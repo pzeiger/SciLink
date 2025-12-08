@@ -3,7 +3,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from typing import List, Tuple, Dict, Any
 
-# BoTorch & GPyTorch Imports
 from botorch.models import SingleTaskGP, ModelListGP
 from botorch.models.transforms import Standardize, Normalize
 from botorch.fit import fit_gpytorch_mll
@@ -18,9 +17,7 @@ from gpytorch.kernels import MaternKernel, RBFKernel, ScaleKernel
 from gpytorch.likelihoods import GaussianLikelihood
 from gpytorch.constraints import GreaterThan
 
-# =============================================================================
-# STRICT FACTORY DEFINITIONS
-# =============================================================================
+
 ALLOWED_KERNELS = {
     "matern_2.5": {"class": MaternKernel, "kwargs": {"nu": 2.5}},
     "matern_1.5": {"class": MaternKernel, "kwargs": {"nu": 1.5}},
@@ -55,9 +52,7 @@ def build_likelihood(noise_key: str) -> GaussianLikelihood:
     likelihood.noise = torch.tensor(config["min_noise"] * 2.0)
     return likelihood
 
-# =============================================================================
-# CLASS 1: Single-Objective Optimizer
-# =============================================================================
+
 class SingleObjectiveOptimizer:
     def __init__(self, device: str = "cpu"):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
@@ -194,7 +189,7 @@ class SingleObjectiveOptimizer:
             ax_sens.text(0.5, 0.5, f"Analysis Error: {str(e)}", ha='center')
 
         # --- 4. Slice (Bottom Left) ---
-        # Slices along the MOST IMPORTANT dimension found above
+        # Slices along the most important dimension found above
         ax_slice = axes[1, 0]
         dim_name = self.feature_names[top_dim_idx]
         b_min = self.bounds[0, top_dim_idx].item()
@@ -217,9 +212,7 @@ class SingleObjectiveOptimizer:
 
         plt.tight_layout(); plt.savefig(save_path); plt.close()
 
-# =============================================================================
-# CLASS 2: Multi-Objective Optimizer
-# =============================================================================
+
 class MultiObjectiveOptimizer:
     def __init__(self, device: str = "cpu"):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
