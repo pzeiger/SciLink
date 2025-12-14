@@ -6,6 +6,7 @@ from typing import Dict, Any, List
 import PIL.Image as PIL_Image
 
 import google.generativeai as genai
+from ...auth import get_api_key, APIKeyNotFoundError
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from .parser_utils import parse_json_from_response 
 from ...tools.bo_tools import get_optimizer
@@ -24,11 +25,16 @@ class BOAgent:
                  model_name: str = "gemini-3-pro-preview", 
                  local_model: str = None):
         
+        if google_api_key is None:
+            google_api_key = get_api_key('google')
+            if not google_api_key:
+                raise APIKeyNotFoundError('google')
+        
         # --- LLM Backend Configuration ---
         if local_model and ('ai-incubator' in local_model or 'openai' in local_model):
             logging.info(f"🏛️  BO Agent using OpenAI-compatible model: {model_name}")
             self.model = OpenAIAsGenerativeModel(
-                model_name=model_name, 
+                model=model_name, 
                 api_key=google_api_key, 
                 base_url=local_model
             )
