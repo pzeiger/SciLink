@@ -8,7 +8,7 @@ from botorch.models.transforms import Standardize, Normalize
 from botorch.fit import fit_gpytorch_mll
 from botorch.acquisition import LogExpectedImprovement
 from botorch.acquisition.monte_carlo import qUpperConfidenceBound
-from botorch.acquisition.multi_objective import qNoisyExpectedHypervolumeImprovement
+from botorch.acquisition.multi_objective import qLogNoisyExpectedHypervolumeImprovement
 from botorch.acquisition.objective import LinearMCObjective
 from botorch.optim import optimize_acqf
 from botorch.utils.sampling import draw_sobol_samples
@@ -288,8 +288,11 @@ class MultiObjectiveOptimizer:
             
         else: # Default: 'pareto'
             ref_point = self.y_train.min(dim=0)[0] - 0.1 * torch.abs(self.y_train.min(dim=0)[0])
-            acq_func = qNoisyExpectedHypervolumeImprovement(
-                model=self.model, X_baseline=self.X_train, prune_baseline=True, ref_point=ref_point
+            acq_func = qLogNoisyExpectedHypervolumeImprovement(
+                model=self.model, 
+                X_baseline=self.X_train, 
+                prune_baseline=True, 
+                ref_point=ref_point
             )
 
         # Batch Optimization
