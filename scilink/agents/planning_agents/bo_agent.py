@@ -18,7 +18,41 @@ from .instruct import (
 
 class BOAgent:
     """
-    Autonomous Agent for Bayesian Optimization.
+    Autonomous Agent for Bayesian Optimization (BO) designed for "Stop-and-Go" experimental loops.
+
+    This agent acts as an AI research partner that plans your next set of experiments.
+    It combines valid statistical modeling (Gaussian Processes) with LLM-based reasoning 
+    to adaptively configure the optimization strategy based on your data trends.
+
+    **DATA FORMATTING REQUIREMENTS:**
+    --------------------------------
+    The agent expects a "Tidy Data" format (Excel .xlsx or CSV .csv) where:
+    1.  **Rows** represent individual experiments.
+    2.  **Columns** represent input parameters (e.g., 'Temperature', 'Pressure') and 
+        measured objectives (e.g., 'Yield', 'Purity').
+    3.  **No Merged Cells:** Ensure the header is a single row containing clean variable names.
+    4.  **Missing Data:** The agent requires complete data rows for the optimization columns. 
+        Rows with NaNs in inputs/targets should be removed or imputed before running.
+
+    **PERSISTENCE & WORKFLOW:**
+    ---------------------------
+    This agent is stateless and persistent. It is safe to shut down between experiments.
+    
+    1.  **Run Agent:** Call `run_optimization_loop` pointing to your current data file.
+    2.  **Get Recommendations:** The agent saves a new batch of experiments to 
+        `./bo_artifacts/batch_step_N.csv`.
+    3.  **Shut Down:** You can close the program while you perform the experiments in the lab 
+        (whether it takes 1 hour or 1 week).
+    4.  **Update Data:** Once results are in, append them as new rows to your original 
+        data file (.xlsx/.csv).
+    5.  **Restart:** Run the agent again. It automatically re-reads the updated data 
+        and the history file (`bo_history.json`) to pick up exactly where it left off.
+
+    **ARGUMENTS:**
+    --------------
+    google_api_key (str): Google Gemini API Key.
+    model_name (str): LLM model name (default: "gemini-3-pro-preview").
+    local_model (str): Optional URL for local/OpenAI-compatible endpoints.
     """
     def __init__(self, 
                  google_api_key: str = None, 
