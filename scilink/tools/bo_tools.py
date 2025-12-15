@@ -12,6 +12,7 @@ from botorch.acquisition.multi_objective import qNoisyExpectedHypervolumeImprove
 from botorch.acquisition.objective import LinearMCObjective
 from botorch.optim import optimize_acqf
 from botorch.utils.sampling import draw_sobol_samples
+from botorch.generation import MaxPosteriorSampling
 from gpytorch.mlls import ExactMarginalLogLikelihood, SumMarginalLogLikelihood
 from gpytorch.kernels import MaternKernel, RBFKernel, ScaleKernel
 from gpytorch.likelihoods import GaussianLikelihood
@@ -31,7 +32,7 @@ ALLOWED_NOISE_PRIORS = {
 }
 
 def build_covar_module(kernel_key: str, input_dim: int) -> ScaleKernel:
-    """Strict factory for Kernels."""
+    """Factory for Kernel selection."""
     if kernel_key not in ALLOWED_KERNELS:
         kernel_key = "matern_2.5"
     
@@ -40,7 +41,7 @@ def build_covar_module(kernel_key: str, input_dim: int) -> ScaleKernel:
     return ScaleKernel(base_kernel)
 
 def build_likelihood(noise_key: str) -> GaussianLikelihood:
-    """Strict factory for Likelihoods."""
+    """Factory for Likelihood/Noise selection."""
     if noise_key not in ALLOWED_NOISE_PRIORS:
         noise_key = "fixed_low"
         
@@ -65,9 +66,7 @@ class SingleObjectiveOptimizer:
 
     def fit(self, X: np.ndarray, y: np.ndarray, bounds: List[Tuple[float, float]], 
             model_config: Dict[str, str], feature_names: List[str] = None):
-        """
-        Fits GP. model_config MUST contain 'kernel' and 'noise' keys.
-        """
+        """Fits the SingleTaskGP."""
         self.X_train = torch.tensor(X, dtype=torch.double, device=self.device)
         self.y_train = torch.tensor(y, dtype=torch.double, device=self.device)
         if self.y_train.ndim == 1: self.y_train = self.y_train.unsqueeze(-1)
@@ -95,33 +94,49 @@ class SingleObjectiveOptimizer:
         fit_gpytorch_mll(self.mll)
 
     def recommend(self, n_candidates: int = 1, strategy: str = 'log_ei', params: Dict[str, float] = None) -> np.ndarray:
+        """
+        Generates n_candidates. 
+        Supports 'thompson' for high-throughput batches, and 'ucb'/'log_ei' for precision.
+        """
         if self.model is None: raise RuntimeError("Call fit() first.")
         params = params or {}
 
+        # --- 1. Thompson Sampling (High Throughput / Diversity) ---
+        if strategy == 'thompson':
+            n_pool = max(2000, 500 * n_candidates)
+            X_cand = draw_sobol_samples(bounds=self.bounds, n=n_pool, q=1).squeeze(1)
+            
+            thompson_sampler = MaxPosteriorSampling(model=self.model, replacement=False)
+            candidates = thompson_sampler(X_cand, num_samples=n_candidates)
+            return candidates.detach().cpu().numpy()
+
+        # --- 2. Acquisition Functions ---
         if strategy == 'ucb':
-            # Beta determines the balance.
+            # Uses beta parameter from Agent
             beta = params.get('beta', 2.0)
             acq_func = qUpperConfidenceBound(model=self.model, beta=beta)
             
         elif strategy == 'max_variance':
-            # Pure Exploration via high-beta UCB
             acq_func = qUpperConfidenceBound(model=self.model, beta=1000.0)
             
         else: # Default: 'log_ei'
             best_f = self.y_train.max()
             acq_func = LogExpectedImprovement(model=self.model, best_f=best_f)
 
+        # --- 3. Optimization (Greedy Batch) ---
+        is_large_batch = n_candidates > 10
         candidates, _ = optimize_acqf(
             acq_function=acq_func,
             bounds=self.bounds,
             q=n_candidates,
-            num_restarts=10,
-            raw_samples=256,
+            num_restarts=2 if is_large_batch else 10,
+            raw_samples=128 if is_large_batch else 512,
+            sequential=True # Optimizes one point at a time conditioning on previous
         )
         return candidates.detach().cpu().numpy()
 
     def _compute_sensitivity(self, n_samples=2048) -> Tuple[List[str], List[float]]:
-        """Helper: Calculates First-Order Sobol Indices."""
+        """Helper: Calculates First-Order Sobol Indices for diagnostics."""
         if self.input_dim == 1: return [self.feature_names[0]], [1.0]
 
         # 1. Sobol Sampling [0, 1]
@@ -146,6 +161,9 @@ class SingleObjectiveOptimizer:
 
     def generate_diagnostics(self, candidate_x: np.ndarray, history_y: List[float], save_path: str):
         """Generates 4-Panel Dashboard: Calibration, Trend, Slice, Sensitivity."""
+        # Only plot the FIRST candidate to keep visualization clean
+        x_plot = candidate_x[0:1]
+
         y_np = self.y_train.cpu().numpy().flatten()
         fig, axes = plt.subplots(2, 2, figsize=(16, 10))
 
@@ -170,7 +188,6 @@ class SingleObjectiveOptimizer:
         ax_trend.set_title("2. Optimization Trend")
 
         # --- 3. Sensitivity (Bottom Right) ---
-        # Compute first to identify top feature for slicing
         ax_sens = axes[1, 1]
         top_dim_idx = 0
         try:
@@ -196,7 +213,7 @@ class SingleObjectiveOptimizer:
         b_max = self.bounds[1, top_dim_idx].item()
         
         x_sweep = np.linspace(b_min, b_max, 100)
-        X_slice = np.tile(candidate_x, (100, 1))
+        X_slice = np.tile(x_plot, (100, 1))
         X_slice[:, top_dim_idx] = x_sweep
         
         with torch.no_grad():
@@ -206,7 +223,7 @@ class SingleObjectiveOptimizer:
 
         ax_slice.plot(x_sweep, mu, 'b-', label='Mean')
         ax_slice.fill_between(x_sweep, mu-1.96*sigma, mu+1.96*sigma, alpha=0.2, color='b')
-        ax_slice.axvline(candidate_x[0, top_dim_idx], color='green', linestyle='--', label='Candidate')
+        ax_slice.axvline(x_plot[0, top_dim_idx], color='green', linestyle='--', label='Next Point')
         ax_slice.set_title(f"3. Slice along '{dim_name}' (Top Factor)")
         ax_slice.legend()
 
@@ -222,6 +239,7 @@ class MultiObjectiveOptimizer:
         self.bounds = None
         self.input_dim = 0
         self.output_dim = 0
+        self.feature_names = []
 
     def fit(self, X: np.ndarray, y: np.ndarray, bounds: List[Tuple[float, float]], 
             model_config: Dict[str, str], feature_names: List[str] = None):
@@ -230,8 +248,7 @@ class MultiObjectiveOptimizer:
         self.input_dim = self.X_train.shape[-1]
         self.output_dim = self.y_train.shape[-1]
         self.bounds = torch.tensor(bounds, dtype=torch.double, device=self.device).T
-        self.feature_names = feature_names
-
+        self.feature_names = feature_names or [f"x{i}" for i in range(self.input_dim)]
         # Independent GPs
         models = []
         for i in range(self.output_dim):
@@ -258,12 +275,12 @@ class MultiObjectiveOptimizer:
         if strategy == 'weighted':
             # Scalarized UCB
             weights = params.get('weights', [1.0]*self.output_dim)
+            beta = params.get('beta', 0.1) # Handles beta for Weighted UCB
             weights_t = torch.tensor(weights, device=self.device)
             objective = LinearMCObjective(weights=weights_t)
-            acq_func = qUpperConfidenceBound(model=self.model, beta=0.1, objective=objective)
+            acq_func = qUpperConfidenceBound(model=self.model, beta=beta, objective=objective)
             
         elif strategy == 'max_variance':
-            # Weighted Uncertainty Sampling
             weights = params.get('weights', [1.0]*self.output_dim)
             weights_t = torch.tensor(weights, device=self.device)
             objective = LinearMCObjective(weights=weights_t)
@@ -275,9 +292,13 @@ class MultiObjectiveOptimizer:
                 model=self.model, X_baseline=self.X_train, prune_baseline=True, ref_point=ref_point
             )
 
+        # Batch Optimization
+        is_large = n_candidates > 10
         candidates, _ = optimize_acqf(
             acq_function=acq_func, bounds=self.bounds, q=n_candidates,
-            num_restarts=10, raw_samples=256,
+            num_restarts=2 if is_large else 10, 
+            raw_samples=128 if is_large else 256,
+            sequential=True
         )
         return candidates.detach().cpu().numpy()
 

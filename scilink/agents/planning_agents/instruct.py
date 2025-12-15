@@ -120,84 +120,90 @@ You MUST include the following fields, populated based on general knowledge:
 """
 
 
+
+
 BO_CONFIG_SOO_PROMPT = """
-You are a Principal Investigator configuring a Single-Objective Bayesian Optimization step.
+You are a Principal Investigator configuring a Single-Objective Bayesian Optimization experiment.
 
 **INPUTS:**
-1. **Trend:** History of previous steps.
-2. **Data Summary:** Statistics of the current dataset.
+1. **Context:** User's objective and the **Fixed Batch Size** constraint.
+2. **Trend:** History of previous steps.
+3. **Data:** Statistics of current dataset.
 
-**TASK:** Return a SINGLE JSON object selecting options from the menus below.
+**TASK:** Return a SINGLE JSON object to configure the math.
 
 ---
-**MENU 1: KERNEL (Physics Model)**
+**MENU 1: ACQUISITION STRATEGY (Select based on Batch Size)**
+* `"log_ei"`: **Precision (Expected Improvement).**
+    * *Use when:* Batch Size is small (1-5).
+    * *Why:* Calculates exact improvement. Best for manual/low-throughput.
+* `"ucb"`: **Tunable Confidence.** Requires `beta` (float).
+    * *Usage:* Works for ANY batch size.
+    * `beta` ~ 0.1: **Exploitative.** Clusters points tightly around best predictions (Fine-tuning).
+    * `beta` > 5.0: **Explorative.** Pushes points into high-uncertainty regions (Search).
+* `"thompson"`: **High-Throughput Exploration.**
+    * *Use when:* Batch Size is large (e.g., > 10, 96-well plates).
+    * *Why:* Computationally fast; ensures diversity across the plate via random sampling.
+
+**MENU 2: KERNEL (Physics)**
 * `"matern_2.5"`: **(Default)** Standard physical processes. Smooth but allows local variation.
 * `"matern_1.5"`: Use if data is **jagged**, discontinuous, or changes rapidly.
 * `"rbf"`: Use ONLY if data is **extremely smooth** and theoretical.
 
-**MENU 2: NOISE PRIOR (Trust in Data)**
-* `"fixed_low"`: **(Default)** Standard lab data. Assumes high precision.
-* `"learnable"`: Use if you are unsure of measurement quality.
-* `"high_noise"`: Use if Trend shows **erratic jumps** or poor reproducibility.
-
-**MENU 3: ACQUISITION (Search Strategy)**
-* `"log_ei"`: **(Default)** Balanced exploration/exploitation.
-* `"ucb"`: **Tunable Confidence.** Requires `beta` (float).
-    - `beta` ~ 0.1: **Exploitative.**
-    - `beta` > 5.0: **Explorative.**
-* `"max_variance"`: **Pure Exploration.** Ignores current best.
-
-**CRITICAL OUTPUT RULES:**
-1. Return ONLY the JSON object. Do not wrap it in a list `[...]`.
-2. Do not include markdown formatting or code blocks.
+**MENU 3: NOISE PRIOR**
+* `"fixed_low"`: **(Default)** Precise lab equipment.
+* `"learnable"`: Unsure of measurement quality.
+* `"high_noise"`: Data has shown erratic jumps.
 
 **OUTPUT FORMAT:**
 {
-  "model_config": {
-    "kernel": "matern_2.5", 
-    "noise": "fixed_low"
+  "model_config": { "kernel": "matern_2.5", "noise": "fixed_low" },
+  "acquisition_strategy": { 
+      "type": "ucb", 
+      "params": { "beta": 0.1 } 
   },
-  "acquisition_strategy": {
-    "type": "ucb", 
-    "params": {"beta": 3.5}
-  },
-  "rationale": "Trend shows stagnation. Using UCB with beta=3.5 to widen the search."
+  "rationale": "We found a promising peak. Using UCB with low beta (0.1) to aggressively exploit this region with a batch of 8 points."
 }
 """
 
 BO_CONFIG_MOO_PROMPT = """
-You are a Principal Investigator configuring a Multi-Objective Optimization step.
+You are a Principal Investigator configuring a Multi-Objective Optimization experiment.
 
 **INPUTS:**
-1. **Trend:** History of previous steps.
-2. **Data Summary:** Statistics of the current dataset.
+1. **Context:** User's objective and **Fixed Batch Size** constraint.
+2. **Trend:** History of previous steps.
+3. **Data:** Statistics of current dataset.
 
-**TASK:** Return a SINGLE JSON object selecting options from the menus below.
+**TASK:** Return a SINGLE JSON object.
 
 ---
-**MENU 1: KERNEL (Physics Model)**
-* `"matern_2.5"`, `"matern_1.5"`, `"rbf"`
+**MENU 1: ACQUISITION STRATEGY (MOO)**
+* `"pareto"`: **(Default)** qNEHVI. Best for general purpose frontier expansion.
+    * *Works for:* Any batch size.
+* `"weighted"`: Linear Scalarization. Requires `weights` list (e.g., `[0.5, 0.5]`) and `beta`.
+    * *Description:* Scalarizes objectives -> applies UCB.
+    * `beta` ~ 0.1: Exploitative on the weighted sum.
+    * `beta` > 5.0: Explorative on the weighted sum.
+* `"max_variance"`: Uncertainty sampling (Pure exploration).
 
-**MENU 2: NOISE PRIOR (Trust in Data)**
-* `"fixed_low"`, `"learnable"`, `"high_noise"`
+**MENU 2: KERNEL (Physics)**
+* `"matern_2.5"`: **(Default)** Standard physical processes. Smooth but allows local variation.
+* `"matern_1.5"`: Use if data is **jagged**, discontinuous, or changes rapidly.
+* `"rbf"`: Use ONLY if data is **extremely smooth** and theoretical.
 
-**MENU 3: ACQUISITION (MOO Strategy)**
-* `"pareto"`: **(Default)** Uses qNEHVI to expand the Pareto Frontier.
-* `"weighted"`: **Targeted.** Requires `weights` list (e.g., `[2.0, 1.0]`).
-* `"max_variance"`: **Targeted Exploration.** Accepts `weights` for uncertainty priority.
-
-**CRITICAL OUTPUT RULES:**
-1. Return ONLY the JSON object. Do not wrap it in a list `[...]`.
-2. Do not include markdown formatting or code blocks.
+**MENU 3: NOISE PRIOR**
+* `"fixed_low"`: **(Default)** Precise lab equipment.
+* `"learnable"`: Unsure of measurement quality.
+* `"high_noise"`: Data has shown erratic jumps.
 
 **OUTPUT FORMAT:**
 {
   "model_config": { "kernel": "matern_2.5", "noise": "fixed_low" },
   "acquisition_strategy": {
-    "type": "pareto",
-    "params": {}
+    "type": "weighted",
+    "params": { "weights": [0.8, 0.2], "beta": 2.0 }
   },
-  "rationale": "Expanding the frontier using standard Pareto optimization."
+  "rationale": "Prioritizing Yield (0.8) over Purity (0.2). Using balanced UCB (beta=2.0) on this weighted objective."
 }
 """
 
