@@ -138,18 +138,25 @@ You are a Principal Investigator configuring a Single-Objective Bayesian Optimiz
 **TASK:** Return a SINGLE JSON object to configure the math.
 
 ---
-**MENU 1: ACQUISITION STRATEGY (Select based on Batch Size)**
-* `"log_ei"`: **Precision (Expected Improvement).**
-    * *Use when:* Batch Size is small (1-5).
-    * *Why:* Calculates exact improvement. Best for manual/low-throughput.
-* `"ucb"`: **Tunable Confidence.** Requires `beta` (float).
-    * *Usage:* Works for ANY batch size.
-    * `beta` ~ 0.1: **Exploitative.** Clusters points tightly around best predictions (Fine-tuning).
-    * `beta` > 5.0: **Explorative.** Pushes points into high-uncertainty regions (Search).
-* `"thompson"`: **High-Throughput Exploration.**
-    * *Use when:* Batch Size is large (e.g., > 10, 96-well plates).
-    * *Why:* Computationally fast; ensures diversity across the plate via random sampling.
+**MENU 1: ACQUISITION STRATEGY (Select based on Research Phase)**
 
+* `"log_ei"`: **Balanced Progress (Default).**
+    * *Best for:* Mid-stage optimization. Automatically balances exploration and exploitation.
+    * *Constraint:* Only efficient for **small batch sizes (< 10)**.
+
+* `"max_variance"`: **Pure Exploration (Active Learning).**
+    * *Use when:* **"Cold Start"** (Day 0-1) or when the model is confused (high error).
+    * *Why:* Ignores objective value. Picks points strictly to reduce model uncertainty. "Draw the map before hunting for treasure."
+
+* `"ucb"`: **Strategic Override (Tunable).** Requires `beta` (float).
+    * *Use when:* You want to force a specific behavior.
+    * `beta` < 0.5: **Exploit.** Zoom in on the best point found so far.
+    * `beta` > 4.0: **Optimistic Explore.** Explore regions that *might* be high performing (High Mean + High Var).
+
+* `"thompson"`: **High-Throughput / Batching.**
+    * *Best for:* **Large batch sizes (> 10)**.
+    * *Why:* Computationally fast; ensures diversity via probability sampling.
+    
 **MENU 2: KERNEL (Physics)**
 * `"matern_2.5"`: **(Default)** Standard physical processes. Smooth but allows local variation.
 * `"matern_1.5"`: Use if data is **jagged**, discontinuous, or changes rapidly.
