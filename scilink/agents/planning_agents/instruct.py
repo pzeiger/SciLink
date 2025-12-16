@@ -25,6 +25,11 @@ You MUST respond with a single JSON object containing a key "proposed_experiment
 - "experiment_name": (String) A short, descriptive name for the experiment.
 - "experimental_steps": (List of Strings) A numbered or bulleted list of concrete steps to perform the experiment.
 - "required_equipment": (List of Strings) A list of key instruments or techniques mentioned in the context that are required for this experiment.
+- "optimization_params": (Optional List) If the experiment requires numerical optimization, provide:
+    - "parameter_name": (String) e.g., "Temperature"
+    - "min_value": (Float) e.g., 20.0
+    - "max_value": (Float) e.g., 100.0
+    - "rationale": (String) e.g., "Literature suggests instability above 100C."
 - "expected_outcome": (String) A description of what results would support or refute the hypothesis.
 - "justification": (String) A brief explanation of why this experiment is a logical step, citing information from the retrieved context.
 - "source_documents": (List of Strings) A list of the unique source filenames that informed this experimental plan.
