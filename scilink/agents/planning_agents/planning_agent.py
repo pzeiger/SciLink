@@ -477,7 +477,12 @@ class PlanningAgent:
         
         return self.state
 
-    def update_plan_with_results(self, results: Any, output_json_path: Optional[str] = None, enable_human_feedback: bool = True) -> Dict[str, Any]:
+    def update_plan_with_results(self,
+                                 results: Any,
+                                 output_json_path: Optional[str] = None,
+                                 enable_human_feedback: bool = True,
+                                 current_plan: Optional[Dict[str, Any]] = None, 
+                                 objective: Optional[str] = None) -> Dict[str, Any]:
         """
         Iterates on the current experimental plan based on new experimental results, 
         observations, or data files.
