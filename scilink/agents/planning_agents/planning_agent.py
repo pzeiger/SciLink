@@ -26,6 +26,7 @@ from .instruct import (
 from ...auth import get_api_key, APIKeyNotFoundError
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ..lit_agents.literature_agent import LiteratureSearchAgent
+from ..lit_agents.optimize_query import optimize_search_query
 
 from .rag_engine import (
     perform_science_rag, 
@@ -326,7 +327,12 @@ class PlanningAgent:
         lit_context = ""
         if self.lit_agent:
             print(f"  - 🌍 Querying literature for hypothesis context...")
-            res = self.lit_agent.search_for_hypothesis_context(objective)
+            res = self.lit_agent.search_for_hypothesis_context(
+                optimize_search_query(
+                    objective=objective,
+                    search_intent='Hypothesis Generation',
+                    model=self.model)
+            )
             
             if res['status'] == 'success':
                 lit_context = res['content']
@@ -778,7 +784,12 @@ class PlanningAgent:
         lit_context = ""
         if self.lit_agent:
             print(f"  - 🌍 Querying literature for TEA context...")
-            res = self.lit_agent.search_for_economic_data(objective)
+            res = self.lit_agent.search_for_economic_data(
+                optimize_search_query(
+                    objective=objective,
+                    search_intent='Technoeconomic Analysis',
+                    model=self.model)
+            )
             
             if res['status'] == 'success':
                 lit_context = res['content']
