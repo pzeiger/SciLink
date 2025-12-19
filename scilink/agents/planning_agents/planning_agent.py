@@ -72,8 +72,16 @@ class PlanningAgent:
             self.model = genai.GenerativeModel(model_name)
             self.generation_config = genai.types.GenerationConfig(response_mime_type="application/json")
 
-        self.lit_agent = LiteratureSearchAgent(futurehouse_api_key, max_wait_time=1000)
-        
+        self.lit_agent = None
+        if futurehouse_api_key:
+            try:
+                self.lit_agent = LiteratureSearchAgent(futurehouse_api_key, max_wait_time=1000)
+                logging.info("✅ Literature Search Agent initialized.")
+            except Exception as e:
+                logging.warning(f"⚠️ Failed to initialize Literature Agent: {e}")
+        else:
+            logging.info("ℹ️ No FutureHouse API key provided. Literature search will be skipped.")
+                    
         self.code_chunk_size = code_chunk_size
 
         # --- Dual KnowledgeBase Initialization ---
