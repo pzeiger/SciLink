@@ -1,9 +1,8 @@
 from typing import Any
 
 def optimize_search_query(objective: str, 
-                          search_intent: str, 
                           model: Any, 
-                          generation_config: Any) -> str:
+                          ) -> str:
     """
     Translates a raw, messy user objective into a clean, targeted search query.
     """
@@ -11,18 +10,18 @@ def optimize_search_query(objective: str,
     You are a Research Librarian.
     
     **USER INPUT:** "{objective}"
-    **SEARCH INTENT:** {search_intent}
     
     **TASK:** Convert this input (which may refer to specific local files, results, or objectives) into a **General Scientific Search Query** suitable for a database like Google Scholar.
     
     **RULES:**
-    1. Remove references to "provided data", "this spreadsheet", "my results".
-    2. Extract the core scientific topic.
-    3. Return ONLY the query string.
+    1. REMOVE LOCAL CONTEXT: Strip out references to specific files, provided datasets, or user actions (e.g., "analyze this spreadsheet", "my results", "provided data", "the attached file").
+    2. PRESERVE SCIENTIFIC NOUNS: Preserve specific chemical names, material sources (e.g., "Produced Water", "Lithium-Ion Batteries"), and key analytes.
+    3. STANDALONE: The output must make sense to a search engine that knows nothing about the user's computer.
+    4. Return ONLY the query string.
     """
     
     try:
-        response = model.generate_content([prompt], generation_config=generation_config)
+        response = model.generate_content([prompt])
         
         # Robust extraction
         if hasattr(response, 'text'):

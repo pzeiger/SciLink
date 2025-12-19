@@ -1,3 +1,4 @@
+import os
 import google.generativeai as genai
 import json
 import logging
@@ -73,7 +74,7 @@ class PlanningAgent:
             self.generation_config = genai.types.GenerationConfig(response_mime_type="application/json")
 
         self.lit_agent = None
-        if futurehouse_api_key:
+        if futurehouse_api_key or os.getenv("FUTUREHOUSE_API_KEY"):
             try:
                 self.lit_agent = LiteratureSearchAgent(futurehouse_api_key, max_wait_time=1000)
                 logging.info("✅ Literature Search Agent initialized.")
@@ -338,7 +339,6 @@ class PlanningAgent:
             res = self.lit_agent.search_for_hypothesis_context(
                 optimize_search_query(
                     objective=objective,
-                    search_intent='Hypothesis Generation',
                     model=self.model)
             )
             
@@ -795,7 +795,6 @@ class PlanningAgent:
             res = self.lit_agent.search_for_economic_data(
                 optimize_search_query(
                     objective=objective,
-                    search_intent='Technoeconomic Analysis',
                     model=self.model)
             )
             
