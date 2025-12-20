@@ -38,6 +38,8 @@ from .rag_engine import (
 )
 from .user_interface import display_plan_summary, get_user_feedback
 
+from .html_generator import HTMLReportGenerator
+
 
 class PlanningAgent:
     """
@@ -285,10 +287,11 @@ class PlanningAgent:
                             image_paths: Optional[List[str]] = None,
                             image_descriptions: Optional[List[str]] = None,
                             output_json_path: Optional[str] = None,
-                            enable_human_feedback: bool = True) -> Dict[str, Any]:
+                            enable_human_feedback: bool = True,
+                            reset_state: bool = False) -> Dict[str, Any]: # Default False to enable cumulative workflows
         """
-        Orchestrates experimental planning with state management.
-        Returns the full State Dictionary.
+        Orchestrates experimental planning. Returns the full State Dictionary.
+        Set reset_state=True to force a wipe of previous history.
         """
         
         # 1. Resolve Code Paths
@@ -305,16 +308,25 @@ class PlanningAgent:
                 else:
                     effective_code_paths.append(path)
 
-        # 2. Initialize State
-        self.state = self._initialize_state(
-            objective=objective,
-            science_paths=science_paths,
-            code_paths=effective_code_paths,
-            additional_context=additional_context,
-            primary_data_set=primary_data_set,
-            image_paths=image_paths,
-            image_descriptions=image_descriptions
-        )
+        # 2. Initialize or Update State
+        # If reset_state is True OR state is empty, we initialize fresh.
+        if reset_state or not self.state:
+            self.state = self._initialize_state(
+                objective=objective,
+                science_paths=science_paths,
+                code_paths=effective_code_paths,
+                additional_context=additional_context,
+                primary_data_set=primary_data_set,
+                image_paths=image_paths,
+                image_descriptions=image_descriptions
+            )
+        else:
+            print(f"  - 🔄 Appending to existing research session (History length: {len(self.state.get('plan_history', []))})...")
+            # Update objective if provided, otherwise keep existing context
+            if objective:
+                self.state["objective"] = objective
+
+        current_iter = self.state.get("iteration_index", 1)
 
         # 3. Init KB
         if not self._ensure_kb_is_ready(science_paths, effective_code_paths, structured_data_sets):
@@ -341,7 +353,7 @@ class PlanningAgent:
                     objective=objective,
                     model=self.model)
             )
-            
+
             if lit_res['status'] == 'success':
                 lit_context = lit_res['content']
         
@@ -362,11 +374,13 @@ class PlanningAgent:
         if lit_context:
             res["literature_search"] = lit_context
 
-        # Update State
+        # SNAPSHOT 1: SCIENCE DRAFT (For AI Research Log)
+        res["iteration"] = current_iter
+        res["stage"] = "Science Draft"
+        self.state["plan_history"].append(res.copy()) 
         self.state["current_plan"] = res
-        self.state["plan_history"].append(res.copy())
 
-        # Self-reflection
+        # Self-Correction Loop
         if not res.get("error"):
             is_relevant, critique = verify_plan_relevance(objective, res, self.model, self.generation_config)
             
@@ -382,6 +396,11 @@ class PlanningAgent:
                     generation_config=self.generation_config
                 )
                 print("    - ✅ Plan auto-corrected.")
+                
+                # SNAPSHOT 2: AUTO-CORRECTED
+                res["iteration"] = current_iter
+                res["stage"] = "Auto-Corrected"
+                self.state["plan_history"].append(res.copy())
                 self.state["current_plan"] = res
 
         # =====================================================
@@ -401,7 +420,13 @@ class PlanningAgent:
                     model=self.model,
                     generation_config=self.generation_config
                 )
+                
+                # SNAPSHOT 3: HUMAN REFINED
+                res["iteration"] = current_iter
+                res["stage"] = "Human Refined (Science)"
+                self.state["plan_history"].append(res.copy())
                 self.state["current_plan"] = res
+                
                 display_plan_summary(res)
                 print("✅ Scientific plan updated.")
             else:
@@ -418,6 +443,11 @@ class PlanningAgent:
                  model=self.model,
                  generation_config=self.generation_config
              )
+             
+             # SNAPSHOT 4: CODE GENERATED
+             res["iteration"] = current_iter
+             res["stage"] = "Code Generated"
+             self.state["plan_history"].append(res.copy())
              self.state["current_plan"] = res
 
         # =====================================================
@@ -458,6 +488,11 @@ class PlanningAgent:
                         model=self.model,
                         generation_config=self.generation_config
                     )
+                    
+                    # SNAPSHOT 5: CODE REFINED
+                    res["iteration"] = current_iter
+                    res["stage"] = "Code Refined"
+                    self.state["plan_history"].append(res.copy())
                     self.state["current_plan"] = res
                     
                     print(f"  - 💾 Overwriting files in {temp_dir} with refined code...")
@@ -470,6 +505,9 @@ class PlanningAgent:
         if output_json_path: 
             self._save_results_to_json(res, output_json_path)
             self._save_state_to_json(output_json_path + ".state.json")
+            
+            # TRIGGER HTML REPORT GENERATION
+            self._generate_html_report(output_json_path)
         
         final_out = "./output_scripts"
         print(f"\n--- Saving Final Scripts to: {final_out} ---")
@@ -543,7 +581,7 @@ class PlanningAgent:
 
         # --- 0. STATE HYDRATION ---
         if current_plan is not None:
-            print(f"  - 🔄 Stateless Update Mode: Hydrating agent with provided plan.")
+            print(f"  - 🔄 Stateless Update Mode: Hydrating agent with provided plan.")
             
             # Objective is critical for the RAG engine to know "Success" vs "Failure".
             # If not provided, we try to keep existing, or warn the user.
@@ -552,16 +590,23 @@ class PlanningAgent:
                 if not objective:
                     logging.warning("⚠️  Updating plan without an 'objective'. Agent may lack context for success criteria.")
 
+            # Infer iteration from the passed plan if state is empty
+            # If we are resuming Plan 5, we want to start at 5.
+            inferred_index = current_plan.get("iteration", 1)
+            existing_index = self.state.get("iteration_index")
+
+            # Use existing state if valid, otherwise use inferred, otherwise default to 1
+            start_index = existing_index if existing_index is not None else inferred_index
+                    
             # We merge the passed arguments into the internal state.
             self.state.update({
                 "objective": objective,
                 "current_plan": current_plan,
-                # Ensure lists exist so .append() doesn't crash later
                 "experimental_results": self.state.get("experimental_results", []),
+                # If stateless, assume this is a new history chain or append to current
                 "plan_history": self.state.get("plan_history", [current_plan]),
                 "human_feedback_history": self.state.get("human_feedback_history", []),
-                # If this is a fresh load, start iteration count at 1
-                "iteration_index": self.state.get("iteration_index", 1)
+                "iteration_index": start_index
             })
 
         if not self.state or not self.state.get("current_plan"):
@@ -569,6 +614,7 @@ class PlanningAgent:
             return {"error": "No active state"}
             
         print(f"\n--- 🔄 Iterating Plan based on New Results ---")
+        executed_plan_idx = self.state["iteration_index"]
         
         # --- 1. SMART RESULT PARSING ---
         parsed_text_results = []
@@ -653,11 +699,12 @@ class PlanningAgent:
 
         # Update State History
         self.state["experimental_results"].append({
-            "iteration": self.state["iteration_index"],
+            "iteration": executed_plan_idx,
             "timestamp": datetime.now().isoformat(),
             "data_summary": str(results) # Keep reference to raw input
         })
-        self.state["iteration_index"] += 1
+        self.state["iteration_index"] += 1 
+        next_plan_idx = self.state["iteration_index"]
         
         # --- 2. Construct Feedback Prompt ---
         feedback_prompt = (
@@ -697,6 +744,12 @@ class PlanningAgent:
             result_images=loaded_images
         )
         
+        # SNAPSHOT: REASONING DRAFT
+        new_plan["iteration"] = next_plan_idx
+        new_plan["stage"] = "Reasoning Draft"
+        self.state["plan_history"].append(new_plan.copy())
+        self.state["current_plan"] = new_plan
+
         # =====================================================
         # 5. HUMAN STRATEGY FEEDBACK
         # =====================================================
@@ -718,6 +771,11 @@ class PlanningAgent:
                     model=self.model,
                     generation_config=self.generation_config
                 )
+                # SNAPSHOT: HUMAN REFINED
+                new_plan["iteration"] = current_iter
+                new_plan["stage"] = "Human Refined (Science)"
+                self.state["plan_history"].append(new_plan.copy())
+                self.state["current_plan"] = new_plan
                 print("✅ Strategic revision updated.")
 
         # =====================================================
@@ -731,13 +789,18 @@ class PlanningAgent:
                  model=self.model,
                  generation_config=self.generation_config
              )
+             # SNAPSHOT: CODE GENERATED
+             new_plan["iteration"] = current_iter
+             new_plan["stage"] = "Code Generated"
+             self.state["plan_history"].append(new_plan.copy())
+             self.state["current_plan"] = new_plan
 
         # =====================================================
         # 7. HUMAN CODE REVIEW
         # =====================================================
         if enable_human_feedback and not new_plan.get("error"):
             temp_dir = Path("./temp_code_review_iter")
-            print(f"\n--- Human Code Review (Iteration {self.state['iteration_index']}) ---")
+            print(f"\n--- Human Code Review (Iteration {current_iter}) ---")
             
             if temp_dir.exists(): shutil.rmtree(temp_dir)
             files = write_experiments_to_disk(new_plan, str(temp_dir))
@@ -767,12 +830,18 @@ class PlanningAgent:
                         generation_config=self.generation_config
                     )
                     
+                    # SNAPSHOT: CODE REFINED
+                    new_plan["iteration"] = current_iter
+                    new_plan["stage"] = "Code Refined"
+                    self.state["plan_history"].append(new_plan.copy())
+                    self.state["current_plan"] = new_plan
+                    
                     print(f"  - 💾 Overwriting files in {temp_dir} with refined code...")
                     files = write_experiments_to_disk(new_plan, str(temp_dir))
 
         # 8. Commit to State & Save
         self.state["current_plan"] = new_plan
-        self.state["plan_history"].append(new_plan)
+        # (Already appended snapshots above, so no final append needed unless we want a 'Final' tag)
         self.state["status"] = "iterated"
         
         final_out = "./output_scripts"
@@ -783,7 +852,20 @@ class PlanningAgent:
             self._save_results_to_json(new_plan, output_json_path)
             self._save_state_to_json(output_json_path + ".state.json")
             
+            # TRIGGER HTML REPORT GENERATION
+            self._generate_html_report(output_json_path)
+            
         return self.state
+    
+    def _generate_html_report(self, json_path: str):
+        """Helper to generate HTML report alongside JSON."""
+        if not json_path: return
+        html_path = str(Path(json_path).with_suffix('.html'))
+        try:
+            generator = HTMLReportGenerator(self.state)
+            generator.generate(html_path)
+        except Exception as e:
+            print(f"⚠️ Failed to generate HTML report: {e}")
 
     def perform_technoeconomic_analysis(self, objective: str,
                                         science_paths: Optional[List[str]] = None,
@@ -792,24 +874,38 @@ class PlanningAgent:
                                         primary_data_set: Optional[Dict[str, str]] = None,
                                         image_paths: Optional[List[str]] = None,
                                         image_descriptions: Optional[List[str]] = None,
-                                        output_json_path: Optional[str] = None):
-        """Performs TEA using Dual-KB retrieval."""
+                                        output_json_path: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Performs TEA using Dual-KB retrieval. 
+        Acts as a valid entry point for a research session (initializes state if empty).
+        """
         
+        # 1. State Initialization (if starting fresh with TEA)
+        if not self.state:
+            self.state = self._initialize_state(
+                objective=objective,
+                science_paths=science_paths,
+                code_paths=code_paths,
+                primary_data_set=primary_data_set,
+                image_paths=image_paths,
+                image_descriptions=image_descriptions
+            )
+
+        # 2. Build KB if needed
         if not self._ensure_kb_is_ready(science_paths, code_paths, structured_data_sets):
             return {"error": "KB Init Failed"}
         
+        # 3. Literature Search
         lit_context = ""
         if self.lit_agent:
             print(f"  - 🌍 Querying literature for TEA context...")
             lit_res = self.lit_agent.search_for_economic_data(
-                optimize_search_query(
-                    objective=objective,
-                    model=self.model)
+                optimize_search_query(objective=objective, model=self.model)
             )
-            
             if lit_res['status'] == 'success':
                 lit_context = lit_res['content']
 
+        # 4. Perform RAG
         res = perform_science_rag(
             objective=objective, 
             instructions=TEA_INSTRUCTIONS, 
@@ -826,6 +922,25 @@ class PlanningAgent:
         if lit_context:
             res["literature_search"] = lit_context
 
+        # 5. Commit to State
+        if not res.get("error"):
+            # Tags for the HTML Generator
+            res["type"] = "technoeconomic_analysis"
+            res["stage"] = "TEA Initial"
+            res["iteration"] = 0 # Convention: TEA is step 0 or pre-planning
+            
+            # Append copy to history (Full Traceability)
+            self.state["plan_history"].append(res.copy())
+            
+            # Update Active Pointer
+            self.state["current_plan"] = res
+
+        # 6. Save & Generate Report
         if output_json_path:
             self._save_results_to_json(res, output_json_path)
+            self._save_state_to_json(output_json_path + ".state.json")
+            
+            # Trigger HTML Generation (will show TEA card)
+            self._generate_html_report(output_json_path)
+
         return res
