@@ -297,6 +297,7 @@ def perform_code_rag(
         steps = exp.get("experimental_steps", [])
         exp_name = exp.get("experiment_name", "Experiment")
         hypothesis = exp.get("hypothesis", "N/A")
+        opt_params = exp.get("optimization_params", [])
         
         # Find matching previous implementation
         prev_impl = previous_code_map.get(exp_name)
@@ -311,6 +312,9 @@ Hypothesis: {hypothesis}
 
 **NEW EXPERIMENTAL STEPS:**
 {json.dumps(steps, indent=2)}
+
+**OPTIMIZATION PARAMETERS:** 
+{json.dumps(opt_params, indent=2)}
 
 """
 
