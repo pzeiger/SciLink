@@ -1,5 +1,6 @@
 import json
 import html
+import re
 from datetime import datetime
 from typing import Dict, Any, List
 
@@ -48,12 +49,102 @@ class HTMLReportGenerator:
             .tea-list li { margin-bottom: 8px; }
             .cost { color: #b91c1c; }
             .benefit { color: #047857; }
+
+            /* TABLE STYLING */
+            .styled-table {
+                border-collapse: collapse;
+                margin: 25px 0;
+                font-size: 0.9em;
+                font-family: sans-serif;
+                min-width: 400px;
+                width: 100%;
+                box-shadow: 0 0 20px rgba(0, 0, 0, 0.05);
+                border-radius: 8px;
+                overflow: hidden;
+            }
+            .styled-table thead tr {
+                background-color: var(--primary);
+                color: #ffffff;
+                text-align: left;
+            }
+            .styled-table th, .styled-table td {
+                padding: 12px 15px;
+            }
+            .styled-table tbody tr {
+                border-bottom: 1px solid #dddddd;
+            }
+            .styled-table tbody tr:nth-of-type(even) {
+                background-color: #f3f3f3;
+            }
+            .styled-table tbody tr:last-of-type {
+                border-bottom: 2px solid var(--primary);
+            }
+            .styled-table tbody tr:hover {
+                background-color: #e2e8f0;
+            }
         </style>
         """
 
+    def _markdown_to_html(self, text: str) -> str:
+        """
+        Parses text and converts Markdown tables to styled HTML tables.
+        Also handles basic line breaks.
+        """
+        if not text: return ""
+        
+        lines = text.split('\n')
+        html_output = []
+        in_table = False
+        table_buffer = []
+
+        def render_table(buffer):
+            if not buffer: return ""
+            # Filter out divider rows (e.g., |---|---|)
+            content_rows = [row for row in buffer if not re.match(r'^\s*\|?[\s\-\:|]+\|?\s*$', row)]
+            
+            if not content_rows: return ""
+
+            html_table = '<table class="styled-table">'
+            
+            # Header
+            header_cells = [c.strip() for c in content_rows[0].strip('|').split('|')]
+            html_table += '<thead><tr>' + ''.join(f'<th>{html.escape(h)}</th>' for h in header_cells) + '</tr></thead>'
+            
+            # Body
+            html_table += '<tbody>'
+            for row in content_rows[1:]:
+                cells = [c.strip() for c in row.strip('|').split('|')]
+                # Handle cases where row might have fewer cells than header
+                while len(cells) < len(header_cells): cells.append("")
+                html_table += '<tr>' + ''.join(f'<td>{html.escape(c)}</td>' for c in cells) + '</tr>'
+            
+            html_table += '</tbody></table>'
+            return html_table
+
+        for line in lines:
+            stripped = line.strip()
+            # Check if line looks like a table row (starts/ends with pipe or contains pipes)
+            if stripped.startswith('|') or (stripped.count('|') > 1 and '-' in lines[lines.index(line)+1] if lines.index(line)+1 < len(lines) else False):
+                in_table = True
+                table_buffer.append(stripped)
+            else:
+                if in_table:
+                    # Flush table buffer
+                    html_output.append(render_table(table_buffer))
+                    table_buffer = []
+                    in_table = False
+                
+                # Regular text line
+                html_output.append(html.escape(line) + "<br>")
+
+        # Flush any remaining table
+        if in_table:
+            html_output.append(render_table(table_buffer))
+
+        return "\n".join(html_output)
+
     def _render_experiment(self, exp: Dict[str, Any], index: int) -> str:
         code_html = ""
-        # Only render code if it exists (Final version will have it)
         if "implementation_code" in exp:
             code_html = f"""
             <div style="margin-top:15px;">
@@ -61,19 +152,38 @@ class HTMLReportGenerator:
                 <pre><code>{html.escape(exp['implementation_code'])}</code></pre>
             </div>
             """
-            
+        
+        # We parse the hypothesis and steps through the markdown converter
+        # Steps are usually a list of strings, so we handle them specifically
+        steps_html = ""
+        raw_steps = exp.get('experimental_steps', [])
+        if raw_steps:
+             # Check if any step contains a table (unlikely in a list, but possible if it's a long string)
+             # Usually tables appear in 'hypothesis' or 'justification' or raw text blocks.
+             # But sometimes the 'steps' is just one big string.
+             if isinstance(raw_steps, list):
+                 steps_content = "".join(f"<li>{self._markdown_to_html(s)}</li>" for s in raw_steps)
+                 steps_html = f"<ul>{steps_content}</ul>"
+             else:
+                 steps_html = self._markdown_to_html(str(raw_steps))
+
         return f"""
         <div class="exp-block">
             <h4 style="color: #2563eb; margin-bottom: 5px;">Experiment {index}: {html.escape(exp.get('experiment_name', 'Unnamed'))}</h4>
-            <div style="margin-bottom: 10px;"><strong>🎯 Hypothesis:</strong> {html.escape(exp.get('hypothesis', ''))}</div>
+            
+            <div style="margin-bottom: 10px;">
+                <strong>🎯 Hypothesis:</strong> 
+                <div>{self._markdown_to_html(exp.get('hypothesis', ''))}</div>
+            </div>
             
             <div class="justification">
-                <strong>💡 Justification:</strong> {html.escape(exp.get('justification', ''))}
+                <strong>💡 Justification:</strong> 
+                <div>{self._markdown_to_html(exp.get('justification', ''))}</div>
             </div>
             
             <div style="margin-top: 15px;">
                 <strong>🧪 Steps:</strong>
-                <ul>{''.join(f"<li>{html.escape(s)}</li>" for s in exp.get('experimental_steps', []))}</ul>
+                {steps_html}
             </div>
             {code_html}
         </div>
@@ -83,11 +193,15 @@ class HTMLReportGenerator:
         assess = plan.get('technoeconomic_assessment', {})
         def list_to_html(key, css_class):
             return "".join(f"<li class='{css_class}'>{html.escape(str(x))}</li>" for x in assess.get(key, []))
+        
+        # Summary might contain tables
+        summary_html = self._markdown_to_html(assess.get('summary', ''))
 
         return f"""
         <div class="exp-block" style="border-left-color: #10b981;">
             <div class="justification" style="background: #ecfdf5; color: #065f46;">
-                <strong>💰 Executive Summary:</strong> {html.escape(assess.get('summary', ''))}
+                <strong>💰 Executive Summary:</strong><br>
+                {summary_html}
             </div>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px;">
                 <div><strong>💸 Key Cost Drivers:</strong><ul class="tea-list">{list_to_html('key_cost_drivers', 'cost')}</ul></div>
@@ -100,26 +214,15 @@ class HTMLReportGenerator:
     def generate(self, output_path: str):
         date_str = self.state.get('start_time', datetime.now().isoformat())
         
-        # --- 1. FILTERING LOGIC ---
-        # We process the full 'plan_history' (which contains drafts, corrections, etc.)
-        # and distill it down so that each Iteration # only appears ONCE (the latest version).
-        
         full_history = self.state.get('plan_history', [])
         finalized_plans = {}
-        
         for plan in full_history:
-            # We use 'iteration' as the unique key. 
-            # Since we are iterating chronologically, the LAST entry for a specific iteration
-            # will overwrite previous drafts. This ensures the HTML only shows the Final Plan.
             iter_idx = plan.get('iteration', 0)
             finalized_plans[iter_idx] = plan
 
-        # Convert back to sorted list for rendering
         sorted_plans = [finalized_plans[k] for k in sorted(finalized_plans.keys())]
-        
         results = self.state.get('experimental_results', [])
 
-        # --- 2. RENDER HTML ---
         html_content = f"""
         <!DOCTYPE html><html><head><meta charset="UTF-8"><title>{self.title}</title>{self._get_css()}</head>
         <body><div class="container">
@@ -131,9 +234,7 @@ class HTMLReportGenerator:
         """
 
         for i, plan in enumerate(sorted_plans):
-            # Display numbering (1, 2, 3...)
             step_num = i + 1 
-            
             is_tea = "technoeconomic_assessment" in plan or plan.get("type") == "technoeconomic_analysis"
             badge_class = "tea" if is_tea else "plan"
             badge_text = "TECHNO-ECONOMIC ANALYSIS" if is_tea else "EXPERIMENTAL STRATEGY"
@@ -151,8 +252,6 @@ class HTMLReportGenerator:
                 </div>
                 <div class="card-body">{content_html}"""
 
-            # Render Matching Results (if any)
-            # Logic: If we are at Step 1 (sorted index 0), we look for results[0]
             if i < len(results):
                 res_data = results[i].get('data_summary', '')
                 try:
@@ -160,10 +259,13 @@ class HTMLReportGenerator:
                         res_data = json.dumps(json.loads(res_data), indent=2)
                 except: pass
                 
+                # Apply markdown parser to results too, in case the result log contains a table
+                formatted_result = self._markdown_to_html(str(res_data))
+                
                 html_content += f"""
                     <div class="result-box">
                         <div style="font-weight:bold; margin-bottom:10px;">📊 Results Received:</div>
-                        <pre style="background:none; color:inherit; padding:0;">{html.escape(str(res_data))}</pre>
+                        <div style="font-family: monospace; font-size: 0.9em;">{formatted_result}</div>
                     </div>
                 """
 
@@ -174,6 +276,6 @@ class HTMLReportGenerator:
         try:
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(html_content)
-            print(f"  - 📄 HTML Report updated (Final Views Only): {output_path}")
+            print(f"  - 📄 HTML Report updated: {output_path}")
         except Exception as e:
             print(f"  - ❌ Error writing HTML report: {e}")

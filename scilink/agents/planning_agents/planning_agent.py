@@ -326,7 +326,11 @@ class PlanningAgent:
             if objective:
                 self.state["objective"] = objective
 
+        existing_iter = self.state.get("iteration_index", 0)
+        self.state["iteration_index"] = existing_iter + 1
+        
         current_iter = self.state.get("iteration_index", 1)
+        
 
         # 3. Init KB
         if not self._ensure_kb_is_ready(science_paths, effective_code_paths, structured_data_sets):
@@ -772,7 +776,7 @@ class PlanningAgent:
                     generation_config=self.generation_config
                 )
                 # SNAPSHOT: HUMAN REFINED
-                new_plan["iteration"] = current_iter
+                new_plan["iteration"] = next_plan_idx
                 new_plan["stage"] = "Human Refined (Science)"
                 self.state["plan_history"].append(new_plan.copy())
                 self.state["current_plan"] = new_plan
@@ -790,7 +794,7 @@ class PlanningAgent:
                  generation_config=self.generation_config
              )
              # SNAPSHOT: CODE GENERATED
-             new_plan["iteration"] = current_iter
+             new_plan["iteration"] = next_plan_idx
              new_plan["stage"] = "Code Generated"
              self.state["plan_history"].append(new_plan.copy())
              self.state["current_plan"] = new_plan
@@ -800,7 +804,7 @@ class PlanningAgent:
         # =====================================================
         if enable_human_feedback and not new_plan.get("error"):
             temp_dir = Path("./temp_code_review_iter")
-            print(f"\n--- Human Code Review (Iteration {current_iter}) ---")
+            print(f"\n--- Human Code Review (Iteration {next_plan_idx}) ---")
             
             if temp_dir.exists(): shutil.rmtree(temp_dir)
             files = write_experiments_to_disk(new_plan, str(temp_dir))
@@ -831,7 +835,7 @@ class PlanningAgent:
                     )
                     
                     # SNAPSHOT: CODE REFINED
-                    new_plan["iteration"] = current_iter
+                    new_plan["iteration"] = next_plan_idx
                     new_plan["stage"] = "Code Refined"
                     self.state["plan_history"].append(new_plan.copy())
                     self.state["current_plan"] = new_plan
@@ -891,6 +895,9 @@ class PlanningAgent:
                 image_descriptions=image_descriptions
             )
 
+        #  TEA is always step 0 (pre-planning)
+        self.state["iteration_index"] = 0
+
         # 2. Build KB if needed
         if not self._ensure_kb_is_ready(science_paths, code_paths, structured_data_sets):
             return {"error": "KB Init Failed"}
@@ -927,7 +934,7 @@ class PlanningAgent:
             # Tags for the HTML Generator
             res["type"] = "technoeconomic_analysis"
             res["stage"] = "TEA Initial"
-            res["iteration"] = 0 # Convention: TEA is step 0 or pre-planning
+            res["iteration"] = 0 # TEA is step 0 (pre-planning)
             
             # Append copy to history (Full Traceability)
             self.state["plan_history"].append(res.copy())
