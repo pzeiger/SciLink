@@ -248,74 +248,156 @@ def perform_science_rag(objective: str,
         return {"error": str(e)}
 
 
-def perform_code_rag(result: Dict[str, Any],
-                     kb_code: Any,   # Pass the Code KB object
-                     model: Any,     # Pass the LLM object
-                     generation_config: Any) -> Dict[str, Any]:
+def perform_code_rag(
+    result: Dict[str, Any],
+    kb_code: Any,
+    model: Any,
+    generation_config: Any,
+    previous_implementations: Optional[List[Dict[str, Any]]] = None
+) -> Dict[str, Any]:
     """
-    Retrieves API syntax from the Code KB and generates Python implementation scripts.
+    Retrieves API syntax from the Code KB and generates implementation scripts.
+    If previous code implementations are provided, lets the LLM decide whether to:
+    - Preserve existing code (no changes needed)
+    - Update existing code (incremental edits)
+    - Rewrite from scratch (major procedural changes)
     """
+    
     experiments = result.get("proposed_experiments", [])
-    if not experiments: 
+    if not experiments:
         return result
     
-    # 1. Smart Retrieval: Use the *steps* as the query
-    all_steps_text = " ".join([" ".join(e.get('experimental_steps', [])) for e in experiments])
+    # 1. Retrieve API documentation from Code KB
+    all_steps_text = " ".join([
+        " ".join(e.get('experimental_steps', [])) 
+        for e in experiments
+    ])
     
-    print(f"  - 🔍 Retrieving API syntax for: {all_steps_text[:100]}...")
+    print(f"  - 🔍 Retrieving API syntax for implementation...")
     hits = kb_code.retrieve(f"python implementation for {all_steps_text}", top_k=5)
     
-    if not hits:
-        print("    - ℹ️ No relevant code chunks found. Skipping code gen.")
-        return result
+    repo_map_context = kb_code.get_relevant_maps(hits) if hits else ""
+    code_ctx = "\n\n".join([
+        f"FILE: {c['metadata']['source']}\n{c['text']}" 
+        for c in hits
+    ]) if hits else "No API examples found in Code KB."
     
-    repo_map_context = kb_code.get_relevant_maps(hits)
-
-    code_ctx = "\n\n".join([f"FILE: {c['metadata']['source']}\n{c['text']}" for c in hits])
-    code_files = list(set([Path(c['metadata']['source']).name for c in hits]))
-
-    # 2. Generate Code
+    code_files = list(set([Path(c['metadata']['source']).name for c in hits])) if hits else []
+    
+    # 2. Build mapping of previous implementations by experiment name
+    previous_code_map = {}
+    if previous_implementations:
+        for impl in previous_implementations:
+            exp_name = impl.get('experiment_name', '')
+            if exp_name:
+                previous_code_map[exp_name] = impl
+    
+    # 3. Generate/Update code for each experiment
     for exp in experiments:
         steps = exp.get("experimental_steps", [])
         exp_name = exp.get("experiment_name", "Experiment")
+        hypothesis = exp.get("hypothesis", "N/A")
         
+        # Find matching previous implementation
+        prev_impl = previous_code_map.get(exp_name)
+        
+        # Build the master prompt
         prompt = f"""
-        You are a Research Software Engineer.
-        
-        **TASK:** Write a Python script to implement the experimental steps below.
-        
-        **INPUTS:**
-        1. Experimental Steps: {json.dumps(steps)}
-        2. **REPOSITORY STRUCTURES (Use this to determine correct import paths):**
-        {repo_map_context}
-        3. API Syntax Reference:
-        {code_ctx}
-        
-        **INSTRUCTIONS:**
-        - Use the "API Syntax Reference" to find the correct functions.
-        - Map the scientific intent of the Steps to the code.
-        - You must prioritize using classes and functions from the API Reference over generic external libraries.
-        - Return ONLY valid JSON.
+You are an expert Research Software Engineer working on an iterative scientific project.
 
-        **ENVIRONMENT CONTEXT:**
-        - You are writing a script for a server where **the custom library found in the 'API Reference' is ALREADY INSTALLED.**
+**EXPERIMENT OVERVIEW:**
+Name: {exp_name}
+Hypothesis: {hypothesis}
 
-        **OUTPUT:** A JSON object: {{ "implementation_code": "YOUR_PYTHON_CODE_HERE" }}
-        """
+**NEW EXPERIMENTAL STEPS:**
+{json.dumps(steps, indent=2)}
+
+"""
+
+        # Add previous implementation context if it exists
+        if prev_impl:
+            prev_code = prev_impl.get('code', '')
+            prev_iteration = prev_impl.get('iteration', 'unknown')
+            
+            prompt += f"""
+**PREVIOUS IMPLEMENTATION (Iteration {prev_iteration}):**
+```python
+{prev_code}
+```
+
+**YOUR DECISION:**
+You must choose one of three strategies:
+
+1. **PRESERVE** - If the new steps are identical or the change is only a parameter/value:
+   - Return the exact same code unchanged
+   - Example: "Increase temperature from 50°C to 60°C" → just parameter change
+
+2. **UPDATE** - If the procedure changed but the overall structure is similar:
+   - Keep the working framework (imports, error handling, setup)
+   - Modify only the changed sections
+   - Add comments marking what changed
+   - Example: "Add a centrifugation step after mixing" → insert new function call
+
+3. **REWRITE** - If this is a fundamentally different approach:
+   - Start fresh using the API Reference below
+   - Example: "Switch from batch processing to real-time streaming"
+
+"""
+        else:
+            prompt += f"""
+**PREVIOUS IMPLEMENTATION:**
+None - this is the first implementation for this experiment.
+
+**YOUR TASK:**
+Write a complete Python script from scratch using the API Reference below.
+
+"""
+
+        # Add API context
+        prompt += f"""
+**REPOSITORY STRUCTURES (for correct import paths):**
+{repo_map_context}
+
+**API SYNTAX REFERENCE (Official Documentation/Examples):**
+{code_ctx}
+
+**INSTRUCTIONS:**
+- Use the "API Syntax Reference" to find the correct functions.
+- Map the scientific intent of the Steps to the code.
+- You must prioritize using classes and functions from the API Reference over generic external libraries.
+- If updating existing code, preserve working patterns
+- Return ONLY valid JSON.
+
+**OUTPUT FORMAT:**
+Respond with a JSON object:
+{{"implementation_code": "COMPLETE_PYTHON_CODE_HERE"}}
+"""
         
         try:
+            print(f"    - 🤖 Analyzing '{exp_name}'...")
             resp = model.generate_content([prompt], generation_config=generation_config)
-            code_res, _ = parse_json_from_response(resp)
+            code_res, parse_error = parse_json_from_response(resp)
+            
+            if parse_error:
+                print(f"    - ⚠️ JSON parsing error for '{exp_name}': {parse_error}")
+                continue
             
             if code_res and "implementation_code" in code_res:
                 exp["implementation_code"] = code_res["implementation_code"]
                 exp["code_source_files"] = code_files
-                print(f"    - ✅ Generated code for '{exp_name}'")
+                
+                # Simple output
+                if prev_impl:
+                    print(f"    - 🔄 Updated: {exp_name}")
+                else:
+                    print(f"    - ✨ Generated: {exp_name}")
+                            
             else:
-                print(f"    - ⚠️ Code generation returned no code for '{exp_name}'")
+                print(f"    - ⚠️ LLM did not return code for '{exp_name}'")
+                
         except Exception as e:
-            print(f"    - ❌ Failed to generate code for '{exp_name}': {e}")
-            
+            print(f"    - ❌ Failed to process '{exp_name}': {e}")
+    
     return result
 
 

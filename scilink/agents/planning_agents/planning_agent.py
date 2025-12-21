@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import google.generativeai as genai
 import json
 import logging
@@ -43,13 +44,37 @@ from .html_generator import HTMLReportGenerator
 
 class PlanningAgent:
     """
-    Stateful Agent for Orchestrating Experimental Planning.
+    Stateful AI Agent for Autonomous Experimental Planning and Iteration.
+    
+    The PlanningAgent orchestrates end-to-end research workflows by combining:
+    - Dual Knowledge Base system (scientific literature + implementation code)
+    - RAG-based hypothesis generation and technoeconomic analysis
+    - LLM-driven code generation from experimental procedures
+    - Human-in-the-loop feedback at strategic decision points
+    - Iterative refinement based on experimental results
     
     Maintains a persistent 'state' dictionary to track:
-    1. The Research Objective
-    2. The Evolving Experimental Plan (Science -> Code)
-    3. Results from executed experiments
-    4. Feedback history (both Scientific and Implementation)
+    - The Research Objective
+    - The Evolving Experimental Plan (Science -> Code)
+    - Results from executed experiments
+    - Feedback history (both Scientific Plan and Code Implementation)
+
+    Args:
+        google_api_key (str, optional): API key for Gemini models.
+            If not provided, attempts to load from environment.
+        futurehouse_api_key (str, optional): FutureHouse API key for literature search.
+            If not provided, literature search will be skipped.
+        model_name (str, optional): Name of the LLM to use. 
+            Defaults to "gemini-3-pro-preview".
+        local_model (str, optional): Base URL for OpenAI-compatible local models.
+            If provided, uses OpenAI wrapper instead of Gemini.
+        embedding_model (str, optional): Embedding model for knowledge bases.
+            Defaults to "gemini-embedding-001".
+        kb_base_path (str, optional): Base path for knowledge base storage.
+            Creates separate `_docs` and `_code` knowledge bases.
+            Defaults to "./kb_storage/default_kb".
+        code_chunk_size (int, optional): Chunk size for code files in tokens.
+            Defaults to 20000 (larger than docs for context preservation).
     """
     def __init__(self, google_api_key: str = None,
                  futurehouse_api_key: str = None,
@@ -110,6 +135,53 @@ class PlanningAgent:
         # --- STATE MANAGEMENT ---
         self.state: Dict[str, Any] = {}
 
+    def restore_state(self, state_file_path: str) -> None:
+        """
+        Restore agent state from a saved .state.json file.
+        
+        Args:
+            state_file_path: Path to the .state.json file
+            
+        Example:
+            agent = PlanningAgent()
+            agent.restore_state("./outputs/session.state.json")
+        """        
+        path = Path(state_file_path)
+        
+        if not path.exists():
+            raise FileNotFoundError(f"State file not found: {state_file_path}")
+        
+        if path.suffix != '.json':
+            raise ValueError(f"State file must be a .json file, got: {path.suffix}")
+        
+        print(f"  - 📂 Loading state from: {path.name}")
+        
+        try:
+            with open(path, 'r') as f:
+                saved_state = json.load(f)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in state file: {e}")
+        
+        # Validate structure
+        required = ["objective", "current_plan", "iteration_index", "session_id"]
+        missing = [f for f in required if f not in saved_state]
+        
+        if missing:
+            raise ValueError(
+                f"Invalid state file structure. Missing required fields: {missing}\n"
+                f"Expected a complete .state.json file with keys: {required}"
+            )
+        
+        # Restore
+        self.state = saved_state
+        
+        # User feedback
+        print(f"  - ✅ Restored session: {saved_state['session_id']}")
+        print(f"     • Objective: {saved_state['objective'][:80]}...")
+        print(f"     • Current iteration: {saved_state['iteration_index']}")
+        print(f"     • History entries: {len(saved_state.get('plan_history', []))}")
+        print(f"     • Previous results: {len(saved_state.get('experimental_results', []))}")
+        
     def _load_knowledge_bases(self):
         """Attempts to load both KBs from disk."""
         print(f"  - Docs KB: Loading from {self.kb_docs_prefix}...")
@@ -290,8 +362,83 @@ class PlanningAgent:
                             enable_human_feedback: bool = True,
                             reset_state: bool = False) -> Dict[str, Any]: # Default False to enable cumulative workflows
         """
-        Orchestrates experimental planning. Returns the full State Dictionary.
-        Set reset_state=True to force a wipe of previous history.
+        Generate an experimental plan based on scientific literature and implementation knowledge.
+
+        This is the primary entry point for starting a new research workflow. The agent:
+        1. Builds/loads dual knowledge bases (scientific docs + implementation code)
+        2. Optionally queries external literature databases
+        3. Generates experimental hypotheses via RAG
+        4. Maps experimental steps to executable code
+        5. Provides human-in-the-loop review at both science and code stages
+
+        Args:
+            objective (str): High-level research goal. This guides all hypothesis generation
+                and plan refinement. Should be specific and measurable.
+                Examples:
+                    - "Optimize the yield of the Suzuki coupling reaction"
+                    - "Screen 96 conditions to selectively precipitate magnesium"
+                    - "Develop a high-throughput assay for enzyme activity"
+            
+            science_paths (Optional[List[str]]): Paths to scientific documents/data.
+                Supported formats: PDFs, .txt, .md, directories (recursively searched)
+                These populate the Docs Knowledge Base for hypothesis generation.
+                Examples: ["./papers/", "./lab_notebooks/protocol.pdf"]
+            
+            code_paths (Optional[List[str]]): Paths to code repositories or API documentation.
+                Supported formats: Local directories, Git URLs, Python files
+                These populate the Code Knowledge Base for implementation.
+                Examples:
+                    - ["./opentrons_api/"]  # Local repo
+                    - ["https://github.com/org/automation-lib.git"]  # Git URL
+            
+            structured_data_sets (Optional[List[Dict[str, str]]]): Large Excel/CSV datasets
+                with metadata for adaptive parsing. Each dict should contain:
+                    - 'file_path': Path to .xlsx or .csv file
+                    - 'metadata_path': Path to .json metadata file (optional)
+                Example: [{"file_path": "./data.xlsx", "metadata_path": "./data.json"}]
+            
+            additional_context (Optional[Dict[str, str]]): Additional text context
+                to inject into the prompt. Keys become section headers.
+                Example: {
+                    "Safety Constraints": "Maximum temperature is 80°C",
+                    "Equipment Available": "Opentrons OT-2, plate reader"
+                }
+            
+            primary_data_set (Optional[Dict[str, str]]): Main dataset to analyze.
+                Similar format to structured_data_sets, but gets priority placement
+                in the prompt. Use for the dataset that drives the research objective.
+                Example: {"file_path": "./screening_results.xlsx"}
+            
+            image_paths (Optional[List[str]]): Paths to images (plots, diagrams, photos).
+                Supported formats: .png, .jpg, .jpeg, .tiff, .bmp
+                These are passed to the vision model for multimodal analysis.
+                Examples: ["./criticality_matrix.png", "./reaction_scheme.jpg"]
+            
+            image_descriptions (Optional[List[str]]): Text descriptions for each image.
+                Should be in same order as image_paths. Helps LLM interpret images.
+                Examples: ["Criticality matrix showing material supply risks"]
+            
+            output_json_path (Optional[str]): Path to save the generated plan.
+                Also saves full state to {output_json_path}.state.json
+                and generates HTML report at {output_json_path}.html
+                Example: "./outputs/experiment_plan.json"
+            
+            enable_human_feedback (bool): If True, pauses for user input at:
+                - Strategy review (after hypothesis generation)
+                - Code review (after script generation)
+                Set to False for fully autonomous operation.
+                Defaults to True.
+            
+            reset_state (bool): If True, clears any existing state and starts fresh.
+                If False, appends to existing research session (cumulative workflow).
+                Defaults to False.
+        
+        Returns:
+            Dict[str, Any]: Complete agent state containing:
+                - session_id: Unique identifier for this session
+                - objective: The research objective
+                - iteration_index: Current iteration number (1 for initial plan)
+                - current_plan: The active experimental plan, structure
         """
         
         # 1. Resolve Code Paths
@@ -523,8 +670,8 @@ class PlanningAgent:
                                  results: Any,
                                  output_json_path: Optional[str] = None,
                                  enable_human_feedback: bool = True,
-                                 current_plan: Optional[Dict[str, Any]] = None, 
-                                 objective: Optional[str] = None) -> Dict[str, Any]:
+                                 state_file_path: Optional[str] = None 
+                                 ) -> Dict[str, Any]:
         """
         Iterates on the current experimental plan based on new experimental results, 
         observations, or data files.
@@ -570,55 +717,39 @@ class PlanningAgent:
                 The full state is also saved to `{output_json_path}.state.json`.
             enable_human_feedback (bool): If True, pauses execution for console input at the 
                 Strategy and Code review stages. Defaults to True.
-            current_plan (Optional[Dict[str, Any]]): A specific plan dictionary to update. 
-                If provided, this overrides the agent's internal state. Useful for resuming 
-                experiments from a saved JSON file or updating plans generated by external tools.
-            objective (Optional[str]): The high-level research goal (e.g., "Maximize yield").
-                **Critical when using `current_plan`:** The agent uses this to determine if the 
-                `results` constitute a success or failure. If not provided during a stateless update,
-                the agent may default to a generic fallback or warn about missing context.
+            state_file_path: Optional path to .state.json file.
+                If provided, restores agent state before processing results.
+                Equivalent to calling restore_state() first.
 
         Returns:
-            Dict[str, Any]: The updated internal state dictionary, containing the new `current_plan`, 
-            appended `experimental_results`, and updated `plan_history`.
+            Dict[str, Any]: Updated state dictionary containing:
+                - current_plan: Latest experimental plan
+                - plan_history: All historical plans
+                - experimental_results: All results received
+                - iteration_index: Current iteration number
         """
 
-        # --- 0. STATE HYDRATION ---
-        if current_plan is not None:
-            print(f"  - 🔄 Stateless Update Mode: Hydrating agent with provided plan.")
-            
-            # Objective is critical for the RAG engine to know "Success" vs "Failure".
-            # If not provided, we try to keep existing, or warn the user.
-            if objective is None:
-                objective = self.state.get("objective", "")
-                if not objective:
-                    logging.warning("⚠️  Updating plan without an 'objective'. Agent may lack context for success criteria.")
+        # --- 0. STATE RESTORATION ---
 
-            # Infer iteration from the passed plan if state is empty
-            # If we are resuming Plan 5, we want to start at 5.
-            inferred_index = current_plan.get("iteration", 1)
-            existing_index = self.state.get("iteration_index")
-
-            # Use existing state if valid, otherwise use inferred, otherwise default to 1
-            start_index = existing_index if existing_index is not None else inferred_index
-                    
-            # We merge the passed arguments into the internal state.
-            self.state.update({
-                "objective": objective,
-                "current_plan": current_plan,
-                "experimental_results": self.state.get("experimental_results", []),
-                # If stateless, assume this is a new history chain or append to current
-                "plan_history": self.state.get("plan_history", [current_plan]),
-                "human_feedback_history": self.state.get("human_feedback_history", []),
-                "iteration_index": start_index
-            })
+        if state_file_path is not None:
+            print(f"\n--- 🔄 Restoring State from File ---")
+            self.restore_state(state_file_path)
 
         if not self.state or not self.state.get("current_plan"):
-            logging.error("No active plan state found. Run 'propose_experiments' first.")
-            return {"error": "No active state"}
-            
+            raise ValueError(
+                "No active state found.\n"
+                "You must initialize the agent first using one of:\n"
+                "  1. agent.propose_experiments(...) - Start new session\n"
+                "  2. agent.restore_state('path.state.json') - Restore saved session\n"
+                "  3. Pass state_file_path='path.state.json' to this method"
+            )
+        
         print(f"\n--- 🔄 Iterating Plan based on New Results ---")
         executed_plan_idx = self.state["iteration_index"]
+        
+        # Extract from state
+        objective = self.state["objective"]
+        current_plan = self.state["current_plan"]
         
         # --- 1. SMART RESULT PARSING ---
         parsed_text_results = []
@@ -786,18 +917,39 @@ class PlanningAgent:
         # 6. Generate Code
         # =====================================================
         if self.kb_code.index and self.kb_code.index.ntotal > 0 and not new_plan.get("error"):
-             print(f"\n  - Regenerating implementation code for refined plan...")
-             new_plan = perform_code_rag(
+             
+            # Extract previous implementations
+            previous_implementations = []
+            if current_plan and "proposed_experiments" in current_plan:                
+                for exp in current_plan["proposed_experiments"]:
+                    if "implementation_code" in exp:
+                        previous_implementations.append({
+                            'experiment_name': exp.get('experiment_name', 'Unnamed'),
+                            'code': exp['implementation_code'],
+                            'iteration': executed_plan_idx,
+                            'source_files': exp.get('code_source_files', []),
+                            'previous_steps': exp.get('experimental_steps', [])
+                        })
+            
+            print(f"\n--- Code Implementation Analysis ---")
+            if previous_implementations:
+                print(f"  - Context: {len(previous_implementations)} existing implementation(s)")
+            else:
+                print(f"  - Context: Writing from scratch (no previous code)")
+            
+            new_plan = perform_code_rag(
                  result=new_plan,
                  kb_code=self.kb_code,
                  model=self.model,
-                 generation_config=self.generation_config
+                 generation_config=self.generation_config,
+                 previous_implementations=previous_implementations
              )
+            
              # SNAPSHOT: CODE GENERATED
-             new_plan["iteration"] = next_plan_idx
-             new_plan["stage"] = "Code Generated"
-             self.state["plan_history"].append(new_plan.copy())
-             self.state["current_plan"] = new_plan
+            new_plan["iteration"] = next_plan_idx
+            new_plan["stage"] = "Code Generated"
+            self.state["plan_history"].append(new_plan.copy())
+            self.state["current_plan"] = new_plan
 
         # =====================================================
         # 7. HUMAN CODE REVIEW
@@ -881,8 +1033,103 @@ class PlanningAgent:
                                         output_json_path: Optional[str] = None) -> Dict[str, Any]:
         """
         Performs TEA using Dual-KB retrieval. 
-        Acts as a valid entry point for a research session (initializes state if empty).
-        """
+
+        **Workflow:**
+        
+        1. Knowledge Base Construction (if needed)
+        2. External Literature Search (optional, via FutureHouse)
+        3. RAG-based Economic Analysis
+        4. State Initialization (if starting fresh with TEA)
+        5. Report Generation (JSON + HTML)
+
+        **Integration with Planning:**
+    
+        TEA results are stored in the agent's state and can inform subsequent
+        experimental planning:
+            >>> # Perform TEA first
+            >>> tea_results = agent.perform_technoeconomic_analysis(
+            ...     objective="Recover lithium from brine",
+            ...     science_paths=["./market_data/", "./reports/"],
+            ... )
+            >>> 
+            >>> # Use TEA insights in experimental planning
+            >>> plan = agent.propose_experiments(
+            ...             objective="Develop lithium extraction process",
+            ...             science_paths=["./extraction_methods/"],
+            ...             additional_context=tea_results,
+            ...             primary_data_set={
+            ...                "file_path": "./brine_composition.xlsx",
+            ...                "metadata_path": ./metadata.json}
+            ... )
+        Args:
+        objective (str): Research objective to evaluate economically.
+            Should describe the material, process, or technology to assess.
+            Examples:
+                - "Recover rare earth elements from coal ash"
+                - "Evaluate magnesium extraction from produced water"
+                - "Assess economic viability of direct air capture"
+        
+        science_paths (Optional[List[str]]): Paths to documents for TEA context.
+            Should include market data, pricing reports, criticality assessments,
+            existing TEA studies, and process descriptions.
+            Examples: ["./market_reports/", "./critical_materials_report.pdf"]
+        
+        code_paths (Optional[List[str]]): Paths to code (typically unused for TEA).
+            Included for consistency with propose_experiments API.
+            TEA rarely requires code generation.
+        
+        structured_data_sets (Optional[List[Dict[str, str]]]): Excel/CSV datasets
+            containing economic data (prices, concentrations, yields, etc.).
+            Example: [{"file_path": "./commodity_prices.xlsx"}]
+        
+        primary_data_set (Optional[Dict[str, str]]): Main dataset for analysis.
+            Typically contains composition, concentration, or yield data.
+            Example: {"file_path": "./feedstock_composition.xlsx"}
+        
+        image_paths (Optional[List[str]]): Images to support TEA analysis.
+            Examples: criticality matrices, supply chain diagrams, cost breakdowns.
+        
+        image_descriptions (Optional[List[str]]): Descriptions for each image.
+            Example: ["Criticality matrix showing supply risk vs. importance"]
+        
+        output_json_path (Optional[str]): Path to save TEA results.
+            Saves to {output_json_path} (results only)
+            Saves to {output_json_path}.state.json (full state)
+            Generates {output_json_path}.html (formatted report)
+    
+    Returns:
+        Dict[str, Any]: Technoeconomic analysis results  
+
+    Example - Basic Usage:
+        >>> agent = PlanningAgent()
+        >>> state = agent.propose_experiments(
+        ...     objective="Optimize enzyme kinetics",
+        ...     science_paths=["./enzyme_papers/"],
+        ...     code_paths=["./plate_reader_api/"],
+        ...     output_json_path="./plan.json"
+        ... )
+        >>> # User reviews in console, provides feedback or approves
+        >>> # Final scripts saved to ./output_scripts/
+
+    Example - Advanced with Data:
+        >>> state = agent.propose_experiments(
+        ...     objective="Identify optimal precipitation conditions",
+        ...     science_paths=["./papers/", "./protocols.pdf"],
+        ...     code_paths=["https://github.com/opentrons/opentrons"],
+        ...     primary_data_set={
+        ...         "file_path": "./icpms_results.xlsx",
+        ...         "metadata_path": "./icpms_metadata.json"
+        ...     },
+        ...     image_paths=["./criticality_matrix.jpg"],
+        ...     image_descriptions=["Material criticality assessment"],
+        ...     additional_context={
+        ...         "Constraints": "Use only commodity chemicals",
+        ...         "Equipment": "Opentrons OT-2, 96-well plates, ICP-MS"
+        ...     },
+        ...     output_json_path="./precipitation_plan.json",
+        ...     enable_human_feedback=True
+        ... )
+    """
         
         # 1. State Initialization (if starting fresh with TEA)
         if not self.state:
