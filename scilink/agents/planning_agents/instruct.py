@@ -23,7 +23,7 @@ Synthesize the information from the retrieved context, *any provided images, and
 You MUST respond with a single JSON object containing a key "proposed_experiments", which is a list of experiment plans. Each plan must have the following keys:
 - "hypothesis": (String) A clear, single-sentence, testable hypothesis.
 - "experiment_name": (String) A short, descriptive name for the experiment.
-- "experimental_steps": (List of Strings) A numbered or bulleted list of concrete steps to perform the experiment.
+- "experimental_steps": (List of Strings) A numbered or bulleted list of concrete steps to perform the experiment. Must be self-contained, i.e. fully understandable by a human WITHOUT referencing external code or files or other sections of the JSON file.
 - "required_equipment": (List of Strings) A list of key instruments or techniques mentioned in the context that are required for this experiment.
 - "optimization_params": (Optional List) If the experiment requires numerical optimization, provide:
     - "parameter_name": (String) e.g., "Temperature"
