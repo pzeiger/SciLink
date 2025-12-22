@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scilink"
-version = "0.0.8"
+version = "0.0.9"
 authors = [
   { name="SciLink Team", email="maxim.ziatdinov@gmail.com" },
 ]
@@ -40,11 +40,12 @@ dependencies = [
     "faiss-cpu>=1.12.0",
     "mdanalysis>=2.9.0",
     "pymupdf>=1.26.5",
-    "pdfplumber>=0.11.7"
+    "pdfplumber>=0.11.7",
+    "botorch>=0.16.1"
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/scilinkllm/scilink"
+"Homepage" = "https://github.com/scilink/scilink"
 "Bug Tracker" = "https://github.com/scilink/scilink/issues"
 
 [project.scripts]

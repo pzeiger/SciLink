@@ -6,32 +6,13 @@ from typing import List, Dict, Any, Optional, Tuple
 import PIL.Image as PIL_Image
 
 from .excel_parser import parse_adaptive_excel
+from .parser_utils import parse_json_from_response
 from .instruct import (
     HYPOTHESIS_GENERATION_INSTRUCTIONS,
     TEA_INSTRUCTIONS,
     HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK,
     TEA_INSTRUCTIONS_FALLBACK
 )
-
-
-def _parse_json_from_response(resp) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Helper to extract JSON from LLM response objects."""
-    if hasattr(resp, 'text'): 
-        json_text = resp.text.strip()
-    elif hasattr(resp, 'parts') and resp.parts: 
-        json_text = resp.parts[0].text.strip()
-    else: 
-        return None, f"LLM response format unexpected: {resp}"
-    
-    if json_text.startswith("```json"): 
-        json_text = json_text[len("```json"):].strip()
-    if json_text.endswith("```"): 
-        json_text = json_text[:-len("```")].strip()
-        
-    try: 
-        return json.loads(json_text), None
-    except json.JSONDecodeError as e: 
-        return None, f"Failed to decode JSON: {str(e)}"
 
 
 def verify_plan_relevance(objective: str, 
@@ -122,7 +103,7 @@ def verify_plan_relevance(objective: str,
     # 4. Execute Verification
     try:
         response = model.generate_content([eval_prompt], generation_config=generation_config)
-        eval_result, _ = _parse_json_from_response(response)
+        eval_result, _ = parse_json_from_response(response)
         
         if eval_result and not eval_result.get("is_relevant"):
             reason = eval_result.get('reason', 'Unknown irrelevance.')
@@ -147,7 +128,8 @@ def perform_science_rag(objective: str,
                         primary_data_set: Optional[Dict[str, str]] = None,
                         image_paths: Optional[List[str]] = None,
                         image_descriptions: Optional[List[str]] = None,
-                        additional_context: Optional[str] = None) -> Dict[str, Any]:
+                        additional_context: Optional[str] = None,
+                        external_context: Optional[str] = None) -> Dict[str, Any]:
     """
     Executes the Scientific/TEA RAG loop using the Docs KnowledgeBase.
     Includes logic for handling Primary Data (Excel) and Fallback generation.
@@ -173,7 +155,7 @@ def perform_science_rag(objective: str,
     
     unique_chunks = {c['text']: c for c in doc_chunks}.values()
     
-    if not unique_chunks and not primary_data_str:
+    if not unique_chunks and not primary_data_str and not external_context:
         retrieved_context_str = "No specific documents found in Knowledge Base."
     else:
         rag_str = "\n\n---\n\n".join(
@@ -181,8 +163,18 @@ def perform_science_rag(objective: str,
             for c in unique_chunks
         )
         retrieved_context_str = ""
-        if primary_data_str: retrieved_context_str += f"## Primary Data Summary\n{primary_data_str}\n\n"
-        if rag_str: retrieved_context_str += f"## Retrieved Scientific Literature\n{rag_str}"
+
+        # Primary Data
+        if primary_data_str: 
+            retrieved_context_str += f"## 📊 Primary Lab Data Summary\n{primary_data_str}\n\n"
+        
+        # B. External Literature
+        if external_context:
+            retrieved_context_str += f"## 🌍 External Scientific Literature\n{external_context}\n\n"
+
+        # C. Local Documents
+        if rag_str: 
+            retrieved_context_str += f"## 📂 Retrieved Local Documents\n{rag_str}"
 
     # --- 3. Construct Multimodal Prompt ---
     loaded_images = []
@@ -215,7 +207,7 @@ def perform_science_rag(objective: str,
     try:
         # Attempt 1: Strict RAG Generation
         response = model.generate_content(prompt_parts, generation_config=generation_config)
-        result, error_msg = _parse_json_from_response(response)
+        result, error_msg = parse_json_from_response(response)
         
         if error_msg: 
             return {"error": f"JSON Parsing Error: {error_msg}"}
@@ -242,7 +234,7 @@ def perform_science_rag(objective: str,
             prompt_parts[0] = fallback_inst
             
             fallback_response = model.generate_content(prompt_parts, generation_config=generation_config)
-            result, error_msg_fb = _parse_json_from_response(fallback_response)
+            result, error_msg_fb = parse_json_from_response(fallback_response)
             
             if error_msg_fb:
                 return {"error": f"Fallback JSON Parsing Error: {error_msg_fb}"}
@@ -256,74 +248,156 @@ def perform_science_rag(objective: str,
         return {"error": str(e)}
 
 
-def perform_code_rag(result: Dict[str, Any],
-                     kb_code: Any,   # Pass the Code KB object
-                     model: Any,     # Pass the LLM object
-                     generation_config: Any) -> Dict[str, Any]:
+def perform_code_rag(
+    result: Dict[str, Any],
+    kb_code: Any,
+    model: Any,
+    generation_config: Any,
+    previous_implementations: Optional[List[Dict[str, Any]]] = None
+) -> Dict[str, Any]:
     """
-    Retrieves API syntax from the Code KB and generates Python implementation scripts.
+    Retrieves API syntax from the Code KB and generates implementation scripts.
+    If previous code implementations are provided, lets the LLM decide whether to:
+    - Preserve existing code (no changes needed)
+    - Update existing code (incremental edits)
+    - Rewrite from scratch (major procedural changes)
     """
+    
     experiments = result.get("proposed_experiments", [])
-    if not experiments: 
+    if not experiments:
         return result
     
-    # 1. Smart Retrieval: Use the *steps* as the query
-    all_steps_text = " ".join([" ".join(e.get('experimental_steps', [])) for e in experiments])
+    # 1. Retrieve API documentation from Code KB
+    all_steps_text = " ".join([
+        " ".join(e.get('experimental_steps', [])) 
+        for e in experiments
+    ])
     
-    print(f"  - 🔍 Retrieving API syntax for: {all_steps_text[:100]}...")
+    print(f"  - 🔍 Retrieving API syntax for implementation...")
     hits = kb_code.retrieve(f"python implementation for {all_steps_text}", top_k=5)
     
-    if not hits:
-        print("    - ℹ️ No relevant code chunks found. Skipping code gen.")
-        return result
+    repo_map_context = kb_code.get_relevant_maps(hits) if hits else ""
+    code_ctx = "\n\n".join([
+        f"FILE: {c['metadata']['source']}\n{c['text']}" 
+        for c in hits
+    ]) if hits else "No API examples found in Code KB."
     
-    repo_map_context = kb_code.get_relevant_maps(hits)
-
-    code_ctx = "\n\n".join([f"FILE: {c['metadata']['source']}\n{c['text']}" for c in hits])
-    code_files = list(set([Path(c['metadata']['source']).name for c in hits]))
-
-    # 2. Generate Code
+    code_files = list(set([Path(c['metadata']['source']).name for c in hits])) if hits else []
+    
+    # 2. Build mapping of previous implementations by experiment name
+    previous_code_map = {}
+    if previous_implementations:
+        for impl in previous_implementations:
+            exp_name = impl.get('experiment_name', '')
+            if exp_name:
+                previous_code_map[exp_name] = impl
+    
+    # 3. Generate/Update code for each experiment
     for exp in experiments:
         steps = exp.get("experimental_steps", [])
         exp_name = exp.get("experiment_name", "Experiment")
+        hypothesis = exp.get("hypothesis", "N/A")
         
+        # Find matching previous implementation
+        prev_impl = previous_code_map.get(exp_name)
+        
+        # Build the master prompt
         prompt = f"""
-        You are a Research Software Engineer.
-        
-        **TASK:** Write a Python script to implement the experimental steps below.
-        
-        **INPUTS:**
-        1. Experimental Steps: {json.dumps(steps)}
-        2. **REPOSITORY STRUCTURES (Use this to determine correct import paths):**
-        {repo_map_context}
-        3. API Syntax Reference:
-        {code_ctx}
-        
-        **INSTRUCTIONS:**
-        - Use the "API Syntax Reference" to find the correct functions.
-        - Map the scientific intent of the Steps to the code.
-        - You must prioritize using classes and functions from the API Reference over generic external libraries.
-        - Return ONLY valid JSON.
+You are an expert Research Software Engineer working on an iterative scientific project.
 
-        **ENVIRONMENT CONTEXT:**
-        - You are writing a script for a server where **the custom library found in the 'API Reference' is ALREADY INSTALLED.**
+**EXPERIMENT OVERVIEW:**
+Name: {exp_name}
+Hypothesis: {hypothesis}
 
-        **OUTPUT:** A JSON object: {{ "implementation_code": "YOUR_PYTHON_CODE_HERE" }}
-        """
+**NEW EXPERIMENTAL STEPS:**
+{json.dumps(steps, indent=2)}
+
+"""
+
+        # Add previous implementation context if it exists
+        if prev_impl:
+            prev_code = prev_impl.get('code', '')
+            prev_iteration = prev_impl.get('iteration', 'unknown')
+            
+            prompt += f"""
+**PREVIOUS IMPLEMENTATION (Iteration {prev_iteration}):**
+```python
+{prev_code}
+```
+
+**YOUR DECISION:**
+You must choose one of three strategies:
+
+1. **PRESERVE** - If the new steps are identical or the change is only a parameter/value:
+   - Return the exact same code unchanged
+   - Example: "Increase temperature from 50°C to 60°C" → just parameter change
+
+2. **UPDATE** - If the procedure changed but the overall structure is similar:
+   - Keep the working framework (imports, error handling, setup)
+   - Modify only the changed sections
+   - Add comments marking what changed
+   - Example: "Add a centrifugation step after mixing" → insert new function call
+
+3. **REWRITE** - If this is a fundamentally different approach:
+   - Start fresh using the API Reference below
+   - Example: "Switch from batch processing to real-time streaming"
+
+"""
+        else:
+            prompt += f"""
+**PREVIOUS IMPLEMENTATION:**
+None - this is the first implementation for this experiment.
+
+**YOUR TASK:**
+Write a complete Python script from scratch using the API Reference below.
+
+"""
+
+        # Add API context
+        prompt += f"""
+**REPOSITORY STRUCTURES (for correct import paths):**
+{repo_map_context}
+
+**API SYNTAX REFERENCE (Official Documentation/Examples):**
+{code_ctx}
+
+**INSTRUCTIONS:**
+- Use the "API Syntax Reference" to find the correct functions.
+- Map the scientific intent of the Steps to the code.
+- You must prioritize using classes and functions from the API Reference over generic external libraries.
+- If updating existing code, preserve working patterns
+- Return ONLY valid JSON.
+
+**OUTPUT FORMAT:**
+Respond with a JSON object:
+{{"implementation_code": "COMPLETE_PYTHON_CODE_HERE"}}
+"""
         
         try:
+            print(f"    - 🤖 Analyzing '{exp_name}'...")
             resp = model.generate_content([prompt], generation_config=generation_config)
-            code_res, _ = _parse_json_from_response(resp)
+            code_res, parse_error = parse_json_from_response(resp)
+            
+            if parse_error:
+                print(f"    - ⚠️ JSON parsing error for '{exp_name}': {parse_error}")
+                continue
             
             if code_res and "implementation_code" in code_res:
                 exp["implementation_code"] = code_res["implementation_code"]
                 exp["code_source_files"] = code_files
-                print(f"    - ✅ Generated code for '{exp_name}'")
+                
+                # Simple output
+                if prev_impl:
+                    print(f"    - 🔄 Updated: {exp_name}")
+                else:
+                    print(f"    - ✨ Generated: {exp_name}")
+                            
             else:
-                print(f"    - ⚠️ Code generation returned no code for '{exp_name}'")
+                print(f"    - ⚠️ LLM did not return code for '{exp_name}'")
+                
         except Exception as e:
-            print(f"    - ❌ Failed to generate code for '{exp_name}': {e}")
-            
+            print(f"    - ❌ Failed to process '{exp_name}': {e}")
+    
     return result
 
 
@@ -331,11 +405,24 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
                               feedback: str, 
                               objective: str,
                               model: Any,
-                              generation_config: Any) -> Dict[str, Any]:
+                              generation_config: Any,
+                              new_context: Optional[str] = None,
+                              result_images: Optional[List[Any]] = None
+                              ) -> Dict[str, Any]:
     """
-    Refines the experimental plan based on user input.
+    Refines the experimental plan based on user input or experimental results.
+    Now supports injecting fresh RAG context relevant to the feedback/results.
     """
     
+    # Construct the context block if available
+    context_block = ""
+    if new_context:
+        context_block = (
+            f"\n**📚 RELEVANT LITERATURE FOR OBSERVED RESULTS:**\n"
+            f"{new_context}\n"
+            f"(Use this literature to interpret the results and adjust the plan accordingly.)\n"
+        )
+
     refinement_prompt = f"""
     You are an expert Research Strategist acting as an editor.
     
@@ -344,10 +431,13 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
     **Current Plan (JSON):**
     {json.dumps(original_result, indent=2)}
     
-    **User Feedback/Correction:** "{feedback}"
+    **Experimental Results / Feedback:** "{feedback}"
+    {context_block}
     
     **Task:**
-    Update the "Current Plan" to strictly address the "User Feedback".
+    Update the "Current Plan" to strictly address the Feedback and Results.
+    - If the results indicate failure, use the Literature Context to propose a fix.
+    - If the results indicate success, move to the next logical step.
     
     **Constraints:**
     - You MUST return the exact same JSON structure (keys: "proposed_experiments", etc.).
@@ -358,14 +448,22 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
     A single valid JSON object containing the updated plan.
     """
 
+    prompt_parts = [refinement_prompt]
+    
+    if result_images:
+        print(f"    + 📎 Attaching {len(result_images)} images to refinement prompt.")
+        prompt_parts.extend(result_images)
+
     try:
-        response = model.generate_content([refinement_prompt], generation_config=generation_config)
-        refined_result, error_msg = _parse_json_from_response(response)
+        # 4. Generate Content (Sending List of Text + Images)
+        response = model.generate_content(prompt_parts, generation_config=generation_config)
+        refined_result, error_msg = parse_json_from_response(response)
         
         if error_msg:
             print(f"    - ⚠️ Could not parse refined plan: {error_msg}. Reverting.")
             return original_result
         
+        # Structure Validation
         if "proposed_experiments" not in refined_result:
             print("    - ⚠️ Refined plan invalid structure. Reverting.")
             return original_result
@@ -425,7 +523,7 @@ def refine_code_with_feedback(result: Dict[str, Any],
     print(f"    - ↻ Refine Code RAG: Generating updates based on feedback...")
     try:
         response = model.generate_content([prompt], generation_config=generation_config)
-        updates, error = _parse_json_from_response(response)
+        updates, error = parse_json_from_response(response)
         
         if updates and "updated_codes" in updates:
             new_codes = updates["updated_codes"]

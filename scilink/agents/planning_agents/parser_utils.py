@@ -1,8 +1,11 @@
-import logging
-
 import os
 from typing import List, Dict, Any
 from pathlib import Path
+from typing import List, Dict, Any, Tuple, Optional
+import logging
+
+import json
+import pandas as pd
 
 # Match these to the extensions you check in planning_agent.py
 SUPPORTED_EXTENSIONS = {
@@ -73,6 +76,77 @@ def table_to_markdown(table: List[List[str]]) -> str:
         # Truncate rows that are longer than the header
         md += f"| {' | '.join(row[:len(header)])} |\n"
     return md
+
+
+def parse_json_from_response(resp) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    Robustly extracts and parses JSON from an LLM response object.
+    Matches the logic originally defined in rag_engine.py.
+    """
+    json_text = ""
+    
+    # 1. Extract Text (Protected against Safety Filter blocks)
+    try:
+        if hasattr(resp, 'text'): 
+            json_text = resp.text.strip()
+        elif hasattr(resp, 'parts') and resp.parts: 
+            json_text = resp.parts[0].text.strip()
+        elif isinstance(resp, str):
+            json_text = resp.strip()
+        else:
+            return None, f"LLM response format unexpected: {type(resp)}"
+            
+    except ValueError as e:
+        # Google GenAI raises ValueError on .text access if response was blocked
+        return None, f"Response blocked or empty (Safety Filter): {e}"
+    except Exception as e:
+        return None, f"Error extracting text from response: {e}"
+
+    # 2. Strip Markdown Code Blocks
+    if json_text.startswith("```json"):
+        json_text = json_text[len("```json"):].strip()
+    elif json_text.startswith("```"):
+        json_text = json_text[len("```"):].strip()
+    
+    if json_text.endswith("```"):
+        json_text = json_text[:-len("```")].strip()
+
+    # 3. Parse
+    try:
+        return json.loads(json_text), None
+    except json.JSONDecodeError as e:
+        return None, f"Failed to decode JSON: {str(e)}"
+
+def append_experiment_result(file_path: str, parameters: Dict[str, float], results: Dict[str, float]):
+    """
+    Appends a completed experiment (Params + Results) to the cumulative dataset.
+    This 'closes the loop' for the BO Agent.
+    """
+    path = Path(file_path)
+    
+    # Merge input parameters and lab results into one row
+    new_row = {**parameters, **results}
+    
+    if not path.exists():
+        # Create new if doesn't exist
+        df = pd.DataFrame([new_row])
+    else:
+        if path.suffix == '.xlsx':
+            df = pd.read_excel(path)
+        elif path.suffix == '.csv':
+            df = pd.read_csv(path)
+        else:
+            raise ValueError("Unsupported file format. Use .xlsx or .csv")
+        
+        # Append
+        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+    
+    # Save back
+    if path.suffix == '.xlsx':
+        df.to_excel(path, index=False)
+    else:
+        df.to_csv(path, index=False)
+    print(f"✅ Appended result to {path.name}. New size: {len(df)}")
 
 
 def write_experiments_to_disk(result_json: Dict[str, Any], target_dir: str) -> List[str]:

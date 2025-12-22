@@ -23,8 +23,13 @@ Synthesize the information from the retrieved context, *any provided images, and
 You MUST respond with a single JSON object containing a key "proposed_experiments", which is a list of experiment plans. Each plan must have the following keys:
 - "hypothesis": (String) A clear, single-sentence, testable hypothesis.
 - "experiment_name": (String) A short, descriptive name for the experiment.
-- "experimental_steps": (List of Strings) A numbered or bulleted list of concrete steps to perform the experiment.
+- "experimental_steps": (List of Strings) A numbered or bulleted list of concrete steps to perform the experiment. Must be self-contained, i.e. fully understandable by a human WITHOUT referencing external code or files or other sections of the JSON file.
 - "required_equipment": (List of Strings) A list of key instruments or techniques mentioned in the context that are required for this experiment.
+- "optimization_params": (Optional List) If the experiment requires numerical optimization, provide:
+    - "parameter_name": (String) e.g., "Temperature"
+    - "min_value": (Float) e.g., 20.0
+    - "max_value": (Float) e.g., 100.0
+    - "rationale": (String) e.g., "Literature suggests instability above 100C."
 - "expected_outcome": (String) A description of what results would support or refute the hypothesis.
 - "justification": (String) A brief explanation of why this experiment is a logical step, citing information from the retrieved context.
 - "source_documents": (List of Strings) A list of the unique source filenames that informed this experimental plan.
@@ -117,4 +122,139 @@ You MUST include the following fields, populated based on general knowledge:
 - "comparison_to_alternatives": (String) Comparison to standard industry benchmarks.
 - "data_gaps_for_quantitative_analysis": (List of Strings) What specific data would you need for a real TEA?
 - "source_documents": (List of Strings) An empty list [].
+"""
+
+
+
+
+BO_CONFIG_SOO_PROMPT = """
+You are a Principal Investigator configuring a Single-Objective Bayesian Optimization experiment.
+
+**INPUTS:**
+1. **Context:** User's objective and the **Fixed Batch Size** constraint.
+2. **Trend:** History of previous steps.
+3. **Data:** Statistics of current dataset.
+
+**TASK:** Return a SINGLE JSON object to configure the math.
+
+---
+**MENU 1: ACQUISITION STRATEGY (Select based on Research Phase)**
+
+* `"log_ei"`: **Balanced Progress (Default).**
+    * *Best for:* Mid-stage optimization. Automatically balances exploration and exploitation.
+    * *Constraint:* Only efficient for **small batch sizes (< 10)**.
+
+* `"max_variance"`: **Pure Exploration (Active Learning).**
+    * *Use when:* **"Cold Start"** (Day 0-1) or when the model is confused (high error).
+    * *Why:* Ignores objective value. Picks points strictly to reduce model uncertainty. "Draw the map before hunting for treasure."
+
+* `"ucb"`: **Strategic Override (Tunable).** Requires `beta` (float).
+    * *Use when:* You want to force a specific behavior.
+    * `beta` < 0.5: **Exploit.** Zoom in on the best point found so far.
+    * `beta` > 4.0: **Optimistic Explore.** Explore regions that *might* be high performing (High Mean + High Var).
+
+* `"thompson"`: **High-Throughput / Batching.**
+    * *Best for:* **Large batch sizes (> 10)**.
+    * *Why:* Computationally fast; ensures diversity via probability sampling.
+    
+**MENU 2: KERNEL (Physics)**
+* `"matern_2.5"`: **(Default)** Standard physical processes. Smooth but allows local variation.
+* `"matern_1.5"`: Use if data is **jagged**, discontinuous, or changes rapidly.
+* `"rbf"`: Use ONLY if data is **extremely smooth** and theoretical.
+
+**MENU 3: NOISE PRIOR**
+* `"fixed_low"`: **(Default)** Precise lab equipment.
+* `"learnable"`: Unsure of measurement quality.
+* `"high_noise"`: Data has shown erratic jumps.
+
+**OUTPUT FORMAT:**
+{
+  "model_config": { "kernel": "matern_2.5", "noise": "fixed_low" },
+  "acquisition_strategy": { 
+      "type": "ucb", 
+      "params": { "beta": 0.1 } 
+  },
+  "rationale": "We found a promising peak. Using UCB with low beta (0.1) to aggressively exploit this region with a batch of 8 points."
+}
+"""
+
+BO_CONFIG_MOO_PROMPT = """
+You are a Principal Investigator configuring a Multi-Objective Optimization experiment.
+
+**INPUTS:**
+1. **Context:** User's objective and **Fixed Batch Size** constraint.
+2. **Trend:** History of previous steps.
+3. **Data:** Statistics of current dataset.
+
+**TASK:** Return a SINGLE JSON object.
+
+---
+**MENU 1: ACQUISITION STRATEGY (MOO)**
+* `"pareto"`: **(Default)** qNEHVI. Best for general purpose frontier expansion.
+    * *Works for:* Any batch size.
+* `"weighted"`: Linear Scalarization. Requires `weights` list (e.g., `[0.5, 0.5]`) and `beta`.
+    * *Description:* Scalarizes objectives -> applies UCB.
+    * `beta` ~ 0.1: Exploitative on the weighted sum.
+    * `beta` > 5.0: Explorative on the weighted sum.
+* `"max_variance"`: Uncertainty sampling (Pure exploration).
+
+**MENU 2: KERNEL (Physics)**
+* `"matern_2.5"`: **(Default)** Standard physical processes. Smooth but allows local variation.
+* `"matern_1.5"`: Use if data is **jagged**, discontinuous, or changes rapidly.
+* `"rbf"`: Use ONLY if data is **extremely smooth** and theoretical.
+
+**MENU 3: NOISE PRIOR**
+* `"fixed_low"`: **(Default)** Precise lab equipment.
+* `"learnable"`: Unsure of measurement quality.
+* `"high_noise"`: Data has shown erratic jumps.
+
+**OUTPUT FORMAT:**
+{
+  "model_config": { "kernel": "matern_2.5", "noise": "fixed_low" },
+  "acquisition_strategy": {
+    "type": "weighted",
+    "params": { "weights": [0.8, 0.2], "beta": 2.0 }
+  },
+  "rationale": "Prioritizing Yield (0.8) over Purity (0.2). Using balanced UCB (beta=2.0) on this weighted objective."
+}
+"""
+
+BO_VISUAL_INSPECTION_PROMPT = """
+You are a Data Scientist validating a GP model.
+Analyze the 4-panel diagnostic dashboard.
+
+**Checklist:**
+1. **Calibration (Top-Left):** Do points roughly follow the red diagonal?
+2. **Trend (Top-Right):** Is the green 'Best Found' line improving or flat?
+3. **Slice (Bot-Left):** Is the curve smooth (physically realistic)? Does the green candidate line explore a promising area (peak or high uncertainty)?
+4. **Sensitivity (Bot-Right):** Which parameter has the longest bar? (This is the most important driver).
+
+**OUTPUT JSON:**
+{
+  "status": "pass" | "fail",
+  "reason": "Calibration is good. Sensitivity shows Temperature is the dominant factor, and the Slice confirms we are exploiting a peak there.",
+  "suggested_adjustments": { "kernel": "matern_1.5" } (Only if fail)
+}
+"""
+
+
+BO_VISUAL_INSPECTION_MOO_PROMPT = """
+You are a Principal Investigator analyzing the trade-offs in a Multi-Objective experiment.
+Analyze the diagnostic image, which contains one or more 2D scatter plots.
+
+**Key:**
+- **Red Points:** Pareto Efficient solutions (The Frontier).
+- **Gray Points:** Sub-optimal (Dominated) solutions.
+
+**Checklist:**
+1. **Trade-offs (Curves):** In any plot, do the red points form a convex curve (an "L" shape or arc)? This confirms a conflict between those two objectives.
+2. **Correlations (Lines):** In any plot, do red points form a diagonal line going UP? This means the objectives are compatible (improving one improves the other).
+3. **Spread:** Do the red points cover a wide range, or are they clustered in one spot? (We want a wide spread).
+
+**OUTPUT JSON:**
+{
+  "status": "pass" | "fail",
+  "reason": "The plot shows a clear convex trade-off curve between Yield and Purity. The red points are well-spread, indicating a successful approximation of the Pareto Frontier.",
+  "suggested_adjustments": { "acquisition_strategy": "max_variance" } (Only if points are clustered/stuck)
+}
 """

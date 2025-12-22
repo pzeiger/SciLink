@@ -1,0 +1,2631 @@
+Directory structure:
+└── planning_agents/
+    ├── __init__.py
+    ├── bo_agent.py
+    ├── excel_parser.py
+    ├── instruct.py
+    ├── knowledge_base.py
+    ├── parser_utils.py
+    ├── pdf_parser.py
+    ├── planning_agent.py
+    ├── rag_engine.py
+    ├── repo_loader.py
+    └── user_interface.py
+
+================================================
+FILE: __init__.py
+================================================
+from .planning_agent import PlanningAgent
+
+
+================================================
+FILE: bo_agent.py
+================================================
+import pandas as pd
+import json
+import logging
+from pathlib import Path
+from typing import Dict, Any, List
+import PIL.Image as PIL_Image
+
+import google.generativeai as genai
+from ...auth import get_api_key, APIKeyNotFoundError
+from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from .parser_utils import parse_json_from_response 
+from ...tools.bo_tools import get_optimizer
+from .instruct import (
+    BO_CONFIG_SOO_PROMPT,
+    BO_CONFIG_MOO_PROMPT,
+    BO_VISUAL_INSPECTION_PROMPT
+)
+
+class BOAgent:
+    """
+    Autonomous Agent for Bayesian Optimization (BO) designed for "Stop-and-Go" experimental loops.
+
+    This agent acts as an AI research partner that plans your next set of experiments.
+    It combines valid statistical modeling (Gaussian Processes) with LLM-based reasoning 
+    to adaptively configure the optimization strategy based on your data trends.
+
+    **DATA FORMATTING REQUIREMENTS:**
+    --------------------------------
+    The agent expects a "Tidy Data" format (Excel .xlsx or CSV .csv) where:
+    1.  **Rows** represent individual experiments.
+    2.  **Columns** represent input parameters (e.g., 'Temperature', 'Pressure') and 
+        measured objectives (e.g., 'Yield', 'Purity').
+    3.  **No Merged Cells:** Ensure the header is a single row containing clean variable names.
+    4.  **Missing Data:** The agent requires complete data rows for the optimization columns. 
+        Rows with NaNs in inputs/targets should be removed or imputed before running.
+
+    **PERSISTENCE & WORKFLOW:**
+    ---------------------------
+    This agent is stateless and persistent. It is safe to shut down between experiments.
+    
+    1.  **Run Agent:** Call `run_optimization_loop` pointing to your current data file.
+    2.  **Get Recommendations:** The agent saves a new batch of experiments to 
+        `./bo_artifacts/batch_step_N.csv`.
+    3.  **Shut Down:** You can close the program while you perform the experiments in the lab 
+        (whether it takes 1 hour or 1 week).
+    4.  **Update Data:** Once results are in, append them as new rows to your original 
+        data file (.xlsx/.csv).
+    5.  **Restart:** Run the agent again. It automatically re-reads the updated data 
+        and the history file (`bo_history.json`) to pick up exactly where it left off.
+
+    **ARGUMENTS:**
+    --------------
+    google_api_key (str): Google Gemini API Key.
+    model_name (str): LLM model name (default: "gemini-3-pro-preview").
+    local_model (str): Optional URL for local/OpenAI-compatible endpoints.
+    """
+    def __init__(self, 
+                 google_api_key: str = None, 
+                 model_name: str = "gemini-3-pro-preview", 
+                 local_model: str = None):
+        
+        if google_api_key is None:
+            google_api_key = get_api_key('google')
+            if not google_api_key:
+                raise APIKeyNotFoundError('google')
+        
+        if local_model and ('ai-incubator' in local_model or 'openai' in local_model):
+            logging.info(f"🏛️  BO Agent using OpenAI-compatible model: {model_name}")
+            self.model = OpenAIAsGenerativeModel(
+                model=model_name, 
+                api_key=google_api_key, 
+                base_url=local_model
+            )
+            self.generation_config = None 
+        else:
+            logging.info(f"☁️  BO Agent using Google Gemini model: {model_name}")
+            if google_api_key:
+                genai.configure(api_key=google_api_key)
+            self.model = genai.GenerativeModel(model_name)
+            self.generation_config = genai.types.GenerationConfig(response_mime_type="application/json")
+
+        self.history_file = Path("./bo_history.json")
+
+    def _load_history(self) -> List[Dict]:
+        if self.history_file.exists():
+            with open(self.history_file, 'r') as f: return json.load(f)
+        return []
+
+    def _save_history(self, entry: Dict):
+        history = self._load_history()
+        history.append(entry)
+        with open(self.history_file, 'w') as f: json.dump(history, f, indent=2)
+
+    def _validate_config(self, config: Dict) -> Dict:
+        clean = config.copy()
+        m_conf = clean.get("model_config", {})
+        if m_conf.get("kernel") not in ["matern_2.5", "matern_1.5", "rbf"]:
+            m_conf["kernel"] = "matern_2.5"
+        if m_conf.get("noise") not in ["fixed_low", "learnable", "high_noise"]:
+            m_conf["noise"] = "fixed_low"
+        clean["model_config"] = m_conf
+        return clean
+
+    def run_optimization_loop(self, data_path: str, objective_text: str, 
+                              input_cols: List[str], input_bounds: List[List[float]], 
+                              target_cols: List[str], output_dir: str = "./bo_artifacts",
+                              batch_size: int = 1) -> Dict[str, Any]:
+        
+        Path(output_dir).mkdir(exist_ok=True, parents=True)
+        
+        # 1. Load Data
+        try:
+            df = pd.read_excel(data_path) if data_path.endswith('.xlsx') else pd.read_csv(data_path)
+            for col in input_cols + target_cols:
+                if col not in df.columns: return {"error": f"Column '{col}' not found in data."}
+            X = df[input_cols].values
+            y = df[target_cols].values
+        except Exception as e:
+            return {"error": f"Data load failed: {e}"}
+
+        is_moo = len(target_cols) > 1
+        history = self._load_history()
+
+        # 2. Configure Strategy (LLM)
+        trend_context = f"Last 5 strategies: {[h.get('config', {}).get('rationale', 'N/A') for h in history[-5:]]}" if history else "No history."
+        
+        # Select Prompt and inject context
+        prompt_tmpl = BO_CONFIG_MOO_PROMPT if is_moo else BO_CONFIG_SOO_PROMPT
+        prompt_parts = [
+            prompt_tmpl,
+            f"Objective: {objective_text}",
+            f"Constraint: Fixed Batch Size = {batch_size}",
+            f"Meta-Data Trend: {trend_context}",
+            f"Data Summary:\n{df.describe().to_markdown()}"
+        ]
+        
+        print(f"  - 🤖 BO Agent: Configuring strategy (Batch={batch_size})...")
+        resp = self.model.generate_content(prompt_parts, generation_config=self.generation_config)
+        raw_config, parse_error = parse_json_from_response(resp)
+        if parse_error: 
+            return {"error": f"JSON Error: {parse_error}"}
+        
+        valid_config = self._validate_config(raw_config)
+        valid_config["batch_size"] = batch_size # Lock in the user constraint
+
+        # 3. Fit Model
+        optimizer = get_optimizer(is_moo=is_moo)
+        optimizer.fit(
+            X, y, 
+            bounds=input_bounds, 
+            model_config=valid_config["model_config"],
+            feature_names=input_cols
+        )
+
+        # 4. Recommend
+        acq_conf = valid_config.get("acquisition_strategy", {})
+        strategy_name = acq_conf.get("type", "pareto" if is_moo else "log_ei")
+        
+        print(f"  - 🚀 Optimizing {strategy_name}...")
+        next_x_batch = optimizer.recommend(
+            n_candidates=batch_size,
+            strategy=strategy_name,
+            params=acq_conf.get("params", {})
+        )
+
+        # 5. Diagnostics (Plot only first candidate)
+        plot_path = f"{output_dir}/step_{len(history)+1}.png"
+        if is_moo:
+            optimizer.generate_diagnostics(save_path=plot_path)
+        else:
+            optimizer.generate_diagnostics(next_x_batch, df[target_cols[0]].values.tolist(), save_path=plot_path)
+
+        # 6. Inspection
+        print("  - 👀 BO Agent: Inspecting visuals...")
+        try:
+            img = PIL_Image.open(plot_path)
+            insp_resp = self.model.generate_content([BO_VISUAL_INSPECTION_PROMPT, img], generation_config=self.generation_config)
+            inspection, _ = parse_json_from_response(insp_resp)
+        except Exception as e:
+            inspection = {"status": "skipped", "reason": str(e)}
+
+        # 7. Save History
+        recommendations = []
+        for row in next_x_batch:
+            recommendations.append({k: float(v) for k, v in zip(input_cols, row)})
+            
+        log_entry = {
+            "step": len(history) + 1, 
+            "config": valid_config, 
+            "recommendation_batch": recommendations, 
+            "inspection": inspection
+        }
+        self._save_history(log_entry)
+
+        # 8. Output
+        if batch_size > 1:
+            batch_csv = f"{output_dir}/batch_step_{len(history)+1}.csv"
+            pd.DataFrame(recommendations).to_csv(batch_csv, index=False)
+            print(f"  - 💾 Batch saved: {batch_csv}")
+
+        return {
+            "status": "success",
+            "next_parameters": recommendations[0] if batch_size == 1 else recommendations,
+            "strategy": valid_config,
+            "plot_path": plot_path
+        }
+
+
+================================================
+FILE: excel_parser.py
+================================================
+# planning_agents/excel_parser.py
+import pandas as pd
+import json
+from pathlib import Path
+from typing import Dict, Any, List
+
+# If a file has this many rows or fewer, we embed it all in one chunk.
+SMALL_FILE_THRESHOLD = 150
+
+def parse_adaptive_excel(excel_path: str, context_path: str, row_chunk_size: int = 200) -> List[Dict[str, Any]]:
+    """
+    Reads an Excel file and a JSON context file with an adaptive strategy.    
+    - If rows <= SMALL_FILE_THRESHOLD:
+      Creates ONE chunk containing the summary, definitions, AND the full data table.
+    - If rows > SMALL_FILE_THRESHOLD:
+      Creates TWO types of chunks:
+      1. A single "summary chunk" with statistical info.
+      2. Multiple "data chunks" by batching the rows.
+    """
+    print(f"  - Processing Excel '{Path(excel_path).name}' with adaptive strategy...")
+    all_chunks = []
+
+    try:
+        # --- 1. Read and validate the structured context ---
+        with open(context_path, 'r', encoding='utf-8') as f:
+            context = json.load(f)
+        
+        # Validate that at least one of 'objective' or 'title' exists
+        if "objective" not in context and "title" not in context:
+            print(f"    - ⚠️  Skipping: JSON '{context_path}' must contain at least one of 'objective' or 'title'.")
+            return []
+
+        # --- 2. Load the Excel file ---
+        try:
+            df = pd.read_excel(excel_path)
+        except ImportError:
+            print("    - ❌ Error: 'pandas' or 'openpyxl' not installed. Please run: pip install pandas openpyxl")
+            return []
+        
+        total_rows = len(df)
+        print(f"    - Loaded {total_rows} rows from Excel.")
+
+        # --- 3. Base Content (common to all strategies) ---
+        
+        description_parts = []
+        
+        # Get title: Use 'title' if present, else fallback to filename
+        title = context.get('title', Path(excel_path).stem)
+        description_parts.append(f"### Experiment: {title}")
+        
+        # Get objective: Only add if present
+        if context.get("objective"):
+            description_parts.append(f"#### Objective\n{context['objective']}")
+
+        # Get or create column definitions
+        column_defs_dict = context.get('column_definitions')
+        if not column_defs_dict:
+            print(f"     - ℹ️  'column_definitions' not found in JSON. Using headers from '{Path(excel_path).name}'.")
+            # Create definitions from DataFrame column headers
+            column_defs_dict = {str(header): "No definition provided." for header in df.columns}
+
+        col_defs = "\n".join([f"- `{col}`: {desc}" for col, desc in column_defs_dict.items()])
+        description_parts.append(f"#### Data Column Definitions\n{col_defs}")
+        
+        statistical_summary = df.describe().to_markdown() if not df.empty else "No statistical summary available."
+
+        # --- 4. Adaptive Chunking Logic ---
+        
+        if total_rows <= SMALL_FILE_THRESHOLD:
+            # --- STRATEGY A: Small File (One Rich Chunk) ---
+            print(f"    - File is small ({total_rows} rows). Creating one single, comprehensive chunk.")
+            
+            full_data_table = df.to_markdown(index=False)
+            
+            # Create the base description from our parts
+            base_description = "\n\n".join(description_parts)
+            
+            combined_text = f"""
+{base_description}
+
+#### Statistical Summary
+{statistical_summary}
+
+#### Full Experimental Data ({total_rows} rows)
+{full_data_table}
+            """.strip()
+
+            single_chunk = {
+                'text': combined_text,
+                'metadata': {
+                    'source': excel_path,
+                    'context_source': context_path,
+                    'content_type': 'dataset_package', 
+                    'page': 1 
+                }
+            }
+            all_chunks.append(single_chunk)
+            print(f"    - ✅ Created 1 'dataset_package' chunk.")
+
+        else:
+            # --- STRATEGY B: Large File (Summary + Data Chunks) ---
+            print(f"    - File is large ({total_rows} rows). Creating summary + batched data chunks.")
+            
+            # 4.1 Create the "Summary Chunk"
+            
+            # Create the base description from our parts
+            base_description = "\n\n".join(description_parts)
+            
+            summary_text = f"""
+{base_description}
+
+#### Statistical Summary of {total_rows} Rows
+{statistical_summary}
+            """.strip()
+
+            summary_chunk = {
+                'text': summary_text,
+                'metadata': {
+                    'source': excel_path,
+                    'context_source': context_path,
+                    'content_type': 'dataset_summary',
+                    'page': 1 
+                }
+            }
+            all_chunks.append(summary_chunk)
+            print(f"    - ✅ Created 1 'dataset_summary' chunk.")
+
+            # 4.2 Create "Data Chunks" by batching rows
+            num_batches = 0
+            for i in range(0, total_rows, row_chunk_size):
+                df_batch = df.iloc[i : i + row_chunk_size]
+                markdown_table = df_batch.to_markdown(index=False)
+                
+                # We use the title (which has a fallback) for the header
+                chunk_text = f"""
+### {title}
+#### Data Rows {i + 1} to {i + len(df_batch)}
+
+{markdown_table}
+                """.strip()
+                
+                data_chunk = {
+                    'text': chunk_text,
+                    'metadata': {
+                        'source': excel_path,
+                        'context_source': context_path,
+                        'content_type': 'data_rows',
+                        'start_row': i + 1,
+                        'end_row': i + len(df_batch),
+                        'page': 1 
+                    }
+                }
+                all_chunks.append(data_chunk)
+                num_batches += 1
+            
+            print(f"    - ✅ Created {num_batches} 'data_rows' chunks (batch size: {row_chunk_size}).")
+        
+        print(f"    - ✅ Successfully created {len(all_chunks)} total chunks for {Path(excel_path).name}")
+        return all_chunks
+
+    except FileNotFoundError as e:
+        print(f"    - ❌ Error: File not found - {e}")
+        return []
+    except json.JSONDecodeError:
+        print(f"    - ❌ Error: Invalid JSON in file '{context_path}'")
+        return []
+    except Exception as e:
+        print(f"    - ❌ Error processing data pair for '{excel_path}': {e}")
+        return []
+
+
+================================================
+FILE: instruct.py
+================================================
+HYPOTHESIS_GENERATION_INSTRUCTIONS = """
+You are an expert research scientist and strategist. Your primary goal is to develop testable hypotheses and concrete experimental plans based *only* on the provided knowledge base.
+
+**Input:**
+1.  **General Objective:** The high-level research goal.
+2.  **Retrieved Context:** Relevant excerpts from scientific papers and technical documents.
+3.  **Provided Images:** (Optional) One or more images (e.g., charts, microscope images, diagrams) provided by the user for visual context.
+4.  **Provided Image Descriptions:** (Optional) Text or JSON descriptions corresponding to the provided images.
+
+**Crucial Safety Rule & Conditional Logic:**
+Your response format depends on the quality of the retrieved context.
+- **IF** the retrieved context is empty, irrelevant, or too general to formulate a *specific, actionable* experiment that directly addresses the objective:
+    - You **MUST NOT** invent an experiment or use your general knowledge.
+    - Instead, you **MUST** respond with a JSON object containing an "error" key.
+    - Example: `{"error": "Insufficient context to generate a specific experiment. The provided documents do not contain information about [topic from objective]."}`
+- **ELSE** (if the context is sufficient):
+    - Proceed with the task below.
+
+**Task (only if context is sufficient):**
+Synthesize the information from the retrieved context, *any provided images, and any provided image descriptions* to propose one or more specific, actionable experiments to address the general objective. Your entire response must be directly derivable from the provided context (text and images).
+
+**Output Format (only if context is sufficient):**
+You MUST respond with a single JSON object containing a key "proposed_experiments", which is a list of experiment plans. Each plan must have the following keys:
+- "hypothesis": (String) A clear, single-sentence, testable hypothesis.
+- "experiment_name": (String) A short, descriptive name for the experiment.
+- "experimental_steps": (List of Strings) A numbered or bulleted list of concrete steps to perform the experiment.
+- "required_equipment": (List of Strings) A list of key instruments or techniques mentioned in the context that are required for this experiment.
+- "optimization_params": (Optional List) If the experiment requires numerical optimization, provide:
+    - "parameter_name": (String) e.g., "Temperature"
+    - "min_value": (Float) e.g., 20.0
+    - "max_value": (Float) e.g., 100.0
+    - "rationale": (String) e.g., "Literature suggests instability above 100C."
+- "expected_outcome": (String) A description of what results would support or refute the hypothesis.
+- "justification": (String) A brief explanation of why this experiment is a logical step, citing information from the retrieved context.
+- "source_documents": (List of Strings) A list of the unique source filenames that informed this experimental plan.
+"""
+
+TEA_INSTRUCTIONS = """
+You are an expert technoeconomic analyst specializing in scientific and engineering fields. Your primary goal is to provide a preliminary technoeconfig assessment (TEA) of a proposed technology, process, or material *based strictly on the provided knowledge base context*.
+
+**Input:**
+1.  **Objective:** The specific technology, process, or material to be assessed economically.
+2.  **Retrieved Context:** Relevant excerpts from scientific papers, technical reports, experimental data summaries, and market analyses.
+3.  **Provided Images:** (Optional) One or more images (e.g., process flow diagrams, device photos, cost breakdown charts) provided by the user for visual context.
+4.  **Provided Image Descriptions:** (Optional) Text or JSON descriptions corresponding to the provided images.
+
+**Crucial Safety Rule & Conditional Logic:**
+Your response format depends on the quality and relevance of the retrieved context for economic analysis.
+- **IF** the retrieved context contains little to no economic information (e.g., costs, prices, market size, efficiency comparisons, manufacturing challenges related to cost) relevant to the objective:
+    - You **MUST NOT** invent economic data or use your general knowledge of typical costs.
+    - Instead, you **MUST** respond with a JSON object containing an "error" key.
+    - Example: `{"error": "Insufficient economic context provided to perform a meaningful technoeconfig assessment for [objective topic]. Context focuses primarily on technical aspects."}`
+- **ELSE** (if the context provides *some* relevant economic indicators, even if qualitative):
+    - Proceed with the task below, relying *only* on the information given.
+
+**Task (only if context is sufficient):**
+Synthesize the economic indicators, cost factors, potential benefits, and market information mentioned *within the retrieved context, any provided images, and any provided image descriptions* to provide a preliminary TEA. Explicitly state when information is qualitative or quantitative based on the context. Do not perform calculations unless the context provides explicit numerical data and units for comparison.
+
+**Output Format (only if context is sufficient):**
+You MUST respond with a single JSON object containing a key "technoeconomic_assessment". This object must have the following keys:
+- "summary": (String) A brief qualitative summary of the economic potential and challenges identified *from the context*. (e.g., "Context suggests potential viability due to high efficiency mentioned, but raw material costs identified as a major challenge.", "Preliminary assessment based on context indicates significant economic hurdles related to scaling.").
+- "key_cost_drivers": (List of Strings) Specific factors mentioned in the context that likely drive costs. Prefix with "(Qualitative)" or "(Quantitative)" if the context allows. (e.g., "(Qualitative) Energy-intensive manufacturing process described", "(Quantitative) Context cites high price for platinum catalyst").
+- "potential_benefits_or_revenue": (List of Strings) Economic advantages or potential revenue streams mentioned in the context. Prefix with "(Qualitative)" or "(Quantitative)". (e.g., "(Qualitative) Potential for improved device lifespan reducing replacement costs", "(Quantitative) Report mentions market value projection of $X billion by 20XX").
+- "economic_risks": (List of Strings) Potential economic downsides or uncertainties mentioned in the context. Prefix with "(Qualitative)" or "(Quantitative)". (e.g., "(Qualitative) Dependence on volatile rare earth element prices noted", "(Qualitative) Manufacturing yield challenges highlighted").
+- "comparison_to_alternatives": (String) A brief comparison to alternative technologies/materials *if explicitly discussed in the context* in economic terms. (e.g., "Context mentions silicon carbide offers higher efficiency than silicon but at a higher projected cost.", "No direct economic comparison to alternatives found in context.").
+- "data_gaps_for_quantitative_analysis": (List of Strings) Specific types of economic data clearly missing *from the provided context* that would be needed for a more rigorous quantitative TEA. (e.g., "Specific cost per kg of precursor materials", "Detailed breakdown of capital expenditure for manufacturing setup", "Energy consumption per unit produced").
+- "source_documents": (List of Strings) A list of the unique source filenames that informed this assessment.
+"""
+
+
+HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK = """
+You are an expert research scientist. Your goal is to develop testable hypotheses.
+
+**Input:**
+1.  **General Objective:** The high-level research goal.
+2.  **Retrieved Context:** Relevant excerpts (THIS IS EMPTY OR IRRELEVANT).
+3.  **Provided Images:** (Optional) Images provided by the user.
+4.  **Provided Image Descriptions:** (Optional) Text or JSON descriptions of provided images.
+
+**Conditional Logic:**
+The first attempt to find specific context in the knowledge base failed.
+- You **ARE NOW PERMITTED** to use your general scientific knowledge.
+- Your task is to propose a *foundational, general* experiment to help the user *start* their research on the objective.
+- You **MUST** add a "justification" that clearly states: "Warning: This proposal is based on general scientific knowledge as the provided documents lacked specific context."
+
+**Task:**
+Propose one or more specific, actionable experiments. You may use your general scientific knowledge, *analyze any provided images, and read any provided image descriptions* to help the user *start* their research.
+
+**Output Format:**
+You MUST respond with a single JSON object containing a key "proposed_experiments", which is a list of experiment plans. Each plan must have the keys:
+- "hypothesis": (String) A clear, single-sentence, testable hypothesis.
+- "experiment_name": (String) A short, descriptive name for the experiment.
+- "experimental_steps": (List of Strings) A numbered or bulleted list of concrete steps.
+- "required_equipment": (List of Strings) A list of common lab equipment.
+- "expected_outcome": (String) A description of what results would support the hypothesis.
+- "justification": (String) **MUST be 'Warning: This proposal is based on general scientific knowledge as the provided documents lacked specific context.'**
+- "source_documents": (List ofStrings) An empty list `[]`.
+- "implementation_code": (String) A self-contained code snippet (e.g., Python script) that outlines the experimental steps. Enclose in triple backticks. If the objective is non-computational, output 'No relevant code found in the knowledge base.' **MUST be prefixed with the same strong warning as the justification field.**
+- "code_source_files": (List of Strings) A list of the specific filenames (e.g., 'api_docs.txt', 'example_script.py') from the Knowledge Base that were used to generate this code.
+"""
+
+
+TEA_INSTRUCTIONS_FALLBACK = """
+You are an expert technoeconomic analyst.
+
+**Input:**
+1.  **Objective:** The specific technology, process, or material to be assessed.
+2.  **Retrieved Context:** (THIS IS EMPTY OR IRRELEVANT).
+
+**Conditional Logic:**
+The first attempt to find specific context in the knowledge base failed.
+- You **ARE NOW PERMITTED** to use your general knowledge of industrial standards, market trends, and engineering economics.
+- Your task is to provide a *preliminary, high-level* assessment based on general industry knowledge.
+
+**Output Format:**
+You MUST respond with a single JSON object containing a key "technoeconomic_assessment". 
+You MUST include the following fields, populated based on general knowledge:
+- "summary": (String) A qualitative summary of economic potential.
+- "key_cost_drivers": (List of Strings) Likely cost drivers (e.g., "High energy cost of electrolysis").
+- "potential_benefits_or_revenue": (List of Strings) Standard revenue streams.
+- "economic_risks": (List of Strings) Common risks for this technology.
+- "comparison_to_alternatives": (String) Comparison to standard industry benchmarks.
+- "data_gaps_for_quantitative_analysis": (List of Strings) What specific data would you need for a real TEA?
+- "source_documents": (List of Strings) An empty list [].
+"""
+
+
+
+
+BO_CONFIG_SOO_PROMPT = """
+You are a Principal Investigator configuring a Single-Objective Bayesian Optimization experiment.
+
+**INPUTS:**
+1. **Context:** User's objective and the **Fixed Batch Size** constraint.
+2. **Trend:** History of previous steps.
+3. **Data:** Statistics of current dataset.
+
+**TASK:** Return a SINGLE JSON object to configure the math.
+
+---
+**MENU 1: ACQUISITION STRATEGY (Select based on Research Phase)**
+
+* `"log_ei"`: **Balanced Progress (Default).**
+    * *Best for:* Mid-stage optimization. Automatically balances exploration and exploitation.
+    * *Constraint:* Only efficient for **small batch sizes (< 10)**.
+
+* `"max_variance"`: **Pure Exploration (Active Learning).**
+    * *Use when:* **"Cold Start"** (Day 0-1) or when the model is confused (high error).
+    * *Why:* Ignores objective value. Picks points strictly to reduce model uncertainty. "Draw the map before hunting for treasure."
+
+* `"ucb"`: **Strategic Override (Tunable).** Requires `beta` (float).
+    * *Use when:* You want to force a specific behavior.
+    * `beta` < 0.5: **Exploit.** Zoom in on the best point found so far.
+    * `beta` > 4.0: **Optimistic Explore.** Explore regions that *might* be high performing (High Mean + High Var).
+
+* `"thompson"`: **High-Throughput / Batching.**
+    * *Best for:* **Large batch sizes (> 10)**.
+    * *Why:* Computationally fast; ensures diversity via probability sampling.
+    
+**MENU 2: KERNEL (Physics)**
+* `"matern_2.5"`: **(Default)** Standard physical processes. Smooth but allows local variation.
+* `"matern_1.5"`: Use if data is **jagged**, discontinuous, or changes rapidly.
+* `"rbf"`: Use ONLY if data is **extremely smooth** and theoretical.
+
+**MENU 3: NOISE PRIOR**
+* `"fixed_low"`: **(Default)** Precise lab equipment.
+* `"learnable"`: Unsure of measurement quality.
+* `"high_noise"`: Data has shown erratic jumps.
+
+**OUTPUT FORMAT:**
+{
+  "model_config": { "kernel": "matern_2.5", "noise": "fixed_low" },
+  "acquisition_strategy": { 
+      "type": "ucb", 
+      "params": { "beta": 0.1 } 
+  },
+  "rationale": "We found a promising peak. Using UCB with low beta (0.1) to aggressively exploit this region with a batch of 8 points."
+}
+"""
+
+BO_CONFIG_MOO_PROMPT = """
+You are a Principal Investigator configuring a Multi-Objective Optimization experiment.
+
+**INPUTS:**
+1. **Context:** User's objective and **Fixed Batch Size** constraint.
+2. **Trend:** History of previous steps.
+3. **Data:** Statistics of current dataset.
+
+**TASK:** Return a SINGLE JSON object.
+
+---
+**MENU 1: ACQUISITION STRATEGY (MOO)**
+* `"pareto"`: **(Default)** qNEHVI. Best for general purpose frontier expansion.
+    * *Works for:* Any batch size.
+* `"weighted"`: Linear Scalarization. Requires `weights` list (e.g., `[0.5, 0.5]`) and `beta`.
+    * *Description:* Scalarizes objectives -> applies UCB.
+    * `beta` ~ 0.1: Exploitative on the weighted sum.
+    * `beta` > 5.0: Explorative on the weighted sum.
+* `"max_variance"`: Uncertainty sampling (Pure exploration).
+
+**MENU 2: KERNEL (Physics)**
+* `"matern_2.5"`: **(Default)** Standard physical processes. Smooth but allows local variation.
+* `"matern_1.5"`: Use if data is **jagged**, discontinuous, or changes rapidly.
+* `"rbf"`: Use ONLY if data is **extremely smooth** and theoretical.
+
+**MENU 3: NOISE PRIOR**
+* `"fixed_low"`: **(Default)** Precise lab equipment.
+* `"learnable"`: Unsure of measurement quality.
+* `"high_noise"`: Data has shown erratic jumps.
+
+**OUTPUT FORMAT:**
+{
+  "model_config": { "kernel": "matern_2.5", "noise": "fixed_low" },
+  "acquisition_strategy": {
+    "type": "weighted",
+    "params": { "weights": [0.8, 0.2], "beta": 2.0 }
+  },
+  "rationale": "Prioritizing Yield (0.8) over Purity (0.2). Using balanced UCB (beta=2.0) on this weighted objective."
+}
+"""
+
+BO_VISUAL_INSPECTION_PROMPT = """
+You are a Data Scientist validating a GP model.
+Analyze the 4-panel diagnostic dashboard.
+
+**Checklist:**
+1. **Calibration (Top-Left):** Do points roughly follow the red diagonal?
+2. **Trend (Top-Right):** Is the green 'Best Found' line improving or flat?
+3. **Slice (Bot-Left):** Is the curve smooth (physically realistic)? Does the green candidate line explore a promising area (peak or high uncertainty)?
+4. **Sensitivity (Bot-Right):** Which parameter has the longest bar? (This is the most important driver).
+
+**OUTPUT JSON:**
+{
+  "status": "pass" | "fail",
+  "reason": "Calibration is good. Sensitivity shows Temperature is the dominant factor, and the Slice confirms we are exploiting a peak there.",
+  "suggested_adjustments": { "kernel": "matern_1.5" } (Only if fail)
+}
+"""
+
+
+================================================
+FILE: knowledge_base.py
+================================================
+import numpy as np
+import faiss
+import google.generativeai as genai
+import time
+import json
+from pathlib import Path
+import logging
+from typing import List, Dict, Any
+
+from ...auth import get_api_key, APIKeyNotFoundError
+from ...wrappers.openai_wrapper_embeddings import OpenAIAsEmbeddingModel
+
+from openai import RateLimitError
+
+
+class KnowledgeBase:
+    """
+    Handles embedding, retrieval, and repository structure mapping.
+    Supports both Google and OpenAI-compatible (e.g., incubator) embedding models.
+    """
+    def __init__(self, google_api_key: str = None, 
+                 embedding_model: str = "gemini-embedding-001", 
+                 local_model: str = None):
+        
+        if google_api_key is None:
+            google_api_key = get_api_key('google')
+            if not google_api_key:
+                raise APIKeyNotFoundError('google')
+        
+        self.embedding_model_name = embedding_model
+        
+        # --- Logic to Switch Embedding Backends ---
+        if local_model and 'ai-incubator' in local_model:
+            logging.info(f"🏛️  Using OpenAI-compatible incubator model for embeddings: {self.embedding_model_name}")
+            self.embedding_client = OpenAIAsEmbeddingModel(
+                model=self.embedding_model_name,
+                api_key=google_api_key, # This key is for the incubator service
+                base_url=local_model
+            )
+        else:
+            logging.info(f"☁️  Using Google Gemini model for embeddings: {self.embedding_model_name}")
+            # For Google, the client is the genai module itself after configuration
+            genai.configure(api_key=google_api_key)
+            self.embedding_client = genai
+            
+        self.index = None
+        self.chunks = []
+        
+        # Registry for Repo Maps: {'repo_name': 'tree_structure_string'}
+        # This stores the visual directory trees for any repo you ingest.
+        self.repo_maps: Dict[str, str] = {}
+
+    def build(self, chunks: List[Dict[str, any]], batch_size: int = 100):
+        """
+        Processes a list of text chunks, generates embeddings in batches, 
+        and builds the vector index.
+        """
+        if not chunks:
+            print("⚠️  KnowledgeBase build skipped: No chunks provided.")
+            return
+
+        self.chunks = chunks
+        texts_to_embed = [chunk['text'] for chunk in self.chunks]
+        all_embeddings = []
+        
+        print(f"  - Generating embeddings for {len(texts_to_embed)} chunks using '{self.embedding_model_name}'...")
+        
+        for i in range(0, len(texts_to_embed), batch_size):
+            batch_texts = texts_to_embed[i:i + batch_size]
+            
+            max_retries = 3
+            delay = 5 # seconds
+            for attempt in range(max_retries):
+                try:
+                    response = self.embedding_client.embed_content(
+                        model=self.embedding_model_name,
+                        content=batch_texts,
+                        task_type="RETRIEVAL_DOCUMENT" # Ignored by OpenAI wrapper, used by Google
+                    )
+                    all_embeddings.extend(response['embedding'])
+                    print(f"    - Embedded batch {i//batch_size + 1}/{(len(texts_to_embed) + batch_size - 1)//batch_size}")
+                    time.sleep(1) # Small delay to respect API rate limits
+                    break # Success
+                except RateLimitError as e:
+                    if attempt < max_retries - 1:
+                        print(f"    - ⚠️  Rate limit hit during build. Retrying in {delay}s...")
+                        time.sleep(delay)
+                        delay *= 2 # Exponential backoff
+                    else:
+                        print(f"    - ❌ Rate limit hit on final attempt. Build failed.")
+                        raise e 
+                except Exception as e:
+                    print(f"    - ❌ Error embedding batch {i//batch_size + 1}: {e}")
+                    raise e
+
+        embeddings_np = np.array(all_embeddings, dtype=np.float32)
+        
+        print("  - Building FAISS vector index...")
+        dimension = embeddings_np.shape[1]
+        self.index = faiss.IndexFlatL2(dimension)
+        self.index.add(embeddings_np)
+        print("  - ✅ Knowledge base built successfully.")
+
+    def save(self, index_path: str, chunks_path: str, repo_map_path: str = None):
+        """Saves the FAISS index, text chunks, and optionally the repo maps to disk."""
+        if self.index:
+            faiss.write_index(self.index, index_path)
+            print(f"  - FAISS index saved to {index_path}")
+        
+        with open(chunks_path, 'w', encoding='utf-8') as f:
+            json.dump(self.chunks, f, indent=2)
+            print(f"  - Chunks saved to {chunks_path}")
+
+        # Save Repo Maps Registry
+        if repo_map_path and self.repo_maps:
+            try:
+                with open(repo_map_path, 'w', encoding='utf-8') as f:
+                    json.dump(self.repo_maps, f, indent=2)
+                print(f"  - Repo maps registry saved to {repo_map_path}")
+            except Exception as e:
+                print(f"  - ❌ Error saving repo maps: {e}")
+
+    def load(self, index_path: str, chunks_path: str, repo_map_path: str = None) -> bool:
+        """Loads a pre-built FAISS index, chunks, and repo maps from disk."""
+        index_file = Path(index_path)
+        chunks_file = Path(chunks_path)
+
+        if not index_file.exists() or not chunks_file.exists():
+            print("  - ⚠️  Cannot load: Index or chunks file missing.")
+            return False
+            
+        try:
+            self.index = faiss.read_index(index_path)
+            with open(chunks_file, 'r', encoding='utf-8') as f:
+                self.chunks = json.load(f)
+            
+            # Load Repo Maps if path provided and file exists
+            if repo_map_path and Path(repo_map_path).exists():
+                try:
+                    with open(repo_map_path, 'r', encoding='utf-8') as f:
+                        self.repo_maps = json.load(f)
+                    print(f"    - Loaded maps for repos: {list(self.repo_maps.keys())}")
+                except Exception as e:
+                    print(f"    - ⚠️ Error loading repo maps file: {e}")
+            
+            print(f"  - ✅ Successfully loaded {len(self.chunks)} chunks and index with {self.index.ntotal} vectors.")
+            return True
+        except Exception as e:
+            print(f"  - ❌ Error loading knowledge base: {e}")
+            self.index = None
+            self.chunks = []
+            return False
+
+    def retrieve(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        """
+        Retrieves the most relevant document chunks for a given query.
+        """
+        if not self.index:
+            print("⚠️  Cannot retrieve: Knowledge base has not been built.")
+            return []
+            
+        print(f"  - Retrieving top {top_k} most relevant chunks for query: '{query[:80]}...'")
+
+        max_retries = 3
+        delay = 5 # seconds
+        response = None
+        for attempt in range(max_retries):
+            try:
+                response = self.embedding_client.embed_content(
+                    model=self.embedding_model_name,
+                    content=query,
+                    task_type="RETRIEVAL_QUERY" # Ignored by OpenAI wrapper, used by Google
+                )
+                break # Success
+            except RateLimitError as e:
+                if attempt < max_retries - 1:
+                    print(f"    - ⚠️  Rate limit hit embedding query. Retrying in {delay}s...")
+                    time.sleep(delay)
+                    delay *= 2 # Exponential backoff
+                else:
+                    print(f"    - ❌ Rate limit hit on final attempt. Retrieval failed.")
+                    raise e # Re-raise the exception if all retries fail
+            except Exception as e:
+                print(f"    - ❌ Error embedding query: {e}")
+                raise e
+        
+        if response is None:
+            print("    - ❌ Retrieval failed after retries.")
+            return []
+
+        query_embedding = np.array([response['embedding']], dtype=np.float32)
+
+        if query_embedding.ndim == 3:
+            query_embedding = np.squeeze(query_embedding, axis=0)
+
+        distances, indices = self.index.search(query_embedding, top_k)
+        
+        # Retrieve valid chunks (filtering out potential index errors)
+        retrieved_chunks = [self.chunks[i] for i in indices[0] if i < len(self.chunks)]
+        print(f"  - ✅ Retrieved {len(retrieved_chunks)} chunks.")
+        return retrieved_chunks
+
+    def get_relevant_maps(self, retrieved_chunks: List[Dict]) -> str:
+        """
+        Dynamic Context Injection:
+        Looks at the retrieved chunks, finds which repos they belong to (via 'repo_name' metadata),
+        and returns a combined string of ONLY the relevant repo maps.
+        """
+        relevant_repos = set()
+        for chunk in retrieved_chunks:
+            # We ensure chunks have this metadata field in planning_agent.py
+            repo_name = chunk['metadata'].get('repo_name')
+            if repo_name and repo_name in self.repo_maps:
+                relevant_repos.add(repo_name)
+        
+        if not relevant_repos:
+            return ""
+
+        combined_map = ""
+        for repo in relevant_repos:
+            combined_map += f"\n--- DIRECTORY STRUCTURE FOR REPO: {repo} ---\n"
+            combined_map += self.repo_maps[repo]
+            combined_map += "\n"
+            
+        return combined_map
+
+
+================================================
+FILE: parser_utils.py
+================================================
+import os
+from pathlib import Path
+from typing import List, Dict, Any, Tuple, Optional
+import logging
+
+import json
+import pandas as pd
+
+# Match these to the extensions you check in planning_agent.py
+SUPPORTED_EXTENSIONS = {
+    '.py', '.java', '.r', '.cpp', '.h', '.js', '.json', 
+    '.csv', '.txt', '.md', '.pdf'
+}
+
+def get_files_from_directory(directory_path: str) -> List[str]:
+    """
+    Recursively finds all supported files in a directory, ignoring hidden files.
+    """
+    found_files = []
+    path = Path(directory_path)
+    
+    if not path.exists():
+        print(f"  - ⚠️ Directory not found: {directory_path}")
+        return []
+
+    print(f"  - 📂 Scanning directory: {path.name}...")
+
+    for root, dirs, files in os.walk(path):
+        # In-place modification to skip hidden dirs and common junk
+        dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('__pycache__', 'venv', 'env', 'node_modules', '.git')]
+        
+        for file in files:
+            if file.startswith('.'): continue
+            
+            file_path = Path(root) / file
+            if file_path.suffix.lower() in SUPPORTED_EXTENSIONS:
+                found_files.append(str(file_path))
+                
+    print(f"    -> Found {len(found_files)} files in directory.")
+    return found_files
+
+def generate_repo_map(root_dir: str) -> str:
+    """
+    Generates a visual tree structure of the repository.
+    Useful for giving the LLM context on where files live for imports.
+    """
+    root = Path(root_dir)
+    if not root.exists(): return ""
+
+    tree_lines = [f"{root.name}/"]
+    
+    for path in sorted(root.rglob('*')):
+        # Skip hidden files/dirs
+        if any(part.startswith('.') or part in ('__pycache__', 'venv', 'env') for part in path.parts):
+            continue
+        
+        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS:
+            rel_path = path.relative_to(root)
+            depth = len(rel_path.parts)
+            indent = '    ' * (depth - 1)
+            tree_lines.append(f"{indent}├── {path.name}")
+            
+    return "\n".join(tree_lines)
+
+def table_to_markdown(table: List[List[str]]) -> str:
+    """Converts a 2D list representation of a table into Markdown format."""
+    if not table or not table[0]: return ""
+    # Ensure all cells are strings before joining
+    cleaned_table = [[str(cell).strip() if cell is not None else "" for cell in row] for row in table]
+    header, *rows = cleaned_table
+    md = f"| {' | '.join(header)} |\n| {' | '.join(['---'] * len(header))} |\n"
+    for row in rows:
+        # Pad rows that are shorter than the header
+        while len(row) < len(header): row.append("")
+        # Truncate rows that are longer than the header
+        md += f"| {' | '.join(row[:len(header)])} |\n"
+    return md
+
+
+def parse_json_from_response(resp) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    Robustly extracts and parses JSON from an LLM response object.
+    Matches the logic originally defined in rag_engine.py.
+    """
+    json_text = ""
+    
+    # 1. Extract Text (Protected against Safety Filter blocks)
+    try:
+        if hasattr(resp, 'text'): 
+            json_text = resp.text.strip()
+        elif hasattr(resp, 'parts') and resp.parts: 
+            json_text = resp.parts[0].text.strip()
+        elif isinstance(resp, str):
+            json_text = resp.strip()
+        else:
+            return None, f"LLM response format unexpected: {type(resp)}"
+            
+    except ValueError as e:
+        # Google GenAI raises ValueError on .text access if response was blocked
+        return None, f"Response blocked or empty (Safety Filter): {e}"
+    except Exception as e:
+        return None, f"Error extracting text from response: {e}"
+
+    # 2. Strip Markdown Code Blocks
+    if json_text.startswith("```json"):
+        json_text = json_text[len("```json"):].strip()
+    elif json_text.startswith("```"):
+        json_text = json_text[len("```"):].strip()
+    
+    if json_text.endswith("```"):
+        json_text = json_text[:-len("```")].strip()
+
+    # 3. Parse
+    try:
+        return json.loads(json_text), None
+    except json.JSONDecodeError as e:
+        return None, f"Failed to decode JSON: {str(e)}"
+
+def append_experiment_result(file_path: str, parameters: Dict[str, float], results: Dict[str, float]):
+    """
+    Appends a completed experiment (Params + Results) to the cumulative dataset.
+    This 'closes the loop' for the BO Agent.
+    """
+    path = Path(file_path)
+    
+    # Merge input parameters and lab results into one row
+    new_row = {**parameters, **results}
+    
+    if not path.exists():
+        # Create new if doesn't exist
+        df = pd.DataFrame([new_row])
+    else:
+        if path.suffix == '.xlsx':
+            df = pd.read_excel(path)
+        elif path.suffix == '.csv':
+            df = pd.read_csv(path)
+        else:
+            raise ValueError("Unsupported file format. Use .xlsx or .csv")
+        
+        # Append
+        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+    
+    # Save back
+    if path.suffix == '.xlsx':
+        df.to_excel(path, index=False)
+    else:
+        df.to_csv(path, index=False)
+    print(f"✅ Appended result to {path.name}. New size: {len(df)}")
+
+
+def write_experiments_to_disk(result_json: Dict[str, Any], target_dir: str) -> List[str]:
+    """
+    Parses the result JSON and writes 'implementation_code' to .py files in the target directory.
+    Returns a list of filenames that were successfully saved.
+    """
+    path = Path(target_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    
+    experiments = result_json.get("proposed_experiments", [])
+    saved_files = []
+    
+    if not experiments:
+        logging.warning(f"No experiments found to save in {target_dir}")
+        return []
+    
+    for i, exp in enumerate(experiments):
+        code_content = exp.get("implementation_code")
+        exp_name = exp.get("experiment_name", f"Experiment_{i+1}")
+        
+        # 1. Clean filename
+        # Replace spaces with underscores and remove non-alphanumeric chars (except _ and .)
+        safe_name = "".join(c for c in exp_name if c.isalnum() or c in (' ', '_', '.')).rstrip()
+        safe_name = safe_name.replace(' ', '_')
+        
+        # Fallback if name becomes empty after cleaning
+        if not safe_name: 
+            safe_name = f"experiment_code_{i+1}"
+            
+        filename = f"{safe_name}.py"
+        file_path = path / filename
+
+        # 2. Extract and Write
+        if code_content and "No relevant code found" not in code_content:
+            try:
+                # Strip markdown code blocks (```python ... ```)
+                code_lines = code_content.splitlines()
+                
+                # Logic to find the content between the backticks
+                start_index = next((j for j, line in enumerate(code_lines) if line.strip().startswith('```')), -1)
+                end_index = next((j for j, line in enumerate(code_lines[start_index+1:]) if line.strip().endswith('```')), -1)
+                
+                if start_index != -1 and end_index != -1:
+                    # Adjust end_index because we sliced the list
+                    actual_end = start_index + 1 + end_index
+                    extracted_code = "\n".join(code_lines[start_index + 1 : actual_end]).strip()
+                else:
+                    # Fallback: assume the whole string is code if no backticks found
+                    extracted_code = code_content.strip()
+
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(extracted_code)
+                
+                saved_files.append(filename)
+                
+            except Exception as e:
+                logging.error(f"Failed to write {filename}: {e}")
+        else:
+            logging.info(f"Experiment {i+1} ('{exp_name}') has no executable code.")
+
+    return saved_files
+
+
+================================================
+FILE: pdf_parser.py
+================================================
+import fitz  # PyMuPDF
+import pdfplumber
+import threading
+from typing import List, Dict, Tuple
+from dataclasses import dataclass
+from pathlib import Path
+
+from .parser_utils import table_to_markdown
+
+
+class TimeoutError(Exception):
+    pass
+
+class timeout:
+    def __init__(self, seconds=15, error_message="Timeout"):
+        self.seconds = seconds
+        self.error_message = error_message
+        self.timer = None
+        
+    def _timeout_handler(self):
+        raise TimeoutError(self.error_message)
+    
+    def __enter__(self):
+        self.timer = threading.Timer(self.seconds, self._timeout_handler)
+        self.timer.daemon = True
+        self.timer.start()
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.timer:
+            self.timer.cancel()
+        return False
+
+@dataclass
+class ContentBlock:
+    text: str; page: int; content_type: str
+
+
+def chunk_text(text: str, page_num: int, chunk_size: int, overlap: int) -> List[Dict[str, any]]:
+    """Chunks a single block of text with overlap."""
+    chunks = []
+    start = 0
+    text_length = len(text)
+    chunk_idx = 0
+    while start < text_length:
+        end = start + chunk_size
+        chunk_text = text[start:end].strip()
+        if chunk_text:
+            chunks.append({
+                'text': chunk_text,
+                'metadata': {
+                    'page': page_num,
+                    'content_type': 'text',
+                    'chunk_id': f"p{page_num}-t-{chunk_idx}"
+                }
+            })
+            chunk_idx += 1
+        start = end - overlap if end < text_length else end
+    return chunks
+
+def extract_pdf_two_pass(pdf_path: str, chunk_size: int = 500, overlap: int = 50, table_timeout: int = 15) -> List[Dict[str, any]]:
+    """
+    A robust two-pass hybrid extraction pipeline for RAG. This is the stable version.
+    Pass 1 (PyMuPDF): Fast extraction of all text and identification of pages containing tables.
+    Pass 2 (pdfplumber): High-accuracy extraction of tables from only the identified pages.
+    """
+    print(f"Starting robust two-pass processing for: {pdf_path}")
+    
+    text_chunks = []
+    table_chunks = []
+    table_page_nums = set()
+
+    # === PASS 1: Fast Text Extraction and Table Location with PyMuPDF ===
+    print("  - Pass 1: Extracting text and locating potential tables...")
+    try:
+        doc = fitz.open(pdf_path)
+        for page_num_zero_indexed in range(len(doc)):
+            page = doc[page_num_zero_indexed]
+            page_num_one_indexed = page_num_zero_indexed + 1
+
+            # 1.1 Extract and chunk text for the current page
+            text_blocks = sorted(page.get_text("blocks"), key=lambda b: (b[1], b[0]))
+            full_page_text = "\n\n".join([block[4].strip() for block in text_blocks if block[4].strip()])
+            
+            if full_page_text:
+                text_chunks.extend(chunk_text(full_page_text, page_num_one_indexed, chunk_size, overlap))
+
+            # 1.2 Identify pages that might contain tables for the next pass
+            if page.find_tables():
+                table_page_nums.add(page_num_zero_indexed)
+        doc.close()
+        print(f"  - Pass 1 Complete: Extracted {len(text_chunks)} text chunks.")
+        print(f"  - Found {len(table_page_nums)} pages that may contain tables.")
+
+    except Exception as e:
+        print(f"❌ Error during Pass 1 (PyMuPDF processing): {e}")
+        return []
+
+    # === PASS 2: Targeted, High-Accuracy Table Extraction with pdfplumber ===
+    if table_page_nums:
+        print("  - Pass 2: Performing high-accuracy table extraction on specific pages...")
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                for page_num_zero_indexed in sorted(list(table_page_nums)):
+                    page_num_one_indexed = page_num_zero_indexed + 1
+                    try:
+                        with timeout(seconds=table_timeout):
+                            page = pdf.pages[page_num_zero_indexed]
+                            tables = page.extract_tables()
+                            if tables:
+                                #print(f"    - Extracted {len(tables)} table(s) from page {page_num_one_indexed}.")
+                                for table in tables:
+                                    if table and len(table) > 1:
+                                        markdown_table = table_to_markdown(table)
+                                        table_chunks.append({
+                                            'text': markdown_table,
+                                            'metadata': {'page': page_num_one_indexed, 'content_type': 'table'}
+                                        })
+                    except TimeoutError:
+                        print(f"    - ⚠️  Table extraction on page {page_num_one_indexed} timed out. Skipping.")
+                    except Exception as e:
+                        print(f"    - ⚠️  Error extracting tables from page {page_num_one_indexed}: {e}")
+            print("  - Pass 2 Complete.")
+        except Exception as e:
+            print(f"❌ Error during Pass 2 (pdfplumber processing): {e}")
+
+    # === Final Merge and Post-processing ===
+    print("  - Merging and finalizing chunks...")
+    all_content = text_chunks + table_chunks
+    all_content.sort(key=lambda x: (x['metadata']['page'], 0 if x['metadata']['content_type'] == 'text' else 1))
+
+    for i, chunk in enumerate(all_content):
+        chunk['metadata']['source'] = pdf_path
+        chunk['metadata']['chunk_id'] = f"{Path(pdf_path).stem}-{i}"
+
+    print(f"✓ Created {len(all_content)} total chunks ({len(table_chunks)} tables)")
+    return all_content
+
+
+================================================
+FILE: planning_agent.py
+================================================
+import google.generativeai as genai
+import json
+import logging
+import shutil
+import uuid
+from typing import List, Dict, Any, Optional
+from pathlib import Path
+from datetime import datetime
+import PIL.Image as PIL_Image
+
+from .knowledge_base import KnowledgeBase
+from .pdf_parser import extract_pdf_two_pass, chunk_text
+from .excel_parser import parse_adaptive_excel
+from .parser_utils import (
+    get_files_from_directory, 
+    generate_repo_map, 
+    write_experiments_to_disk
+)
+from .repo_loader import clone_git_repository
+
+from .instruct import (
+    HYPOTHESIS_GENERATION_INSTRUCTIONS,
+    TEA_INSTRUCTIONS
+)
+
+from ...auth import get_api_key, APIKeyNotFoundError
+from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+
+from .rag_engine import (
+    perform_science_rag, 
+    perform_code_rag, 
+    refine_plan_with_feedback,
+    refine_code_with_feedback,
+    verify_plan_relevance
+)
+from .user_interface import display_plan_summary, get_user_feedback
+
+
+class PlanningAgent:
+    """
+    Stateful Agent for Orchestrating Experimental Planning.
+    
+    Maintains a persistent 'state' dictionary to track:
+    1. The Research Objective
+    2. The Evolving Experimental Plan (Science -> Code)
+    3. Results from executed experiments
+    4. Feedback history (both Scientific and Implementation)
+    """
+    def __init__(self, google_api_key: str = None,
+                 model_name: str = "gemini-2.5-pro-preview-06-05",
+                 local_model: str = None,
+                 embedding_model: str = "gemini-embedding-001",
+                 kb_base_path: str = "./kb_storage/default_kb",
+                 code_chunk_size: int = 20000): 
+        
+        if google_api_key is None:
+            google_api_key = get_api_key('google')
+            if not google_api_key:
+                raise APIKeyNotFoundError('google')
+
+        # --- LLM Backend Configuration ---
+        if local_model and ('ai-incubator' in local_model or 'openai' in local_model):
+            logging.info(f"🏛️  Using OpenAI-compatible model for generation: {model_name}")
+            self.model = OpenAIAsGenerativeModel(model_name, api_key=google_api_key, base_url=local_model)
+            self.generation_config = None
+        else:
+            logging.info(f"☁️  Using Google Gemini model for generation: {model_name}")
+            genai.configure(api_key=google_api_key)
+            self.model = genai.GenerativeModel(model_name)
+            self.generation_config = genai.types.GenerationConfig(response_mime_type="application/json")
+
+        self.code_chunk_size = code_chunk_size
+
+        # --- Dual KnowledgeBase Initialization ---
+        base_path = Path(kb_base_path)
+        base_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # 1. Scientific/Docs KB
+        self.kb_docs = KnowledgeBase(google_api_key=google_api_key, embedding_model=embedding_model, local_model=local_model)
+        self.kb_docs_prefix = base_path.parent / f"{base_path.name}_docs"
+        self.kb_docs_index = str(self.kb_docs_prefix.with_suffix(".faiss"))
+        self.kb_docs_chunks = str(self.kb_docs_prefix.with_suffix(".json"))
+
+        # 2. Implementation/Code KB
+        self.kb_code = KnowledgeBase(google_api_key=google_api_key, embedding_model=embedding_model, local_model=local_model)
+        self.kb_code_prefix = base_path.parent / f"{base_path.name}_code"
+        self.kb_code_index = str(self.kb_code_prefix.with_suffix(".faiss"))
+        self.kb_code_chunks = str(self.kb_code_prefix.with_suffix(".json"))
+        self.kb_code_map_path = str(self.kb_code_prefix.with_suffix(".maps.json"))
+
+        print("--- Initializing Agent (Dual-KB System) ---")
+        self._load_knowledge_bases()
+
+        # --- STATE MANAGEMENT ---
+        self.state: Dict[str, Any] = {}
+
+    def _load_knowledge_bases(self):
+        """Attempts to load both KBs from disk."""
+        print(f"  - Docs KB: Loading from {self.kb_docs_prefix}...")
+        docs_loaded = self.kb_docs.load(self.kb_docs_index, self.kb_docs_chunks)
+        
+        print(f"  - Code KB: Loading from {self.kb_code_prefix}...")
+        code_loaded = self.kb_code.load(self.kb_code_index, self.kb_code_chunks, self.kb_code_map_path)
+
+        self._kb_is_built = docs_loaded or code_loaded
+        
+        if docs_loaded: print("    - ✅ Docs KB loaded.")
+        if code_loaded: print("    - ✅ Code KB loaded.")
+        if not self._kb_is_built: print("    - ⚠️  No pre-built KBs found.")
+
+    def _initialize_state(self, objective: str, **kwargs) -> Dict[str, Any]:
+        """Creates the foundational state dictionary for a new research task."""
+        return {
+            "session_id": str(uuid.uuid4()),
+            "start_time": datetime.now().isoformat(),
+            "objective": objective,
+            "iteration_index": 0,
+            
+            # Inputs
+            "inputs": {
+                "science_paths": kwargs.get("science_paths", []),
+                "code_paths": kwargs.get("code_paths", []),
+                "additional_context": kwargs.get("additional_context"),
+                "primary_data_set": kwargs.get("primary_data_set"),
+                "image_paths": kwargs.get("image_paths", []),
+                "image_descriptions": kwargs.get("image_descriptions", [])
+            },
+
+            # Plan Evolution
+            "current_plan": None,   # The active plan dict
+            "plan_history": [],     # Snapshots of previous plans
+            
+            # Feedback Loop
+            "experimental_results": [],  # List of result dicts from the lab
+            "human_feedback_history": [],
+            
+            # Status
+            "last_error": None,
+            "status": "initialized"
+        }
+
+    def _save_results_to_json(self, results: Dict[str, Any], file_path: str):
+        try:
+            p = Path(file_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with p.open('w', encoding='utf-8') as f: json.dump(results, f, indent=2)
+            print(f"    - ✅ Results successfully saved to: {file_path}")
+        except Exception as e: logging.error(f"    - ❌ Failed to save results: {e}")
+
+    def _save_state_to_json(self, file_path: str):
+        """Saves the full state dictionary (history, results) to a sidecar file."""
+        try:
+            p = Path(file_path)
+            with p.open('w', encoding='utf-8') as f: json.dump(self.state, f, indent=2)
+        except Exception as e: logging.error(f"    - ❌ Failed to save state: {e}")
+
+    def _process_file_list(self, file_paths: List[str], is_code_mode: bool, repo_name: str = None) -> List[Dict[str, Any]]:
+        """Generic helper to process a list of files OR directories."""
+        chunks = []
+        expanded_paths = []
+        if file_paths:
+            for f_path in file_paths:
+                path_obj = Path(f_path)
+                if path_obj.is_dir():
+                    expanded_paths.extend(get_files_from_directory(f_path))
+                else:
+                    expanded_paths.append(f_path)
+
+        for f_path in expanded_paths:
+            path = Path(f_path)
+            if not path.exists():
+                print(f"  - ⚠️ File not found: {f_path}")
+                continue
+            
+            file_ext = path.suffix.lower()
+            if file_ext == '.pdf':
+                pdf_chunks = extract_pdf_two_pass(f_path)
+                if is_code_mode:
+                    for c in pdf_chunks: c['metadata']['content_type'] = 'code'
+                chunks.extend(pdf_chunks)
+            elif file_ext in ['.txt', '.md', '.py', '.java', '.r', '.cpp', '.h', '.js', '.json', '.csv']:
+                try:
+                    with path.open('r', encoding='utf-8') as f: content = f.read()
+                    if is_code_mode:
+                        formatted_text = f"CODE FILE: {path.name}\n\n```\n{content}\n```"
+                        chunk_sz = self.code_chunk_size
+                        ctype = 'code'
+                    else:
+                        formatted_text = f"DOCUMENT: {path.name}\n\n{content}"
+                        chunk_sz = 1000
+                        ctype = 'text'
+                    new_chunks = chunk_text(formatted_text, page_num=1, chunk_size=chunk_sz, overlap=50)
+                    for c in new_chunks: 
+                        c['metadata']['content_type'] = ctype
+                        c['metadata']['source'] = f_path
+                    chunks.extend(new_chunks)
+                    print(f"  - Extracted {len(new_chunks)} chunks from {path.name} ({'Code' if is_code_mode else 'Docs'} Mode)")
+                except Exception as e:
+                    print(f"  - ❌ Error reading {f_path}: {e}")
+            else:
+                print(f"  - ⚠️ Unsupported file type: {f_path}")
+        return chunks
+
+    def _build_and_save_kb(self, science_paths: Optional[List[str]] = None, code_paths: Optional[List[str]] = None, structured_data_sets: Optional[List[Dict[str, str]]] = None) -> bool:
+        """Builds TWO separate knowledge bases based on explicit input lists."""
+        print("\n--- Rebuilding Knowledge Bases ---")
+        
+        # 1. Build Docs KB (Science)
+        doc_chunks = []
+        if science_paths:
+            print(f"Processing {len(science_paths)} Scientific Documents...")
+            doc_chunks.extend(self._process_file_list(science_paths, is_code_mode=False))
+        if structured_data_sets:
+            print(f"Processing {len(structured_data_sets)} Structured Data Sets...")
+            for data_set in structured_data_sets:
+                try:
+                    if Path(data_set['file_path']).suffix.lower() in ['.xlsx', '.xls']:
+                        excel_chunks = parse_adaptive_excel(data_set['file_path'], data_set['metadata_path'])
+                        if excel_chunks: doc_chunks.extend(excel_chunks)
+                except Exception as e: print(f"  - ❌ Error processing Excel: {e}")
+
+        if doc_chunks:
+            print(f"  - Building Scientific KB with {len(doc_chunks)} chunks...")
+            self.kb_docs.build(doc_chunks)
+            self.kb_docs.save(self.kb_docs_index, self.kb_docs_chunks)
+        else:
+            print("  - ℹ️  No Scientific docs provided. Docs KB unchanged (or empty).")
+
+        # 2. Build Code KB (Implementation)
+        code_chunks = []
+        if code_paths:
+            print(f"Processing {len(code_paths)} Implementation/Code Documents...")
+            for p in code_paths:
+                path_obj = Path(p)
+                if path_obj.is_dir():
+                    repo_name = path_obj.name
+                    print(f"  - 📦 Processing Repo: {repo_name}")
+                    self.kb_code.repo_maps[repo_name] = generate_repo_map(str(path_obj))
+                    repo_chunks = self._process_file_list([p], is_code_mode=True, repo_name=repo_name)
+                    code_chunks.extend(repo_chunks)
+                else:
+                    file_chunks = self._process_file_list([p], is_code_mode=True)
+                    code_chunks.extend(file_chunks)
+            
+        if code_chunks:
+            print(f"  - Building Code KB with {len(code_chunks)} chunks...")
+            self.kb_code.build(code_chunks)
+            self.kb_code.save(self.kb_code_index, self.kb_code_chunks, self.kb_code_map_path)
+        else:
+            print("  - ℹ️  No Code docs provided. Code KB unchanged (or empty).")
+
+        self._kb_is_built = True
+        print("✅ Dual-KB Build Complete.")
+        return True
+
+    def _ensure_kb_is_ready(self, science_paths, code_paths, structured_data_sets) -> bool:
+        new_inputs = (science_paths or []) or (code_paths or []) or (structured_data_sets or [])
+        if new_inputs:
+            return self._build_and_save_kb(science_paths, code_paths, structured_data_sets)
+        elif not self._kb_is_built:
+            logging.error("Knowledge base is not built.")
+            return False
+        return True
+
+    def propose_experiments(self, objective: str, 
+                            science_paths: Optional[List[str]] = None, 
+                            code_paths: Optional[List[str]] = None,
+                            structured_data_sets: Optional[List[Dict[str, str]]] = None,
+                            additional_context: Optional[Dict[str, str]] = None,
+                            primary_data_set: Optional[Dict[str, str]] = None,
+                            image_paths: Optional[List[str]] = None,
+                            image_descriptions: Optional[List[str]] = None,
+                            output_json_path: Optional[str] = None,
+                            enable_human_feedback: bool = True) -> Dict[str, Any]:
+        """
+        Orchestrates experimental planning with state management.
+        Returns the full State Dictionary.
+        """
+        
+        # 1. Resolve Code Paths
+        effective_code_paths = []
+        if code_paths:
+            print("\n--- Resolving Code Paths ---")
+            for path in code_paths:
+                if path.strip().startswith(('http://', 'https://', 'git@')):
+                    print(f"  - 🔗 Detected URL: {path}")
+                    local_path = clone_git_repository(path)
+                    if local_path:
+                        effective_code_paths.append(local_path)
+                        print(f"    -> Resolved to local: {Path(local_path).name}")
+                else:
+                    effective_code_paths.append(path)
+
+        # 2. Initialize State
+        self.state = self._initialize_state(
+            objective=objective,
+            science_paths=science_paths,
+            code_paths=effective_code_paths,
+            additional_context=additional_context,
+            primary_data_set=primary_data_set,
+            image_paths=image_paths,
+            image_descriptions=image_descriptions
+        )
+
+        # 3. Init KB
+        if not self._ensure_kb_is_ready(science_paths, effective_code_paths, structured_data_sets):
+            self.state["status"] = "failed"
+            self.state["last_error"] = "KB Init Failed"
+            return self.state
+
+        # =====================================================
+        # PHASE 1: SCIENCE STRATEGY (Docs KB Only)
+        # =====================================================
+        print(f"\n--- Phase 1: Generating Experimental Strategy ---")
+        
+        ctx_string = ""
+        if additional_context:
+            for header, content in additional_context.items():
+                ctx_string += f"## {header}\n{content}\n\n"
+        ctx_string = ctx_string.strip() if ctx_string else None
+        
+        res = perform_science_rag(
+            objective=objective,
+            instructions=HYPOTHESIS_GENERATION_INSTRUCTIONS,
+            task_name="Experimental Plan",
+            kb_docs=self.kb_docs,             
+            model=self.model,                 
+            generation_config=self.generation_config,
+            primary_data_set=primary_data_set,
+            image_paths=image_paths,
+            image_descriptions=image_descriptions,
+            additional_context=ctx_string
+        )
+
+        # Update State
+        self.state["current_plan"] = res
+        self.state["plan_history"].append(res.copy())
+
+        # Self-reflection
+        if not res.get("error"):
+            is_relevant, critique = verify_plan_relevance(objective, res, self.model, self.generation_config)
+            
+            if not is_relevant:
+                print(f"\n🔄 Self-Reflection triggered: {critique}")
+                print("    - Attempting autonomous plan correction...")
+   
+                res = refine_plan_with_feedback(
+                    original_result=res,
+                    feedback=f"CRITICAL CORRECTION NEEDED: {critique}. Ensure the plan directly addresses the objective: {objective}",
+                    objective=objective,
+                    model=self.model,
+                    generation_config=self.generation_config
+                )
+                print("    - ✅ Plan auto-corrected.")
+                self.state["current_plan"] = res
+
+        # =====================================================
+        # PHASE 2: HUMAN STRATEGY FEEDBACK
+        # =====================================================
+        if enable_human_feedback and res.get("proposed_experiments") and not res.get("error"):
+            display_plan_summary(res)
+            user_feedback = get_user_feedback()
+            
+            if user_feedback:
+                print(f"\n📝 Feedback received. Refining Scientific Plan...")
+                self.state["human_feedback_history"].append({"phase": "science", "feedback": user_feedback})
+                res = refine_plan_with_feedback(
+                    original_result=res,
+                    feedback=user_feedback,
+                    objective=objective,
+                    model=self.model,
+                    generation_config=self.generation_config
+                )
+                self.state["current_plan"] = res
+                display_plan_summary(res)
+                print("✅ Scientific plan updated.")
+            else:
+                print("✅ Scientific plan accepted.")
+
+        # =====================================================
+        # PHASE 3: CODE IMPLEMENTATION
+        # =====================================================
+        if self.kb_code.index and self.kb_code.index.ntotal > 0 and not res.get("error"):
+             print(f"\n--- Phase 3: Mapping to Implementation Code ---")
+             res = perform_code_rag(
+                 result=res,
+                 kb_code=self.kb_code,
+                 model=self.model,
+                 generation_config=self.generation_config
+             )
+             self.state["current_plan"] = res
+
+        # =====================================================
+        # PHASE 4: HUMAN CODE REVIEW
+        # =====================================================
+        if enable_human_feedback:
+            temp_dir = Path("./temp_code_review")
+            print(f"\n--- Phase 4: Human Code Review ---")
+            print(f"  - 💾 Saving generated code to temporary folder: {temp_dir}")
+            
+            if temp_dir.exists(): shutil.rmtree(temp_dir)
+            files = write_experiments_to_disk(res, str(temp_dir))
+            
+            if not files:
+                print("  - ⚠️ No code generated to review.")
+            else:
+                while True:
+                    print("\n" + "="*60)
+                    print(f"👀 ACTION REQUIRED: Code Review")
+                    print("="*60)
+                    print(f"1. Open the folder: {temp_dir.resolve()}")
+                    print(f"2. Inspect the {len(files)} generated Python file(s).")
+                    print("3. Return here to Approve or Request Changes.")
+                    print("-" * 60)
+                    
+                    code_feedback = get_user_feedback()
+                    
+                    if not code_feedback:
+                        print("✅ Code accepted.")
+                        break
+                    
+                    self.state["human_feedback_history"].append({"phase": "code", "feedback": code_feedback})
+                    print(f"\n🛠️  Refining code based on: '{code_feedback}'...")
+                    
+                    res = refine_code_with_feedback(
+                        result=res,
+                        feedback=code_feedback,
+                        model=self.model,
+                        generation_config=self.generation_config
+                    )
+                    self.state["current_plan"] = res
+                    
+                    print(f"  - 💾 Overwriting files in {temp_dir} with refined code...")
+                    files = write_experiments_to_disk(res, str(temp_dir))
+                    print("  - ✅ Files updated. Please re-review.")
+
+        # --- Final Save & Return ---
+        self.state["status"] = "planned"
+        
+        if output_json_path: 
+            self._save_results_to_json(res, output_json_path)
+            self._save_state_to_json(output_json_path + ".state.json")
+        
+        final_out = "./output_scripts"
+        print(f"\n--- Saving Final Scripts to: {final_out} ---")
+        write_experiments_to_disk(res, final_out)
+        
+        return self.state
+
+    def update_plan_with_results(self, results: Any, output_json_path: Optional[str] = None, enable_human_feedback: bool = True) -> Dict[str, Any]:
+        """
+        Iterates on the current experimental plan based on new experimental results, 
+        observations, or data files.
+
+        This method acts as the "feedback loop" of the agent, transforming the system from 
+        a linear planner into an iterative scientific partner. It performs Smart Result Parsing, 
+        Result-Aware RAG, and Human-in-the-Loop refinement.
+
+        **Capabilities & Workflow:**
+
+        1.  **Smart Result Parsing (Multimodal):**
+            -   Detects and parses input types automatically.
+            -   **Text/Dicts/Lists:** Converted to JSON strings for the LLM prompt.
+            -   **Data Files (.xlsx, .csv):** Automatically summarized using `excel_parser` and injected as text context.
+            -   **Images (.png, .jpg):** Loaded and passed to the vision model for visual analysis (e.g., plot trends, failures).
+            -   **Logs (.txt, .log):** Read and injected as context.
+
+        2.  **Result-Aware RAG (Retrieval Augmented Generation):**
+            -   Uses the content of the results to perform a *new* targeted search in the Docs Knowledge Base (`kb_docs`).
+            -   Example: If results mention "precipitation," it retrieves papers discussing solubility limits, even if those papers weren't relevant to the initial plan.
+
+        3.  **Nuanced Scientific Reasoning:**
+            -   Prompts the LLM to categorize the outcome into one of five strategic buckets:
+                * **CONFIRMED:** Validated hypothesis -> Propose next step.
+                * **OPTIMIZATION NEEDED:** Valid sub-optimal result -> Tune parameters (Do not change hypothesis).
+                * **INCONCLUSIVE:** Noisy data -> Refine measurement technique.
+                * **OPERATIONAL FAILURE:** Code/Equipment error -> Fix implementation (Do not change science).
+                * **SCIENTIFIC FAILURE:** Disproven hypothesis -> Pivot to new approach.
+
+        4.  **Human-in-the-Loop (Dual-Phase):**
+            -   **Phase A (Strategy):** Pauses after generating the new scientific plan to allow user critique (e.g., "Don't increase temp, safety limit is 50C").
+            -   **Phase B (Code):** Pauses after generating the Python scripts. Writes them to a temp folder (`./temp_code_review_iter`) for inspection before finalization.
+
+        Args:
+            results (Any): The outcome of the previous experiment. 
+                Supported formats:
+                -   **String:** Natural language description (e.g., "Yield was 5%").
+                -   **Dict/List:** Structured data (e.g., `{"yield": 0.05, "error": None}`).
+                -   **File Path (str):** Path to a local file (.xlsx, .csv, .txt, .png, .jpg).
+                -   **Structured List:** A list containing a mix of the above, or dictionaries with metadata 
+                    (e.g., `[{"path": "./plot.png", "description": "Graph showing thermal runaway"}]`).
+            output_json_path (Optional[str]): If provided, saves the updated plan JSON to this path.
+                The full state is also saved to `{output_json_path}.state.json`.
+            enable_human_feedback (bool): If True, pauses execution for console input at the 
+                Strategy and Code review stages. Defaults to True.
+            current_plan (Optional[Dict[str, Any]]): A specific plan dictionary to update. 
+                If provided, this overrides the agent's internal state. Useful for resuming 
+                experiments from a saved JSON file or updating plans generated by external tools.
+            objective (Optional[str]): The high-level research goal (e.g., "Maximize yield").
+                **Critical when using `current_plan`:** The agent uses this to determine if the 
+                `results` constitute a success or failure. If not provided during a stateless update,
+                the agent may default to a generic fallback or warn about missing context.
+
+        Returns:
+            Dict[str, Any]: The updated internal state dictionary, containing the new `current_plan`, 
+            appended `experimental_results`, and updated `plan_history`.
+        """
+
+        # --- 0. STATE HYDRATION ---
+        if current_plan is not None:
+            print(f"  - 🔄 Stateless Update Mode: Hydrating agent with provided plan.")
+            
+            # Objective is critical for the RAG engine to know "Success" vs "Failure".
+            # If not provided, we try to keep existing, or warn the user.
+            if objective is None:
+                objective = self.state.get("objective", "")
+                if not objective:
+                    logging.warning("⚠️  Updating plan without an 'objective'. Agent may lack context for success criteria.")
+
+            # We merge the passed arguments into the internal state.
+            self.state.update({
+                "objective": objective,
+                "current_plan": current_plan,
+                # Ensure lists exist so .append() doesn't crash later
+                "experimental_results": self.state.get("experimental_results", []),
+                "plan_history": self.state.get("plan_history", [current_plan]),
+                "human_feedback_history": self.state.get("human_feedback_history", []),
+                # If this is a fresh load, start iteration count at 1
+                "iteration_index": self.state.get("iteration_index", 1)
+            })
+
+        if not self.state or not self.state.get("current_plan"):
+            logging.error("No active plan state found. Run 'propose_experiments' first.")
+            return {"error": "No active state"}
+            
+        print(f"\n--- 🔄 Iterating Plan based on New Results ---")
+        
+        # --- 1. SMART RESULT PARSING ---
+        parsed_text_results = []
+        loaded_images = []
+        
+        # Helper to process a single item (path or text)
+        def process_item(item: Any, description: str = "") -> str:
+            text_output = ""
+            
+            # If it's a file path
+            if isinstance(item, str) and (Path(item).exists()):
+                path = Path(item)
+                suffix = path.suffix.lower()
+                
+                # A. Data Files
+                if suffix in ['.xlsx', '.xls', '.csv']:
+                    print(f"  - 📄 Parsing data file: {path.name}")
+                    try:
+                        chunks = parse_adaptive_excel(str(path), context_path="")
+                        if chunks:
+                            summary = chunks[0]['text']
+                            text_output = f"DATA FILE ({path.name}):\n{summary}"
+                    except Exception as e:
+                        text_output = f"[Error parsing {path.name}: {e}]"
+
+                # B. Images
+                elif suffix in ['.png', '.jpg', '.jpeg', '.tiff', '.bmp']:
+                    print(f"  - 🖼️  Loading result image: {path.name}")
+                    try:
+                        img = PIL_Image.open(path)
+                        loaded_images.append(img)
+                        text_output = f"[Attached Image: {path.name}]"
+                    except Exception as e:
+                        text_output = f"[Error loading image {path.name}: {e}]"
+                
+                # C. Logs/Text
+                elif suffix in ['.txt', '.log', '.md', '.json']:
+                    try:
+                        content = path.read_text(encoding='utf-8')
+                        text_output = f"LOG FILE ({path.name}):\n{content}"
+                    except Exception as e:
+                        text_output = f"[Error reading log {path.name}: {e}]"
+                
+                else:
+                    text_output = f"FILE ({path.name})"
+
+            # If not a file, treat as raw text/data
+            else:
+                if isinstance(item, (dict, list)):
+                    text_output = json.dumps(item, indent=2)
+                else:
+                    text_output = str(item)
+            
+            # Append description if provided
+            if description:
+                text_output += f"\n(Context: {description})"
+            
+            return text_output
+
+        # Recursive Parser to handle Lists and Dictionaries
+        items_to_process = results if isinstance(results, list) else [results]
+        
+        for entry in items_to_process:
+            if isinstance(entry, dict):
+                # Check for common keys indicating a file + desc structure
+                path_val = entry.get('path') or entry.get('file') or entry.get('image')
+                desc_val = entry.get('description') or entry.get('desc') or entry.get('caption') or entry.get('notes')
+                
+                if path_val and isinstance(path_val, str):
+                    # It's a structured file entry
+                    parsed_text_results.append(process_item(path_val, desc_val if desc_val else ""))
+                else:
+                    # It's just a data dictionary
+                    parsed_text_results.append(json.dumps(entry, indent=2))
+            else:
+                # It's a direct item (string, number, or path string)
+                parsed_text_results.append(process_item(entry))
+
+        # Join all text findings
+        consolidated_feedback = "\n\n".join(parsed_text_results)
+
+        # Update State History
+        self.state["experimental_results"].append({
+            "iteration": self.state["iteration_index"],
+            "timestamp": datetime.now().isoformat(),
+            "data_summary": str(results) # Keep reference to raw input
+        })
+        self.state["iteration_index"] += 1
+        
+        # --- 2. Construct Feedback Prompt ---
+        feedback_prompt = (
+            f"We executed the previous plan. Here are the experimental results:\n"
+            f"{consolidated_feedback}\n\n"
+            f"**TASK:** Analyze these results (including any attached plots) to Refine or Update the plan.\n"
+            f"Select the most appropriate strategy:\n"
+            f"1. **CONFIRMED:** If hypothesis is validated, propose next step.\n"
+            f"2. **OPTIMIZATION NEEDED:** If result is valid but sub-optimal, tune parameters.\n"
+            f"3. **INCONCLUSIVE:** If data is noisy, propose refined experiment.\n"
+            f"4. **OPERATIONAL FAILURE:** If failure was code/equipment, propose fix.\n"
+            f"5. **SCIENTIFIC FAILURE:** If hypothesis is disproven, propose new approach.\n"
+        )
+        
+        # --- 3. RESULT-AWARE RAG ---
+        new_literature_context = None
+        if self.kb_docs.index and self.kb_docs.index.ntotal > 0:
+            search_query = f"Implications and causes of: {consolidated_feedback[:400]}"
+            print(f"  - 🔍 Searching literature for context on results...")
+            hits = self.kb_docs.retrieve(search_query, top_k=3)
+            if hits:
+                new_literature_context = "\n---\n".join([c['text'] for c in hits])
+                print(f"    -> Found {len(hits)} relevant document chunks.")
+        
+        # --- 4. Generate Refined Plan ---
+        print(f"  - Reasoning over results with literature context...")
+        objective = self.state["objective"]
+        current_plan = self.state["current_plan"]
+        
+        new_plan = refine_plan_with_feedback(
+            original_result=current_plan,
+            feedback=feedback_prompt,
+            objective=objective,
+            model=self.model,
+            generation_config=self.generation_config,
+            new_context=new_literature_context,
+            result_images=loaded_images # <--- Images passed here
+        )
+        
+        # =====================================================
+        # 5. HUMAN STRATEGY FEEDBACK
+        # =====================================================
+        if enable_human_feedback and not new_plan.get("error"):
+            print("\n" + "="*60)
+            print("🧠 AGENT'S PROPOSED REVISION BASED ON RESULTS")
+            print("="*60)
+            display_plan_summary(new_plan)
+            
+            user_feedback = get_user_feedback()
+            
+            if user_feedback:
+                print(f"\n📝 Feedback received. Adjusting strategy...")
+                self.state["human_feedback_history"].append({"phase": "science_iteration", "feedback": user_feedback})
+                new_plan = refine_plan_with_feedback(
+                    original_result=new_plan,
+                    feedback=user_feedback,
+                    objective=objective,
+                    model=self.model,
+                    generation_config=self.generation_config
+                )
+                print("✅ Strategic revision updated.")
+
+        # =====================================================
+        # 6. Generate Code
+        # =====================================================
+        if self.kb_code.index and self.kb_code.index.ntotal > 0 and not new_plan.get("error"):
+             print(f"\n  - Regenerating implementation code for refined plan...")
+             new_plan = perform_code_rag(
+                 result=new_plan,
+                 kb_code=self.kb_code,
+                 model=self.model,
+                 generation_config=self.generation_config
+             )
+
+        # =====================================================
+        # 7. HUMAN CODE REVIEW
+        # =====================================================
+        if enable_human_feedback and not new_plan.get("error"):
+            temp_dir = Path("./temp_code_review_iter")
+            print(f"\n--- Human Code Review (Iteration {self.state['iteration_index']}) ---")
+            
+            if temp_dir.exists(): shutil.rmtree(temp_dir)
+            files = write_experiments_to_disk(new_plan, str(temp_dir))
+            
+            if files:
+                while True:
+                    print("\n" + "="*60)
+                    print(f"👀 ACTION REQUIRED: Code Review")
+                    print("="*60)
+                    print(f"1. Open folder: {temp_dir.resolve()}")
+                    print(f"2. Inspect the {len(files)} new Python file(s).")
+                    print("3. Return here to Approve or Request Changes.")
+                    
+                    code_feedback = get_user_feedback()
+                    
+                    if not code_feedback:
+                        print("✅ Code accepted.")
+                        break
+                    
+                    self.state["human_feedback_history"].append({"phase": "code_iteration", "feedback": code_feedback})
+                    print(f"\n🛠️  Refining code based on: '{code_feedback}'...")
+                    
+                    new_plan = refine_code_with_feedback(
+                        result=new_plan,
+                        feedback=code_feedback,
+                        model=self.model,
+                        generation_config=self.generation_config
+                    )
+                    
+                    print(f"  - 💾 Overwriting files in {temp_dir} with refined code...")
+                    files = write_experiments_to_disk(new_plan, str(temp_dir))
+
+        # 8. Commit to State & Save
+        self.state["current_plan"] = new_plan
+        self.state["plan_history"].append(new_plan)
+        self.state["status"] = "iterated"
+        
+        final_out = "./output_scripts"
+        print(f"\n--- Saving Final Scripts to: {final_out} ---")
+        write_experiments_to_disk(new_plan, final_out)
+        
+        if output_json_path:
+            self._save_results_to_json(new_plan, output_json_path)
+            self._save_state_to_json(output_json_path + ".state.json")
+            
+        return self.state
+
+    def perform_technoeconomic_analysis(self, objective: str,
+                                        science_paths: Optional[List[str]] = None,
+                                        code_paths: Optional[List[str]] = None, 
+                                        structured_data_sets: Optional[List[Dict[str, str]]] = None,
+                                        primary_data_set: Optional[Dict[str, str]] = None,
+                                        image_paths: Optional[List[str]] = None,
+                                        image_descriptions: Optional[List[str]] = None,
+                                        output_json_path: Optional[str] = None):
+        """Performs TEA using Dual-KB retrieval."""
+        
+        if not self._ensure_kb_is_ready(science_paths, code_paths, structured_data_sets):
+            return {"error": "KB Init Failed"}
+
+        res = perform_science_rag(
+            objective=objective, 
+            instructions=TEA_INSTRUCTIONS, 
+            task_name="Technoeconomic Analysis",
+            kb_docs=self.kb_docs,
+            model=self.model,
+            generation_config=self.generation_config,
+            primary_data_set=primary_data_set, 
+            image_paths=image_paths, 
+            image_descriptions=image_descriptions
+        )
+
+        if output_json_path: self._save_results_to_json(res, output_json_path)
+        return res
+
+
+================================================
+FILE: rag_engine.py
+================================================
+import json
+import logging
+from pathlib import Path
+from typing import List, Dict, Any, Optional, Tuple
+
+import PIL.Image as PIL_Image
+
+from .excel_parser import parse_adaptive_excel
+from .parser_utils import parse_json_from_response
+from .instruct import (
+    HYPOTHESIS_GENERATION_INSTRUCTIONS,
+    TEA_INSTRUCTIONS,
+    HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK,
+    TEA_INSTRUCTIONS_FALLBACK
+)
+
+
+def verify_plan_relevance(objective: str, 
+                          result: Dict[str, Any], 
+                          model: Any, 
+                          generation_config: Any) -> Tuple[bool, str]: 
+    """
+    Self-reflection step. Returns (True, "") if relevant, or (False, "Reason") if not.
+    
+    Logic:
+    1. Checks if the plan was generated via Fallback (General Knowledge).
+    2. If Fallback: Verifies only scientific soundness (Relaxed).
+    3. If Strict: Verifies document grounding and specific constraint adherence (Strict).
+    """
+    experiments = result.get("proposed_experiments", [])
+    if not experiments: 
+        return False, "No experiments generated."
+
+    # 1. Detect Fallback Mode
+    # We check if ANY experiment contains the mandatory fallback warning defined in instruct.py
+    is_fallback = False
+    for exp in experiments:
+        justification = exp.get('justification', '').lower()
+        if "general scientific knowledge" in justification or "documents lacked specific context" in justification:
+            is_fallback = True
+            break
+
+    # 2. Build Plan Summary for the Verifier
+    plan_summary_lines = []
+    for i, exp in enumerate(experiments):
+        name = exp.get('experiment_name', 'N/A')
+        hyp = exp.get('hypothesis', 'N/A')
+        justification = exp.get('justification', 'No justification provided.')
+        
+        plan_summary_lines.append(f"Experiment {i+1}: {name}")
+        plan_summary_lines.append(f"  Hypothesis: {hyp}")
+        plan_summary_lines.append(f"  Justification: {justification}") 
+        plan_summary_lines.append("---")
+        
+    plan_summary = "\n".join(plan_summary_lines)
+
+    # 3. Construct Context-Aware Prompt
+    if is_fallback:
+        print("    - ℹ️  Verifying Fallback Plan (Relaxed Constraints)...")
+        eval_prompt = f"""
+        You are a scientific research evaluator.
+        
+        **CONTEXT:** The system failed to find specific documents for the User Objective in the Knowledge Base.
+        Therefore, it generated a plan based on **General Scientific Knowledge**.
+        
+        1. User Objective: "{objective}"
+        2. Proposed Plan (General Knowledge): 
+        {plan_summary}
+
+        **TASK:**
+        Determine if the Proposed Plan makes scientific sense for the Objective, acknowledging that it CANNOT cite specific documents.
+        
+        **CRITERIA FOR PASS:**
+        - The plan addresses the objective using standard, correct scientific principles.
+        - The logic is sound and actionable.
+        - **DO NOT FAIL** the plan simply because it uses general knowledge or lacks specific context (this is expected in fallback mode).
+        
+        **Output:**
+        Respond with a single JSON object: {{ "is_relevant": boolean, "reason": "string explanation" }}
+        """
+    else:
+        print("    - ℹ️  Verifying Strict Plan (Document Constraints)...")
+        eval_prompt = f"""
+        You are a scientific research evaluator.
+        
+        1. User Objective: "{objective}"
+        2. Proposed Plan: 
+        {plan_summary}
+
+        **TASK:**
+        Review the "Hypothesis" and "Justification" for each experiment.
+        Determine if the Proposed Plan is directly relevant to the User Objective AND supported by the cited context.
+        
+        **CRITERIA FOR FAIL:**
+        - The plan ignores specific constraints in the objective (e.g., "Use X method" but the plan uses "Y").
+        - The justification contradicts the hypothesis.
+        - The plan is logically incoherent.
+        
+        **Output:**
+        Respond with a single JSON object: {{ "is_relevant": boolean, "reason": "string explanation" }}
+        """
+
+    # 4. Execute Verification
+    try:
+        response = model.generate_content([eval_prompt], generation_config=generation_config)
+        eval_result, _ = parse_json_from_response(response)
+        
+        if eval_result and not eval_result.get("is_relevant"):
+            reason = eval_result.get('reason', 'Unknown irrelevance.')
+            print(f"    - ⚠️  Plan Verification Failed: {reason}")
+            return False, reason
+            
+        print(f"    - ✅ Plan Verification Passed.")
+        return True, ""
+        
+    except Exception as e:
+        logging.error(f"Verification step failed: {e}")
+        # Fail open: If the verifier crashes, we assume the plan is okay to avoid blocking the user.
+        return True, ""
+
+
+def perform_science_rag(objective: str, 
+                        instructions: str, 
+                        task_name: str,
+                        kb_docs: Any,  # Pass the KB object here
+                        model: Any,    # Pass the LLM object here
+                        generation_config: Any,
+                        primary_data_set: Optional[Dict[str, str]] = None,
+                        image_paths: Optional[List[str]] = None,
+                        image_descriptions: Optional[List[str]] = None,
+                        additional_context: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Executes the Scientific/TEA RAG loop using the Docs KnowledgeBase.
+    Includes logic for handling Primary Data (Excel) and Fallback generation.
+    """
+    
+    # --- 1. Process Primary Data (e.g., Excel) ---
+    primary_data_str = None
+    if primary_data_set:
+        try:
+            chunks = parse_adaptive_excel(primary_data_set['file_path'], primary_data_set['metadata_path'])
+            if chunks: 
+                summary = next((c for c in chunks if c['metadata'].get('content_type') in ('dataset_summary', 'dataset_package')), chunks[0])
+                primary_data_str = summary['text']
+        except Exception as e:
+            print(f"  - ⚠️ Warning: Failed to parse primary data set: {e}")
+
+    # --- 2. Retrieve Scientific Context (Docs KB Only) ---
+    print(f"\n--- Retrieving Scientific Context for {task_name} ---")
+    
+    doc_chunks = []
+    if kb_docs.index and kb_docs.index.ntotal > 0:
+        doc_chunks = kb_docs.retrieve(objective, top_k=10)
+    
+    unique_chunks = {c['text']: c for c in doc_chunks}.values()
+    
+    if not unique_chunks and not primary_data_str:
+        retrieved_context_str = "No specific documents found in Knowledge Base."
+    else:
+        rag_str = "\n\n---\n\n".join(
+            f"Source: {Path(c['metadata'].get('source', 'N/A')).name}\nType: {c['metadata'].get('content_type')}\n\n{c['text']}" 
+            for c in unique_chunks
+        )
+        retrieved_context_str = ""
+        if primary_data_str: retrieved_context_str += f"## Primary Data Summary\n{primary_data_str}\n\n"
+        if rag_str: retrieved_context_str += f"## Retrieved Scientific Literature\n{rag_str}"
+
+    # --- 3. Construct Multimodal Prompt ---
+    loaded_images = []
+    img_desc_str = ""
+    
+    if image_paths and PIL_Image:
+        for p in image_paths:
+            try: 
+                loaded_images.append(PIL_Image.open(p))
+            except Exception as e:
+                print(f"  - ⚠️ Could not load image {p}: {e}")
+
+    if image_descriptions:
+        img_desc_str = json.dumps(image_descriptions, indent=2)
+
+    prompt_parts = [instructions, f"## User Objective:\n{objective}"]
+    
+    if loaded_images:
+        prompt_parts.append("\n## Provided Images: (See attached)")
+        prompt_parts.extend(loaded_images)
+        if img_desc_str: prompt_parts.append(f"\n## Image Descriptions:\n{img_desc_str}")
+    
+    if additional_context:
+        prompt_parts.append(f"\n## Additional Context:\n{additional_context}")
+        
+    prompt_parts.append(f"\n## Retrieved Context:\n{retrieved_context_str}")
+
+    # --- 4. Generation & Fallback Logic ---
+    print(f"--- Generating {task_name} ---")
+    try:
+        # Attempt 1: Strict RAG Generation
+        response = model.generate_content(prompt_parts, generation_config=generation_config)
+        result, error_msg = parse_json_from_response(response)
+        
+        if error_msg: 
+            return {"error": f"JSON Parsing Error: {error_msg}"}
+
+        # Check for Insufficient Context
+        needs_fallback = False
+        if result.get("error") and "Insufficient" in str(result.get("error")):
+            needs_fallback = True
+            print(f"    - ⚠️ Strict generation failed: {result.get('error')}")
+        
+        # --- 5. Execution of Fallback ---
+        if needs_fallback:
+            print("    - 🔄 Entering Fallback Mode (General Knowledge)...")
+            
+            fallback_inst = None
+            if instructions == HYPOTHESIS_GENERATION_INSTRUCTIONS:
+                fallback_inst = HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
+            elif instructions == TEA_INSTRUCTIONS:
+                fallback_inst = TEA_INSTRUCTIONS_FALLBACK
+            
+            if not fallback_inst:
+                return result # No fallback available for this instruction set
+
+            prompt_parts[0] = fallback_inst
+            
+            fallback_response = model.generate_content(prompt_parts, generation_config=generation_config)
+            result, error_msg_fb = parse_json_from_response(fallback_response)
+            
+            if error_msg_fb:
+                return {"error": f"Fallback JSON Parsing Error: {error_msg_fb}"}
+            
+            print("    - ✅ Fallback generation successful.")
+
+        return result
+
+    except Exception as e:
+        logging.error(f"Error in perform_science_rag: {e}")
+        return {"error": str(e)}
+
+
+def perform_code_rag(result: Dict[str, Any],
+                     kb_code: Any,   # Pass the Code KB object
+                     model: Any,     # Pass the LLM object
+                     generation_config: Any) -> Dict[str, Any]:
+    """
+    Retrieves API syntax from the Code KB and generates Python implementation scripts.
+    """
+    experiments = result.get("proposed_experiments", [])
+    if not experiments: 
+        return result
+    
+    # 1. Smart Retrieval: Use the *steps* as the query
+    all_steps_text = " ".join([" ".join(e.get('experimental_steps', [])) for e in experiments])
+    
+    print(f"  - 🔍 Retrieving API syntax for: {all_steps_text[:100]}...")
+    hits = kb_code.retrieve(f"python implementation for {all_steps_text}", top_k=5)
+    
+    if not hits:
+        print("    - ℹ️ No relevant code chunks found. Skipping code gen.")
+        return result
+    
+    repo_map_context = kb_code.get_relevant_maps(hits)
+
+    code_ctx = "\n\n".join([f"FILE: {c['metadata']['source']}\n{c['text']}" for c in hits])
+    code_files = list(set([Path(c['metadata']['source']).name for c in hits]))
+
+    # 2. Generate Code
+    for exp in experiments:
+        steps = exp.get("experimental_steps", [])
+        exp_name = exp.get("experiment_name", "Experiment")
+        
+        prompt = f"""
+        You are a Research Software Engineer.
+        
+        **TASK:** Write a Python script to implement the experimental steps below.
+        
+        **INPUTS:**
+        1. Experimental Steps: {json.dumps(steps)}
+        2. **REPOSITORY STRUCTURES (Use this to determine correct import paths):**
+        {repo_map_context}
+        3. API Syntax Reference:
+        {code_ctx}
+        
+        **INSTRUCTIONS:**
+        - Use the "API Syntax Reference" to find the correct functions.
+        - Map the scientific intent of the Steps to the code.
+        - You must prioritize using classes and functions from the API Reference over generic external libraries.
+        - Return ONLY valid JSON.
+
+        **ENVIRONMENT CONTEXT:**
+        - You are writing a script for a server where **the custom library found in the 'API Reference' is ALREADY INSTALLED.**
+
+        **OUTPUT:** A JSON object: {{ "implementation_code": "YOUR_PYTHON_CODE_HERE" }}
+        """
+        
+        try:
+            resp = model.generate_content([prompt], generation_config=generation_config)
+            code_res, _ = parse_json_from_response(resp)
+            
+            if code_res and "implementation_code" in code_res:
+                exp["implementation_code"] = code_res["implementation_code"]
+                exp["code_source_files"] = code_files
+                print(f"    - ✅ Generated code for '{exp_name}'")
+            else:
+                print(f"    - ⚠️ Code generation returned no code for '{exp_name}'")
+        except Exception as e:
+            print(f"    - ❌ Failed to generate code for '{exp_name}': {e}")
+            
+    return result
+
+
+def refine_plan_with_feedback(original_result: Dict[str, Any], 
+                              feedback: str, 
+                              objective: str,
+                              model: Any,
+                              generation_config: Any,
+                              new_context: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Refines the experimental plan based on user input or experimental results.
+    Now supports injecting fresh RAG context relevant to the feedback/results.
+    """
+    
+    # Construct the context block if available
+    context_block = ""
+    if new_context:
+        context_block = (
+            f"\n**📚 RELEVANT LITERATURE FOR OBSERVED RESULTS:**\n"
+            f"{new_context}\n"
+            f"(Use this literature to interpret the results and adjust the plan accordingly.)\n"
+        )
+
+    refinement_prompt = f"""
+    You are an expert Research Strategist acting as an editor.
+    
+    **Original Objective:** {objective}
+    
+    **Current Plan (JSON):**
+    {json.dumps(original_result, indent=2)}
+    
+    **Experimental Results / Feedback:** "{feedback}"
+    {context_block}
+    
+    **Task:**
+    Update the "Current Plan" to strictly address the Feedback and Results.
+    - If the results indicate failure, use the Literature Context to propose a fix.
+    - If the results indicate success, move to the next logical step.
+    
+    **Constraints:**
+    - You MUST return the exact same JSON structure (keys: "proposed_experiments", etc.).
+    - Update "experimental_steps", "hypothesis", or "required_equipment" as requested.
+    - Do NOT add explanations outside the JSON.
+    
+    **Output:**
+    A single valid JSON object containing the updated plan.
+    """
+
+    try:
+        response = model.generate_content([refinement_prompt], generation_config=generation_config)
+        refined_result, error_msg = parse_json_from_response(response)
+        
+        if error_msg:
+            print(f"    - ⚠️ Could not parse refined plan: {error_msg}. Reverting.")
+            return original_result
+        
+        if "proposed_experiments" not in refined_result:
+            print("    - ⚠️ Refined plan invalid structure. Reverting.")
+            return original_result
+            
+        return refined_result
+        
+    except Exception as e:
+        print(f"    - ⚠️ Error during refinement: {e}")
+        return original_result
+    
+
+def refine_code_with_feedback(result: Dict[str, Any], 
+                              feedback: str, 
+                              model: Any, 
+                              generation_config: Any) -> Dict[str, Any]:
+    """
+    Refines the implementation code based on user feedback.
+    """
+    experiments = result.get("proposed_experiments", [])
+    if not experiments:
+        return result
+
+    # Context construction: We dump the current code so the LLM knows what to fix
+    current_code_state = ""
+    for i, exp in enumerate(experiments):
+        name = exp.get('experiment_name', f'Experiment {i+1}')
+        code = exp.get("implementation_code", "# No code generated")
+        current_code_state += f"--- CODE FOR: {name} ---\n{code}\n\n"
+
+    prompt = f"""
+    You are a Senior Research Software Engineer.
+    
+    **TASK:** Refine the Python implementation code based on User Feedback.
+    
+    **CURRENT CODE STATE:**
+    {current_code_state}
+    
+    **USER FEEDBACK / ERROR REPORT:**
+    "{feedback}"
+    
+    **INSTRUCTIONS:**
+    1. Apply the user's fixes to the relevant code blocks.
+    2. If the user refers to a specific experiment, only update that one.
+    3. You must return a JSON object with a list of "updated_codes". 
+       Each item in the list must match the order of the experiments above.
+    4. Provide the FULL updated code for each script, not just the diffs.
+    
+    **OUTPUT FORMAT:**
+    {{
+        "updated_codes": [
+            "FULL_PYTHON_SCRIPT_1...",
+            "FULL_PYTHON_SCRIPT_2..."
+        ]
+    }}
+    """
+    
+    print(f"    - ↻ Refine Code RAG: Generating updates based on feedback...")
+    try:
+        response = model.generate_content([prompt], generation_config=generation_config)
+        updates, error = parse_json_from_response(response)
+        
+        if updates and "updated_codes" in updates:
+            new_codes = updates["updated_codes"]
+            # Map back to the result structure
+            if len(new_codes) == len(experiments):
+                for i, code in enumerate(new_codes):
+                    experiments[i]["implementation_code"] = code
+                print("    - ✅ Code successfully refined.")
+            else:
+                print("    - ⚠️ Warning: LLM returned wrong number of code blocks. Skipping update.")
+        elif error:
+            print(f"    - ⚠️ JSON Error during refinement: {error}")
+        
+        return result
+        
+    except Exception as e:
+        print(f"    - ❌ Error during code refinement: {e}")
+        return result
+
+
+================================================
+FILE: repo_loader.py
+================================================
+import subprocess
+import os
+from pathlib import Path
+from urllib.parse import urlparse
+
+def clone_git_repository(repo_url: str, 
+                         target_base_dir: str = "./downloaded_repos", 
+                         auto_update: bool = True) -> str:
+    """
+    Clones a git repository to a local directory.
+    If the directory exists and auto_update is True, it runs 'git pull'.
+    
+    Returns the absolute path to the cloned directory.
+    """
+    # 1. Extract repo name to use as folder name
+    # e.g., https://github.com/user/my-project.git -> my-project
+    parsed_url = urlparse(repo_url)
+    repo_name = os.path.basename(parsed_url.path)
+    if repo_name.endswith('.git'):
+        repo_name = repo_name[:-4]
+    
+    # Clean up name to ensure valid folder path
+    repo_name = "".join(c for c in repo_name if c.isalnum() or c in ('-', '_'))
+    
+    target_path = Path(target_base_dir) / repo_name
+    
+    # 2. Check if git is installed
+    try:
+        subprocess.run(["git", "--version"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        print("  - ❌ Error: 'git' is not installed or not in PATH.")
+        return None
+
+    # 3. Handle Existing Directory
+    if target_path.exists():
+        if auto_update:
+            print(f"  - 🔄 Repo '{repo_name}' exists. Attempting update (git pull)...")
+            try:
+                # 'git -C path' runs the command inside that directory
+                subprocess.run(["git", "-C", str(target_path), "pull"], 
+                               check=True, 
+                               stdout=subprocess.DEVNULL) # Hide generic output unless error
+                print(f"  - ✅ Update successful: {repo_name}")
+            except subprocess.CalledProcessError as e:
+                print(f"  - ⚠️  Update failed (local changes or network issue): {e}")
+                print("       Using existing version without update.")
+        else:
+            print(f"  - ℹ️  Repo '{repo_name}' exists. Skipping update.")
+            
+        return str(target_path.resolve())
+    
+    # 4. Clone New Repo
+    print(f"  - 📥 Cloning '{repo_url}' into {target_path}...")
+    try:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "clone", repo_url, str(target_path)], check=True)
+        print("  - ✅ Clone successful.")
+        return str(target_path.resolve())
+    except subprocess.CalledProcessError as e:
+        print(f"  - ❌ Error cloning repo: {e}")
+        return None
+
+
+================================================
+FILE: user_interface.py
+================================================
+from typing import Dict, Any, Optional
+
+def display_plan_summary(result: Dict[str, Any]) -> None:
+    """
+    Parses the agent's results and prints a structured, pretty-printed 
+    summary to the console for human review.
+    """
+    # 1. Error Handling
+    if result.get("error"):
+        print(f"\n❌ Agent finished with an error: {result['error']}\n")
+        return
+
+    # 2. Structure Validation
+    experiments = result.get("proposed_experiments")
+    if not experiments or not isinstance(experiments, list):
+        print("\n⚠️  The agent returned a result, but no experiments were found.")
+        # Optional: Print raw if debugging needed
+        # print(json.dumps(result, indent=2))
+        return
+
+    # 3. Header
+    print("\n" + "="*80)
+    print("✅ PROPOSED EXPERIMENTAL PLAN")
+    print("="*80)
+
+    # 4. Loop through Experiments
+    for i, exp in enumerate(experiments, 1):
+        
+        # --- Name & Hypothesis ---
+        print(f"\n🔬 EXPERIMENT {i}: {exp.get('experiment_name', 'Unnamed Experiment')}")
+        print("-" * 80)
+        print(f"\n> 🎯 Hypothesis:\n> {exp.get('hypothesis', 'N/A')}")
+
+        # --- Experimental Steps (Numbered) ---
+        print("\n--- 🧪 Experimental Steps ---")
+        steps = exp.get('experimental_steps', [])
+        if steps:
+            for j, step in enumerate(steps, 1):
+                print(f" {j}. {step}")
+        else:
+            print("  (No steps provided)")
+        
+        # --- Equipment ---
+        print("\n--- 🛠️  Required Equipment ---")
+        equipment = exp.get('required_equipment', [])
+        if equipment:
+            # Print as a clean comma-separated list if short, or bullets if long
+            if len(equipment) > 5:
+                for item in equipment: print(f"  * {item}")
+            else:
+                print(f"  {', '.join(equipment)}")
+        else:
+            print("  (No equipment specified)")
+
+        # --- Outcome & Justification (Critical for Review) ---
+        print("\n--- 📈 Expected Outcome ---")
+        print(f"  {exp.get('expected_outcome', 'N/A')}")
+
+        print("\n--- 💡 Justification ---")
+        print(f"  {exp.get('justification', 'N/A')}")
+        
+        # --- Source Documents ---
+        print("\n--- 📄 Source Documents ---")
+        sources = exp.get('source_documents', [])
+        if sources:
+            for src in sources:
+                print(f"  - {src}")
+        else:
+            print("  (No sources listed)")
+
+        # --- Code Indicator (If generated) ---
+        if "implementation_code" in exp:
+            print("\n--- 💻 Implementation Code ---")
+            print("  ✅ Python script generated (saved to file).")
+
+    print("\n" + "="*80)
+
+
+def get_user_feedback() -> Optional[str]:
+    """
+    Pauses execution to get user input via the CLI. 
+    Returns None if the user just presses ENTER (indicating approval).
+    """
+    print("\n" + "-"*60)
+    
+    print("👤 HUMAN FEEDBACK STEP")
+    print("-" * 60)
+    print("Review the plan above.")
+    print("• To APPROVE: Press [ENTER] directly.")
+    print("• To REQUEST CHANGES: Type your feedback/instructions and press [ENTER].")
+    
+    feedback = input("\n> Instruction: ").strip()
+    
+    if not feedback:
+        return None # User accepted the plan
+        
+    return feedback
+
