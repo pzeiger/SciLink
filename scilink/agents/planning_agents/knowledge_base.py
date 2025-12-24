@@ -45,6 +45,7 @@ class KnowledgeBase:
             
         self.index = None
         self.chunks = []
+        self.sources: List[str | Dict[str, str]] = []
         
         # Registry for Repo Maps: {'repo_name': 'tree_structure_string'}
         # This stores the visual directory trees for any repo you ingest.
@@ -59,8 +60,8 @@ class KnowledgeBase:
             print("⚠️  KnowledgeBase build skipped: No chunks provided.")
             return
 
-        self.chunks = chunks
-        texts_to_embed = [chunk['text'] for chunk in self.chunks]
+        self.chunks.extend(chunks)
+        texts_to_embed = [chunk['text'] for chunk in chunks]
         all_embeddings = []
         
         print(f"  - Generating embeddings for {len(texts_to_embed)} chunks using '{self.embedding_model_name}'...")
@@ -94,14 +95,18 @@ class KnowledgeBase:
                     raise e
 
         embeddings_np = np.array(all_embeddings, dtype=np.float32)
-        
-        print("  - Building FAISS vector index...")
         dimension = embeddings_np.shape[1]
-        self.index = faiss.IndexFlatL2(dimension)
+
+        if self.index is None: 
+            print("  - Building FAISS vector index...")
+            self.index = faiss.IndexFlatL2(dimension)
+        else:
+            print("  - Appending to existing FAISS vector index...")
+
         self.index.add(embeddings_np)
         print("  - ✅ Knowledge base built successfully.")
 
-    def save(self, index_path: str, chunks_path: str, repo_map_path: str = None):
+    def save(self, index_path: str, chunks_path: str, repo_map_path: str = None, sources_path: str = None):
         """Saves the FAISS index, text chunks, and optionally the repo maps to disk."""
         if self.index:
             faiss.write_index(self.index, index_path)
@@ -110,6 +115,10 @@ class KnowledgeBase:
         with open(chunks_path, 'w', encoding='utf-8') as f:
             json.dump(self.chunks, f, indent=2)
             print(f"  - Chunks saved to {chunks_path}")
+
+        with open(sources_path, 'w', encoding='utf-8') as f:
+            json.dump(self.sources, f, indent=2)
+            print(f"  - Sources saved to {sources_path}")
 
         # Save Repo Maps Registry
         if repo_map_path and self.repo_maps:
@@ -120,13 +129,14 @@ class KnowledgeBase:
             except Exception as e:
                 print(f"  - ❌ Error saving repo maps: {e}")
 
-    def load(self, index_path: str, chunks_path: str, repo_map_path: str = None) -> bool:
+    def load(self, index_path: str, chunks_path: str, repo_map_path: str = None, sources_path: str = None) -> bool:
         """Loads a pre-built FAISS index, chunks, and repo maps from disk."""
         index_file = Path(index_path)
         chunks_file = Path(chunks_path)
+        sources_file = Path(sources_path)
 
-        if not index_file.exists() or not chunks_file.exists():
-            print("  - ⚠️  Cannot load: Index or chunks file missing.")
+        if not index_file.exists() or not chunks_file.exists() or not sources_file.exists() :
+            print("  - ⚠️  Cannot load: Index or chunks or sources file missing.")
             return False
             
         try:
@@ -134,6 +144,9 @@ class KnowledgeBase:
             with open(chunks_file, 'r', encoding='utf-8') as f:
                 self.chunks = json.load(f)
             
+            with open(sources_file, 'r', encoding='utf-8') as f:
+                self.sources = json.load(f)
+                
             # Load Repo Maps if path provided and file exists
             if repo_map_path and Path(repo_map_path).exists():
                 try:
@@ -143,7 +156,7 @@ class KnowledgeBase:
                 except Exception as e:
                     print(f"    - ⚠️ Error loading repo maps file: {e}")
             
-            print(f"  - ✅ Successfully loaded {len(self.chunks)} chunks and index with {self.index.ntotal} vectors.")
+            print(f"  - ✅ Successfully loaded {len(self.chunks)} chunks and index with {self.index.ntotal} vectors from {len(self.sources)} sources.")
             return True
         except Exception as e:
             print(f"  - ❌ Error loading knowledge base: {e}")
@@ -223,3 +236,38 @@ class KnowledgeBase:
             combined_map += "\n"
             
         return combined_map
+       
+    def source_difference(self, new_sources: List[str | Dict[str, str]]) -> List[str | Dict[str, str]]:
+        """Returns the subset of new sources which are not present in the existing sources."""
+        
+        if not new_sources:
+            return []
+
+        # Check if the new sources are dictionaries
+        contains_dict = any(isinstance(item, dict) for item in new_sources)
+        
+        if contains_dict:
+            # 1. Convert new sources to tuples for set comparison
+            new_sources_tuple = {tuple(sorted(d.items())) for d in new_sources if isinstance(d, dict)}
+            
+            # 2. Filter existing sources to ONLY check dictionaries
+            old_sources_tuple = {
+                tuple(sorted(d.items())) 
+                for d in self.sources 
+                if isinstance(d, dict)
+            }
+            
+            # 3. Calculate difference and convert back to dicts
+            difference_tuples = new_sources_tuple - old_sources_tuple
+            source_difference = [dict(t) for t in difference_tuples]
+            
+        else:
+            # 1. Filter existing sources to only check strings
+            existing_strings = {s for s in self.sources if isinstance(s, str)}
+            
+            # 2. Calculate difference
+            source_difference = list(set(new_sources) - existing_strings)
+        
+        # Update history
+        self.sources.extend(source_difference)
+        return source_difference

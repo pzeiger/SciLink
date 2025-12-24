@@ -115,12 +115,13 @@ class PlanningAgent:
         # --- Dual KnowledgeBase Initialization ---
         base_path = Path(kb_base_path)
         base_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         # 1. Scientific/Docs KB
         self.kb_docs = KnowledgeBase(google_api_key=google_api_key, embedding_model=embedding_model, local_model=local_model)
         self.kb_docs_prefix = base_path.parent / f"{base_path.name}_docs"
         self.kb_docs_index = str(self.kb_docs_prefix.with_suffix(".faiss"))
         self.kb_docs_chunks = str(self.kb_docs_prefix.with_suffix(".json"))
+        self.kb_docs_sources_path = str(self.kb_docs_prefix.with_suffix(".sources.json"))
 
         # 2. Implementation/Code KB
         self.kb_code = KnowledgeBase(google_api_key=google_api_key, embedding_model=embedding_model, local_model=local_model)
@@ -128,6 +129,7 @@ class PlanningAgent:
         self.kb_code_index = str(self.kb_code_prefix.with_suffix(".faiss"))
         self.kb_code_chunks = str(self.kb_code_prefix.with_suffix(".json"))
         self.kb_code_map_path = str(self.kb_code_prefix.with_suffix(".maps.json"))
+        self.kb_code_sources_path = str(self.kb_code_prefix.with_suffix(".sources.json"))
 
         print("--- Initializing Agent (Dual-KB System) ---")
         self._load_knowledge_bases()
@@ -185,10 +187,16 @@ class PlanningAgent:
     def _load_knowledge_bases(self):
         """Attempts to load both KBs from disk."""
         print(f"  - Docs KB: Loading from {self.kb_docs_prefix}...")
-        docs_loaded = self.kb_docs.load(self.kb_docs_index, self.kb_docs_chunks)
+        docs_loaded = self.kb_docs.load(
+            self.kb_docs_index, self.kb_docs_chunks,
+            sources_path=self.kb_docs_sources_path
+        )
         
         print(f"  - Code KB: Loading from {self.kb_code_prefix}...")
-        code_loaded = self.kb_code.load(self.kb_code_index, self.kb_code_chunks, self.kb_code_map_path)
+        code_loaded = self.kb_code.load(
+            self.kb_code_index, self.kb_code_chunks, self.kb_code_map_path,
+            sources_path=self.kb_code_sources_path
+        )
 
         self._kb_is_built = docs_loaded or code_loaded
         
@@ -302,15 +310,17 @@ class PlanningAgent:
             print(f"Processing {len(structured_data_sets)} Structured Data Sets...")
             for data_set in structured_data_sets:
                 try:
-                    if Path(data_set['file_path']).suffix.lower() in ['.xlsx', '.xls', '.csv']:
-                        excel_chunks = parse_adaptive_excel(data_set['file_path'], data_set['metadata_path'])
+                    data_set_path = data_set.get('file_path', '')
+                    metadata_path = data_set.get('metadata_path', '')
+                    if Path(data_set_path).suffix.lower() in ['.xlsx', '.xls', '.csv']:
+                        excel_chunks = parse_adaptive_excel(data_set_path, metadata_path)
                         if excel_chunks: doc_chunks.extend(excel_chunks)
                 except Exception as e: print(f"  - ❌ Error processing Excel: {e}")
 
         if doc_chunks:
             print(f"  - Building Scientific KB with {len(doc_chunks)} chunks...")
             self.kb_docs.build(doc_chunks)
-            self.kb_docs.save(self.kb_docs_index, self.kb_docs_chunks)
+            self.kb_docs.save(self.kb_docs_index, self.kb_docs_chunks, sources_path=self.kb_docs_sources_path)
         else:
             print("  - ℹ️  No Scientific docs provided. Docs KB unchanged (or empty).")
 
@@ -333,7 +343,12 @@ class PlanningAgent:
         if code_chunks:
             print(f"  - Building Code KB with {len(code_chunks)} chunks...")
             self.kb_code.build(code_chunks)
-            self.kb_code.save(self.kb_code_index, self.kb_code_chunks, self.kb_code_map_path)
+            self.kb_code.save(
+                self.kb_code_index, 
+                self.kb_code_chunks, 
+                self.kb_code_map_path,
+                self.kb_code_sources_path
+            )
         else:
             print("  - ℹ️  No Code docs provided. Code KB unchanged (or empty).")
 
@@ -341,10 +356,17 @@ class PlanningAgent:
         print("✅ Dual-KB Build Complete.")
         return True
 
-    def _ensure_kb_is_ready(self, science_paths, code_paths, structured_data_sets) -> bool:
-        new_inputs = (science_paths or []) or (code_paths or []) or (structured_data_sets or [])
+    def _ensure_kb_is_ready(self, 
+                            science_paths: Optional[List[str]] = None, 
+                            code_paths: Optional[List[str]] = None, 
+                            structured_data_sets: Optional[List[Dict[str, str]]] = None) -> bool:
+        new_science_sources = self.kb_docs.source_difference(science_paths)
+        new_data_sources = self.kb_docs.source_difference(structured_data_sets)
+        new_code_sources = self.kb_code.source_difference(code_paths)
+        new_inputs = new_science_sources or new_data_sources or new_code_sources
+
         if new_inputs:
-            return self._build_and_save_kb(science_paths, code_paths, structured_data_sets)
+            return self._build_and_save_kb(new_science_sources, new_code_sources, new_data_sources)
         elif not self._kb_is_built:
             logging.error("Knowledge base is not built.")
             return False
