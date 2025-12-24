@@ -37,6 +37,9 @@ from .rag_engine import (
     refine_code_with_feedback,
     verify_plan_relevance
 )
+
+from .ingestor import ingest_files
+
 from .user_interface import display_plan_summary, get_user_feedback
 
 from .html_generator import HTMLReportGenerator
@@ -250,123 +253,52 @@ class PlanningAgent:
             with p.open('w', encoding='utf-8') as f: json.dump(self.state, f, indent=2)
         except Exception as e: logging.error(f"    - ❌ Failed to save state: {e}")
 
-    def _process_file_list(self, file_paths: List[str], is_code_mode: bool, repo_name: str = None) -> List[Dict[str, Any]]:
-        """Generic helper to process a list of files OR directories."""
-        chunks = []
-        expanded_paths = []
-        if file_paths:
-            for f_path in file_paths:
-                path_obj = Path(f_path)
-                if path_obj.is_dir():
-                    expanded_paths.extend(get_files_from_directory(f_path))
-                else:
-                    expanded_paths.append(f_path)
-
-        for f_path in expanded_paths:
-            path = Path(f_path)
-            if not path.exists():
-                print(f"  - ⚠️ File not found: {f_path}")
-                continue
-            
-            file_ext = path.suffix.lower()
-            if file_ext == '.pdf':
-                pdf_chunks = extract_pdf_two_pass(f_path)
-                if is_code_mode:
-                    for c in pdf_chunks: c['metadata']['content_type'] = 'code'
-                chunks.extend(pdf_chunks)
-            elif file_ext in ['.txt', '.md', '.py', '.java', '.r', '.cpp', '.h', '.js', '.json', '.csv']:
-                try:
-                    with path.open('r', encoding='utf-8') as f: content = f.read()
-                    if is_code_mode:
-                        formatted_text = f"CODE FILE: {path.name}\n\n```\n{content}\n```"
-                        chunk_sz = self.code_chunk_size
-                        ctype = 'code'
-                    else:
-                        formatted_text = f"DOCUMENT: {path.name}\n\n{content}"
-                        chunk_sz = 1000
-                        ctype = 'text'
-                    new_chunks = chunk_text(formatted_text, page_num=1, chunk_size=chunk_sz, overlap=50)
-                    for c in new_chunks: 
-                        c['metadata']['content_type'] = ctype
-                        c['metadata']['source'] = f_path
-                    chunks.extend(new_chunks)
-                    print(f"  - Extracted {len(new_chunks)} chunks from {path.name} ({'Code' if is_code_mode else 'Docs'} Mode)")
-                except Exception as e:
-                    print(f"  - ❌ Error reading {f_path}: {e}")
-            else:
-                print(f"  - ⚠️ Unsupported file type: {f_path}")
-        return chunks
-
-    def _build_and_save_kb(self, science_paths: Optional[List[str]] = None, code_paths: Optional[List[str]] = None, structured_data_sets: Optional[List[Dict[str, str]]] = None) -> bool:
-        """Builds TWO separate knowledge bases based on explicit input lists."""
+    def _build_and_save_kb(self, science_paths: Optional[List[str]] = None, code_paths: Optional[List[str]] = None) -> bool:
         print("\n--- Rebuilding Knowledge Bases ---")
         
-        # 1. Build Docs KB (Science)
+        # 1. Science KB
         doc_chunks = []
         if science_paths:
-            print(f"Processing {len(science_paths)} Scientific Documents...")
-            doc_chunks.extend(self._process_file_list(science_paths, is_code_mode=False))
-        if structured_data_sets:
-            print(f"Processing {len(structured_data_sets)} Structured Data Sets...")
-            for data_set in structured_data_sets:
-                try:
-                    data_set_path = data_set.get('file_path', '')
-                    metadata_path = data_set.get('metadata_path', '')
-                    if Path(data_set_path).suffix.lower() in ['.xlsx', '.xls', '.csv']:
-                        excel_chunks = parse_adaptive_excel(data_set_path, metadata_path)
-                        if excel_chunks: doc_chunks.extend(excel_chunks)
-                except Exception as e: print(f"  - ❌ Error processing Excel: {e}")
+            print(f"Processing {len(science_paths)} Scientific Paths...")
+            doc_chunks.extend(ingest_files(science_paths, is_code_mode=False))
 
         if doc_chunks:
             print(f"  - Building Scientific KB with {len(doc_chunks)} chunks...")
             self.kb_docs.build(doc_chunks)
             self.kb_docs.save(self.kb_docs_index, self.kb_docs_chunks, sources_path=self.kb_docs_sources_path)
         else:
-            print("  - ℹ️  No Scientific docs provided. Docs KB unchanged (or empty).")
+            print("  - ℹ️  No Scientific docs provided. Docs KB unchanged.")
 
-        # 2. Build Code KB (Implementation)
+        # 2. Code KB
         code_chunks = []
         if code_paths:
-            print(f"Processing {len(code_paths)} Implementation/Code Documents...")
+            print(f"Processing {len(code_paths)} Code Paths...")
             for p in code_paths:
                 path_obj = Path(p)
                 if path_obj.is_dir():
                     repo_name = path_obj.name
                     print(f"  - 📦 Processing Repo: {repo_name}")
                     self.kb_code.repo_maps[repo_name] = generate_repo_map(str(path_obj))
-                    repo_chunks = self._process_file_list([p], is_code_mode=True, repo_name=repo_name)
-                    code_chunks.extend(repo_chunks)
+                    code_chunks.extend(ingest_files([p], is_code_mode=True, code_chunk_size=self.code_chunk_size, repo_name=repo_name))
                 else:
-                    file_chunks = self._process_file_list([p], is_code_mode=True)
-                    code_chunks.extend(file_chunks)
+                    code_chunks.extend(ingest_files([p], is_code_mode=True, code_chunk_size=self.code_chunk_size))
             
         if code_chunks:
             print(f"  - Building Code KB with {len(code_chunks)} chunks...")
             self.kb_code.build(code_chunks)
-            self.kb_code.save(
-                self.kb_code_index, 
-                self.kb_code_chunks, 
-                self.kb_code_map_path,
-                self.kb_code_sources_path
-            )
+            self.kb_code.save(self.kb_code_index, self.kb_code_chunks, self.kb_code_map_path, self.kb_code_sources_path)
         else:
-            print("  - ℹ️  No Code docs provided. Code KB unchanged (or empty).")
+            print("  - ℹ️  No Code docs provided. Code KB unchanged.")
 
         self._kb_is_built = True
-        print("✅ Dual-KB Build Complete.")
         return True
 
-    def _ensure_kb_is_ready(self, 
-                            science_paths: Optional[List[str]] = None, 
-                            code_paths: Optional[List[str]] = None, 
-                            structured_data_sets: Optional[List[Dict[str, str]]] = None) -> bool:
-        new_science_sources = self.kb_docs.source_difference(science_paths)
-        new_data_sources = self.kb_docs.source_difference(structured_data_sets)
-        new_code_sources = self.kb_code.source_difference(code_paths)
-        new_inputs = new_science_sources or new_data_sources or new_code_sources
-
-        if new_inputs:
-            return self._build_and_save_kb(new_science_sources, new_code_sources, new_data_sources)
+    def _ensure_kb_is_ready(self, science_paths: Optional[List[str]] = None, code_paths: Optional[List[str]] = None) -> bool:
+        new_science = self.kb_docs.source_difference(science_paths)
+        new_code = self.kb_code.source_difference(code_paths)
+        
+        if new_science or new_code:
+            return self._build_and_save_kb(new_science, new_code)
         elif not self._kb_is_built:
             logging.error("Knowledge base is not built.")
             return False
@@ -402,9 +334,12 @@ class PlanningAgent:
                     - "Develop a high-throughput assay for enzyme activity"
             
             science_paths (Optional[List[str]]): Paths to scientific documents/data.
-                Supported formats: PDFs, .txt, .md, directories (recursively searched)
+                Supported formats: PDFs, .txt, .md, .xlsx, .csv, directories.
+                You can pass Excel/CSV files directly here. If a .json file 
+                with the same name exists next to the data file, it is automatically 
+                loaded as metadata.
                 These populate the Docs Knowledge Base for hypothesis generation.
-                Examples: ["./papers/", "./lab_notebooks/protocol.pdf"]
+                Example: ["./papers/", "./lab_notebooks/protocol.pdf", "./public_data.xlsx", "./public_data.json" ]
             
             code_paths (Optional[List[str]]): Paths to code repositories or API documentation.
                 Supported formats: Local directories, Git URLs, Python files
@@ -413,11 +348,8 @@ class PlanningAgent:
                     - ["./opentrons_api/"]  # Local repo
                     - ["https://github.com/org/automation-lib.git"]  # Git URL
             
-            structured_data_sets (Optional[List[Dict[str, str]]]): Large Excel/CSV datasets
-                with metadata for adaptive parsing. Each dict should contain:
-                    - 'file_path': Path to .xlsx or .csv file
-                    - 'metadata_path': Path to .json metadata file (optional)
-                Example: [{"file_path": "./data.xlsx", "metadata_path": "./data.json"}]
+            structured_data_sets (Optional[List[Dict[str, str]]]): Legacy argument for explicit data definition. 
+                Prefer passing files directly to 'science_paths' for simplicity.
             
             additional_context (Optional[Dict[str, str]]): Additional text context
                 to inject into the prompt. Keys become section headers.
@@ -502,7 +434,7 @@ class PlanningAgent:
         
 
         # 3. Init KB
-        if not self._ensure_kb_is_ready(science_paths, effective_code_paths, structured_data_sets):
+        if not self._ensure_kb_is_ready(science_paths, effective_code_paths):
             self.state["status"] = "failed"
             self.state["last_error"] = "KB Init Failed"
             return self.state
@@ -1047,8 +979,6 @@ class PlanningAgent:
 
     def perform_technoeconomic_analysis(self, objective: str,
                                         science_paths: Optional[List[str]] = None,
-                                        code_paths: Optional[List[str]] = None, 
-                                        structured_data_sets: Optional[List[Dict[str, str]]] = None,
                                         primary_data_set: Optional[Dict[str, str]] = None,
                                         image_paths: Optional[List[str]] = None,
                                         image_descriptions: Optional[List[str]] = None,
@@ -1093,16 +1023,8 @@ class PlanningAgent:
         
         science_paths (Optional[List[str]]): Paths to documents for TEA context.
             Should include market data, pricing reports, criticality assessments,
-            existing TEA studies, and process descriptions.
-            Examples: ["./market_reports/", "./critical_materials_report.pdf"]
-        
-        code_paths (Optional[List[str]]): Paths to code (typically unused for TEA).
-            Included for consistency with propose_experiments API.
-            TEA rarely requires code generation.
-        
-        structured_data_sets (Optional[List[Dict[str, str]]]): Excel/CSV datasets
-            containing economic data (prices, concentrations, yields, etc.).
-            Example: [{"file_path": "./commodity_prices.xlsx"}]
+            existing TEA studies, and process descriptions. Supports both PDF/TXT and Excel/CSV.
+            Examples: ["./market_reports/", "./critical_materials_report.pdf", "./public_data.xlsx", "./public_data.json"]
         
         primary_data_set (Optional[Dict[str, str]]): Main dataset for analysis.
             Typically contains composition, concentration, or yield data.
@@ -1158,7 +1080,7 @@ class PlanningAgent:
             self.state = self._initialize_state(
                 objective=objective,
                 science_paths=science_paths,
-                code_paths=code_paths,
+                code_paths=None,
                 primary_data_set=primary_data_set,
                 image_paths=image_paths,
                 image_descriptions=image_descriptions
@@ -1168,7 +1090,7 @@ class PlanningAgent:
         self.state["iteration_index"] = 0
 
         # 2. Build KB if needed
-        if not self._ensure_kb_is_ready(science_paths, code_paths, structured_data_sets):
+        if not self._ensure_kb_is_ready(science_paths, code_paths=None):
             return {"error": "KB Init Failed"}
         
         # 3. Literature Search
