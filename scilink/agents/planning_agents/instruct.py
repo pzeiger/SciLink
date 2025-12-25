@@ -290,6 +290,13 @@ Your goal is to write a Python script that converts raw experimental data files 
   "metrics": { "target_metric": 123.4 },
   "plot_path": "analysis_artifacts/debug_filename.png"
 }
+
+**LLM RESPONSE FORMAT:**
+You (the Agent) must return a single JSON object containing the code:
+{
+  "thought_process": "Brief explanation of the approach...",
+  "implementation_code": "import pandas as pd\\nimport numpy as np..."
+}
 """
 
 SCALARIZER_REFLECTION_PROMPT = """

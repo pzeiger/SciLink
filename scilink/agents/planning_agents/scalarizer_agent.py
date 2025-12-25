@@ -239,8 +239,11 @@ class ScalarizerAgent:
                 return {"error": f"LLM Generation Error: {e}"}
 
             if error or not result or "implementation_code" not in result:
-                # If LLM produces garbage, try again with simple feedback
-                current_prompt = base_prompt + f"\n\n**PREVIOUS ERROR:** JSON parsing failed. Return ONLY valid JSON."
+                err_msg = error if error else "Missing 'implementation_code' key"
+                print(f"    ⚠️ Generation Failed (Invalid JSON): {err_msg}")
+                print("    --> Retrying with stricter JSON instructions...")
+                # Update prompt to force JSON compliance
+                current_prompt = base_prompt + f"\n\n**PREVIOUS ERROR:** JSON parsing failed ({err_msg}). Return ONLY valid JSON."
                 continue
 
             # Save Script
@@ -252,9 +255,13 @@ class ScalarizerAgent:
             exec_res = self._execute_script(script_path)
             
             if exec_res["status"] == "failure":
-                print(f"    ❌ Runtime Error. Retrying...")
+                err_msg = exec_res.get('stderr', 'Unknown Error').strip()
+                # Truncate if too long for console readability
+                display_err = (err_msg[:300] + '...') if len(err_msg) > 300 else err_msg
+                print(f"    ❌ Runtime Error:\n    {display_err}")
+                
                 # Feed stderr back to LLM
-                current_prompt = base_prompt + f"\n\n**RUNTIME ERROR:**\n{exec_res.get('stderr')}\nFix the code."
+                current_prompt = base_prompt + f"\n\n**RUNTIME ERROR:**\n{err_msg}\nFix the code."
                 continue
                 
             # Auto-Reflection (Visual Check)
