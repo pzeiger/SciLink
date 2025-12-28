@@ -10,6 +10,8 @@ import pandas as pd
 from pathlib import Path
 from typing import Dict, Any, Callable
 
+from .parser_utils import write_experiments_to_disk
+
 
 class OrchestratorTools:
     """
@@ -33,7 +35,7 @@ class OrchestratorTools:
     def _register_all_tools(self):
         """Register all tools with both OpenAI and Gemini formats."""
         
-        # 1. LIST WORKSPACE FILES
+        # 0. LIST WORKSPACE FILES
         def list_workspace_files():
             """Lists files in the campaign directory including analysis artifacts."""
             print(f"  ⚡ Tool: Listing files in {self.orch.base_dir}...")
@@ -69,15 +71,19 @@ class OrchestratorTools:
             parameters={}
         )
         
-        # 2. GENERATE INITIAL PLAN
+        # 1. GENERATE INITIAL PLAN
         def generate_initial_plan(
             specific_objective: str = None, 
             knowledge_paths: str = None, 
-            code_paths: str = None,
             primary_data_set: str = None,
             additional_context: str = None
         ):
-            """Generates the first experimental plan."""
+            """
+            Generates experimental plan (science strategy only, no code).
+            
+            Note: code_paths parameter is deprecated. Use generate_implementation_code() 
+            as a separate step to add code after plan approval.
+            """
             obj = specific_objective if specific_objective else self.orch.objective
             print(f"  ⚡ Tool: Generating Initial Plan for '{obj}'...")
             
@@ -86,7 +92,7 @@ class OrchestratorTools:
             if knowledge_paths:
                 knowledge_list = [p.strip() for p in knowledge_paths.split(',') if p.strip()]
                 
-                # Validate paths exist
+                # Validate paths
                 invalid_paths = []
                 for path in knowledge_list:
                     if not Path(path).exists():
@@ -96,47 +102,10 @@ class OrchestratorTools:
                     return json.dumps({
                         "status": "error",
                         "message": f"Knowledge paths not found: {', '.join(invalid_paths)}",
-                        "hint": "Check folder names and spelling. Verify folders exist in current directory.",
-                        "provided_paths": knowledge_list
+                        "hint": "Check folder names and spelling"
                     })
                 
                 print(f"    📚 Knowledge sources: {knowledge_list}")
-            
-            # Parse code paths
-            code_list = None
-            if code_paths:
-                code_list = [p.strip() for p in code_paths.split(',') if p.strip()]
-                
-                # Validate paths exist
-                invalid_paths = []
-                for path in code_list:
-                    if not Path(path).exists():
-                        invalid_paths.append(path)
-                
-                if invalid_paths:
-                    # Check for common typos
-                    suggestions = []
-                    for invalid in invalid_paths:
-                        # Try to find similar folder names
-                        parent = Path(invalid).parent
-                        if parent.exists():
-                            similar = [f.name for f in parent.iterdir() 
-                                    if f.is_dir() and invalid.lower() in f.name.lower()]
-                            if similar:
-                                suggestions.append(f"Did you mean './{similar[0]}'?")
-                    
-                    hint = "Check folder names and spelling."
-                    if suggestions:
-                        hint += " " + " ".join(suggestions)
-                    
-                    return json.dumps({
-                        "status": "error",
-                        "message": f"Code paths not found: {', '.join(invalid_paths)}",
-                        "hint": hint,
-                        "provided_paths": code_list
-                    })
-                
-                print(f"    💻 Code sources: {code_list}")
             
             # Parse primary dataset
             primary_dataset = None
@@ -147,108 +116,224 @@ class OrchestratorTools:
                         primary_dataset = {"file_path": str(path)}
                         print(f"    📊 Primary data (file): {path.name}")
                     elif path.is_dir():
-                        # Find all supported files
                         all_files = []
                         for ext in ['*.csv', '*.xlsx', '*.txt', '*.json']:
                             all_files.extend(path.glob(ext))
                         
                         if all_files:
-                            # Use first file as primary
                             first_file = str(all_files[0])
                             primary_dataset = {"file_path": first_file}
                             print(f"    📊 Primary data (folder): {len(all_files)} files found, using {Path(first_file).name}")
                         else:
-                            print(f"    ⚠️  No supported files (.csv, .xlsx, .txt, .json) in: {primary_data_set}")
+                            print(f"    ⚠️  No supported files in: {primary_data_set}")
                 else:
                     print(f"    ⚠️  Primary data path not found: {primary_data_set}")
             
-            # Build additional context by combining user input + TEA results
+            # Build context
             context_parts = []
             
             if additional_context:
                 context_parts.append(f"User Requirements: {additional_context}")
                 print(f"    ℹ️  User context: {additional_context[:60]}...")
             
-            # Auto-include TEA results if available
+            # Auto-include TEA results
             if self.orch.latest_tea_results:
                 tea_summary = self.orch.latest_tea_results.get('summary', '')
                 context_parts.append(f"Economic Analysis Results: {tea_summary}")
                 print(f"    💰 Including TEA results in context")
             
-            # Combine all context
             context_dict = None
             if context_parts:
                 context_dict = {"user_context": "\n\n".join(context_parts)}
             
             try:
-                state = self.orch.planner.propose_experiments(
+                # Call the new generate_plan method (not propose_experiments!)
+                plan = self.orch.planner.generate_plan(
                     objective=obj,
                     knowledge_paths=knowledge_list,
-                    code_paths=code_list,
                     primary_data_set=primary_dataset,
                     additional_context=context_dict,
-                    output_json_path=str(self.orch.base_dir / "plan.json")
+                    enable_human_feedback=True,
+                    reset_state=False
                 )
                 
-                if state.get("status") == "failed":
+                if plan.get("error"):
                     return json.dumps({
                         "status": "error",
-                        "message": state.get("last_error", "Planning failed"),
-                        "hint": "Check if knowledge base was built correctly"
+                        "message": plan.get("error")
                     })
                 
-                num_experiments = len(state.get('current_plan', {}).get('proposed_experiments', []))
+                # Save
+                output_path = self.orch.base_dir / "plan.json"
+                with open(output_path, 'w') as f:
+                    json.dump(plan, f, indent=2)
+                
+                # Generate HTML
+                from .html_generator import HTMLReportGenerator
+                html_path = self.orch.base_dir / "plan.html"
+                generator = HTMLReportGenerator(self.orch.planner.state)
+                generator.generate(str(html_path))
+                
+                num_experiments = len(plan.get('proposed_experiments', []))
                 
                 return json.dumps({
                     "status": "success",
-                    "iteration": state.get('iteration_index'),
+                    "iteration": plan.get('iteration'),
                     "num_experiments": num_experiments,
-                    "output_path": str(self.orch.base_dir / "plan.json"),
-                    "html_report": str(self.orch.base_dir / "plan.html"), 
+                    "output_path": str(output_path),
+                    "html_report": str(html_path),
                     "knowledge_used": knowledge_list is not None,
-                    "code_knowledge_used": code_list is not None,
                     "primary_data_used": primary_dataset is not None,
-                    "tea_context_included": self.orch.latest_tea_results is not None
+                    "tea_context_included": self.orch.latest_tea_results is not None,
+                    "hint": "Use generate_implementation_code() to add executable code"
                 })
                 
             except Exception as e:
                 logging.error(f"Plan generation error: {e}", exc_info=True)
                 return json.dumps({
                     "status": "error",
-                    "message": str(e),
-                    "hint": "Check logs for detailed error information"
+                    "message": str(e)
                 })
 
+        # Register it
         self._register_tool(
             func=generate_initial_plan,
             name="generate_initial_plan",
             description=(
-                "Generates experimental plan. Automatically includes previous TEA results if available. "
-                "Can use: papers/reports, code/APIs, experimental data, lab constraints."
+                "Generates experimental plan (science strategy only, no implementation code). "
+                "Automatically includes previous TEA results if available. "
+                "Can use: papers/reports, experimental data, lab constraints."
             ),
             parameters={
-                "specific_objective": {
-                    "type": "string",
-                    "description": "Research objective"
-                },
-                "knowledge_paths": {
-                    "type": "string",
-                    "description": "Comma-separated paths to papers/reports/docs folders"
-                },
-                "code_paths": {
-                    "type": "string",
-                    "description": "Comma-separated paths to code/API folders"
-                },
-                "primary_data_set": {
-                    "type": "string",
-                    "description": "Path to experimental data file or folder (always include if user mentions data)"
-                },
-                "additional_context": {
-                    "type": "string",
-                    "description": "Lab constraints, equipment, reagents, budget, etc. TEA results auto-included separately."
-                }
+                "specific_objective": {"type": "string", "description": "Research objective"},
+                "knowledge_paths": {"type": "string", "description": "Comma-separated paths to papers/reports/docs folders"},
+                "primary_data_set": {"type": "string", "description": "Path to experimental data file or folder"},
+                "additional_context": {"type": "string", "description": "Lab constraints, equipment, reagents, budget, etc."}
             },
             required=[]
+        )
+
+        # 2. GENERATE IMPLEMENTATION CODE
+        def generate_implementation_code(code_paths: str):
+            """
+            Adds implementation code to the most recent experimental plan.
+            Use after generate_initial_plan() to map experiments to executable code.
+            """
+            
+            if not self.orch.planner.state or not self.orch.planner.state.get("current_plan"):
+                return json.dumps({
+                    "status": "error",
+                    "message": "No active plan. Generate a plan first using generate_initial_plan()"
+                })
+            
+            current_plan = self.orch.planner.state["current_plan"]
+            
+            # Check if already has code
+            if current_plan.get("proposed_experiments"):
+                has_code = any(exp.get("implementation_code") for exp in current_plan["proposed_experiments"])
+                if has_code:
+                    return json.dumps({
+                        "status": "warning",
+                        "message": "Plan already has implementation code",
+                        "hint": "Generate a new plan if you want to change the code source"
+                    })
+            
+            print(f"  ⚡ Tool: Generating implementation code for existing plan...")
+            
+            # Parse code paths
+            code_list = [p.strip() for p in code_paths.split(',') if p.strip()]
+            
+            # Validate paths
+            invalid_paths = []
+            for path in code_list:
+                if not Path(path).exists():
+                    invalid_paths.append(path)
+            
+            if invalid_paths:
+                # Check for common typos
+                suggestions = []
+                for invalid in invalid_paths:
+                    parent = Path(invalid).parent
+                    if parent.exists():
+                        similar = [f.name for f in parent.iterdir() 
+                                if f.is_dir() and invalid.lower() in f.name.lower()]
+                        if similar:
+                            suggestions.append(f"Did you mean './{similar[0]}'?")
+                
+                hint = "Check folder names and spelling."
+                if suggestions:
+                    hint += " " + " ".join(suggestions)
+                
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Code paths not found: {', '.join(invalid_paths)}",
+                    "hint": hint
+                })
+            
+            print(f"    💻 Code sources: {code_list}")
+            
+            try:
+                # Call the new method!
+                updated_plan = self.orch.planner.generate_implementation_code(
+                    plan=current_plan,
+                    code_paths=code_list,
+                    enable_human_feedback=True  # Will pause for code review
+                )
+                
+                if updated_plan.get("error"):
+                    return json.dumps({
+                        "status": "error",
+                        "message": updated_plan.get("error")
+                    })
+                
+                # Save
+                output_path = self.orch.base_dir / "plan.json"
+                with open(output_path, 'w') as f:
+                    json.dump(updated_plan, f, indent=2)
+                
+                # Regenerate HTML
+                from .html_generator import HTMLReportGenerator
+                html_path = self.orch.base_dir / "plan.html"
+                generator = HTMLReportGenerator(self.orch.planner.state)
+                generator.generate(str(html_path))
+                
+                # Save scripts to output folder
+                final_out = "./output_scripts"
+                print(f"\n--- Saving Scripts to: {final_out} ---")
+                write_experiments_to_disk(updated_plan, final_out)
+                
+                return json.dumps({
+                    "status": "success",
+                    "message": "Implementation code added to plan",
+                    "output_path": str(output_path),
+                    "html_report": str(html_path),
+                    "scripts_saved_to": final_out,
+                    "code_sources_used": code_list
+                })
+                
+            except Exception as e:
+                logging.error(f"Code generation error: {e}", exc_info=True)
+                return json.dumps({
+                    "status": "error",
+                    "message": str(e)
+                })
+
+        # Register it
+        self._register_tool(
+            func=generate_implementation_code,
+            name="generate_implementation_code",
+            description=(
+                "Generates executable implementation code for the most recent experimental plan. "
+                "Maps experimental steps to code using API documentation and example repositories. "
+                "Use after generate_initial_plan() once the scientific strategy is approved."
+            ),
+            parameters={
+                "code_paths": {
+                    "type": "string",
+                    "description": "Comma-separated paths to code/API folders (e.g., './opentrons_api', './automation_lib')"
+                }
+            },
+            required=["code_paths"]
         )
         
         # 3. RUN ECONOMIC ANALYSIS

@@ -302,6 +302,262 @@ class PlanningAgent:
             logging.error("Knowledge base is not built.")
             return False
         return True
+    
+    def generate_plan(self,
+                    objective: str,
+                    knowledge_paths: Optional[List[str]] = None,
+                    primary_data_set: Optional[Union[str, Dict[str, str]]] = None,
+                    additional_context: Optional[Dict[str, str]] = None,
+                    image_paths: Optional[List[str]] = None,
+                    image_descriptions: Optional[List[str]] = None,
+                    enable_human_feedback: bool = True,
+                    reset_state: bool = False) -> Dict[str, Any]:
+        """
+        Generate experimental plan (science only, no implementation code/protocol).
+        
+        This method performs:
+        1. Knowledge base initialization (docs only)
+        2. Literature search (optional)
+        3. RAG-based hypothesis generation
+        4. Self-correction loop
+        5. Human feedback on strategy
+        
+        Does NOT generate implementation code. Use generate_implementation_code() for that.
+        
+        Returns:
+            Dict with proposed_experiments
+        """
+        
+        # Resolve data and images
+        primary_data_set = resolve_primary_data_path(primary_data_set)
+        manual_images = image_paths or []
+        auto_images = [img for img in extract_images(knowledge_paths) if img not in manual_images]
+        all_image_paths = manual_images + auto_images
+        
+        # Initialize or update state
+        if reset_state or not self.state:
+            self.state = self._initialize_state(
+                objective=objective,
+                knowledge_paths=knowledge_paths,
+                code_paths=None,  # ← Not used in plan generation
+                additional_context=additional_context,
+                primary_data_set=primary_data_set,
+                image_paths=all_image_paths,
+                image_descriptions=image_descriptions
+            )
+        else:
+            print(f"  - 🔄 Appending to existing research session...")
+            if objective:
+                self.state["objective"] = objective
+        
+        # Increment iteration
+        existing_iter = self.state.get("iteration_index", 0)
+        self.state["iteration_index"] = existing_iter + 1
+        current_iter = self.state["iteration_index"]
+        
+        # Build KB (docs only)
+        if not self._ensure_kb_is_ready(knowledge_paths, code_paths=None):
+            self.state["status"] = "failed"
+            self.state["last_error"] = "KB Init Failed"
+            return self.state
+        
+        # Build context string
+        ctx_string = ""
+        if additional_context:
+            for header, content in additional_context.items():
+                ctx_string += f"## {header}\n{content}\n\n"
+            ctx_string = ctx_string.strip() if ctx_string else None
+        
+        # Literature search
+        lit_context = ""
+        if self.lit_agent:
+            print(f"  - 🌍 Querying literature...")
+            lit_res = self.lit_agent.search_for_hypothesis_context(
+                optimize_search_query(objective=objective, model=self.model)
+            )
+            if lit_res['status'] == 'success':
+                lit_context = lit_res['content']
+        
+        # RAG for science plan
+        print(f"\n--- Generating Experimental Strategy ---")
+        res = perform_science_rag(
+            objective=objective,
+            instructions=HYPOTHESIS_GENERATION_INSTRUCTIONS,
+            task_name="Experimental Plan",
+            kb_docs=self.kb_docs,
+            model=self.model,
+            generation_config=self.generation_config,
+            primary_data_set=primary_data_set,
+            image_paths=all_image_paths,
+            image_descriptions=image_descriptions,
+            additional_context=ctx_string,
+            external_context=lit_context
+        )
+        
+        if lit_context:
+            res["literature_search"] = lit_context
+        
+        # Snapshot 1: Science Draft
+        res["iteration"] = current_iter
+        res["stage"] = "Science Draft"
+        self.state["plan_history"].append(res.copy())
+        self.state["current_plan"] = res
+        
+        # Self-correction
+        if not res.get("error"):
+            is_relevant, critique = verify_plan_relevance(objective, res, self.model, self.generation_config)
+            
+            if not is_relevant:
+                print(f"\n🔄 Self-correction triggered: {critique}")
+                res = refine_plan_with_feedback(
+                    original_result=res,
+                    feedback=f"CRITICAL: {critique}",
+                    objective=objective,
+                    model=self.model,
+                    generation_config=self.generation_config
+                )
+                
+                res["iteration"] = current_iter
+                res["stage"] = "Auto-Corrected"
+                self.state["plan_history"].append(res.copy())
+                self.state["current_plan"] = res
+        
+        # Human feedback on strategy
+        if enable_human_feedback and res.get("proposed_experiments") and not res.get("error"):
+            display_plan_summary(res)
+            user_feedback = get_user_feedback()
+            
+            if user_feedback:
+                print(f"\n📝 Refining plan...")
+                self.state["human_feedback_history"].append({"phase": "science", "feedback": user_feedback})
+                res = refine_plan_with_feedback(
+                    original_result=res,
+                    feedback=user_feedback,
+                    objective=objective,
+                    model=self.model,
+                    generation_config=self.generation_config
+                )
+                
+                res["iteration"] = current_iter
+                res["stage"] = "Human Refined (Science)"
+                self.state["plan_history"].append(res.copy())
+                self.state["current_plan"] = res
+                
+                display_plan_summary(res)
+                print("✅ Plan updated.")
+            else:
+                print("✅ Plan accepted.")
+        
+        self.state["status"] = "planned"
+        
+        return res
+    
+    def generate_implementation_code(self,
+                                    plan: Dict[str, Any],
+                                    code_paths: List[str],
+                                    enable_human_feedback: bool = True) -> Dict[str, Any]:
+        """
+        Add implementation code to an existing experimental plan.
+        
+        This method:
+        1. Builds code knowledge base
+        2. Performs code RAG to map experiments to APIs
+        3. Provides human code review
+        
+        Args:
+            plan: Existing plan dict (must have proposed_experiments)
+            code_paths: Paths to code/API repositories
+            enable_human_feedback: If True, pauses for code review
+        
+        Returns:
+            Updated plan dict with implementation_code added to experiments
+        """
+        
+        # Resolve code paths (handle Git URLs)
+        print("\n--- Resolving Code Paths ---")
+        effective_code_paths = []
+        for path in code_paths:
+            if path.strip().startswith(('http://', 'https://', 'git@')):
+                print(f"  - 🔗 Cloning: {path}")
+                local_path = clone_git_repository(path)
+                if local_path:
+                    effective_code_paths.append(local_path)
+            else:
+                effective_code_paths.append(path)
+        
+        # Build code KB
+        if not self._ensure_kb_is_ready(knowledge_paths=None, code_paths=effective_code_paths):
+            return {"error": "Code KB build failed"}
+        
+        # Check if code KB has content
+        if not (self.kb_code.index and self.kb_code.index.ntotal > 0):
+            print("  - ⚠️  Code KB is empty, skipping code generation")
+            return plan
+        
+        # Generate code
+        print(f"\n--- Generating Implementation Code ---")
+        current_iter = plan.get("iteration", self.state.get("iteration_index", 1))
+        
+        res = perform_code_rag(
+            result=plan,
+            kb_code=self.kb_code,
+            model=self.model,
+            generation_config=self.generation_config
+        )
+        
+        # Snapshot: Code Generated
+        res["iteration"] = current_iter
+        res["stage"] = "Code Generated"
+        self.state["plan_history"].append(res.copy())
+        self.state["current_plan"] = res
+        
+        # Human code review
+        if enable_human_feedback:
+            temp_dir = Path("./temp_code_review")
+            print(f"\n--- Code Review ---")
+            print(f"  - 💾 Saving to: {temp_dir}")
+            
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir)
+            
+            files = write_experiments_to_disk(res, str(temp_dir))
+            
+            if not files:
+                print("  - ⚠️  No code generated")
+            else:
+                while True:
+                    print("\n" + "="*60)
+                    print(f"👀 CODE REVIEW REQUIRED")
+                    print("="*60)
+                    print(f"1. Review files in: {temp_dir.resolve()}")
+                    print(f"2. Press ENTER to approve, or type feedback to refine")
+                    print("-"*60)
+                    
+                    code_feedback = get_user_feedback()
+                    
+                    if not code_feedback:
+                        print("✅ Code accepted")
+                        break
+                    
+                    print(f"\n🛠️  Refining code...")
+                    self.state["human_feedback_history"].append({"phase": "code", "feedback": code_feedback})
+                    
+                    res = refine_code_with_feedback(
+                        result=res,
+                        feedback=code_feedback,
+                        model=self.model,
+                        generation_config=self.generation_config
+                    )
+                    
+                    res["iteration"] = current_iter
+                    res["stage"] = "Code Refined"
+                    self.state["plan_history"].append(res.copy())
+                    self.state["current_plan"] = res
+                    
+                    print(f"  - 💾 Updating files...")
+                    files = write_experiments_to_disk(res, str(temp_dir))
+        
+        return res
 
     def propose_experiments(self, objective: str, 
                             knowledge_paths: Optional[List[str]] = None, 
@@ -388,238 +644,41 @@ class PlanningAgent:
                 - iteration_index: Current iteration number (1 for initial plan)
                 - current_plan: The active experimental plan, structure
         """
-        # 0. Resolve Primary Data
-        primary_data_set = resolve_primary_data_path(primary_data_set)
-        # 0b. Resolve all image paths
-        # Images explicitly specified by user undr image_paths (will be deprecated in the future)
-        manual_images = image_paths or []
-        # Find new images under the provided knowledge paths but exclude any that are already in manual_images
-        auto_images = [img for img in extract_images(knowledge_paths) if img not in manual_images]
-        # Append auto-images to the end so manual descriptions stay aligned with manual images
-        all_image_paths = manual_images + auto_images
-
-        # 1. Resolve Code Paths
-        effective_code_paths = []
-        if code_paths:
-            print("\n--- Resolving Code Paths ---")
-            for path in code_paths:
-                if path.strip().startswith(('http://', 'https://', 'git@')):
-                    print(f"  - 🔗 Detected URL: {path}")
-                    local_path = clone_git_repository(path)
-                    if local_path:
-                        effective_code_paths.append(local_path)
-                        print(f"    -> Resolved to local: {Path(local_path).name}")
-                else:
-                    effective_code_paths.append(path)
-
-        # 2. Initialize or Update State
-        # If reset_state is True OR state is empty, we initialize fresh.
-        if reset_state or not self.state:
-            self.state = self._initialize_state(
-                objective=objective,
-                knowledge_paths=knowledge_paths,
-                code_paths=effective_code_paths,
-                additional_context=additional_context,
-                primary_data_set=primary_data_set,
-                image_paths = all_image_paths,
-                image_descriptions=image_descriptions
-            )
-        else:
-            print(f"  - 🔄 Appending to existing research session (History length: {len(self.state.get('plan_history', []))})...")
-            # Update objective if provided, otherwise keep existing context
-            if objective:
-                self.state["objective"] = objective
-
-        existing_iter = self.state.get("iteration_index", 0)
-        self.state["iteration_index"] = existing_iter + 1
-        
-        current_iter = self.state.get("iteration_index", 1)
-        
-
-        # 3. Init KB
-        if not self._ensure_kb_is_ready(knowledge_paths, effective_code_paths):
-            self.state["status"] = "failed"
-            self.state["last_error"] = "KB Init Failed"
-            return self.state
-
-        # =====================================================
-        # PHASE 1: SCIENCE STRATEGY (Docs KB Only)
-        # =====================================================
-        print(f"\n--- Phase 1: Generating Experimental Strategy ---")
-        
-        ctx_string = ""
-        if additional_context:
-            for header, content in additional_context.items():
-                ctx_string += f"## {header}\n{content}\n\n"
-        ctx_string = ctx_string.strip() if ctx_string else None
-
-        lit_context = ""
-        if self.lit_agent:
-            print(f"  - 🌍 Querying literature for hypothesis context...")
-            lit_res = self.lit_agent.search_for_hypothesis_context(
-                optimize_search_query(
-                    objective=objective,
-                    model=self.model)
-            )
-
-            if lit_res['status'] == 'success':
-                lit_context = lit_res['content']
-        
-        res = perform_science_rag(
+        # Phase 1: Generate experimental plan (science only)
+        plan = self.generate_plan(
             objective=objective,
-            instructions=HYPOTHESIS_GENERATION_INSTRUCTIONS,
-            task_name="Experimental Plan",
-            kb_docs=self.kb_docs,             
-            model=self.model,                 
-            generation_config=self.generation_config,
+            knowledge_paths=knowledge_paths,
             primary_data_set=primary_data_set,
-            image_paths=all_image_paths,
+            additional_context=additional_context,
+            image_paths=image_paths,
             image_descriptions=image_descriptions,
-            additional_context=ctx_string,
-            external_context=lit_context
+            enable_human_feedback=enable_human_feedback,
+            reset_state=reset_state
         )
-
-        if lit_context:
-            res["literature_search"] = lit_context
-
-        # SNAPSHOT 1: SCIENCE DRAFT (For AI Research Log)
-        res["iteration"] = current_iter
-        res["stage"] = "Science Draft"
-        self.state["plan_history"].append(res.copy()) 
-        self.state["current_plan"] = res
-
-        # Self-Correction Loop
-        if not res.get("error"):
-            is_relevant, critique = verify_plan_relevance(objective, res, self.model, self.generation_config)
-            
-            if not is_relevant:
-                print(f"\n🔄 Self-Reflection triggered: {critique}")
-                print("    - Attempting autonomous plan correction...")
-   
-                res = refine_plan_with_feedback(
-                    original_result=res,
-                    feedback=f"CRITICAL CORRECTION NEEDED: {critique}. Ensure the plan directly addresses the objective: {objective}",
-                    objective=objective,
-                    model=self.model,
-                    generation_config=self.generation_config
-                )
-                print("    - ✅ Plan auto-corrected.")
-                
-                # SNAPSHOT 2: AUTO-CORRECTED
-                res["iteration"] = current_iter
-                res["stage"] = "Auto-Corrected"
-                self.state["plan_history"].append(res.copy())
-                self.state["current_plan"] = res
-
-        # =====================================================
-        # PHASE 2: HUMAN STRATEGY FEEDBACK
-        # =====================================================
-        if enable_human_feedback and res.get("proposed_experiments") and not res.get("error"):
-            display_plan_summary(res)
-            user_feedback = get_user_feedback()
-            
-            if user_feedback:
-                print(f"\n📝 Feedback received. Refining Scientific Plan...")
-                self.state["human_feedback_history"].append({"phase": "science", "feedback": user_feedback})
-                res = refine_plan_with_feedback(
-                    original_result=res,
-                    feedback=user_feedback,
-                    objective=objective,
-                    model=self.model,
-                    generation_config=self.generation_config
-                )
-                
-                # SNAPSHOT 3: HUMAN REFINED
-                res["iteration"] = current_iter
-                res["stage"] = "Human Refined (Science)"
-                self.state["plan_history"].append(res.copy())
-                self.state["current_plan"] = res
-                
-                display_plan_summary(res)
-                print("✅ Scientific plan updated.")
-            else:
-                print("✅ Scientific plan accepted.")
-
-        # =====================================================
-        # PHASE 3: CODE IMPLEMENTATION
-        # =====================================================
-        if self.kb_code.index and self.kb_code.index.ntotal > 0 and not res.get("error"):
-             print(f"\n--- Phase 3: Mapping to Implementation Code ---")
-             res = perform_code_rag(
-                 result=res,
-                 kb_code=self.kb_code,
-                 model=self.model,
-                 generation_config=self.generation_config
-             )
-             
-             # SNAPSHOT 4: CODE GENERATED
-             res["iteration"] = current_iter
-             res["stage"] = "Code Generated"
-             self.state["plan_history"].append(res.copy())
-             self.state["current_plan"] = res
-
-        # =====================================================
-        # PHASE 4: HUMAN CODE REVIEW
-        # =====================================================
-        if enable_human_feedback:
-            temp_dir = Path("./temp_code_review")
-            print(f"\n--- Phase 4: Human Code Review ---")
-            print(f"  - 💾 Saving generated code to temporary folder: {temp_dir}")
-            
-            if temp_dir.exists(): shutil.rmtree(temp_dir)
-            files = write_experiments_to_disk(res, str(temp_dir))
-            
-            if not files:
-                print("  - ⚠️ No code generated to review.")
-            else:
-                while True:
-                    print("\n" + "="*60)
-                    print(f"👀 ACTION REQUIRED: Code Review")
-                    print("="*60)
-                    print(f"1. Open the folder: {temp_dir.resolve()}")
-                    print(f"2. Inspect the {len(files)} generated Python file(s).")
-                    print("3. Return here to Approve or Request Changes.")
-                    print("-" * 60)
-                    
-                    code_feedback = get_user_feedback()
-                    
-                    if not code_feedback:
-                        print("✅ Code accepted.")
-                        break
-                    
-                    self.state["human_feedback_history"].append({"phase": "code", "feedback": code_feedback})
-                    print(f"\n🛠️  Refining code based on: '{code_feedback}'...")
-                    
-                    res = refine_code_with_feedback(
-                        result=res,
-                        feedback=code_feedback,
-                        model=self.model,
-                        generation_config=self.generation_config
-                    )
-                    
-                    # SNAPSHOT 5: CODE REFINED
-                    res["iteration"] = current_iter
-                    res["stage"] = "Code Refined"
-                    self.state["plan_history"].append(res.copy())
-                    self.state["current_plan"] = res
-                    
-                    print(f"  - 💾 Overwriting files in {temp_dir} with refined code...")
-                    files = write_experiments_to_disk(res, str(temp_dir))
-                    print("  - ✅ Files updated. Please re-review.")
-
-        # --- Final Save & Return ---
-        self.state["status"] = "planned"
         
-        if output_json_path: 
-            self._save_results_to_json(res, output_json_path)
+        if plan.get("error"):
+            if output_json_path:
+                self._save_results_to_json(plan, output_json_path)
+            return self.state
+        
+        # Phase 2: Add implementation code (if code_paths provided)
+        if code_paths:
+            plan = self.generate_implementation_code(
+                plan=plan,
+                code_paths=code_paths,
+                enable_human_feedback=enable_human_feedback
+            )
+        
+        # Save final results
+        if output_json_path:
+            self._save_results_to_json(plan, output_json_path)
             self._save_state_to_json(output_json_path + ".state.json")
-            
-            # TRIGGER HTML REPORT GENERATION
             self._generate_html_report(output_json_path)
         
+        # Save scripts
         final_out = "./output_scripts"
-        print(f"\n--- Saving Final Scripts to: {final_out} ---")
-        write_experiments_to_disk(res, final_out)
+        print(f"\n--- Saving Scripts to: {final_out} ---")
+        write_experiments_to_disk(plan, final_out)
         
         return self.state
 
