@@ -2,8 +2,9 @@ import subprocess
 import json
 import logging
 import re
+import sys
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import PIL.Image as PIL_Image
 
 import google.generativeai as genai
@@ -90,11 +91,16 @@ class ScalarizerAgent:
         except Exception as e:
             return f"Error reading metadata: {str(e)}"
 
-    def _execute_script(self, script_path: Path) -> Dict[str, Any]:
+    def _execute_script(self, script_path: Path, args: List[str] = None) -> Dict[str, Any]:
         """Runs the generated python script in a subprocess."""
+       
+        # Construct command with arguments (if any)
+        cmd = ["python", str(script_path)]
+        if args:
+            cmd.extend(args)
         try:
             process = subprocess.run(
-                ["python", str(script_path)],
+                cmd,
                 capture_output=True, text=True, timeout=45
             )
             # Parse STDOUT for JSON
@@ -143,7 +149,6 @@ class ScalarizerAgent:
         """
         
         try:
-            # Note: If using local_model (OpenAI wrapper), ensure it supports image inputs
             response = self.model.generate_content(
                 [SCALARIZER_REFLECTION_PROMPT, prompt, image],
                 generation_config=self.generation_config
@@ -156,7 +161,8 @@ class ScalarizerAgent:
 
     def scalarize(self, 
                   data_path: str, 
-                  objective_query: str, 
+                  objective_query: str = "",
+                  reuse_script_path: str = None,
                   experiment_context: Optional[Dict[str, Any]] = None,
                   metadata_path: Optional[str] = None, 
                   enable_human_review: bool = True) -> Dict[str, Any]:
@@ -192,6 +198,20 @@ class ScalarizerAgent:
             - 'source_script': Path to the generated Python script
         """
         path_obj = Path(data_path)
+
+        # Path 1: Re-use existign script
+        if reuse_script_path and Path(reuse_script_path).exists():
+            print(f"  🔄 Reusing scalarizer script: {Path(reuse_script_path).name}")
+            # Execute with input file as argument
+            exec_res = self._execute_script(Path(reuse_script_path), args=[str(data_path)])
+            return {
+                "status": exec_res["status"], 
+                "metrics": exec_res.get("metrics", {}),
+                "source_script": str(reuse_script_path),
+                "error": exec_res.get("error")
+            }
+        
+        # Path 2: Generate new script
         file_context = self._read_file_head(data_path)
         
         # Metadata Auto-Discovery
@@ -252,7 +272,7 @@ class ScalarizerAgent:
                 f.write(result["implementation_code"])
             
             # Execute Script
-            exec_res = self._execute_script(script_path)
+            exec_res = self._execute_script(script_path, args=[str(data_path)])
             
             if exec_res["status"] == "failure":
                 err_msg = exec_res.get('stderr', 'Unknown Error').strip()
