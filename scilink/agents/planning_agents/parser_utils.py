@@ -6,6 +6,10 @@ import logging
 
 import json
 import pandas as pd
+import PIL.Image as PIL_Image
+
+from .excel_parser import parse_adaptive_excel
+
 
 # Match these to the extensions you check in planning_agent.py
 SUPPORTED_EXTENSIONS = {
@@ -275,3 +279,166 @@ def resolve_primary_data_path(data_input: Union[str, Dict[str, str], None]) -> O
     
     # User chose to skip
     return {"file_path": str(path), "metadata_path": None}
+
+
+def parse_data_file(file_path: str, 
+                   metadata_path: Optional[str] = None) -> str:
+    """
+    Unified data file parsing for both initial planning and iteration.
+    Auto-discovers metadata JSON if not provided.
+    
+    Args:
+        file_path: Path to data file (.csv, .xlsx, .xls)
+        metadata_path: Optional explicit metadata path (overrides auto-discovery)
+    
+    Returns:
+        String containing formatted data summary
+    """
+    # Auto-discover metadata using existing logic
+    data_dict = resolve_primary_data_path(file_path)
+    
+    if data_dict is None:
+        return f"[Error: File not found - {file_path}]"
+    
+    # Override metadata if explicitly provided (for backward compatibility)
+    if metadata_path is not None:
+        data_dict['metadata_path'] = metadata_path
+    
+    try:
+        chunks = parse_adaptive_excel(
+            data_dict['file_path'],
+            data_dict.get('metadata_path')
+        )
+        
+        if chunks:
+            # Return the summary chunk (prioritize dataset_summary or dataset_package)
+            summary = next(
+                (c for c in chunks 
+                 if c['metadata'].get('content_type') in 
+                    ('dataset_summary', 'dataset_package')), 
+                chunks[0]
+            )
+            return summary['text']
+        
+        return f"[No data extracted from {file_path}]"
+        
+    except Exception as e:
+        return f"[Error parsing {file_path}: {e}]"
+
+
+def load_image_file(image_path: str) -> Optional[Any]:
+    """
+    Unified image loading with error handling.
+    
+    Args:
+        image_path: Path to image file
+        
+    Returns:
+        PIL Image object or None if loading fails
+    """
+    if PIL_Image is None:
+        logging.warning("PIL not installed. Cannot load images.")
+        return None
+    
+    try:
+        with PIL_Image.open(image_path) as img:
+            img.load()
+            return img.copy()
+    except Exception as e:
+        logging.warning(f"Failed to load image {image_path}: {e}")
+        return None
+
+
+def parse_multimodal_results(results: Any) -> Tuple[str, List]:
+    """
+    Extracts text and images from various result formats.
+    
+    Handles multiple input formats:
+    - String: "Yield was 85%"
+    - File path: "./data.csv" or "./plot.png"
+    - Dict: {"path": "./file.csv", "description": "..."}
+    - List: Mix of above types
+    
+    Args:
+        results: Experimental results in any supported format
+        
+    Returns:
+        Tuple of (consolidated_text, loaded_images)
+        
+    Example:
+        >>> text, images = parse_multimodal_results([
+        ...     "./experiment.csv",
+        ...     {"path": "./plot.png", "description": "Results"},
+        ...     "Precipitation observed"
+        ... ])
+    """
+    parsed_text_results = []
+    loaded_images = []
+    
+    def process_item(item: Any, description: str = "") -> str:
+        text_output = ""
+        
+        # If it's a file path
+        if isinstance(item, str) and Path(item).exists():
+            path = Path(item)
+            suffix = path.suffix.lower()
+            
+            # A. Data Files
+            if suffix in ['.xlsx', '.xls', '.csv']:
+                print(f"  - 📄 Parsing data file: {path.name}")
+                text_output = parse_data_file(str(path))
+                text_output = f"DATA FILE ({path.name}):\n{text_output}"
+
+            # B. Images
+            elif suffix in ['.png', '.jpg', '.jpeg', '.tiff', '.bmp']:
+                print(f"  - 🖼️  Loading result image: {path.name}")
+                img = load_image_file(str(path))
+                if img:
+                    loaded_images.append(img)
+                    text_output = f"[Attached Image: {path.name}]"
+                else:
+                    text_output = f"[Error loading image: {path.name}]"
+            
+            # C. Logs/Text
+            elif suffix in ['.txt', '.log', '.md', '.json']:
+                try:
+                    content = path.read_text(encoding='utf-8')
+                    text_output = f"LOG FILE ({path.name}):\n{content}"
+                except Exception as e:
+                    text_output = f"[Error reading log {path.name}: {e}]"
+            
+            else:
+                text_output = f"FILE ({path.name})"
+
+        # If not a file, treat as raw text/data
+        else:
+            if isinstance(item, (dict, list)):
+                text_output = json.dumps(item, indent=2)
+            else:
+                text_output = str(item)
+        
+        # Append description if provided
+        if description:
+            text_output += f"\n(Context: {description})"
+        
+        return text_output
+
+    # Process results
+    items_to_process = results if isinstance(results, list) else [results]
+    
+    for entry in items_to_process:
+        if isinstance(entry, dict):
+            # Structured file entry
+            path_val = entry.get('path') or entry.get('file') or entry.get('image')
+            desc_val = (entry.get('description') or entry.get('desc') or 
+                       entry.get('caption') or entry.get('notes'))
+            
+            if path_val and isinstance(path_val, str):
+                parsed_text_results.append(process_item(path_val, desc_val or ""))
+            else:
+                parsed_text_results.append(json.dumps(entry, indent=2))
+        else:
+            parsed_text_results.append(process_item(entry))
+
+    consolidated_feedback = "\n\n".join(parsed_text_results)
+    return consolidated_feedback, loaded_images

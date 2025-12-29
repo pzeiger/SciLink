@@ -15,7 +15,10 @@ from .excel_parser import parse_adaptive_excel
 from .parser_utils import (
     generate_repo_map, 
     write_experiments_to_disk,
-    resolve_primary_data_path
+    resolve_primary_data_path,
+    parse_data_file,
+    load_image_file,
+    parse_multimodal_results
 )
 from .repo_loader import clone_git_repository
 
@@ -681,72 +684,24 @@ class PlanningAgent:
         write_experiments_to_disk(plan, final_out)
         
         return self.state
-
-    def update_plan_with_results(self,
-                                 results: Any,
-                                 output_json_path: Optional[str] = None,
-                                 enable_human_feedback: bool = True,
-                                 state_file_path: Optional[str] = None 
-                                 ) -> Dict[str, Any]:
+    
+    def refine_plan(self,
+                    results: Any,
+                    enable_human_feedback: bool = True,
+                    state_file_path: Optional[str] = None) -> Dict[str, Any]:
         """
-        Iterates on the current experimental plan based on new experimental results, 
-        observations, or data files.
-
-        This method acts as the "feedback loop" of the agent, transforming the system from 
-        a linear planner into an iterative scientific partner. It performs Smart Result Parsing, 
-        Result-Aware RAG, and Human-in-the-Loop refinement.
-
-        **Capabilities & Workflow:**
-
-        1.  **Smart Result Parsing (Multimodal):**
-            -   Detects and parses input types automatically.
-            -   **Text/Dicts/Lists:** Converted to JSON strings for the LLM prompt.
-            -   **Data Files (.xlsx, .csv):** Automatically summarized using `excel_parser` and injected as text context.
-            -   **Images (.png, .jpg):** Loaded and passed to the vision model for visual analysis (e.g., plot trends, failures).
-            -   **Logs (.txt, .log):** Read and injected as context.
-
-        2.  **Result-Aware RAG (Retrieval Augmented Generation):**
-            -   Uses the content of the results to perform a *new* targeted search in the Docs Knowledge Base (`kb_docs`).
-            -   Example: If results mention "precipitation," it retrieves papers discussing solubility limits, even if those papers weren't relevant to the initial plan.
-
-        3.  **Nuanced Scientific Reasoning:**
-            -   Prompts the LLM to categorize the outcome into one of five strategic buckets:
-                * **CONFIRMED:** Validated hypothesis -> Propose next step.
-                * **OPTIMIZATION NEEDED:** Valid sub-optimal result -> Tune parameters (Do not change hypothesis).
-                * **INCONCLUSIVE:** Noisy data -> Refine measurement technique.
-                * **OPERATIONAL FAILURE:** Code/Equipment error -> Fix implementation (Do not change science).
-                * **SCIENTIFIC FAILURE:** Disproven hypothesis -> Pivot to new approach.
-
-        4.  **Human-in-the-Loop (Dual-Phase):**
-            -   **Phase A (Strategy):** Pauses after generating the new scientific plan to allow user critique (e.g., "Don't increase temp, safety limit is 50C").
-            -   **Phase B (Code):** Pauses after generating the Python scripts. Writes them to a temp folder (`./temp_code_review_iter`) for inspection before finalization.
-
+        Refines the experimental plan (science strategy only) based on new results.
+        
         Args:
-            results (Any): The outcome of the previous experiment. 
-                Supported formats:
-                -   **String:** Natural language description (e.g., "Yield was 5%").
-                -   **Dict/List:** Structured data (e.g., `{"yield": 0.05, "error": None}`).
-                -   **File Path (str):** Path to a local file (.xlsx, .csv, .txt, .png, .jpg).
-                -   **Structured List:** A list containing a mix of the above, or dictionaries with metadata 
-                    (e.g., `[{"path": "./plot.png", "description": "Graph showing thermal runaway"}]`).
-            output_json_path (Optional[str]): If provided, saves the updated plan JSON to this path.
-                The full state is also saved to `{output_json_path}.state.json`.
-            enable_human_feedback (bool): If True, pauses execution for console input at the 
-                Strategy and Code review stages. Defaults to True.
-            state_file_path: Optional path to .state.json file.
-                If provided, restores agent state before processing results.
-                Equivalent to calling restore_state() first.
-
+            results: Experimental outcomes (text, dict, file path, or list of files/images)
+            enable_human_feedback: If True, pauses for strategy review
+            state_file_path: Optional path to restore state from checkpoint
+            
         Returns:
-            Dict[str, Any]: Updated state dictionary containing:
-                - current_plan: Latest experimental plan
-                - plan_history: All historical plans
-                - experimental_results: All results received
-                - iteration_index: Current iteration number
+            Dict with refined plan (proposed_experiments)
         """
-
+        
         # --- 0. STATE RESTORATION ---
-
         if state_file_path is not None:
             print(f"\n--- 🔄 Restoring State from File ---")
             self.restore_state(state_file_path)
@@ -760,115 +715,37 @@ class PlanningAgent:
                 "  3. Pass state_file_path='path.state.json' to this method"
             )
         
-        print(f"\n--- 🔄 Iterating Plan based on New Results ---")
+        print(f"\n--- 🔄 Refining Plan based on New Results ---")
         executed_plan_idx = self.state["iteration_index"]
         
         # Extract from state
         objective = self.state["objective"]
         current_plan = self.state["current_plan"]
         
-        # --- 1. SMART RESULT PARSING ---
-        parsed_text_results = []
-        loaded_images = []
+        # --- 1. PARSE RESULTS (Use utility function) ---
+        consolidated_feedback, loaded_images = parse_multimodal_results(results)
         
-        # Helper to process a single item (path or text)
-        def process_item(item: Any, description: str = "") -> str:
-            text_output = ""
-            
-            # If it's a file path
-            if isinstance(item, str) and (Path(item).exists()):
-                path = Path(item)
-                suffix = path.suffix.lower()
-                
-                # A. Data Files
-                if suffix in ['.xlsx', '.xls', '.csv']:
-                    print(f"  - 📄 Parsing data file: {path.name}")
-                    try:
-                        chunks = parse_adaptive_excel(str(path), context_path="")
-                        if chunks:
-                            summary = chunks[0]['text']
-                            text_output = f"DATA FILE ({path.name}):\n{summary}"
-                    except Exception as e:
-                        text_output = f"[Error parsing {path.name}: {e}]"
-
-                # B. Images
-                elif suffix in ['.png', '.jpg', '.jpeg', '.tiff', '.bmp']:
-                    print(f"  - 🖼️  Loading result image: {path.name}")
-                    try:
-                        with PIL_Image.open(path) as img:
-                            img.load()  
-                            loaded_images.append(img.copy())
-                        text_output = f"[Attached Image: {path.name}]"
-                    except Exception as e:
-                        text_output = f"[Error loading image {path.name}: {e}]"
-                
-                # C. Logs/Text
-                elif suffix in ['.txt', '.log', '.md', '.json']:
-                    try:
-                        content = path.read_text(encoding='utf-8')
-                        text_output = f"LOG FILE ({path.name}):\n{content}"
-                    except Exception as e:
-                        text_output = f"[Error reading log {path.name}: {e}]"
-                
-                else:
-                    text_output = f"FILE ({path.name})"
-
-            # If not a file, treat as raw text/data
-            else:
-                if isinstance(item, (dict, list)):
-                    text_output = json.dumps(item, indent=2)
-                else:
-                    text_output = str(item)
-            
-            # Append description if provided
-            if description:
-                text_output += f"\n(Context: {description})"
-            
-            return text_output
-
-        # Recursive Parser to handle Lists and Dictionaries
-        items_to_process = results if isinstance(results, list) else [results]
-        
-        for entry in items_to_process:
-            if isinstance(entry, dict):
-                # Check for common keys indicating a file + desc structure
-                path_val = entry.get('path') or entry.get('file') or entry.get('image')
-                desc_val = entry.get('description') or entry.get('desc') or entry.get('caption') or entry.get('notes')
-                
-                if path_val and isinstance(path_val, str):
-                    # It's a structured file entry
-                    parsed_text_results.append(process_item(path_val, desc_val if desc_val else ""))
-                else:
-                    # It's just a data dictionary
-                    parsed_text_results.append(json.dumps(entry, indent=2))
-            else:
-                # It's a direct item (string, number, or path string)
-                parsed_text_results.append(process_item(entry))
-
-        # Join all text findings
-        consolidated_feedback = "\n\n".join(parsed_text_results)
-
         # Update State History
         self.state["experimental_results"].append({
             "iteration": executed_plan_idx,
             "timestamp": datetime.now().isoformat(),
-            "data_summary": str(results) # Keep reference to raw input
+            "data_summary": str(results)
         })
         self.state["iteration_index"] += 1 
         next_plan_idx = self.state["iteration_index"]
         
-        # --- 2. Construct Feedback Prompt ---
-        feedback_prompt = (
-            f"We executed the previous plan. Here are the experimental results:\n"
-            f"{consolidated_feedback}\n\n"
-            f"**TASK:** Analyze these results (including any attached plots) to Refine or Update the plan.\n"
-            f"Select the most appropriate strategy:\n"
-            f"1. **CONFIRMED:** If hypothesis is validated, propose next step.\n"
-            f"2. **OPTIMIZATION NEEDED:** If result is valid but sub-optimal, tune parameters.\n"
-            f"3. **INCONCLUSIVE:** If data is noisy, propose refined experiment.\n"
-            f"4. **OPERATIONAL FAILURE:** If failure was code/equipment, propose fix.\n"
-            f"5. **SCIENTIFIC FAILURE:** If hypothesis is disproven, propose new approach.\n"
-        )
+        # --- 2. BUILD FEEDBACK PROMPT ---
+        feedback_prompt = f"""We executed the previous plan. Here are the experimental results:
+{consolidated_feedback}
+
+**TASK:** Analyze these results (including any attached plots) to Refine or Update the plan.
+Select the most appropriate strategy:
+1. **CONFIRMED:** If hypothesis is validated, propose next step.
+2. **OPTIMIZATION NEEDED:** If result is valid but sub-optimal, tune parameters.
+3. **INCONCLUSIVE:** If data is noisy, propose refined experiment.
+4. **OPERATIONAL FAILURE:** If failure was code/equipment, propose fix.
+5. **SCIENTIFIC FAILURE:** If hypothesis is disproven, propose new approach.
+"""
         
         # --- 3. RESULT-AWARE RAG ---
         new_literature_context = None
@@ -880,10 +757,8 @@ class PlanningAgent:
                 new_literature_context = "\n---\n".join([c['text'] for c in hits])
                 print(f"    -> Found {len(hits)} relevant document chunks.")
         
-        # --- 4. Generate Refined Plan ---
+        # --- 4. GENERATE REFINED PLAN ---
         print(f"  - Reasoning over results with literature context...")
-        objective = self.state["objective"]
-        current_plan = self.state["current_plan"]
         
         new_plan = refine_plan_with_feedback(
             original_result=current_plan,
@@ -895,15 +770,13 @@ class PlanningAgent:
             result_images=loaded_images
         )
         
-        # SNAPSHOT: REASONING DRAFT
+        # Snapshot: Reasoning Draft
         new_plan["iteration"] = next_plan_idx
         new_plan["stage"] = "Reasoning Draft"
         self.state["plan_history"].append(new_plan.copy())
         self.state["current_plan"] = new_plan
 
-        # =====================================================
-        # 5. HUMAN STRATEGY FEEDBACK
-        # =====================================================
+        # --- 5. HUMAN STRATEGY FEEDBACK ---
         if enable_human_feedback and not new_plan.get("error"):
             print("\n" + "="*60)
             print("🧠 AGENT'S PROPOSED REVISION BASED ON RESULTS")
@@ -914,7 +787,10 @@ class PlanningAgent:
             
             if user_feedback:
                 print(f"\n📝 Feedback received. Adjusting strategy...")
-                self.state["human_feedback_history"].append({"phase": "science_iteration", "feedback": user_feedback})
+                self.state["human_feedback_history"].append({
+                    "phase": "science_iteration", 
+                    "feedback": user_feedback
+                })
                 new_plan = refine_plan_with_feedback(
                     original_result=new_plan,
                     feedback=user_feedback,
@@ -922,59 +798,85 @@ class PlanningAgent:
                     model=self.model,
                     generation_config=self.generation_config
                 )
-                # SNAPSHOT: HUMAN REFINED
+                # Snapshot: Human Refined
                 new_plan["iteration"] = next_plan_idx
                 new_plan["stage"] = "Human Refined (Science)"
                 self.state["plan_history"].append(new_plan.copy())
                 self.state["current_plan"] = new_plan
                 print("✅ Strategic revision updated.")
+        
+        self.state["status"] = "refined"
+        return new_plan
+    
+    def refine_implementation_code(self,
+                                   plan: Dict[str, Any],
+                                   enable_human_feedback: bool = True) -> Dict[str, Any]:
+        """
+        Updates implementation code for a refined plan.
+        
+        This is Step 2 of the iteration process - maps the refined experimental
+        strategy to executable code using the Code KB.
+        
+        Args:
+            plan: Refined plan from refine_plan() (must have proposed_experiments)
+            enable_human_feedback: If True, pauses for code review
+            
+        Returns:
+            Updated plan dict with implementation_code added/updated
+        """
+        
+        if not self.kb_code.index or self.kb_code.index.ntotal == 0:
+            print("  - ℹ️  No Code KB available, skipping implementation update")
+            return plan
+        
+        if plan.get("error"):
+            return plan
+        
+        next_plan_idx = plan.get("iteration", self.state.get("iteration_index", 1))
+        
+        # Extract previous implementations from current state
+        current_plan = self.state.get("current_plan", {})
+        previous_implementations = []
+        
+        if current_plan and "proposed_experiments" in current_plan:                
+            for exp in current_plan["proposed_experiments"]:
+                if "implementation_code" in exp:
+                    previous_implementations.append({
+                        'experiment_name': exp.get('experiment_name', 'Unnamed'),
+                        'code': exp['implementation_code'],
+                        'iteration': self.state.get("iteration_index", 0) - 1,
+                        'source_files': exp.get('code_source_files', []),
+                        'previous_steps': exp.get('experimental_steps', [])
+                    })
+        
+        print(f"\n--- Code Implementation Analysis ---")
+        if previous_implementations:
+            print(f"  - Context: {len(previous_implementations)} existing implementation(s)")
+        else:
+            print(f"  - Context: Writing from scratch (no previous code)")
+        
+        # Generate/Update code
+        new_plan = perform_code_rag(
+            result=plan,
+            kb_code=self.kb_code,
+            model=self.model,
+            generation_config=self.generation_config,
+            previous_implementations=previous_implementations
+        )
+        
+        # Snapshot: Code Generated
+        new_plan["iteration"] = next_plan_idx
+        new_plan["stage"] = "Code Generated"
+        self.state["plan_history"].append(new_plan.copy())
+        self.state["current_plan"] = new_plan
 
-        # =====================================================
-        # 6. Generate Code
-        # =====================================================
-        if self.kb_code.index and self.kb_code.index.ntotal > 0 and not new_plan.get("error"):
-             
-            # Extract previous implementations
-            previous_implementations = []
-            if current_plan and "proposed_experiments" in current_plan:                
-                for exp in current_plan["proposed_experiments"]:
-                    if "implementation_code" in exp:
-                        previous_implementations.append({
-                            'experiment_name': exp.get('experiment_name', 'Unnamed'),
-                            'code': exp['implementation_code'],
-                            'iteration': executed_plan_idx,
-                            'source_files': exp.get('code_source_files', []),
-                            'previous_steps': exp.get('experimental_steps', [])
-                        })
-            
-            print(f"\n--- Code Implementation Analysis ---")
-            if previous_implementations:
-                print(f"  - Context: {len(previous_implementations)} existing implementation(s)")
-            else:
-                print(f"  - Context: Writing from scratch (no previous code)")
-            
-            new_plan = perform_code_rag(
-                 result=new_plan,
-                 kb_code=self.kb_code,
-                 model=self.model,
-                 generation_config=self.generation_config,
-                 previous_implementations=previous_implementations
-             )
-            
-             # SNAPSHOT: CODE GENERATED
-            new_plan["iteration"] = next_plan_idx
-            new_plan["stage"] = "Code Generated"
-            self.state["plan_history"].append(new_plan.copy())
-            self.state["current_plan"] = new_plan
-
-        # =====================================================
-        # 7. HUMAN CODE REVIEW
-        # =====================================================
+        # --- HUMAN CODE REVIEW ---
         if enable_human_feedback and not new_plan.get("error"):
             temp_dir = Path("./temp_code_review_iter")
             print(f"\n--- Human Code Review (Iteration {next_plan_idx}) ---")
             
-            if temp_dir.exists(): shutil.rmtree(temp_dir)
+            if temp_dir.exists(): 
+                shutil.rmtree(temp_dir)
             files = write_experiments_to_disk(new_plan, str(temp_dir))
             
             if files:
@@ -992,7 +894,10 @@ class PlanningAgent:
                         print("✅ Code accepted.")
                         break
                     
-                    self.state["human_feedback_history"].append({"phase": "code_iteration", "feedback": code_feedback})
+                    self.state["human_feedback_history"].append({
+                        "phase": "code_iteration", 
+                        "feedback": code_feedback
+                    })
                     print(f"\n🛠️  Refining code based on: '{code_feedback}'...")
                     
                     new_plan = refine_code_with_feedback(
@@ -1002,7 +907,7 @@ class PlanningAgent:
                         generation_config=self.generation_config
                     )
                     
-                    # SNAPSHOT: CODE REFINED
+                    # Snapshot: Code Refined
                     new_plan["iteration"] = next_plan_idx
                     new_plan["stage"] = "Code Refined"
                     self.state["plan_history"].append(new_plan.copy())
@@ -1010,21 +915,240 @@ class PlanningAgent:
                     
                     print(f"  - 💾 Overwriting files in {temp_dir} with refined code...")
                     files = write_experiments_to_disk(new_plan, str(temp_dir))
+        
+        return new_plan
 
-        # 8. Commit to State & Save
-        self.state["current_plan"] = new_plan
-        # (Already appended snapshots above, so no final append needed unless we want a 'Final' tag)
+    def update_plan_with_results(self,
+                                 results: Any,
+                                 output_json_path: Optional[str] = None,
+                                 enable_human_feedback: bool = True,
+                                 state_file_path: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Iterates on the current experimental plan based on new results.
+        
+        This is the main entry point for the iteration loop. It orchestrates:
+        1. Scientific plan refinement (refine_plan)
+        2. Implementation code updates (refine_implementation_code)
+        3. File saving and report generation
+        
+        For more granular control, call refine_plan() and refine_implementation_code()
+        separately.
+        
+        **Supported Result Formats:**
+        
+        The `results` parameter is highly flexible and accepts:
+        
+        **1. Text String (Qualitative Observations)**
+            >>> agent.update_plan_with_results(
+            ...     results="Yield was 12%, unexpected precipitation"
+            ... )
+        
+        **2. Single File Path**
+            >>> agent.update_plan_with_results(
+            ...     results="./experiments/run_005.csv"
+            ... )
+            >>> # Auto-discovers ./experiments/run_005.json metadata
+        
+        **3. Image Path (Visual Analysis)**
+            >>> agent.update_plan_with_results(
+            ...     results="./plots/failure_analysis.png"
+            ... )
+        
+        **4. Data Dictionary**
+            >>> agent.update_plan_with_results(
+            ...     results={
+            ...         "yield": 45.2,
+            ...         "purity": 87.3,
+            ...         "observations": "Product color changed to yellow"
+            ...     }
+            ... )
+        
+        **5. File + Description (Recommended for Images)**
+            >>> agent.update_plan_with_results(
+            ...     results={
+            ...         "path": "./microscopy/crystals.tiff",
+            ...         "description": "Crystal morphology shows needle-like structure"
+            ...     }
+            ... )
+        
+        **6. List of Mixed Formats (Most Flexible)**
+            >>> agent.update_plan_with_results(
+            ...     results=[
+            ...         "Experiment date: 2024-01-15",
+            ...         "./data/icpms_run12.csv",              # Quantitative data
+            ...         "./data/icpms_run12.json",             # Optional metadata
+            ...         {
+            ...             "path": "./photos/product.jpg",
+            ...             "description": "White crystalline solid"
+            ...         },
+            ...         {
+            ...             "temp_max": 78.5,
+            ...             "pressure_stable": True
+            ...         },
+            ...         "./logs/errors.txt",                   # Equipment logs
+            ...         "Stirrer stopped at t=15min, restarted manually"
+            ...     ]
+            ... )
+        
+        **Data File Handling:**
+        - **CSV/Excel files** (.csv, .xlsx, .xls):
+          * Automatically parsed and summarized
+          * Metadata JSON auto-discovered (e.g., data.csv → data.json)
+          * Column definitions and units included if metadata present
+        
+        - **Image files** (.png, .jpg, .jpeg, .tiff, .bmp):
+          * Loaded and passed to vision model for analysis
+          * Supports plots, microscopy, photos, diagrams
+        
+        - **Log files** (.txt, .log, .md, .json):
+          * Read as text and included in context
+          * Useful for equipment errors, timestamps, notes
+        
+        **Workflow Overview:**
+        
+        Phase 1 - Scientific Refinement:
+            1. Parse results (multimodal)
+            2. Search knowledge base for relevant context
+            3. LLM analyzes and proposes strategy revision
+            4. Human review (if enabled)
+            5. Incorporate feedback and regenerate
+        
+        Phase 2 - Implementation Update:
+            1. Extract previous code implementations
+            2. LLM decides: preserve, update, or rewrite
+            3. Generate updated scripts
+            4. Human code review (if enabled)
+            5. Save to ./output_scripts/
+        
+        Phase 3 - Persistence:
+            1. Save plan JSON
+            2. Save state JSON (for resumption)
+            3. Generate HTML report
+        
+        Args:
+            results: Experimental outcomes. Accepts:
+                - String: Text description
+                - String: File path (data, image, or log)
+                - Dict: Structured data or {path: ..., description: ...}
+                - List: Mix of any above formats
+                See format examples above for details.
+            
+            output_json_path: Path to save the updated plan. If provided:
+                - Saves plan to: {output_json_path}
+                - Saves state to: {output_json_path}.state.json
+                - Saves report to: {output_json_path}.html
+                Example: "./outputs/iteration_2.json"
+            
+            enable_human_feedback: If True, pauses twice for user review:
+                1. After scientific plan generation
+                2. After code generation
+                Set to False for fully autonomous operation.
+                Defaults to True.
+            
+            state_file_path: Optional path to restore state from a checkpoint.
+                Useful for resuming after shutdown. Equivalent to calling
+                agent.restore_state() before this method.
+                Example: "./outputs/session.state.json"
+        
+        Returns:
+            Dict containing the complete agent state:
+            {
+                "session_id": "...",
+                "objective": "...",
+                "iteration_index": 2,
+                "current_plan": {...},
+                "plan_history": [...],
+                "experimental_results": [...],
+                "status": "iterated"
+            }
+        
+        Raises:
+            ValueError: If no active state found and no state_file_path provided
+        
+        Example 1 - Simple Text Results:
+            >>> agent.update_plan_with_results(
+            ...     results="Yield dropped to 15%, likely due to low temperature"
+            ... )
+        
+        Example 2 - Data File Results:
+            >>> agent.update_plan_with_results(
+            ...     results="./lab_data/hplc_run_005.csv",
+            ...     output_json_path="./outputs/iteration_2.json"
+            ... )
+        
+        Example 3 - Complete Multi-Modal Results:
+            >>> agent.update_plan_with_results(
+            ...     results=[
+            ...         "Run completed successfully on 2024-01-15 at 14:30",
+            ...         "./data/gc_ms_results.csv",
+            ...         {
+            ...             "path": "./plots/conversion_vs_time.png",
+            ...             "description": "Conversion plateaus at 60min"
+            ...         },
+            ...         {
+            ...             "yield": 78.5,
+            ...             "selectivity": 92.3,
+            ...             "notes": "Product purity excellent"
+            ...         },
+            ...         "./logs/temperature_profile.txt"
+            ...     ],
+            ...     output_json_path="./outputs/iteration_3.json",
+            ...     enable_human_feedback=True
+            ... )
+        
+        Example 4 - Resume from Checkpoint:
+            >>> # After restarting Python
+            >>> agent = PlanningAgent()
+            >>> agent.update_plan_with_results(
+            ...     results="./new_data.csv",
+            ...     state_file_path="./outputs/session.state.json"
+            ... )
+        
+        Example 5 - Step-by-Step Control:
+            >>> # For maximum control, use individual methods:
+            >>> plan = agent.refine_plan(results="...")
+            >>> # Review plan, make modifications...
+            >>> plan = agent.refine_implementation_code(plan)
+            >>> # Review code, make modifications...
+            >>> agent._save_results_to_json(plan, "./plan.json")
+        
+        Notes:
+            - The method is stateful - maintains session history across calls
+            - Safe to shut down between calls (use state_file_path to resume)
+            - Automatically includes previous code when generating updates
+            - All outputs saved to ./output_scripts/ directory
+        """
+        
+        # Phase 1: Refine scientific strategy
+        plan = self.refine_plan(
+            results=results,
+            enable_human_feedback=enable_human_feedback,
+            state_file_path=state_file_path
+        )
+        
+        if plan.get("error"):
+            if output_json_path:
+                self._save_results_to_json(plan, output_json_path)
+            return self.state
+        
+        # Phase 2: Update implementation code
+        plan = self.refine_implementation_code(  # ← RENAMED
+            plan=plan,
+            enable_human_feedback=enable_human_feedback
+        )
+        
+        # Final state update
+        self.state["current_plan"] = plan
         self.state["status"] = "iterated"
         
+        # Save outputs
         final_out = "./output_scripts"
         print(f"\n--- Saving Final Scripts to: {final_out} ---")
-        write_experiments_to_disk(new_plan, final_out)
+        write_experiments_to_disk(plan, final_out)
         
         if output_json_path:
-            self._save_results_to_json(new_plan, output_json_path)
+            self._save_results_to_json(plan, output_json_path)
             self._save_state_to_json(output_json_path + ".state.json")
-            
-            # TRIGGER HTML REPORT GENERATION
             self._generate_html_report(output_json_path)
             
         return self.state

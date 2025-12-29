@@ -31,6 +31,57 @@ class OrchestratorTools:
         self.gemini_functions: list = []
         
         self._register_all_tools()
+
+    def _parse_result_input(self, result_data: str):
+        """
+        Helper to parse result_data into appropriate format.
+        
+        Returns:
+            - String (text input)
+            - String (single file path)
+            - List of strings (multiple file paths)
+        """
+        if len(result_data) < 500:  # Reasonable path length
+            try:
+                # Check if it's a single file path
+                path = Path(result_data.strip())
+                if path.exists() and path.is_file():
+                    print(f"    (Detected file path: {path.name})")
+                    return str(path)
+                
+                # Check if it's comma-separated file paths
+                if ',' in result_data:
+                    paths = [p.strip() for p in result_data.split(',')]
+                    valid_paths = []
+                    for p in paths:
+                        p_obj = Path(p)
+                        if p_obj.exists():
+                            valid_paths.append(p)
+                    
+                    if valid_paths:
+                        print(f"    (Detected {len(valid_paths)} file paths)")
+                        return valid_paths
+                    else:
+                        # Treat as text if no valid paths found
+                        text_preview = result_data[:100] + "..." if len(result_data) > 100 else result_data
+                        print(f"    (Processing as text: '{text_preview}')")
+                        return result_data
+                else:
+                    # Not a valid path - treat as text
+                    text_preview = result_data[:100] + "..." if len(result_data) > 100 else result_data
+                    print(f"    (Processing text input: '{text_preview}')")
+                    return result_data
+                    
+            except (OSError, ValueError, RuntimeError):
+                # Not a valid path - treat as text
+                text_preview = result_data[:100] + "..." if len(result_data) > 100 else result_data
+                print(f"    (Processing text input: '{text_preview}')")
+                return result_data
+        else:
+            # Too long to be a path - treat as text
+            text_preview = result_data[:100] + "..." if len(result_data) > 100 else result_data
+            print(f"    (Processing text input: '{text_preview}')")
+            return result_data
     
     def _register_all_tools(self):
         """Register all tools with both OpenAI and Gemini formats."""
@@ -444,78 +495,163 @@ class OrchestratorTools:
             required=[]
         )
         
-        # 4. ITERATE WITH RESULTS
-        def iterate_with_results(result_data: str):
+        # 4. REFINE PLAN (based on results)
+        def refine_plan_with_results(result_data: str):
             """
-            Iterates the plan strategically based on results (Cognitive Loop).
-            Use this for pivots, failures, qualitative data, IMAGES, or when data is insufficient for BO.
+            Refines the experimental plan (science strategy only) based on results.
+            
+            Use this for:
+            - Strategic pivots or failures
+            - Qualitative observations  
+            - Visual analysis of plots/images
+            - When experiments didn't go as expected
+            
+            Supports multiple input formats:
+            - Text: "Yield was 12%, precipitation observed"
+            - File path: "./data.csv" or "./plot.png"
+            - Comma-separated files: "./data.csv,./plot.png"
             """
-            print(f"  ⚡ Tool: Cognitive Iteration...")
+            print(f"  ⚡ Tool: Refining Plan based on Results...")
             
-            # Validate if it's a file path
-            # File paths should be short and actually exist
-            is_file_path = False
-            
-            if len(result_data) < 500:  # Max reasonable path length
-                try:
-                    path = Path(result_data.strip())
-                    if path.exists() and path.is_file():
-                        is_file_path = True
-                        payload = [str(path)]
-                        print(f"    (Detected file path: {path.name})")
-                except (OSError, ValueError, RuntimeError):
-                    # Not a valid path - treat as text
-                    pass
-            
-            if not is_file_path:
-                # Treat as text content
-                payload = result_data
-                text_preview = result_data[:100] + "..." if len(result_data) > 100 else result_data
-                print(f"    (Processing text input: '{text_preview}')")
+            # Parse input - handle both single paths and comma-separated lists
+            payload = self._parse_result_input(result_data)
             
             try:
-                state = self.orch.planner.update_plan_with_results(
+                plan = self.orch.planner.refine_plan(
                     results=payload,
-                    output_json_path=str(self.orch.base_dir / "plan_iterated.json")
+                    enable_human_feedback=True
                 )
                 
-                if state.get("status") == "failed":
+                if plan.get("error"):
                     return json.dumps({
                         "status": "error",
-                        "message": state.get("last_error", "Iteration failed")
+                        "message": plan.get("error")
                     })
+                
+                # Save
+                output_path = self.orch.base_dir / "plan_refined.json"
+                with open(output_path, 'w') as f:
+                    json.dump(plan, f, indent=2)
+                
+                # Generate HTML
+                from .html_generator import HTMLReportGenerator
+                html_path = self.orch.base_dir / "plan_refined.html"
+                generator = HTMLReportGenerator(self.orch.planner.state)
+                generator.generate(str(html_path))
                 
                 return json.dumps({
                     "status": "success",
-                    "new_iteration": state.get('iteration_index'),
-                    "output_path": str(self.orch.base_dir / "plan_iterated.json")
+                    "iteration": plan.get('iteration'),
+                    "num_experiments": len(plan.get('proposed_experiments', [])),
+                    "output_path": str(output_path),
+                    "html_report": str(html_path),
+                    "hint": "Use refine_implementation_code() to update executable code"
                 })
                 
             except Exception as e:
-                logging.error(f"Iterate with results error: {e}", exc_info=True)
+                logging.error(f"Plan refinement error: {e}", exc_info=True)
                 return json.dumps({
                     "status": "error",
                     "message": str(e)
                 })
         
         self._register_tool(
-            func=iterate_with_results,
-            name="iterate_with_results",
+            func=refine_plan_with_results,
+            name="refine_plan_with_results",
             description=(
-                "Iterates the experimental plan strategically based on results. "
-                "Use for: experimental failures, strategic pivots, qualitative observations, "
-                "or visual analysis of plots/images. Accepts text descriptions or file paths."
+                "Refines experimental plan (science strategy only) based on results. "
+                "Handles text descriptions, single file paths, or comma-separated files. "
+                "Use for: failures, pivots, qualitative observations, or visual analysis. "
+                "Does NOT update implementation code - use refine_implementation_code() for that."
             ),
             parameters={
                 "result_data": {
                     "type": "string",
-                    "description": "Experimental results as text summary OR file path (e.g., 'results/plot.png'). The agent auto-detects file paths."
+                    "description": (
+                        "Experimental results. Formats: "
+                        "1) Text: 'Yield was 12%, precipitation observed' "
+                        "2) Single file: './data.csv' or './plot.png' "
+                        "3) Multiple files: './data.csv,./plot.png,./log.txt' "
+                        "Agent auto-detects format and parses accordingly."
+                    )
                 }
             },
             required=["result_data"]
         )
         
-        # 5. ANALYZE FILE
+        # 5. REFINE IMPLEMENTATION CODE (based on refined plan)
+        def refine_implementation_code():
+            """
+            Updates implementation code for the most recently refined plan.
+            Use after refine_plan_with_results() to add/update executable code.
+            """
+            
+            if not self.orch.planner.state or not self.orch.planner.state.get("current_plan"):
+                return json.dumps({
+                    "status": "error",
+                    "message": "No active plan. Refine a plan first using refine_plan_with_results()"
+                })
+            
+            current_plan = self.orch.planner.state["current_plan"]
+            
+            print(f"  ⚡ Tool: Refining implementation code for iteration {current_plan.get('iteration')}...")
+            
+            try:
+                updated_plan = self.orch.planner.refine_implementation_code(
+                    plan=current_plan,
+                    enable_human_feedback=True
+                )
+                
+                if updated_plan.get("error"):
+                    return json.dumps({
+                        "status": "error",
+                        "message": updated_plan.get("error")
+                    })
+                
+                # Save
+                output_path = self.orch.base_dir / "plan_refined.json"
+                with open(output_path, 'w') as f:
+                    json.dump(updated_plan, f, indent=2)
+                
+                # Regenerate HTML
+                from .html_generator import HTMLReportGenerator
+                html_path = self.orch.base_dir / "plan_refined.html"
+                generator = HTMLReportGenerator(self.orch.planner.state)
+                generator.generate(str(html_path))
+                
+                # Save scripts
+                final_out = "./output_scripts"
+                print(f"\n--- Saving Scripts to: {final_out} ---")
+                write_experiments_to_disk(updated_plan, final_out)
+                
+                return json.dumps({
+                    "status": "success",
+                    "message": "Implementation code updated",
+                    "output_path": str(output_path),
+                    "html_report": str(html_path),
+                    "scripts_saved_to": final_out
+                })
+                
+            except Exception as e:
+                logging.error(f"Code refinement error: {e}", exc_info=True)
+                return json.dumps({
+                    "status": "error",
+                    "message": str(e)
+                })
+        
+        self._register_tool(
+            func=refine_implementation_code,
+            name="refine_implementation_code",
+            description=(
+                "Updates implementation code for the most recently refined plan. "
+                "Maps refined experimental steps to executable code. "
+                "Use after refine_plan_with_results() once the scientific strategy is approved."
+            ),
+            parameters={},
+            required=[]
+        )
+        
+        # 6. ANALYZE FILE
         def analyze_file(file_path: str, extraction_goal: str = None, force_regenerate: bool = False):
             """
             Analyzes a raw data file (CSV/XLSX) to extract metrics.
@@ -667,7 +803,7 @@ class OrchestratorTools:
             required=["file_path"]
         )
         
-        # 6. RESET ANALYSIS LOGIC
+        # 7. RESET ANALYSIS LOGIC
         def reset_analysis_logic():
             """Resets the analysis script and optimization data."""
             self.orch.active_scalarizer_script = None
@@ -697,7 +833,7 @@ class OrchestratorTools:
             required=[]
         )
         
-        # 7. RUN OPTIMIZATION
+        # 8. RUN OPTIMIZATION
         def run_optimization(parallel_capable: bool = False, batch_size: int = None):
             """
             Runs Bayesian Optimization to suggest next parameters.
@@ -890,7 +1026,7 @@ class OrchestratorTools:
             required=[]
         )
 
-        # 8. SAVE CHECKPOINT
+        # 9. SAVE CHECKPOINT
         def save_checkpoint():
             """
             Saves complete orchestrator state including conversation and agent state.
@@ -964,7 +1100,7 @@ class OrchestratorTools:
             required=[]
         )
 
-        # 9. DISCARD PLAN
+        # 10. DISCARD PLAN
         def discard_plan(reason: str = ""):
             """
             Discards the most recent experimental plan (marks it as superseded).
@@ -1174,3 +1310,5 @@ class OrchestratorTools:
                 "message": str(e),
                 "tool": tool_name
             })
+
+
