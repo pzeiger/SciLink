@@ -1,4 +1,6 @@
 from typing import Dict, Any, Optional
+import re
+
 
 def display_plan_summary(result: Dict[str, Any]) -> None:
     """
@@ -36,7 +38,10 @@ def display_plan_summary(result: Dict[str, Any]) -> None:
         steps = exp.get('experimental_steps', [])
         if steps:
             for j, step in enumerate(steps, 1):
-                print(f" {j}. {step}")
+                # Remove leading numbers/bullets provided by LLM
+                # Regex removes "1.", "1 -", "1)", etc.
+                clean_step = re.sub(r'^[\d\-\.\)\s]+', '', str(step)).strip()
+                print(f" {j}. {clean_step}")
         else:
             print("  (No steps provided)")
         
