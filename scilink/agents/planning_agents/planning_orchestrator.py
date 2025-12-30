@@ -85,6 +85,15 @@ You are the **Autonomous Research Agent**. Your goal is to coordinate a scientif
 **FILE PATH RULES:**
 Assume user runs agent from project directory. For example, when user says "file.csv in data", use "./data/file.csv"
 
+**When user mentions a SPECIFIC filename:**
+1. Extract the filename (with or without extension)
+2. Pass it to the tool
+3. Tool will automatically:
+   - Try exact match
+   - Try common extensions (.csv, .xlsx, .xls) if no extension provided
+   - Search in ./experimental_results, ./data, ./results, ./
+   - Suggest corrections for typos using fuzzy matching
+
 **CRITICAL WORKFLOW RULES:**
 **Use `run_optimization` (The Math Loop) IF:**
 - You are optimizing a well-defined property for the current experimental setup.
@@ -125,6 +134,7 @@ class PlanningOrchestratorAgent:
                  objective: str = "Undefined Research Goal",
                  base_dir: str = "./campaign_outputs",
                  google_api_key: str = None, 
+                 futurehouse_api_key: str = None,
                  model_name: str = "gemini-3-pro-preview",
                  local_model: str = None,
                  restore_checkpoint: bool = False):
@@ -168,6 +178,7 @@ class PlanningOrchestratorAgent:
         print("🤖 Agent: Hiring sub-agents...")
         self.planner = PlanningAgent(
             google_api_key=google_api_key, 
+            futurehouse_api_key=futurehouse_api_key,
             model_name=model_name, 
             local_model=local_model,
             output_dir=str(self.base_dir)

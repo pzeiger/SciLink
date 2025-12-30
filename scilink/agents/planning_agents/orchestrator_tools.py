@@ -83,6 +83,94 @@ class OrchestratorTools:
             text_preview = result_data[:100] + "..." if len(result_data) > 100 else result_data
             print(f"    (Processing text input: '{text_preview}')")
             return result_data
+        
+    def _resolve_data_path(self, path_input: str) -> tuple[str, str]:
+        """
+        Resolves user input to actual file path with fuzzy matching for typos.
+        
+        Returns:
+            (resolved_path, None) on success
+            (None, error_json) on failure (with suggestions if available)
+        """
+        from difflib import get_close_matches
+        
+        path = Path(path_input.strip())
+        
+        # Case 1: Path exists as-is
+        if path.exists():
+            return str(path), None
+        
+        # Case 2: Try common extensions if no extension provided
+        if not path.suffix:
+            for ext in ['.csv', '.xlsx', '.xls']:
+                candidate = path.with_suffix(ext)
+                if candidate.exists():
+                    print(f"    🔍 Resolved: {path.name} → {candidate.name}")
+                    return str(candidate), None
+        
+        # Case 3: Try in common data folders
+        search_folders = ['./experimental_results', './data', './results', './']
+        all_candidates = []  # Track all files we find for fuzzy matching
+        
+        if not path.is_absolute():
+            stem = path.stem if path.suffix else path.name
+            
+            for folder in search_folders:
+                folder_path = Path(folder)
+                if not folder_path.exists():
+                    continue
+                
+                # Collect all data files in this folder
+                for ext in ['.csv', '.xlsx', '.xls']:
+                    all_candidates.extend(folder_path.glob(f"*{ext}"))
+                
+                # Try exact match with provided extension
+                if path.suffix:
+                    candidate = folder_path / path.name
+                    if candidate.exists():
+                        print(f"    🔍 Found: {path.name} in {folder}/")
+                        return str(candidate), None
+                
+                # Try common extensions
+                for ext in ['.csv', '.xlsx', '.xls']:
+                    candidate = folder_path / f"{stem}{ext}"
+                    if candidate.exists():
+                        print(f"    🔍 Found: {stem}{ext} in {folder}/")
+                        return str(candidate), None
+        
+        # Case 4: File not found - use fuzzy matching to suggest alternatives
+        if all_candidates:
+            # Get filenames without path
+            candidate_names = [f.name for f in all_candidates]
+            
+            # Try fuzzy match on the input filename
+            input_name = path.name
+            matches = get_close_matches(input_name, candidate_names, n=3, cutoff=0.6)
+            
+            if matches:
+                # Find full paths for the matches
+                suggested_files = []
+                for match in matches:
+                    for candidate in all_candidates:
+                        if candidate.name == match:
+                            suggested_files.append(str(candidate))
+                            break
+                
+                return None, json.dumps({
+                    "status": "error",
+                    "message": f"File not found: {path_input}",
+                    "did_you_mean": matches,
+                    "full_paths": suggested_files,
+                    "hint": f"Did you mean '{matches[0]}'? Use: primary_data_set='{suggested_files[0]}'"
+                })
+        
+        # No matches found at all
+        return None, json.dumps({
+            "status": "error",
+            "message": f"Could not find file: {path_input}",
+            "searched_in": [str(f) for f in search_folders if Path(f).exists()],
+            "hint": "Check filename spelling or use /files command to see available files"
+        })
     
     def _register_all_tools(self):
         """Register all tools with both OpenAI and Gemini formats."""
@@ -159,27 +247,50 @@ class OrchestratorTools:
                 
                 print(f"    📚 Knowledge sources: {knowledge_list}")
             
-            # Parse primary dataset
+            # Parse primary dataset - UPDATED LOGIC
             primary_dataset = None
             if primary_data_set:
-                path = Path(primary_data_set.strip())
-                if path.exists():
-                    if path.is_file():
-                        primary_dataset = {"file_path": str(path)}
-                        print(f"    📊 Primary data (file): {path.name}")
-                    elif path.is_dir():
-                        all_files = []
-                        for ext in ['*.csv', '*.xlsx', '*.txt', '*.json']:
-                            all_files.extend(path.glob(ext))
+                # Try to resolve the path
+                resolved_path, error = self._resolve_data_path(primary_data_set)
+                
+                if error:
+                    return error  # Return the error JSON with suggestions
+                
+                path = Path(resolved_path)
+                
+                # Now handle resolved path
+                if path.is_file():
+                    primary_dataset = {"file_path": str(path)}
+                    print(f"    📊 Primary data: {path.name}")
+                    
+                elif path.is_dir():
+                    # Directory - check how many data files
+                    all_files = []
+                    for ext in ['*.csv', '*.xlsx', '*.xls']:
+                        all_files.extend(path.glob(ext))
+                    
+                    if not all_files:
+                        return json.dumps({
+                            "status": "error",
+                            "message": f"No data files (.csv, .xlsx, .xls) found in: {primary_data_set}",
+                            "hint": "Add data files to the folder or specify a different path"
+                        })
+                    
+                    elif len(all_files) == 1:
+                        # Only one file - use it automatically
+                        primary_dataset = {"file_path": str(all_files[0])}
+                        print(f"    📊 Primary data (auto-selected): {all_files[0].name}")
                         
-                        if all_files:
-                            first_file = str(all_files[0])
-                            primary_dataset = {"file_path": first_file}
-                            print(f"    📊 Primary data (folder): {len(all_files)} files found, using {Path(first_file).name}")
-                        else:
-                            print(f"    ⚠️  No supported files in: {primary_data_set}")
-                else:
-                    print(f"    ⚠️  Primary data path not found: {primary_data_set}")
+                    else:
+                        # Multiple files - require user to specify
+                        file_list = sorted([f.name for f in all_files])
+                        return json.dumps({
+                            "status": "error",
+                            "message": f"Multiple data files found in '{primary_data_set}'",
+                            "available_files": file_list,
+                            "file_count": len(file_list),
+                            "hint": f"Please specify which file to use. Example: primary_data_set='./experimental_results/{file_list[0]}'"
+                        })
             
             # Build context
             context_parts = []
@@ -266,10 +377,14 @@ class OrchestratorTools:
         )
 
         # 2. GENERATE IMPLEMENTATION CODE
-        def generate_implementation_code(code_paths: str):
+        def generate_implementation_code(code_paths: str = None):
             """
             Adds implementation code to the most recent experimental plan.
             Use after generate_initial_plan() to map experiments to executable code.
+            
+            Args:
+                code_paths: Comma-separated paths to code folders. 
+                        Optional if Code KB already loaded at startup.
             """
             
             if not self.orch.planner.state or not self.orch.planner.state.get("current_plan"):
@@ -291,41 +406,58 @@ class OrchestratorTools:
                     })
             
             print(f"  ⚡ Tool: Generating implementation code for existing plan...")
-            
-            # Parse code paths
-            code_list = [p.strip() for p in code_paths.split(',') if p.strip()]
-            
-            # Validate paths
-            invalid_paths = []
-            for path in code_list:
-                if not Path(path).exists():
-                    invalid_paths.append(path)
-            
-            if invalid_paths:
-                # Check for common typos
-                suggestions = []
-                for invalid in invalid_paths:
-                    parent = Path(invalid).parent
-                    if parent.exists():
-                        similar = [f.name for f in parent.iterdir() 
-                                if f.is_dir() and invalid.lower() in f.name.lower()]
-                        if similar:
-                            suggestions.append(f"Did you mean './{similar[0]}'?")
-                
-                hint = "Check folder names and spelling."
-                if suggestions:
-                    hint += " " + " ".join(suggestions)
-                
+
+            kb_available = (self.orch.planner.kb_code.index and 
+                            self.orch.planner.kb_code.index.ntotal > 0)
+
+            if not kb_available and not code_paths:
                 return json.dumps({
                     "status": "error",
-                    "message": f"Code paths not found: {', '.join(invalid_paths)}",
-                    "hint": hint
+                    "message": "No Code Knowledge Base available",
+                    "hint": "Provide code_paths parameter (e.g., code_paths='./opentrons_api,./automation_lib')",
+                    "available_options": [
+                        "Option 1: Specify code_paths='./your_code_folder'",
+                        "Option 2: If code exists, check folder name and path"
+                    ]
                 })
             
-            print(f"    💻 Code sources: {code_list}")
+            # Parse code paths
+            code_list = []
+            if code_paths:
+                code_list = [p.strip() for p in code_paths.split(',') if p.strip()]
+                
+                # Validate paths (only if code_paths was provided)
+                invalid_paths = []
+                for path in code_list:
+                    if not Path(path).exists():
+                        invalid_paths.append(path)
+                
+                if invalid_paths:
+                    # Check for common typos
+                    suggestions = []
+                    for invalid in invalid_paths:
+                        parent = Path(invalid).parent
+                        if parent.exists():
+                            similar = [f.name for f in parent.iterdir() 
+                                    if f.is_dir() and invalid.lower() in f.name.lower()]
+                            if similar:
+                                suggestions.append(f"Did you mean './{similar[0]}'?")
+                    
+                    hint = "Check folder names and spelling."
+                    if suggestions:
+                        hint += " " + " ".join(suggestions)
+                    
+                    return json.dumps({
+                        "status": "error",
+                        "message": f"Code paths not found: {', '.join(invalid_paths)}",
+                        "hint": hint
+                    })
+                
+                print(f"    💻 Code sources: {code_list}")
+            elif kb_available:
+                print(f"    💻 Using existing Code KB ({self.orch.planner.kb_code.index.ntotal} vectors)")
             
             try:
-                # Call the new method!
                 updated_plan = self.orch.planner.generate_implementation_code(
                     plan=current_plan,
                     code_paths=code_list,
@@ -377,15 +509,20 @@ class OrchestratorTools:
             description=(
                 "Generates executable implementation code for the most recent experimental plan. "
                 "Maps experimental steps to code using API documentation and example repositories. "
-                "Use after generate_initial_plan() once the scientific strategy is approved."
+                "Use after generate_initial_plan() once the scientific strategy is approved. "
+                "If Code KB already loaded, code_paths is optional."
             ),
             parameters={
                 "code_paths": {
                     "type": "string",
-                    "description": "Comma-separated paths to code/API folders (e.g., './opentrons_api', './automation_lib')"
+                    "description": (
+                        "Comma-separated paths to code/API folders (e.g., './opentrons_api,./automation_lib'). "
+                        "OPTIONAL if Code Knowledge Base is already loaded. "
+                        "REQUIRED if no Code KB exists."
+                    )
                 }
             },
-            required=["code_paths"]
+            required=[]
         )
         
         # 3. RUN ECONOMIC ANALYSIS
@@ -408,26 +545,47 @@ class OrchestratorTools:
             # Parse primary dataset
             primary_dataset = None
             if primary_data_set:
-                path = Path(primary_data_set.strip())
-                if path.exists():
-                    if path.is_file():
-                        primary_dataset = {"file_path": str(path)}
-                        print(f"    📊 Primary data (file): {path.name}")
-                    elif path.is_dir():
-                        # Find all supported files
-                        all_files = []
-                        for ext in ['*.csv', '*.xlsx', '*.txt', '*.json']:
-                            all_files.extend(path.glob(ext))
+                # Try to resolve the path
+                resolved_path, error = self._resolve_data_path(primary_data_set)
+                
+                if error:
+                    return error  # Return the error JSON with suggestions
+                
+                path = Path(resolved_path)
+                
+                # Now handle resolved path
+                if path.is_file():
+                    primary_dataset = {"file_path": str(path)}
+                    print(f"    📊 Primary data: {path.name}")
+                    
+                elif path.is_dir():
+                    # Directory - check how many data files
+                    all_files = []
+                    for ext in ['*.csv', '*.xlsx', '*.xls']:
+                        all_files.extend(path.glob(ext))
+                    
+                    if not all_files:
+                        return json.dumps({
+                            "status": "error",
+                            "message": f"No data files (.csv, .xlsx, .xls) found in: {primary_data_set}",
+                            "hint": "Add data files to the folder or specify a different path"
+                        })
+                    
+                    elif len(all_files) == 1:
+                        # Only one file - use it automatically
+                        primary_dataset = {"file_path": str(all_files[0])}
+                        print(f"    📊 Primary data (auto-selected): {all_files[0].name}")
                         
-                        if all_files:
-                            # Use first file as primary
-                            first_file = str(all_files[0])
-                            primary_dataset = {"file_path": first_file}
-                            print(f"    📊 Primary data (folder): {len(all_files)} files found, using {Path(first_file).name}")
-                        else:
-                            print(f"    ⚠️  No supported files (.csv, .xlsx, .txt, .json) in: {primary_data_set}")
-                else:
-                    print(f"    ⚠️  Primary data path not found: {primary_data_set}")
+                    else:
+                        # Multiple files - require user to specify
+                        file_list = sorted([f.name for f in all_files])
+                        return json.dumps({
+                            "status": "error",
+                            "message": f"Multiple data files found in '{primary_data_set}'",
+                            "available_files": file_list,
+                            "file_count": len(file_list),
+                            "hint": f"Please specify which file to use. Example: primary_data_set='./experimental_results/{file_list[0]}'"
+                        })
             
             try:
                 res = self.orch.planner.perform_technoeconomic_analysis(
