@@ -999,7 +999,7 @@ class OrchestratorTools:
                     input_bounds=input_bounds,
                     target_cols=[self.orch.expected_target_column],
                     output_dir=str(self.orch.base_dir / "bo_artifacts"),
-                    batch_size=final_batch_size
+                    batch_size=int(final_batch_size)
                 )
                 
                 if res.get("status") != "success":
