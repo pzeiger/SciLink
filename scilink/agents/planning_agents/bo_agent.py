@@ -142,7 +142,7 @@ class BOAgent:
             return {"error": f"JSON Error: {parse_error}"}
         
         valid_config = self._validate_config(raw_config)
-        valid_config["batch_size"] = batch_size # Lock in the user constraint
+        valid_config["batch_size"] = int(batch_size) # Lock in the user constraint
 
         # 3. Fit Model
         optimizer = get_optimizer(is_moo=is_moo)
