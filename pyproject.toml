@@ -51,7 +51,8 @@ dependencies = [
 "Bug Tracker" = "https://github.com/scilink/scilink/issues"
 
 [project.scripts]
-scilink = "scilink.cli.workflows:main"
+scilink = "scilink.cli.main:main"
+scilink-workflows = "scilink.cli.workflows:main"
 scilink-agent = "scilink.cli.run_agent:main"
 
 [tool.setuptools]
