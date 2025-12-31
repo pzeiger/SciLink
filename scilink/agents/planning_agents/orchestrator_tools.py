@@ -1100,11 +1100,37 @@ class OrchestratorTools:
                 })
             
             # Extract bounds from existing data
-            input_bounds = []
+            # 1. Identify purely numeric columns from the expected inputs
+            numeric_inputs = []
             for col in self.orch.expected_input_columns:
-                min_val = df[col].min()
-                max_val = df[col].max()
-                margin = (max_val - min_val) * 0.1
+                # Check if the column exists and is numeric (float/int)
+                if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
+                    numeric_inputs.append(col)
+                else:
+                    print(f"  ⚠️ Skipping non-numeric input column: {col}")
+
+            # 2. Update the expected inputs to only include the numeric ones
+            if not numeric_inputs:
+                return json.dumps({
+                    "status": "error", 
+                    "message": "No numeric input parameters found. Optimization requires at least one numeric parameter (float/int)."
+                })
+
+            # Update the orchestrator state to reflect the filtered list
+            self.orch.expected_input_columns = numeric_inputs
+
+            # 3. Calculate bounds safely
+            input_bounds = []
+            for col in numeric_inputs:
+                min_val = float(df[col].min())
+                max_val = float(df[col].max())
+                
+                # Handle case where min == max (single data point or constant column)
+                if min_val == max_val:
+                    margin = 1.0 if min_val == 0 else abs(min_val * 0.1)
+                else:
+                    margin = (max_val - min_val) * 0.1
+                    
                 input_bounds.append([min_val - margin, max_val + margin])
             
             # ============================================
