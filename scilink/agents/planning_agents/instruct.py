@@ -21,7 +21,7 @@ Your response format depends on the quality of the retrieved context.
 Synthesize the information from the retrieved context, *any provided images, and any provided image descriptions* to propose one or more specific, actionable experiments to address the general objective. Your entire response must be directly derivable from the provided context (text and images).
 
 **Output Format (only if context is sufficient):**
-You MUST respond with a single JSON object containing a key "proposed_experiments", which is a list of experiment plans. Each plan must have the following keys:
+You MUST respond with a single JSON object containing a key "proposed_experiments", which is a list containing exactly ONE experiment plan. The plan must have the following keys:
 - "hypothesis": (String) A clear, single-sentence, testable hypothesis.
 - "experiment_name": (String) A short, descriptive name for the experiment.
 - "experimental_steps": (List of Strings) A numbered or bulleted list of concrete steps to perform the experiment.
@@ -91,7 +91,7 @@ Propose a **foundational** experimental plan based on:
 2. The **Primary Dataset** (if available).
 
 **OUTPUT FORMAT:**
-You MUST respond with a single JSON object containing a key "proposed_experiments", which is a list of experiment plans. Each plan must have the keys:
+You MUST respond with a single JSON object containing a key "proposed_experiments", which is a list containing exactly ONE experiment plan. The plan must have the following keys:
 - "hypothesis": (String) A clear, single-sentence, testable hypothesis.
 - "experiment_name": (String) A short, descriptive name for the experiment.
 - "experimental_steps": (List of Strings) A numbered or bulleted list of concrete steps to perform the experiment. Must be self-contained, i.e. fully understandable by a human WITHOUT referencing external code or files or other sections of the JSON file.
