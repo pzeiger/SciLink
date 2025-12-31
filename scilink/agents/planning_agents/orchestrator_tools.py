@@ -1036,6 +1036,7 @@ class OrchestratorTools:
             """
             print(f"  ⚡ Tool: Running Bayesian Optimization...")
             
+            # --- PRE-FLIGHT CHECKS ---
             if not self.orch.active_scalarizer_script:
                 return json.dumps({
                     "status": "error",
@@ -1075,6 +1076,7 @@ class OrchestratorTools:
                     "hint": "This shouldn't happen. Try reset_analysis_logic."
                 })
             
+            # --- SCHEMA VALIDATION ---
             if self.orch.expected_target_column not in df.columns:
                 return json.dumps({
                     "status": "error",
@@ -1099,39 +1101,68 @@ class OrchestratorTools:
                     "affected_rows": df[df[critical_cols].isnull().any(axis=1)].index.tolist()
                 })
             
-            # Extract bounds from existing data
-            # 1. Identify purely numeric columns from the expected inputs
+            # ============================================
+            # BOUNDS & CONSTRAINTS CALCULATION
+            # ============================================
+
+            # 1. Fetch Scientific Constraints from Planner State
+            # This allows the Planner (Science Brain) to limit the Optimizer (Math Brain)
+            scientific_bounds = {}
+            current_plan = self.orch.planner.state.get("current_plan", {})
+            
+            if current_plan and "proposed_experiments" in current_plan:
+                for exp in current_plan["proposed_experiments"]:
+                    for param in exp.get("optimization_params", []):
+                        name = param.get("parameter_name")
+                        min_v = param.get("min_value")
+                        max_v = param.get("max_value")
+                        
+                        if name and min_v is not None and max_v is not None:
+                            scientific_bounds[name] = (float(min_v), float(max_v))
+                            print(f"  🔬 Scientific Constraint Found: {name} must be between {min_v} and {max_v}")
+
+            # 2. Identify numeric inputs (Filtering out strings/categories)
             numeric_inputs = []
             for col in self.orch.expected_input_columns:
-                # Check if the column exists and is numeric (float/int)
                 if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
                     numeric_inputs.append(col)
                 else:
                     print(f"  ⚠️ Skipping non-numeric input column: {col}")
 
-            # 2. Update the expected inputs to only include the numeric ones
             if not numeric_inputs:
                 return json.dumps({
                     "status": "error", 
                     "message": "No numeric input parameters found. Optimization requires at least one numeric parameter (float/int)."
                 })
 
-            # Update the orchestrator state to reflect the filtered list
+            # Update state to only track numeric inputs for optimization
             self.orch.expected_input_columns = numeric_inputs
 
-            # 3. Calculate bounds safely
+            # 3. Calculate Final Bounds (Merging Science + Data Stats)
             input_bounds = []
             for col in numeric_inputs:
-                min_val = float(df[col].min())
-                max_val = float(df[col].max())
+                # Priority A: Check Scientific Plan First
+                if col in scientific_bounds:
+                    sci_min, sci_max = scientific_bounds[col]
+                    input_bounds.append([sci_min, sci_max])
+                    print(f"     -> Bound for '{col}': [{sci_min}, {sci_max}] (Source: PLANNER)")
                 
-                # Handle case where min == max (single data point or constant column)
-                if min_val == max_val:
-                    margin = 1.0 if min_val == 0 else abs(min_val * 0.1)
+                # Priority B: Fallback to Data Statistics
                 else:
-                    margin = (max_val - min_val) * 0.1
+                    data_min = float(df[col].min())
+                    data_max = float(df[col].max())
                     
-                input_bounds.append([min_val - margin, max_val + margin])
+                    # Add 10% exploration margin if relying purely on data
+                    if data_min == data_max:
+                        margin = 1.0 if data_min == 0 else abs(data_min * 0.1)
+                    else:
+                        margin = (data_max - data_min) * 0.1
+                        
+                    safe_min = data_min - margin
+                    safe_max = data_max + margin
+                    
+                    input_bounds.append([safe_min, safe_max])
+                    print(f"     -> Bound for '{col}': [{safe_min:.2f}, {safe_max:.2f}] (Source: DATA STATISTICS)")
             
             # ============================================
             # BATCH SIZE DETERMINATION
