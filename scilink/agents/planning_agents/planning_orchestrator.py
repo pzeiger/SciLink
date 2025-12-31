@@ -172,7 +172,7 @@ class PlanningOrchestratorAgent:
         # STATE: Tracks the currently approved analysis script AND expected schema
         self.active_scalarizer_script = None
         self.expected_input_columns = None
-        self.expected_target_column = None
+        self.expected_target_columns = []
 
         # TEA results for auto-context
         self.latest_tea_results = None
@@ -264,12 +264,17 @@ class PlanningOrchestratorAgent:
             
             self.active_scalarizer_script = state.get("active_scalarizer_script")
             self.expected_input_columns = state.get("expected_input_columns")
-            self.expected_target_column = state.get("expected_target_column")
-            self.latest_tea_results = state.get("latest_tea_results")  # ← ADD THIS LINE
+
+            if "expected_target_columns" in state:
+                self.expected_target_columns = state.get("expected_target_columns")
+            else:
+                self.expected_target_columns = []
+
+            self.latest_tea_results = state.get("latest_tea_results") 
             
             print(f"    ✅ Restored state:")
             print(f"       - Analysis script: {Path(self.active_scalarizer_script).name if self.active_scalarizer_script else 'None'}")
-            print(f"       - Schema: {self.expected_input_columns} → {self.expected_target_column}")
+            print(f"       - Schema: {self.expected_input_columns} → {self.expected_target_columns}")
             print(f"       - Data points: {state.get('data_points_collected', 0)}")
             print(f"       - TEA results: {'Available' if self.latest_tea_results else 'None'}")  # ← ADD THIS LINE
             
@@ -347,7 +352,7 @@ class PlanningOrchestratorAgent:
                 "objective": self.objective,
                 "active_scalarizer_script": self.active_scalarizer_script,
                 "expected_input_columns": self.expected_input_columns,
-                "expected_target_column": self.expected_target_column,
+                "expected_target_columns": self.expected_target_columns,
                 "data_points_collected": len(pd.read_csv(self.bo_data_path)) if self.bo_data_path.exists() else 0,
                 "planner_state": self.planner.state,
                 "message_count": self.message_count,

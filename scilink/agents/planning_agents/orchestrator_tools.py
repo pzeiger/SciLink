@@ -809,7 +809,12 @@ class OrchestratorTools:
             required=[]
         )
         
-        def analyze_file(file_path: str, extraction_goal: str = None, force_regenerate: bool = False):
+        def analyze_file(
+                file_path: str,
+                extraction_goal: str = None,
+                force_regenerate: bool = False,
+                inputs: list[str] = None,
+                targets: list[str] = None):
             """
             Analyzes a raw data file (CSV/XLSX) to extract metrics.
             
@@ -912,6 +917,25 @@ class OrchestratorTools:
                     print(f"    💡 Reprocessing entire file")
                     df_to_append = df_new
                     num_new = len(df_new)
+
+                # Explicit Schema Logic for MOO
+                all_cols = list(df_to_append.columns)
+
+                # Case 1: Agent explicitly provided schema (Enables MOO)
+                if inputs and targets:
+                    self.orch.expected_input_columns = inputs
+                    self.orch.expected_target_columns = targets  # Note: Use plural variable in orchestrator state
+                    print(f"    📊 Schema Enforced by Agent (Multi-Objective):")
+                
+                # Case 2: Fallback (Auto-detect assuming last col is target)
+                elif not self.orch.expected_input_columns:
+                    self.orch.expected_target_columns = [all_cols[-1]] # Default to last col as list
+                    self.orch.expected_input_columns = [c for c in all_cols if c != all_cols[-1]] 
+                    print(f"    📊 Schema Auto-Detected (Default Single-Objective):")
+                
+                # Log the schema for transparency
+                print(f"       Inputs: {self.orch.expected_input_columns}")
+                print(f"       Targets: {self.orch.expected_target_columns}")
                 
                 # SCHEMA ENFORCEMENT
                 if self.orch.bo_data_path.exists():
@@ -930,14 +954,6 @@ class OrchestratorTools:
                     df_to_append.to_csv(self.orch.bo_data_path, mode='a', header=False, index=False)
                 else:
                     df_to_append.to_csv(self.orch.bo_data_path, mode='w', header=True, index=False)
-                    
-                    all_cols = list(df_to_append.columns)
-                    self.orch.expected_target_column = all_cols[-1]
-                    self.orch.expected_input_columns = all_cols[:-1]
-                    
-                    print(f"    📊 Schema Established:")
-                    print(f"       Inputs: {self.orch.expected_input_columns}")
-                    print(f"       Target: {self.orch.expected_target_column}")
                 
                 # Update tracking
                 self.orch.analyzed_files[file_path_abs] = current_row_count
@@ -955,7 +971,7 @@ class OrchestratorTools:
                     "optimization_ready": data_count >= 3,
                     "schema": {
                         "inputs": self.orch.expected_input_columns,
-                        "target": self.orch.expected_target_column
+                        "targets": self.orch.expected_target_columns
                     }
                 })
                 
@@ -990,6 +1006,16 @@ class OrchestratorTools:
                         "Use when analysis requirements change (e.g., switching from single-row to multi-row extraction, "
                         "or changing which metrics to extract). Default: false"
                     )
+                },
+                "inputs": {
+                    "type": "array", 
+                    "items": {"type": "string"},
+                    "description": "List of column names to treat as INPUT parameters"
+                },
+                "targets": {
+                    "type": "array", 
+                    "items": {"type": "string"}, 
+                    "description": "List of column names to treat as OPTIMIZATION TARGETS"
                 }
             },
             required=["file_path"]
@@ -1000,7 +1026,7 @@ class OrchestratorTools:
             """Resets the analysis script and optimization data."""
             self.orch.active_scalarizer_script = None
             self.orch.expected_input_columns = None
-            self.orch.expected_target_column = None
+            self.orch.expected_target_columns = [] 
             
             if self.orch.bo_data_path.exists():
                 backup_path = self.orch.bo_data_path.with_suffix('.csv.backup')
@@ -1029,10 +1055,6 @@ class OrchestratorTools:
         def run_optimization(parallel_capable: bool = False, batch_size: int = None):
             """
             Runs Bayesian Optimization to suggest next parameters.
-            
-            Args:
-                parallel_capable: True if experiments can run in parallel. False for sequential (default).
-                batch_size: Number of parallel experiments (required if parallel_capable=True).
             """
             print(f"  ⚡ Tool: Running Bayesian Optimization...")
             
@@ -1063,24 +1085,26 @@ class OrchestratorTools:
             
             if len(df) < 3:
                 return json.dumps({
-                    "status": "error",
+                    "status": "error", 
                     "message": f"Insufficient data points: {len(df)}/3",
                     "hint": "Collect at least 3 experimental results before optimizing",
                     "current_data_count": len(df)
                 })
             
-            if not self.orch.expected_target_column or not self.orch.expected_input_columns:
+            # Check for plural target columns list
+            if not self.orch.expected_target_columns or not self.orch.expected_input_columns:
                 return json.dumps({
-                    "status": "error",
+                    "status": "error", 
                     "message": "Schema not established",
                     "hint": "This shouldn't happen. Try reset_analysis_logic."
                 })
             
-            # --- SCHEMA VALIDATION ---
-            if self.orch.expected_target_column not in df.columns:
+            # SCHEMA VALIDATION
+            missing_targets = [t for t in self.orch.expected_target_columns if t not in df.columns]
+            if missing_targets:
                 return json.dumps({
                     "status": "error",
-                    "message": f"Target column '{self.orch.expected_target_column}' missing from data",
+                    "message": f"Target columns missing from data: {missing_targets}",
                     "available_columns": list(df.columns)
                 })
             
@@ -1092,7 +1116,9 @@ class OrchestratorTools:
                     "available_columns": list(df.columns)
                 })
             
-            critical_cols = self.orch.expected_input_columns + [self.orch.expected_target_column]
+            #  Add list of targets to critical columns
+            critical_cols = self.orch.expected_input_columns + self.orch.expected_target_columns
+            
             if df[critical_cols].isnull().any().any():
                 return json.dumps({
                     "status": "error",
@@ -1102,11 +1128,10 @@ class OrchestratorTools:
                 })
             
             # ============================================
-            # BOUNDS & CONSTRAINTS CALCULATION
+            # BOUNDS & CONSTRAINTS CALCULATION (Unchanged)
             # ============================================
 
             # 1. Fetch Scientific Constraints from Planner State
-            # This allows the Planner (Science Brain) to limit the Optimizer (Math Brain)
             scientific_bounds = {}
             current_plan = self.orch.planner.state.get("current_plan", {})
             
@@ -1121,7 +1146,7 @@ class OrchestratorTools:
                             scientific_bounds[name] = (float(min_v), float(max_v))
                             print(f"  🔬 Scientific Constraint Found: {name} must be between {min_v} and {max_v}")
 
-            # 2. Identify numeric inputs (Filtering out strings/categories)
+            # 2. Identify numeric inputs
             numeric_inputs = []
             for col in self.orch.expected_input_columns:
                 if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
@@ -1138,21 +1163,17 @@ class OrchestratorTools:
             # Update state to only track numeric inputs for optimization
             self.orch.expected_input_columns = numeric_inputs
 
-            # 3. Calculate Final Bounds (Merging Science + Data Stats)
+            # 3. Calculate Final Bounds
             input_bounds = []
             for col in numeric_inputs:
-                # Priority A: Check Scientific Plan First
                 if col in scientific_bounds:
                     sci_min, sci_max = scientific_bounds[col]
                     input_bounds.append([sci_min, sci_max])
                     print(f"     -> Bound for '{col}': [{sci_min}, {sci_max}] (Source: PLANNER)")
-                
-                # Priority B: Fallback to Data Statistics
                 else:
                     data_min = float(df[col].min())
                     data_max = float(df[col].max())
                     
-                    # Add 10% exploration margin if relying purely on data
                     if data_min == data_max:
                         margin = 1.0 if data_min == 0 else abs(data_min * 0.1)
                     else:
@@ -1165,16 +1186,13 @@ class OrchestratorTools:
                     print(f"     -> Bound for '{col}': [{safe_min:.2f}, {safe_max:.2f}] (Source: DATA STATISTICS)")
             
             # ============================================
-            # BATCH SIZE DETERMINATION
+            # BATCH SIZE DETERMINATION (Unchanged)
             # ============================================
             
             if not parallel_capable:
-                # Sequential mode
                 final_batch_size = 1
                 mode_desc = "sequential (single experiment)"
-                
             else:
-                # Parallel mode - batch_size is REQUIRED
                 if batch_size is None:
                     return json.dumps({
                         "status": "batch_size_required",
@@ -1187,10 +1205,9 @@ class OrchestratorTools:
                         "hint": "Common values: 8, 12, 24, 96, 384 for plate-based experiments"
                     })
                 
-                # Validate batch_size
                 if batch_size < 1:
                     return json.dumps({
-                        "status": "error",
+                        "status": "error", 
                         "message": f"Invalid batch_size: {batch_size}. Must be at least 1."
                     })
                 
@@ -1202,23 +1219,24 @@ class OrchestratorTools:
             print(f"       Mode: {mode_desc}")
             print(f"       Data points: {len(df)}")
             print(f"       Inputs: {self.orch.expected_input_columns}")
-            print(f"       Target: {self.orch.expected_target_column}")
+            print(f"       Targets: {self.orch.expected_target_columns}") # Log targets list
             print(f"       Bounds: {input_bounds}")
             
             try:
+                # Pass list of targets directly
                 res = self.orch.bo.run_optimization_loop(
                     data_path=str(self.orch.bo_data_path),
                     objective_text=self.orch.objective,
                     input_cols=self.orch.expected_input_columns,
-                    input_bounds=input_bounds,
-                    target_cols=[self.orch.expected_target_column],
+                    input_bounds=input_bounds,                    
+                    target_cols=self.orch.expected_target_columns,
                     output_dir=str(self.orch.base_dir / "bo_artifacts"),
                     batch_size=int(final_batch_size)
                 )
                 
                 if res.get("status") != "success":
                     return json.dumps({
-                        "status": "error",
+                        "status": "error", 
                         "message": res.get("error", "Optimization failed"),
                         "bo_output": res
                     })
@@ -1308,10 +1326,11 @@ class OrchestratorTools:
                 "objective": self.orch.objective,
                 "active_scalarizer_script": self.orch.active_scalarizer_script,
                 "expected_input_columns": self.orch.expected_input_columns,
-                "expected_target_column": self.orch.expected_target_column,
+                "expected_target_columns": self.orch.expected_target_columns,
                 "data_points_collected": data_points,
                 "message_count": message_count,
-                "planner_state": self.orch.planner.state if hasattr(self.orch.planner, 'state') else None
+                "planner_state": self.orch.planner.state if hasattr(self.orch.planner, 'state') else None,
+                "latest_tea_results": self.orch.latest_tea_results
             }
             
             try:
