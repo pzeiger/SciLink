@@ -252,6 +252,12 @@ def perform_science_rag(objective: str,
         return {"error": str(e)}
 
 
+def normalize_code(code: str) -> str:
+    """Normalizes code by collapsing all whitespace to single spaces."""
+    if not code: return ""
+    return " ".join(code.split())
+
+
 def perform_code_rag(
     result: Dict[str, Any],
     kb_code: Any,
@@ -387,12 +393,19 @@ Respond with a JSON object:
                 continue
             
             if code_res and "implementation_code" in code_res:
-                exp["implementation_code"] = code_res["implementation_code"]
+                new_code = code_res["implementation_code"]
+                exp["implementation_code"] = new_code
                 exp["code_source_files"] = code_files
                 
-                # Simple output
                 if prev_impl:
-                    print(f"    - 🔄 Updated: {exp_name}")
+                    old_code = prev_impl.get('code', '')
+                    
+                    # Compare normalized versions to ignore harmless whitespace/indentation differences
+                    if normalize_code(new_code) == normalize_code(old_code):
+                        print(f"    - ⏹️  Preserved (No logic changes): {exp_name}")
+                    else:
+                        print(f"    - 🔄 Updated: {exp_name}")
+
                 else:
                     print(f"    - ✨ Generated: {exp_name}")
                             

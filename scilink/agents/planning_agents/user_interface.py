@@ -76,7 +76,7 @@ def display_plan_summary(result: Dict[str, Any]) -> None:
         # --- Code Indicator (If generated) ---
         if "implementation_code" in exp:
             print("\n--- 💻 Implementation Code ---")
-            print("  ✅ Python script generated (saved to file).")
+            print("  ℹ️  Plan includes implementation script.")
 
     print("\n" + "="*80)
 
