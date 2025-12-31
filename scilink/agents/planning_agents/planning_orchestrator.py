@@ -374,7 +374,7 @@ class PlanningOrchestratorAgent:
             recent_msgs = self._trim_history(self.messages[1:], max_messages=100)
             self.messages = [system_msg] + recent_msgs
         
-        max_iterations = 5  # Prevent infinite loops
+        max_iterations = 20  # Prevent infinite loops
         iteration = 0
         
         while iteration < max_iterations:
