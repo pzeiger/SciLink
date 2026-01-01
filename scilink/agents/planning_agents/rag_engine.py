@@ -165,8 +165,9 @@ def perform_science_rag(objective: str,
         retrieved_context_str = ""
 
         # Primary Data
-        if primary_data_str: 
-            retrieved_context_str += f"## 📊 Primary Lab Data Summary\n{primary_data_str}\n\n"
+        # if primary_data_str: 
+        #     retrieved_context_str += f"## 📊 Primary Lab Data Summary\n{primary_data_str}\n\n"
+        
         
         # B. External Literature
         if external_context:
@@ -191,6 +192,9 @@ def perform_science_rag(objective: str,
         img_desc_str = json.dumps(image_descriptions, indent=2)
 
     prompt_parts = [instructions, f"## User Objective:\n{objective}"]
+
+    if primary_data_str:
+        prompt_parts.append(f"\n## 📊 Primary Experimental Data:\n{primary_data_str}")
     
     if loaded_images:
         prompt_parts.append("\n## Provided Images: (See attached)")
@@ -246,6 +250,12 @@ def perform_science_rag(objective: str,
     except Exception as e:
         logging.error(f"Error in perform_science_rag: {e}")
         return {"error": str(e)}
+
+
+def normalize_code(code: str) -> str:
+    """Normalizes code by collapsing all whitespace to single spaces."""
+    if not code: return ""
+    return " ".join(code.split())
 
 
 def perform_code_rag(
@@ -383,12 +393,19 @@ Respond with a JSON object:
                 continue
             
             if code_res and "implementation_code" in code_res:
-                exp["implementation_code"] = code_res["implementation_code"]
+                new_code = code_res["implementation_code"]
+                exp["implementation_code"] = new_code
                 exp["code_source_files"] = code_files
                 
-                # Simple output
                 if prev_impl:
-                    print(f"    - 🔄 Updated: {exp_name}")
+                    old_code = prev_impl.get('code', '')
+                    
+                    # Compare normalized versions to ignore harmless whitespace/indentation differences
+                    if normalize_code(new_code) == normalize_code(old_code):
+                        print(f"    - ⏹️  Preserved (No logic changes): {exp_name}")
+                    else:
+                        print(f"    - 🔄 Updated: {exp_name}")
+
                 else:
                     print(f"    - ✨ Generated: {exp_name}")
                             
@@ -455,18 +472,26 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
         prompt_parts.extend(result_images)
 
     try:
-        # 4. Generate Content (Sending List of Text + Images)
+        # Generate Content (Sending List of Text + Images)
         response = model.generate_content(prompt_parts, generation_config=generation_config)
         refined_result, error_msg = parse_json_from_response(response)
         
         if error_msg:
-            print(f"    - ⚠️ Could not parse refined plan: {error_msg}. Reverting.")
-            return original_result
+            print(f"    - ⚠️ JSON Parsing Failed: {error_msg}")
+            # Return an error object so the agent knows to stop.
+            return {
+                "error": "JSON_PARSE_ERROR",
+                "message": f"LLM output invalid: {error_msg}",
+                "raw_output": str(response.text)[:500] if hasattr(response, 'text') else "No text"
+            }
         
         # Structure Validation
         if "proposed_experiments" not in refined_result:
-            print("    - ⚠️ Refined plan invalid structure. Reverting.")
-            return original_result
+            return {
+                "error": "INVALID_STRUCTURE",
+                "message": "JSON parsed but missing 'proposed_experiments' key.",
+                "raw_output": str(refined_result)[:200]
+            }
             
         return refined_result
         

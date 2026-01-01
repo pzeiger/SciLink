@@ -13,9 +13,13 @@ class OpenAIAsGenerativeModel:
     """
 
     def __init__(self, model: str, api_key: str | None = None, base_url: str | None = None):
+        # Store attributes for access by orchestrator
+        self.model = model
+        self.api_key = api_key
+        self.base_url = base_url
+        
         # Works with OpenAI and any OpenAI-compatible endpoint 
         self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
-        self.model = model
 
     # ---------------------- public API ----------------------
     def generate_content(self, contents, generation_config=None, safety_settings=None):
@@ -134,5 +138,3 @@ class OpenAIAsGenerativeModel:
             user_content.append({"type": "text", "text": str(part)})
 
         return [{"role": "user", "content": user_content}]
-
-

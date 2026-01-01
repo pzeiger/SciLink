@@ -6,13 +6,15 @@ from typing import List, Tuple, Dict, Any
 from botorch.models import SingleTaskGP, ModelListGP
 from botorch.models.transforms import Standardize, Normalize
 from botorch.fit import fit_gpytorch_mll
-from botorch.acquisition import LogExpectedImprovement
+from botorch.acquisition import LogExpectedImprovement, qLogExpectedImprovement
 from botorch.acquisition.monte_carlo import qUpperConfidenceBound
 from botorch.acquisition.multi_objective import qLogNoisyExpectedHypervolumeImprovement
 from botorch.acquisition.objective import LinearMCObjective
 from botorch.optim import optimize_acqf
 from botorch.utils.sampling import draw_sobol_samples
 from botorch.generation import MaxPosteriorSampling
+from botorch.sampling import SobolQMCNormalSampler
+
 from gpytorch.mlls import ExactMarginalLogLikelihood, SumMarginalLogLikelihood
 from gpytorch.kernels import MaternKernel, RBFKernel, ScaleKernel
 from gpytorch.likelihoods import GaussianLikelihood
@@ -103,7 +105,8 @@ class SingleObjectiveOptimizer:
 
         # --- 1. Thompson Sampling (High Throughput / Diversity) ---
         if strategy == 'thompson':
-            n_pool = max(2000, 500 * n_candidates)
+            #n_pool = max(2000, 500 * n_candidates)
+            n_pool = min(10000, max(2000, 100 * n_candidates))
             X_cand = draw_sobol_samples(bounds=self.bounds, n=n_pool, q=1).squeeze(1)
             
             thompson_sampler = MaxPosteriorSampling(model=self.model, replacement=False)
@@ -121,17 +124,30 @@ class SingleObjectiveOptimizer:
             
         else: # Default: 'log_ei'
             best_f = self.y_train.max()
-            acq_func = LogExpectedImprovement(model=self.model, best_f=best_f)
+            if n_candidates > 1:
+                # qLogExpectedImprovement for batches
+                sampler = SobolQMCNormalSampler(sample_shape=torch.Size([512]))
+                acq_func = qLogExpectedImprovement(
+                    model=self.model, 
+                    best_f=best_f,
+                    sampler=sampler
+                )
+            else:
+                # Standard LogExpectedImprovement for single point
+                acq_func = LogExpectedImprovement(model=self.model, best_f=best_f)
+                acq_func = LogExpectedImprovement(model=self.model, best_f=best_f)
 
         # --- 3. Optimization (Greedy Batch) ---
         is_large_batch = n_candidates > 10
+        # Only use sequential for batch acquisition functions that support it
+        use_sequential = n_candidates > 1 and strategy != 'thompson'
         candidates, _ = optimize_acqf(
             acq_function=acq_func,
             bounds=self.bounds,
             q=n_candidates,
             num_restarts=2 if is_large_batch else 10,
             raw_samples=128 if is_large_batch else 512,
-            sequential=True # Optimizes one point at a time conditioning on previous
+            sequential=use_sequential # Optimizes one point at a time conditioning on previous
         )
         return candidates.detach().cpu().numpy()
 

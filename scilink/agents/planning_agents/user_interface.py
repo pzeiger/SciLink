@@ -1,4 +1,6 @@
 from typing import Dict, Any, Optional
+import re
+
 
 def display_plan_summary(result: Dict[str, Any]) -> None:
     """
@@ -36,7 +38,10 @@ def display_plan_summary(result: Dict[str, Any]) -> None:
         steps = exp.get('experimental_steps', [])
         if steps:
             for j, step in enumerate(steps, 1):
-                print(f" {j}. {step}")
+                # Remove leading numbers/bullets provided by LLM
+                # Regex removes "1.", "1 -", "1)", etc.
+                clean_step = re.sub(r'^[\d\-\.\)\s]+', '', str(step)).strip()
+                print(f" {j}. {clean_step}")
         else:
             print("  (No steps provided)")
         
@@ -71,7 +76,7 @@ def display_plan_summary(result: Dict[str, Any]) -> None:
         # --- Code Indicator (If generated) ---
         if "implementation_code" in exp:
             print("\n--- 💻 Implementation Code ---")
-            print("  ✅ Python script generated (saved to file).")
+            print("  ℹ️  Plan includes implementation script.")
 
     print("\n" + "="*80)
 
@@ -83,7 +88,7 @@ def get_user_feedback() -> Optional[str]:
     """
     print("\n" + "-"*60)
     
-    print("👤 HUMAN FEEDBACK STEP")
+    print("📝 REQUESTING FEEDBACK")
     print("-" * 60)
     print("Review the plan above.")
     print("• To APPROVE: Press [ENTER] directly.")
@@ -95,3 +100,18 @@ def get_user_feedback() -> Optional[str]:
         return None # User accepted the plan
         
     return feedback
+
+
+def get_dataset_description(filename: str) -> str:
+    """
+    Interactive prompt when metadata is missing.
+    """
+    print("\n" + "!"*60)
+    print(f"⚠️  MISSING METADATA FOR: {filename}")
+    print("!"*60)
+    print("The agent needs context to understand columns/units in this file.")
+    print("• Option 1: Press [ENTER] to skip (Agent will guess based on headers).")
+    print("• Option 2: Type a brief description (e.g., 'Yield results from Suzuki coupling').")
+    
+    desc = input("\n> Context: ").strip()
+    return desc

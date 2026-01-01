@@ -41,6 +41,8 @@ dependencies = [
     "mdanalysis>=2.9.0",
     "pymupdf>=1.26.5",
     "pdfplumber>=0.11.7",
+    "pandas>=2.3.3",
+    "openpyxl>=3.1.5",
     "botorch>=0.16.1"
 ]
 
@@ -49,7 +51,8 @@ dependencies = [
 "Bug Tracker" = "https://github.com/scilink/scilink/issues"
 
 [project.scripts]
-scilink = "scilink.cli.workflows:main"
+scilink = "scilink.cli.main:main"
+scilink-workflows = "scilink.cli.workflows:main"
 scilink-agent = "scilink.cli.run_agent:main"
 
 [tool.setuptools]
