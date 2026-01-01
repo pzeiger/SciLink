@@ -58,7 +58,8 @@ class BOAgent:
     def __init__(self, 
                  google_api_key: str = None, 
                  model_name: str = "gemini-3-pro-preview", 
-                 local_model: str = None):
+                 local_model: str = None,
+                 output_dir: str = "."):
         
         if google_api_key is None:
             google_api_key = get_api_key('google')
@@ -80,7 +81,9 @@ class BOAgent:
             self.model = genai.GenerativeModel(model_name)
             self.generation_config = genai.types.GenerationConfig(response_mime_type="application/json")
 
-        self.history_file = Path("./bo_history.json")
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(exist_ok=True, parents=True)
+        self.history_file = self.output_dir / "bo_history.json"
 
     def _load_history(self) -> List[Dict]:
         if self.history_file.exists():
@@ -106,6 +109,9 @@ class BOAgent:
                               input_cols: List[str], input_bounds: List[List[float]], 
                               target_cols: List[str], output_dir: str = "./bo_artifacts",
                               batch_size: int = 1) -> Dict[str, Any]:
+        
+        if output_dir is None:
+            output_dir = str(self.output_dir)
         
         Path(output_dir).mkdir(exist_ok=True, parents=True)
         
@@ -142,7 +148,7 @@ class BOAgent:
             return {"error": f"JSON Error: {parse_error}"}
         
         valid_config = self._validate_config(raw_config)
-        valid_config["batch_size"] = batch_size # Lock in the user constraint
+        valid_config["batch_size"] = int(batch_size) # Lock in the user constraint
 
         # 3. Fit Model
         optimizer = get_optimizer(is_moo=is_moo)

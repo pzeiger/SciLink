@@ -249,8 +249,12 @@ class HTMLReportGenerator:
         date_str = self.state.get('start_time', datetime.now().isoformat())
         
         full_history = self.state.get('plan_history', [])
+
+        # Filter out superseded plans - they stay in JSON for transparency
+        active_plans = [p for p in full_history if p.get('status') != 'superseded']
+
         finalized_plans = {}
-        for plan in full_history:
+        for plan in active_plans:
             iter_idx = plan.get('iteration', 0)
             finalized_plans[iter_idx] = plan
 

@@ -1,0 +1,362 @@
+import subprocess
+import json
+import logging
+import re
+import sys
+from pathlib import Path
+from typing import Dict, Any, Optional, List
+import PIL.Image as PIL_Image
+
+import google.generativeai as genai
+
+from ...auth import get_api_key, APIKeyNotFoundError
+from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from .parser_utils import parse_json_from_response
+from .instruct import SCALARIZER_PROMPT, SCALARIZER_REFLECTION_PROMPT
+
+
+class ScalarizerAgent:
+    """
+    Agent for converting raw experimental data into scalar descriptors
+    suitable for Bayesian Optimization.
+
+    Example:
+        >>> agent = ScalarizerAgent()
+        >>> context = {
+        ...     "hypothesis": "Product peak expected at 5.5 min",
+        ...     "expected_outcome": "High yield > 80%"
+        ... }
+        >>> result = agent.scalarize(
+        ...     data_path="data/hplc_run_01.csv",
+        ...     objective_query="Integrate peak at 5.5 min. Calculate Purity %.",
+        ...     experiment_context=context
+        ... )
+        >>> print(result["metrics"])
+        {'purity': 98.5, 'peak_area': 12504.2}
+    """
+    def __init__(self, 
+                 google_api_key: str = None, 
+                 model_name: str = "gemini-3-pro-preview", 
+                 local_model: str = None,
+                 output_dir: str = "."):
+        
+        # Auth & Model Initialization
+        if google_api_key is None:
+            google_api_key = get_api_key('google')
+            if not google_api_key:
+                raise APIKeyNotFoundError('google')
+        
+        if local_model and ('ai-incubator' in local_model or 'openai' in local_model):
+            logging.info(f"🏛️  Analysis Agent using OpenAI-compatible model: {model_name}")
+            self.model = OpenAIAsGenerativeModel(
+                model=model_name, 
+                api_key=google_api_key, 
+                base_url=local_model
+            )
+            self.generation_config = None 
+        else:
+            logging.info(f"☁️  Analysis Agent using Google Gemini model: {model_name}")
+            if google_api_key:
+                genai.configure(api_key=google_api_key)
+            self.model = genai.GenerativeModel(model_name)
+            self.generation_config = genai.types.GenerationConfig(response_mime_type="application/json")
+
+        # Local Storage Setup
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(exist_ok=True, parents=True)
+
+    def _read_file_head(self, file_path: str, n_lines=25) -> str:
+        """Reads raw file header to help LLM handle delimiters/metadata."""
+        path = Path(file_path)
+        if not path.exists(): return "Error: File not found."
+        try:
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                head = [next(f) for _ in range(n_lines)]
+            return "".join(head)
+        except Exception as e:
+            return f"Error reading file head: {str(e)}"
+        
+    def _read_metadata(self, metadata_path: str) -> str:
+        """Safely reads a sidecar JSON file."""
+        if not metadata_path: 
+            return "None"
+        
+        path = Path(metadata_path)
+        if not path.exists():
+            return f"Error: Metadata file not found at {path}"
+            
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return json.dumps(data, indent=2)
+        except Exception as e:
+            return f"Error reading metadata: {str(e)}"
+
+    def _execute_script(self, script_path: Path, args: List[str] = None) -> Dict[str, Any]:
+        """Runs the generated python script in a subprocess."""
+       
+        # Construct command with arguments (if any)
+        cmd = ["python", str(script_path)]
+        if args:
+            cmd.extend(args)
+        try:
+            process = subprocess.run(
+                cmd,
+                capture_output=True, text=True, timeout=45
+            )
+            # Parse STDOUT for JSON
+            json_match = re.search(r'\{.*\}', process.stdout.strip(), re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group(0))
+                return {
+                    "status": "success",
+                    "metrics": data.get("metrics", {}),
+                    "plot_path": data.get("plot_path", ""),
+                    "stdout": process.stdout
+                }
+            else:
+                return {
+                    "status": "failure",
+                    "error": "No JSON output found in stdout",
+                    "stdout": process.stdout,
+                    "stderr": process.stderr
+                }
+        except subprocess.TimeoutExpired:
+            return {"status": "failure", "error": "Script execution timed out"}
+        except Exception as e:
+            return {"status": "failure", "error": str(e)}
+
+    def _verify_analysis(self, 
+                        objective: str, 
+                        context_str: str,
+                        script_content: str, 
+                        metrics: Dict, 
+                        plot_path: str,
+                        schema_requirements: Optional[Dict] = None) -> Dict[str, Any]:
+        """Multimodal Self-Reflection: Checks plot vs. objective."""
+        try:
+            image = PIL_Image.open(plot_path)
+        except Exception as e:
+            return {"status": "fail", "feedback": f"Could not load visual proof: {e}"}
+
+        # Build schema verification section
+        schema_check = ""
+        if schema_requirements:
+            schema_check = f"""
+    **REQUIRED SCHEMA TO VERIFY:**
+    - Input columns that MUST be present: {schema_requirements.get('input_columns', [])}
+    - Target columns that MUST be present: {schema_requirements.get('target_columns', [])}
+    Verify ALL these columns appear in the metrics.
+    """
+
+        prompt = f"""
+    **AUDIT REQUEST:**
+    **1. EXTRACTION OBJECTIVE:** "{objective}"
+    {schema_check}
+    **2. EXTRACTED METRICS:** {json.dumps(metrics, indent=2)}
+    **3. CODE SNIPPET:** 
+    ```python
+    {script_content[:3000]}
+    ```
+    **4. VISUAL PROOF:** (See Attached Image)
+    **CONTEXT (reference only):** {context_str[:500]}...
+
+    Verify the extraction is technically correct.
+    """
+        
+        try:
+            response = self.model.generate_content(
+                [SCALARIZER_REFLECTION_PROMPT, prompt, image],
+                generation_config=self.generation_config
+            )
+            return parse_json_from_response(response)[0]
+        except Exception as e:
+            logging.warning(f"Reflection failed: {e}")
+            return {"status": "pass", "reasoning": "Auto-reflection unavailable."}
+
+    def scalarize(self, 
+                  data_path: str, 
+                  objective_query: str = "",
+                  reuse_script_path: str = None,
+                  experiment_context: Optional[Dict[str, Any]] = None,
+                  metadata_path: Optional[str] = None, 
+                  enable_human_review: bool = True) -> Dict[str, Any]:
+        """
+        Main entry point. Converts raw data -> Scalar Metrics.
+        Auto-discovers metadata JSON if not provided.
+
+        Example:
+            >>> agent = ScalarizerAgent()
+            >>> context = {
+            ...     "hypothesis": "Product peak expected at 5.5 min",
+            ...     "expected_outcome": "High yield > 80%"
+            ... }
+            >>> result = agent.scalarize(
+            ...     data_path="data/hplc_run_01.csv",
+            ...     objective_query="Integrate peak at 5.5 min. Calculate Purity %.",
+            ...     experiment_context=context
+            ... )
+            >>> print(result["metrics"])
+            {'purity': 98.5, 'peak_area': 12504.2}
+
+        Args:
+            data_path: Path to raw data (csv, xlsx, txt).
+            objective_query: Natural language instruction (e.g. "Calculate yield").
+            experiment_context: Dict of high-level plan info (Hypothesis, etc).
+            metadata_path: Path to sidecar JSON describing the data file (Units, Columns).
+            enable_human_review: Pause for human check of the plot/logic.
+
+        Returns:
+            Dict containing:
+            - 'status': 'success' or 'failure'
+            - 'metrics': Dict of extracted scalars
+            - 'source_script': Path to the generated Python script
+        """
+        path_obj = Path(data_path)
+
+        # Path 1: Re-use existign script
+        if reuse_script_path and Path(reuse_script_path).exists():
+            print(f"  🔄 Reusing scalarizer script: {Path(reuse_script_path).name}")
+            # Execute with input file as argument
+            exec_res = self._execute_script(Path(reuse_script_path), args=[str(data_path)])
+            return {
+                "status": exec_res["status"], 
+                "metrics": exec_res.get("metrics", {}),
+                "source_script": str(reuse_script_path),
+                "error": exec_res.get("error")
+            }
+        
+        # Path 2: Generate new script
+        file_context = self._read_file_head(data_path)
+        
+        # Metadata Auto-Discovery
+        # If no path provided, check for a JSON file with the same name (e.g., run_01.csv -> run_01.json)
+        if not metadata_path:
+            potential_json = path_obj.with_suffix('.json')
+            if potential_json.exists():
+                metadata_path = str(potential_json)
+                print(f"  - ℹ️  Auto-discovered metadata file: {potential_json.name}")
+        
+        metadata_str = self._read_metadata(metadata_path)
+
+        # Format Contexts
+        exp_context_str = json.dumps(experiment_context) if experiment_context else "None"
+        plot_output_dir = str(self.output_dir.resolve())
+        
+        schema_section = ""
+        if experiment_context and "_schema_requirements" in experiment_context:
+            schema = experiment_context["_schema_requirements"]
+            schema_section = f"""
+    **REQUIRED OUTPUT SCHEMA (MANDATORY):**
+    - INPUT COLUMNS: {schema.get('input_columns', [])}
+    - TARGET COLUMNS: {schema.get('target_columns', [])}
+    - OPTIMIZATION TYPE: {schema.get('optimization_type', 'single-objective')}
+
+    Your output metrics MUST include ALL of these columns for each data point.
+    """
+        
+        base_prompt = f"""
+        **INPUT DATA:** {data_path}
+        **HEAD SNIPPET:** \n{file_context}\n
+
+        **METADATA SIDECAR (Column Defs / Units):**
+        {metadata_str}
+        {schema_section}
+        
+        **EXPERIMENTAL CONTEXT (Hypothesis / Steps):**
+        {exp_context_str}
+        
+        **GOAL:** "{objective_query}"
+        
+        **REQ:** Parse, Calculate, Plot (save to {plot_output_dir}/debug_{path_obj.stem}.png), Print JSON.
+
+        **CRITICAL:** In your code, replace OUTPUT_DIR_PLACEHOLDER with exactly: {plot_output_dir}
+        This is an absolute path - use it directly without modification.
+        """
+
+        current_prompt = base_prompt
+        max_retries = 5
+
+        for attempt in range(max_retries):
+            print(f"  - 📉 Scalarizer (Attempt {attempt+1}): Generating script...")
+            
+            # Generate Script
+            try:
+                response = self.model.generate_content(
+                    [SCALARIZER_PROMPT, current_prompt], 
+                    generation_config=self.generation_config
+                )
+                result, error = parse_json_from_response(response)
+            except Exception as e:
+                return {"error": f"LLM Generation Error: {e}"}
+
+            if error or not result or "implementation_code" not in result:
+                err_msg = error if error else "Missing 'implementation_code' key"
+                print(f"    ⚠️ Generation Failed (Invalid JSON): {err_msg}")
+                print("    --> Retrying with stricter JSON instructions...")
+                # Update prompt to force JSON compliance
+                current_prompt = base_prompt + f"\n\n**PREVIOUS ERROR:** JSON parsing failed ({err_msg}). Return ONLY valid JSON."
+                continue
+
+            # Save Script
+            sanitized_name = Path(data_path).stem.replace(" ", "_")
+            script_path = self.output_dir / f"proc_{sanitized_name}.py"
+            with open(script_path, "w", encoding="utf-8") as f:
+                f.write(result["implementation_code"])
+            
+            # Execute Script
+            exec_res = self._execute_script(script_path, args=[str(data_path)])
+            
+            if exec_res["status"] == "failure":
+                err_msg = exec_res.get('stderr', 'Unknown Error').strip()
+                # Truncate if too long for console readability
+                display_err = (err_msg[:300] + '...') if len(err_msg) > 300 else err_msg
+                print(f"    ❌ Runtime Error:\n    {display_err}")
+                
+                # Feed stderr back to LLM
+                current_prompt = base_prompt + f"\n\n**RUNTIME ERROR:**\n{err_msg}\nFix the code."
+                continue
+                
+            schema_for_verification = None
+            if experiment_context and "_schema_requirements" in experiment_context:
+                schema_for_verification = experiment_context["_schema_requirements"]
+
+            # Auto-Reflection (Visual Check)
+            print(f"    🤔 Auto-Reflecting on visual proof...")
+            verification = self._verify_analysis(
+                objective=objective_query,
+                context_str=exp_context_str,
+                script_content=result["implementation_code"],
+                metrics=exec_res["metrics"],
+                plot_path=exec_res["plot_path"],
+                schema_requirements=schema_for_verification
+            )
+            
+            if verification.get("status") == "fail":
+                feedback = verification.get("feedback", "Unknown logic error")
+                print(f"    ❌ Self-Correction Triggered: {feedback}")
+                current_prompt = base_prompt + f"\n\n**AUTO-CRITIQUE:** {feedback}\nAdjust the code and visuals."
+                continue
+            
+            print(f"    ✅ Auto-Reflection Passed.")
+
+            # Human Review (Optional)
+            if enable_human_review:
+                print("\n" + "="*60)
+                print(f"👀 SCALARIZER REVIEW: {path_obj.name}")
+                print(f"• Metrics: {exec_res['metrics']}")
+                print(f"• Plot: {exec_res['plot_path']}")
+                print("-" * 60)
+                user_fb = input("> Press [ENTER] to confirm or type feedback: ").strip()
+                
+                if user_fb:
+                    current_prompt = base_prompt + f"\n\n**HUMAN FEEDBACK:**\n{user_fb}"
+                    continue
+
+            return {
+                "status": "success", 
+                "metrics": exec_res["metrics"], 
+                "source_script": str(script_path)
+            }
+
+        return {"status": "failure", "error": "Max retries exceeded"}
