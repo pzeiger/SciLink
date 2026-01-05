@@ -145,13 +145,7 @@ class PlanningAgent:
     def restore_state(self, state_file_path: str) -> None:
         """
         Restore agent state from a saved .state.json file.
-        
-        Args:
-            state_file_path: Path to the .state.json file
-            
-        Example:
-            agent = PlanningAgent()
-            agent.restore_state("./outputs/session.state.json")
+        Raises FileNotFoundError if file doesn't exist.
         """        
         path = Path(state_file_path)
         
@@ -163,31 +157,17 @@ class PlanningAgent:
         
         print(f"  - 📂 Loading state from: {path.name}")
         
-        try:
-            with open(path, 'r') as f:
-                saved_state = json.load(f)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON in state file: {e}")
-        
-        # Validate structure
-        required = ["objective", "current_plan", "iteration_index", "session_id"]
-        missing = [f for f in required if f not in saved_state]
-        
-        if missing:
-            raise ValueError(
-                f"Invalid state file structure. Missing required fields: {missing}\n"
-                f"Expected a complete .state.json file with keys: {required}"
-            )
-        
-        # Restore
-        self.state = saved_state
+        if not self.load_state(state_file_path):
+            raise ValueError(f"Failed to parse state file: {state_file_path}")
         
         # User feedback
-        print(f"  - ✅ Restored session: {saved_state['session_id']}")
-        print(f"     • Objective: {saved_state['objective'][:80]}...")
-        print(f"     • Current iteration: {saved_state['iteration_index']}")
-        print(f"     • History entries: {len(saved_state.get('plan_history', []))}")
-        print(f"     • Previous results: {len(saved_state.get('experimental_results', []))}")
+        print(f"  - ✅ Restored session: {self.state['session_id']}")
+        print(f"     • Objective: {self.state['objective'][:80]}...")
+        print(f"     • Current iteration: {self.state['iteration_index']}")
+        print(f"     • History entries: {len(self.state.get('plan_history', []))}")
+        print(f"     • Previous results: {len(self.state.get('experimental_results', []))}")
+        print(f"     • Actions logged: {len(self.state.get('action_history', []))}")
+
         
     def _load_knowledge_bases(self):
         """Attempts to load both KBs from disk."""
@@ -228,17 +208,53 @@ class PlanningAgent:
             },
 
             # Plan Evolution
-            "current_plan": None,   # The active plan dict
-            "plan_history": [],     # Snapshots of previous plans
+            "current_plan": None,
+            "plan_history": [],
+            
+            # Action Tracking (NEW)
+            "action_history": [],
             
             # Feedback Loop
-            "experimental_results": [],  # List of result dicts from the lab
+            "experimental_results": [],
             "human_feedback_history": [],
             
             # Status
             "last_error": None,
             "status": "initialized"
         }
+    
+    def _log_action(self, action: str, input_ctx: Dict, result: Dict, 
+                    rationale: str = None, feedback: str = None) -> None:
+        """Record an atomic action to state history."""
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "action": action,
+            "input": input_ctx,
+            "rationale": rationale,
+            "result": {
+                "status": result.get("status") if isinstance(result, dict) else "completed",
+                "error": result.get("error") if isinstance(result, dict) else None,
+                "iteration": result.get("iteration") if isinstance(result, dict) else None,
+                "stage": result.get("stage") if isinstance(result, dict) else None
+            },
+            "feedback": feedback
+        }
+        
+        if "action_history" not in self.state:
+            self.state["action_history"] = []
+        
+        self.state["action_history"].append(entry)
+        self._save_state()
+
+    def _save_state(self) -> None:
+        """Persist state to disk (auto-save after each action)."""
+        state_file = self.output_dir / "planning_state.json"
+        try:
+            with open(state_file, 'w') as f:
+                json.dump(self.state, f, indent=2)
+        except Exception as e:
+            logging.warning(f"Failed to save Planning state: {e}")
+
 
     def _save_results_to_json(self, results: Dict[str, Any], file_path: str):
         try:
@@ -249,11 +265,34 @@ class PlanningAgent:
         except Exception as e: logging.error(f"    - ❌ Failed to save results: {e}")
 
     def _save_state_to_json(self, file_path: str):
-        """Saves the full state dictionary (history, results) to a sidecar file."""
+        """Saves state to a specific path (legacy interface)."""
         try:
             p = Path(file_path)
-            with p.open('w', encoding='utf-8') as f: json.dump(self.state, f, indent=2)
-        except Exception as e: logging.error(f"    - ❌ Failed to save state: {e}")
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with p.open('w', encoding='utf-8') as f: 
+                json.dump(self.state, f, indent=2)
+        except Exception as e: 
+            logging.error(f"Failed to save state: {e}")
+
+    def load_state(self, state_path: str) -> bool:
+        """Restore state from disk. Returns True on success."""
+        path = Path(state_path)
+        if not path.exists():
+            return False
+        try:
+            with open(path, 'r') as f:
+                self.state = json.load(f)
+            
+            # Ensure action_history exists (for older state files)
+            if "action_history" not in self.state:
+                self.state["action_history"] = []
+            
+            logging.info(f"Restored Planning state: session {self.state.get('session_id')}")
+            return True
+        except Exception as e:
+            logging.warning(f"Failed to load Planning state: {e}")
+            return False
+
 
     def _build_and_save_kb(self, knowledge_paths: Optional[List[str]] = None, code_paths: Optional[List[str]] = None) -> bool:
         print("\n--- Rebuilding Knowledge Bases ---")
@@ -362,6 +401,12 @@ class PlanningAgent:
         if not self._ensure_kb_is_ready(knowledge_paths, code_paths=None):
             self.state["status"] = "failed"
             self.state["last_error"] = "KB Init Failed"
+            self._log_action(
+                action="generate_plan",
+                input_ctx={"objective": objective},
+                result={"status": "failed", "error": "KB Init Failed"},
+                rationale=None
+            )
             return self.state
         
         # Build context string
@@ -399,6 +444,18 @@ class PlanningAgent:
         
         if lit_context:
             res["literature_search"] = lit_context
+
+        self._log_action(
+            action="perform_science_rag",
+            input_ctx={
+                "objective": objective,
+                "knowledge_paths": knowledge_paths,
+                "has_primary_data": primary_data_set is not None,
+                "has_literature": bool(lit_context)
+            },
+            result=res,
+            rationale=res.get("proposed_experiments", [{}])[0].get("justification") if res.get("proposed_experiments") else None
+        )
         
         # Snapshot 1: Science Draft
         res["iteration"] = current_iter
@@ -424,18 +481,26 @@ class PlanningAgent:
                 res["stage"] = "Auto-Corrected"
                 self.state["plan_history"].append(res.copy())
                 self.state["current_plan"] = res
+
+                self._log_action(
+                    action="self_correction",
+                    input_ctx={"critique": critique},
+                    result=res,
+                    rationale=f"Auto-corrected due to: {critique}"
+                )
         
         # Human feedback on strategy
+        human_feedback = None
         if enable_human_feedback and res.get("proposed_experiments") and not res.get("error"):
             display_plan_summary(res)
-            user_feedback = get_user_feedback()
+            human_feedback = get_user_feedback()
             
-            if user_feedback:
+            if human_feedback:
                 print(f"\n📝 Refining plan...")
-                self.state["human_feedback_history"].append({"phase": "science", "feedback": user_feedback})
+                self.state["human_feedback_history"].append({"phase": "science", "feedback": human_feedback})
                 res = refine_plan_with_feedback(
                     original_result=res,
-                    feedback=user_feedback,
+                    feedback=human_feedback,
                     objective=objective,
                     model=self.model,
                     generation_config=self.generation_config
@@ -451,6 +516,17 @@ class PlanningAgent:
             else:
                 print("✅ Plan accepted.")
         
+        self._log_action(
+                action="generate_plan",
+                input_ctx={
+                    "objective": objective,
+                    "iteration": current_iter
+                },
+                result=res,
+                rationale=res.get("proposed_experiments", [{}])[0].get("justification") if res.get("proposed_experiments") else None,
+                feedback=human_feedback
+        )
+
         self.state["status"] = "planned"
         
         return res
@@ -490,11 +566,25 @@ class PlanningAgent:
         
         # Build code KB
         if not self._ensure_kb_is_ready(knowledge_paths=None, code_paths=effective_code_paths):
-            return {"error": "Code KB build failed"}
+            error_result = {"error": "Code KB build failed"}
+            self._log_action(
+                action="generate_implementation_code",
+                input_ctx={"code_paths": code_paths},
+                result=error_result,
+                rationale=None
+            )
+
+            return error_result
         
         # Check if code KB has content
         if not (self.kb_code.index and self.kb_code.index.ntotal > 0):
             print("  - ⚠️  Code KB is empty, skipping code generation")
+            self._log_action(
+                action="generate_implementation_code",
+                input_ctx={"code_paths": code_paths},
+                result={"status": "skipped", "error": "Empty Code KB"},
+                rationale="No code documents found in knowledge base"
+            )
             return plan
         
         # Generate code
@@ -513,7 +603,19 @@ class PlanningAgent:
         res["stage"] = "Code Generated"
         self.state["plan_history"].append(res.copy())
         self.state["current_plan"] = res
+
+        self._log_action(
+            action="perform_code_rag",
+            input_ctx={
+                "code_paths": effective_code_paths,
+                "num_experiments": len(res.get("proposed_experiments", []))
+            },
+            result=res,
+            rationale="Mapped experimental steps to API code"
+        )
         
+        human_feedback = None
+
         # Human code review
         if enable_human_feedback:
             temp_dir = self.output_dir / "temp_code_review"
@@ -542,6 +644,7 @@ class PlanningAgent:
                         print("✅ Code accepted")
                         break
                     
+                    human_feedback = code_feedback
                     print(f"\n🛠️  Refining code...")
                     self.state["human_feedback_history"].append({"phase": "code", "feedback": code_feedback})
                     
@@ -556,10 +659,28 @@ class PlanningAgent:
                     res["stage"] = "Code Refined"
                     self.state["plan_history"].append(res.copy())
                     self.state["current_plan"] = res
+
+                    self._log_action(
+                        action="refine_code",
+                        input_ctx={"feedback": code_feedback},
+                        result=res,
+                        rationale=f"Human requested: {code_feedback}",
+                        feedback=code_feedback
+                    )
                     
                     print(f"  - 💾 Updating files...")
                     files = write_experiments_to_disk(res, str(temp_dir))
         
+        self._log_action(
+            action="generate_implementation_code",
+            input_ctx={
+                "code_paths": effective_code_paths,
+                "iteration": current_iter
+            },
+            result=res,
+            rationale="Code generation complete",
+            feedback=human_feedback
+        )
         return res
 
     def propose_experiments(self, objective: str, 
@@ -786,9 +907,16 @@ Select the most appropriate strategy:
         )
 
         if new_plan.get("error"):
-            # Print the error clearly to the user
-            print(f"\n❌ Refinement Failed: {new_plan.get('message')}")            
-            # Return immediately - do not update self.state["current_plan"]
+            print(f"\n❌ Refinement Failed: {new_plan.get('message')}") 
+            self._log_action(
+                action="refine_plan",
+                input_ctx={
+                    "results_summary": consolidated_feedback[:200],
+                    "use_literature_rag": use_literature_rag
+                },
+                result=new_plan,
+                rationale=None
+            )           
             return new_plan
         
         # Snapshot: Reasoning Draft
@@ -797,24 +925,36 @@ Select the most appropriate strategy:
         self.state["plan_history"].append(new_plan.copy())
         self.state["current_plan"] = new_plan
 
+        self._log_action(
+            action="refine_plan_reasoning",
+            input_ctx={
+                "results_summary": consolidated_feedback[:200],
+                "has_literature_context": new_literature_context is not None,
+                "num_images": len(loaded_images)
+            },
+            result=new_plan,
+            rationale=new_plan.get("proposed_experiments", [{}])[0].get("justification") if new_plan.get("proposed_experiments") else None
+        )
+
         # --- 5. HUMAN STRATEGY FEEDBACK ---
+        human_feedback = None
         if enable_human_feedback and not new_plan.get("error"):
             print("\n" + "="*60)
             print("🧠 AGENT'S PROPOSED REVISION BASED ON RESULTS")
             print("="*60)
             display_plan_summary(new_plan)
             
-            user_feedback = get_user_feedback()
+            human_feedback = get_user_feedback()
             
-            if user_feedback:
+            if human_feedback: 
                 print(f"\n📝 Feedback received. Adjusting strategy...")
                 self.state["human_feedback_history"].append({
                     "phase": "science_iteration", 
-                    "feedback": user_feedback
+                    "feedback": human_feedback
                 })
                 new_plan = refine_plan_with_feedback(
                     original_result=new_plan,
-                    feedback=user_feedback,
+                    feedback=human_feedback,
                     objective=objective,
                     model=self.model,
                     generation_config=self.generation_config
@@ -825,6 +965,17 @@ Select the most appropriate strategy:
                 self.state["plan_history"].append(new_plan.copy())
                 self.state["current_plan"] = new_plan
                 print("✅ Strategic revision updated.")
+
+        self._log_action(
+            action="refine_plan",
+            input_ctx={
+                "iteration": next_plan_idx,
+                "results_provided": True
+            },
+            result=new_plan,
+            rationale=new_plan.get("proposed_experiments", [{}])[0].get("justification") if new_plan.get("proposed_experiments") else None,
+            feedback=human_feedback
+        )
         
         self.state["status"] = "refined"
         return new_plan
@@ -848,6 +999,12 @@ Select the most appropriate strategy:
         
         if not self.kb_code.index or self.kb_code.index.ntotal == 0:
             print("  - ℹ️  No Code KB available, skipping implementation update")
+            self._log_action(
+                action="refine_implementation_code",
+                input_ctx={},
+                result={"status": "skipped", "error": "No Code KB"},
+                rationale="Code knowledge base is empty"
+            )
             return plan
         
         if plan.get("error"):
@@ -891,7 +1048,18 @@ Select the most appropriate strategy:
         self.state["plan_history"].append(new_plan.copy())
         self.state["current_plan"] = new_plan
 
+        self._log_action(
+            action="refine_code_rag",
+            input_ctx={
+                "num_previous_implementations": len(previous_implementations),
+                "iteration": next_plan_idx
+            },
+            result=new_plan,
+            rationale="Updated code based on refined experimental steps"
+        )
+
         # --- HUMAN CODE REVIEW ---
+        human_feedback = None
         if enable_human_feedback and not new_plan.get("error"):
             temp_dir = self.output_dir / "temp_code_review_iter"
             print(f"\n--- Human Code Review (Iteration {next_plan_idx}) ---")
@@ -915,6 +1083,7 @@ Select the most appropriate strategy:
                         print("✅ Code accepted.")
                         break
                     
+                    human_feedback = code_feedback
                     self.state["human_feedback_history"].append({
                         "phase": "code_iteration", 
                         "feedback": code_feedback
@@ -937,6 +1106,13 @@ Select the most appropriate strategy:
                     print(f"  - 💾 Overwriting files in {temp_dir} with refined code...")
                     files = write_experiments_to_disk(new_plan, str(temp_dir))
         
+        self._log_action(
+            action="refine_implementation_code",
+            input_ctx={"iteration": next_plan_idx},
+            result=new_plan,
+            rationale="Code refinement complete",
+            feedback=human_feedback
+        )
         return new_plan
 
     def update_plan_with_results(self,
@@ -1314,7 +1490,14 @@ Select the most appropriate strategy:
 
         # 2. Build KB if needed
         if not self._ensure_kb_is_ready(knowledge_paths, code_paths=None):
-            return {"error": "KB Init Failed"}
+            error_result = {"error": "KB Init Failed"}
+            self._log_action(
+                action="perform_technoeconomic_analysis",
+                input_ctx={"objective": objective},
+                result=error_result,
+                rationale=None
+            )
+            return error_result
         
         # 3. Literature Search
         lit_context = ""
@@ -1349,13 +1532,21 @@ Select the most appropriate strategy:
             res["type"] = "technoeconomic_analysis"
             res["stage"] = "TEA Initial"
             res["iteration"] = 0 # TEA is step 0 (pre-planning)
-            
-            # Append copy to history (Full Traceability)
+            # Append copy to history
             self.state["plan_history"].append(res.copy())
-            
-            # Update Active Pointer
-            #self.state["current_plan"] = res
-
+     
+        self._log_action(
+            action="perform_technoeconomic_analysis",
+            input_ctx={
+                "objective": objective,
+                "knowledge_paths": knowledge_paths,
+                "has_primary_data": primary_data_set is not None,
+                "has_literature": bool(lit_context)
+            },
+            result=res,
+            rationale=res.get("technoeconomic_assessment", {}).get("summary") if not res.get("error") else None
+        )
+        
         # 6. Save & Generate Report
         if output_json_path:
             self._save_results_to_json(res, output_json_path)
