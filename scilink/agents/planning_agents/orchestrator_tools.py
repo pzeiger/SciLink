@@ -9,6 +9,7 @@ import logging
 import pandas as pd
 from pathlib import Path
 from typing import Dict, Any, Callable
+import hashlib
 
 from .parser_utils import write_experiments_to_disk
 
@@ -31,6 +32,18 @@ class OrchestratorTools:
         self.gemini_functions: list = []
         
         self._register_all_tools()
+
+    def _compute_file_hash(self, file_path: str) -> str:
+        """Compute MD5 hash of file content for deduplication."""
+        hasher = hashlib.md5()
+        try:
+            with open(file_path, 'rb') as f:
+                for chunk in iter(lambda: f.read(8192), b''):
+                    hasher.update(chunk)
+            return hasher.hexdigest()
+        except Exception as e:
+            logging.warning(f"Could not compute hash for {file_path}: {e}")
+            return ""
 
 
     def _parse_result_input(self, result_data: str):
@@ -912,14 +925,68 @@ class OrchestratorTools:
                         "message": f"Unexpected metrics format: {type(metrics)}"
                     })
                 
-                # DEDUPLICATION - Track processed rows                
-                previous_row_count = self.orch.analyzed_files.get(file_path_abs, 0)
+                # DEDUPLICATION - Content-based tracking
+                # Compute current file hash
+                current_hash = self._compute_file_hash(file_path)
                 current_row_count = len(df_new)
-                
-                # Only process NEW rows
-                if current_row_count > previous_row_count:
-                    df_new_only = df_new.iloc[previous_row_count:]
-                    num_skipped = previous_row_count
+
+                # Get previous tracking for this file (handle both old and new format)
+                prev_tracking = self.orch.analyzed_files.get(file_path_abs, {})
+                if isinstance(prev_tracking, dict):
+                    prev_hash = prev_tracking.get('hash')
+                    prev_row_count = prev_tracking.get('row_count', 0)
+                else:
+                    # Legacy format: just row count as int
+                    prev_hash = None
+                    prev_row_count = prev_tracking
+
+                # Check for duplicate content across different filenames
+                for tracked_path, tracking_info in self.orch.analyzed_files.items():
+                    if tracked_path == file_path_abs:
+                        continue  # Skip self
+                    tracked_hash = tracking_info.get('hash') if isinstance(tracking_info, dict) else None
+                    if tracked_hash and tracked_hash == current_hash:
+                        print(f"    ⚠️  Duplicate content detected - matches: {Path(tracked_path).name}")
+                        df_final = pd.read_csv(self.orch.bo_data_path) if self.orch.bo_data_path.exists() else pd.DataFrame()
+                        return json.dumps({
+                            "status": "warning",
+                            "message": f"This file's content was already analyzed from '{Path(tracked_path).name}'",
+                            "data_points_collected": len(df_final),
+                            "rows_added": 0,
+                            "optimization_ready": len(df_final) >= 3,
+                            "hint": "Data already in optimization set. No action needed unless this is different data with identical content."
+                        })
+
+                # Determine what to process based on hash and row count
+                if prev_hash is None:
+                    # FIRST TIME analyzing this file
+                    print(f"    ✨ First time analyzing this file")
+                    df_to_append = df_new
+                    num_new = len(df_new)
+
+                elif prev_hash != current_hash:
+                    # FILE CONTENT CHANGED - reprocess entirely
+                    print(f"    🔄 File content changed (hash mismatch) - reprocessing entirely")
+                    
+                    # Remove old data from optimization_data.csv if it exists
+                    if self.orch.bo_data_path.exists() and prev_row_count > 0:
+                        try:
+                            df_existing = pd.read_csv(self.orch.bo_data_path)
+                            # Remove the last prev_row_count rows (assumes they're from this file)
+                            if len(df_existing) >= prev_row_count:
+                                df_existing = df_existing.iloc[:-prev_row_count]
+                                df_existing.to_csv(self.orch.bo_data_path, index=False)
+                                print(f"    🗑️  Removed {prev_row_count} old rows from optimization data")
+                        except Exception as e:
+                            logging.warning(f"Could not clean old data: {e}")
+                    
+                    df_to_append = df_new
+                    num_new = len(df_new)
+
+                elif current_row_count > prev_row_count:
+                    # ROWS APPENDED - process only new rows
+                    df_new_only = df_new.iloc[prev_row_count:]
+                    num_skipped = prev_row_count
                     num_new = len(df_new_only)
                     
                     if num_skipped > 0:
@@ -927,20 +994,36 @@ class OrchestratorTools:
                     print(f"    ✅ Adding {num_new} NEW row(s)")
                     
                     df_to_append = df_new_only
-                elif current_row_count == previous_row_count:
-                    print(f"    ℹ️  No new rows detected (file unchanged)")
+
+                elif current_row_count == prev_row_count:
+                    # prev_hash == current_hash (guaranteed by earlier elif)
+                    # TRULY UNCHANGED
+                    print(f"    ℹ️  File unchanged (same content hash)")
                     df_final = pd.read_csv(self.orch.bo_data_path) if self.orch.bo_data_path.exists() else pd.DataFrame()
                     
                     return json.dumps({
                         "status": "success",
-                        "message": "No new data - file already analyzed",
+                        "message": "File already analyzed - no changes detected",
                         "data_points_collected": len(df_final),
                         "rows_added": 0,
                         "optimization_ready": len(df_final) >= 3
                     })
+
                 else:
-                    print(f"    ⚠️  Warning: File has fewer rows than last analysis ({current_row_count} < {previous_row_count})")
-                    print(f"    💡 Reprocessing entire file")
+                    # FEWER ROWS - file was truncated/replaced
+                    print(f"    ⚠️  File has fewer rows ({current_row_count} < {prev_row_count}) - reprocessing")
+                    
+                    # Remove old data
+                    if self.orch.bo_data_path.exists() and prev_row_count > 0:
+                        try:
+                            df_existing = pd.read_csv(self.orch.bo_data_path)
+                            if len(df_existing) >= prev_row_count:
+                                df_existing = df_existing.iloc[:-prev_row_count]
+                                df_existing.to_csv(self.orch.bo_data_path, index=False)
+                                print(f"    🗑️  Removed {prev_row_count} old rows from optimization data")
+                        except Exception as e:
+                            logging.warning(f"Could not clean old data: {e}")
+                    
                     df_to_append = df_new
                     num_new = len(df_new)
 
@@ -1017,7 +1100,11 @@ class OrchestratorTools:
                     df_to_append.to_csv(self.orch.bo_data_path, mode='w', header=True, index=False)
                 
                 # Update tracking
-                self.orch.analyzed_files[file_path_abs] = current_row_count
+                self.orch.analyzed_files[file_path_abs] = {
+                    'row_count': current_row_count,
+                    'hash': current_hash,
+                    'timestamp': datetime.now().isoformat()
+                }
                 with open(self.orch.analyzed_files_path, 'w') as f:
                     json.dump(self.orch.analyzed_files, f, indent=2)
                 
@@ -1084,10 +1171,19 @@ class OrchestratorTools:
         
         # 7. RESET ANALYSIS LOGIC
         def reset_analysis_logic():
-            """Resets the analysis script and optimization data."""
+            """Resets the analysis script, optimization data, AND file tracking."""
             self.orch.active_scalarizer_script = None
             self.orch.expected_input_columns = None
-            self.orch.expected_target_columns = [] 
+            self.orch.expected_target_columns = []
+            
+            # Clear file tracking completely
+            self.orch.analyzed_files = {}
+            if self.orch.analyzed_files_path.exists():
+                try:
+                    self.orch.analyzed_files_path.unlink()
+                    print(f"    🗑️  Cleared file tracking history")
+                except Exception as e:
+                    logging.warning(f"Could not delete analyzed_files.json: {e}")
             
             if self.orch.bo_data_path.exists():
                 backup_path = self.orch.bo_data_path.with_suffix('.csv.backup')
@@ -1096,7 +1192,7 @@ class OrchestratorTools:
             
             return json.dumps({
                 "status": "success",
-                "message": "Analysis logic reset. Next analyze_file call will generate new script.",
+                "message": "Analysis logic reset. All files will be reprocessed fresh on next analyze_file call.",
                 "hint": "Previous optimization data was backed up"
             })
         
