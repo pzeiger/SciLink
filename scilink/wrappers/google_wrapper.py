@@ -256,13 +256,15 @@ class LegacyChatSession:
     def __init__(self, client: 'genai.Client', model_name: str, 
                  history: List = None, generation_config: Any = None,
                  safety_settings: Any = None, tools: Any = None,
-                 enable_automatic_function_calling: bool = False):
+                 enable_automatic_function_calling: bool = False,
+                 system_instruction: Any = None):
         self._client = client
         self._model_name = model_name
         self._generation_config = generation_config
         self._safety_settings = safety_settings
         self._tools = tools
         self._enable_afc = enable_automatic_function_calling
+        self._system_instruction = system_instruction
         
         # Convert legacy history format to new format if needed
         self._history = self._convert_history(history) if history else []
@@ -623,7 +625,8 @@ class GenAIAsLegacyGenerativeModel:
             generation_config=self._generation_config,
             safety_settings=self._safety_settings,
             tools=self._tools,
-            enable_automatic_function_calling=enable_automatic_function_calling
+            enable_automatic_function_calling=enable_automatic_function_calling,
+            system_instruction=self._system_instruction
         )
     
     def count_tokens(self, contents: Union[str, List, Dict]) -> SimpleNamespace:
