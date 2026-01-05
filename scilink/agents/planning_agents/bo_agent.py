@@ -19,7 +19,9 @@ from .instruct import (
     BO_VISUAL_INSPECTION_MOO_PROMPT
 )
 
-class BOAgent:
+from .base_agent import BaseAgent
+
+class BOAgent(BaseAgent):
     """
     Autonomous Agent for Bayesian Optimization (BO) designed for "Stop-and-Go" experimental loops.
 
@@ -62,6 +64,8 @@ class BOAgent:
                  model_name: str = "gemini-3-pro-preview", 
                  local_model: str = None,
                  output_dir: str = "."):
+        super().__init__(output_dir)
+        self.agent_type = "bo"
         
         if google_api_key is None:
             google_api_key = get_api_key('google')
@@ -83,63 +87,17 @@ class BOAgent:
             self.model = genai.GenerativeModel(model_name)
             self.generation_config = genai.types.GenerationConfig(response_mime_type="application/json")
 
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(exist_ok=True, parents=True)
         self.history_file = self.output_dir / "bo_history.json"
 
-        self.state: Dict[str, Any] = {
-            "session_id": None,
+    def _get_initial_state_fields(self) -> Dict[str, Any]:
+        """Agent-specific state fields"""
+        return {
             "objective": None,
+            "data_path": None,
             "optimization_history": [],
             "current_config": None,
-            "data_points_seen": 0,
-            "status": "initialized"
+            "data_points_seen": 0
         }
-
-    def _init_state(self, objective: str, data_path: str) -> None:
-        """Initialize state for a new optimization session."""
-        if self.state["session_id"] is None:
-            self.state["session_id"] = str(uuid.uuid4())
-            self.state["start_time"] = datetime.now().isoformat()
-        
-        self.state["objective"] = objective
-        self.state["data_path"] = data_path
-        self.state["status"] = "active"
-
-    def _log_action(self, action: str, input_ctx: Dict, result: Dict, rationale: str = None) -> None:
-        """Record an atomic action to state history."""
-        entry = {
-            "timestamp": datetime.now().isoformat(),
-            "action": action,
-            "input": input_ctx,
-            "rationale": rationale,
-            "result": result
-        }
-        self.state["optimization_history"].append(entry)
-        self._save_state()
-
-    def _save_state(self) -> None:
-        """Persist state to disk."""
-        state_file = self.output_dir / "bo_state.json"
-        try:
-            with open(state_file, 'w') as f:
-                json.dump(self.state, f, indent=2)
-        except Exception as e:
-            logging.warning(f"Failed to save BO state: {e}")
-
-    def load_state(self, state_path: str) -> bool:
-        """Restore state from disk."""
-        path = Path(state_path)
-        if not path.exists():
-            return False
-        try:
-            with open(path, 'r') as f:
-                self.state = json.load(f)
-            logging.info(f"Restored BO state: session {self.state.get('session_id')}")
-            return True
-        except Exception as e:
-            logging.warning(f"Failed to load BO state: {e}")
-            return False
         
     def _load_history(self) -> List[Dict]:
         if self.history_file.exists():
@@ -155,9 +113,9 @@ class BOAgent:
         clean = config.copy()
         m_conf = clean.get("model_config", {})
         if m_conf.get("kernel") not in ["matern_2.5", "matern_1.5", "rbf"]:
-            m_conf["kernel"] = "matern_2.5"
+            m_conf["kernel"] = "matern_2.5" # need warning
         if m_conf.get("noise") not in ["fixed_low", "learnable", "high_noise"]:
-            m_conf["noise"] = "fixed_low"
+            m_conf["noise"] = "fixed_low" # need warning
         clean["model_config"] = m_conf
         return clean
 
@@ -172,7 +130,7 @@ class BOAgent:
         Path(output_dir).mkdir(exist_ok=True, parents=True)
         
         # Initialize state
-        self._init_state(objective_text, data_path)
+        self._init_state(objective=objective_text, data_path=data_path)
         
         # 1. Load Data
         try:

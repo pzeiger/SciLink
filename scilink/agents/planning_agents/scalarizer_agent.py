@@ -15,8 +15,10 @@ from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from .parser_utils import parse_json_from_response
 from .instruct import SCALARIZER_PROMPT, SCALARIZER_REFLECTION_PROMPT
 
+from .base_agent import BaseAgent
 
-class ScalarizerAgent:
+
+class ScalarizerAgent(BaseAgent):
     """
     Agent for converting raw experimental data into scalar descriptors
     suitable for Bayesian Optimization.
@@ -40,6 +42,8 @@ class ScalarizerAgent:
                  model_name: str = "gemini-3-pro-preview", 
                  local_model: str = None,
                  output_dir: str = "."):
+        super().__init__(output_dir)
+        self.agent_type = "scalarizer"
         
         # Auth & Model Initialization
         if google_api_key is None:
@@ -62,67 +66,13 @@ class ScalarizerAgent:
             self.model = genai.GenerativeModel(model_name)
             self.generation_config = genai.types.GenerationConfig(response_mime_type="application/json")
 
-        # Local Storage Setup
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(exist_ok=True, parents=True)
-
-        self.state: Dict[str, Any] = {
-            "session_id": None,
-            "analysis_history": [],
-            "active_script": None,
-            "status": "initialized"
+    def _get_initial_state_fields(self) -> Dict[str, Any]:
+        """Agent-specific state fields"""
+        return {
+            "current_data_path": None,
+            "current_objective": None,
+            "active_script": None
         }
-
-    def _init_state(self, data_path: str, objective: str) -> None:
-        """Initialize state for a new analysis session."""
-        if self.state["session_id"] is None:
-            self.state["session_id"] = str(uuid.uuid4())
-            self.state["start_time"] = datetime.now().isoformat()
-        
-        self.state["current_data_path"] = data_path
-        self.state["current_objective"] = objective
-        self.state["status"] = "active"
-
-    def _log_action(self, action: str, input_ctx: Dict, result: Dict, rationale: str = None, feedback: str = None) -> None:
-        """Record an atomic action to state history."""
-        entry = {
-            "timestamp": datetime.now().isoformat(),
-            "action": action,
-            "input": input_ctx,
-            "rationale": rationale,
-            "result": {
-                "status": result.get("status"),
-                "metrics": result.get("metrics"),
-                "script_path": result.get("source_script")
-            },
-            "feedback": feedback
-        }
-        self.state["analysis_history"].append(entry)
-        self._save_state()
-
-    def _save_state(self) -> None:
-        """Persist state to disk."""
-        state_file = self.output_dir / "scalarizer_state.json"
-        try:
-            with open(state_file, 'w') as f:
-                json.dump(self.state, f, indent=2)
-        except Exception as e:
-            logging.warning(f"Failed to save Scalarizer state: {e}")
-
-    def load_state(self, state_path: str) -> bool:
-        """Restore state from disk."""
-        path = Path(state_path)
-        if not path.exists():
-            return False
-        try:
-            with open(path, 'r') as f:
-                self.state = json.load(f)
-            self.state["status"] = "restored"
-            logging.info(f"Restored Scalarizer state: session {self.state.get('session_id')}")
-            return True
-        except Exception as e:
-            logging.warning(f"Failed to load Scalarizer state: {e}")
-            return False
 
     def _read_file_head(self, file_path: str, n_lines=25) -> str:
         """Reads raw file header to help LLM handle delimiters/metadata."""
@@ -273,7 +223,7 @@ class ScalarizerAgent:
         path_obj = Path(data_path)
         
         # Initialize state
-        self._init_state(data_path, objective_query)
+        self._init_state(current_data_path=data_path, current_objective=objective_query)
 
         # Path 1: Re-use existing script
         if reuse_script_path and Path(reuse_script_path).exists():

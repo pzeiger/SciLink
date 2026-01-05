@@ -43,8 +43,11 @@ from .user_interface import display_plan_summary, get_user_feedback
 
 from .html_generator import HTMLReportGenerator
 
+from .base_agent import BaseAgent
 
-class PlanningAgent:
+
+
+class PlanningAgent(BaseAgent):
     """
     Stateful AI Agent for Autonomous Experimental Planning and Iteration.
     
@@ -87,6 +90,9 @@ class PlanningAgent:
                  code_chunk_size: int = 20000,
                  output_dir: str = "."): 
         
+        super().__init__(output_dir)
+        self.agent_type = "planning"
+        
         if google_api_key is None:
             google_api_key = get_api_key('google')
             if not google_api_key:
@@ -115,8 +121,6 @@ class PlanningAgent:
                     
         self.code_chunk_size = code_chunk_size
 
-        self.output_dir = Path(output_dir)
-
         # --- Dual KnowledgeBase Initialization ---
         base_path = Path(kb_base_path)
         base_path.parent.mkdir(parents=True, exist_ok=True)
@@ -139,8 +143,25 @@ class PlanningAgent:
         print("--- Initializing Agent (Dual-KB System) ---")
         self._load_knowledge_bases()
 
-        # --- STATE MANAGEMENT ---
-        self.state: Dict[str, Any] = {}
+    def _get_initial_state_fields(self) -> Dict[str, Any]:
+        """Agent-specific state fields"""
+        return {
+            "objective": None,
+            "iteration_index": 0,
+            "inputs": {
+                "knowledge_paths": [],
+                "code_paths": [],
+                "additional_context": None,
+                "primary_data_set": None,
+                "image_paths": [],
+                "image_descriptions": []
+            },
+            "current_plan": None,
+            "plan_history": [],
+            "experimental_results": [],
+            "human_feedback_history": [],
+            "last_error": None
+        }
 
     def restore_state(self, state_file_path: str) -> None:
         """
@@ -157,7 +178,7 @@ class PlanningAgent:
         
         print(f"  - 📂 Loading state from: {path.name}")
         
-        if not self.load_state(state_file_path):
+        if not self.load_state(state_file_path):  # Uses inherited method
             raise ValueError(f"Failed to parse state file: {state_file_path}")
         
         # User feedback
@@ -191,71 +212,19 @@ class PlanningAgent:
 
     def _initialize_state(self, objective: str, **kwargs) -> Dict[str, Any]:
         """Creates the foundational state dictionary for a new research task."""
-        return {
-            "session_id": str(uuid.uuid4()),
-            "start_time": datetime.now().isoformat(),
-            "objective": objective,
-            "iteration_index": 0,
-            
-            # Inputs
-            "inputs": {
+        self._init_state(
+            objective=objective,
+            inputs={
                 "knowledge_paths": kwargs.get("knowledge_paths", []),
                 "code_paths": kwargs.get("code_paths", []),
                 "additional_context": kwargs.get("additional_context"),
                 "primary_data_set": kwargs.get("primary_data_set"),
                 "image_paths": kwargs.get("image_paths", []),
                 "image_descriptions": kwargs.get("image_descriptions", [])
-            },
-
-            # Plan Evolution
-            "current_plan": None,
-            "plan_history": [],
-            
-            # Action Tracking (NEW)
-            "action_history": [],
-            
-            # Feedback Loop
-            "experimental_results": [],
-            "human_feedback_history": [],
-            
-            # Status
-            "last_error": None,
-            "status": "initialized"
-        }
+            }
+        )
+        return self.state
     
-    def _log_action(self, action: str, input_ctx: Dict, result: Dict, 
-                    rationale: str = None, feedback: str = None) -> None:
-        """Record an atomic action to state history."""
-        entry = {
-            "timestamp": datetime.now().isoformat(),
-            "action": action,
-            "input": input_ctx,
-            "rationale": rationale,
-            "result": {
-                "status": result.get("status") if isinstance(result, dict) else "completed",
-                "error": result.get("error") if isinstance(result, dict) else None,
-                "iteration": result.get("iteration") if isinstance(result, dict) else None,
-                "stage": result.get("stage") if isinstance(result, dict) else None
-            },
-            "feedback": feedback
-        }
-        
-        if "action_history" not in self.state:
-            self.state["action_history"] = []
-        
-        self.state["action_history"].append(entry)
-        self._save_state()
-
-    def _save_state(self) -> None:
-        """Persist state to disk (auto-save after each action)."""
-        state_file = self.output_dir / "planning_state.json"
-        try:
-            with open(state_file, 'w') as f:
-                json.dump(self.state, f, indent=2)
-        except Exception as e:
-            logging.warning(f"Failed to save Planning state: {e}")
-
-
     def _save_results_to_json(self, results: Dict[str, Any], file_path: str):
         try:
             p = Path(file_path)
@@ -273,26 +242,6 @@ class PlanningAgent:
                 json.dump(self.state, f, indent=2)
         except Exception as e: 
             logging.error(f"Failed to save state: {e}")
-
-    def load_state(self, state_path: str) -> bool:
-        """Restore state from disk. Returns True on success."""
-        path = Path(state_path)
-        if not path.exists():
-            return False
-        try:
-            with open(path, 'r') as f:
-                self.state = json.load(f)
-            
-            # Ensure action_history exists (for older state files)
-            if "action_history" not in self.state:
-                self.state["action_history"] = []
-            
-            logging.info(f"Restored Planning state: session {self.state.get('session_id')}")
-            return True
-        except Exception as e:
-            logging.warning(f"Failed to load Planning state: {e}")
-            return False
-
 
     def _build_and_save_kb(self, knowledge_paths: Optional[List[str]] = None, code_paths: Optional[List[str]] = None) -> bool:
         print("\n--- Rebuilding Knowledge Bases ---")
