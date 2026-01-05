@@ -79,7 +79,6 @@ class BOAgent(BaseAgent):
                 api_key=google_api_key, 
                 base_url=local_model
             )
-            self.generation_config = None 
         else:
             logging.info(f"☁️  BOAgent using Google Gemini model: {model_name}")
             self.model = GenAIAsLegacyGenerativeModel(
@@ -87,9 +86,7 @@ class BOAgent(BaseAgent):
                 api_key=google_api_key
             )
         
-        self.generation_config = {
-            "response_mime_type": "application/json"
-        }
+        self.generation_config = None
 
         self.history_file = self.output_dir / "bo_history.json"
 

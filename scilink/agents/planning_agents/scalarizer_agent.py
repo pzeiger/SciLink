@@ -59,7 +59,6 @@ class ScalarizerAgent(BaseAgent):
                 api_key=google_api_key, 
                 base_url=local_model
             )
-            self.generation_config = None 
         else:
             logging.info(f"☁️  ScalarizerAgent using Google Gemini model: {model_name}")
             self.model = GenAIAsLegacyGenerativeModel(
@@ -67,10 +66,7 @@ class ScalarizerAgent(BaseAgent):
                 api_key=google_api_key
             )
 
-        # Generation config as a dict - wrapper handles translation
-        self.generation_config = {
-            "response_mime_type": "application/json"
-        }
+        self.generation_config = None
 
     def _get_initial_state_fields(self) -> Dict[str, Any]:
         """Agent-specific state fields"""

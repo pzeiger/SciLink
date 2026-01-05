@@ -102,15 +102,13 @@ class PlanningAgent(BaseAgent):
         if local_model and ('ai-incubator' in local_model or 'openai' in local_model):
             logging.info(f"🏛️  Using OpenAI-compatible model for generation: {model_name}")
             self.model = OpenAIAsGenerativeModel(model_name, api_key=google_api_key, base_url=local_model)
-            self.generation_config = None
         else:
             logging.info(f"☁️  Using Google Gemini model for generation: {model_name}")
             self.model = GenAIAsLegacyGenerativeModel(
                 model_name=model_name,
                 api_key=google_api_key
-            )
-            # Generation config as a dict - wrapper handles translation
-            self.generation_config = {"response_mime_type": "application/json"}
+            )      
+        self.generation_config = None
 
         self.lit_agent = None
         if futurehouse_api_key or os.getenv("FUTUREHOUSE_API_KEY"):
