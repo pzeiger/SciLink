@@ -4,11 +4,14 @@ import time
 import json
 from pathlib import Path
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from ...auth import get_api_key, APIKeyNotFoundError
 from ...wrappers.openai_wrapper_embeddings import OpenAIAsEmbeddingModel
-from ...wrappers.google_wrapper_embeddings import GenAIAsLegacyEmbeddingModel
+from ...wrappers.litellm_wrapper import LiteLLMEmbeddingModel
+
+
+from ._deprecation import normalize_params
 
 from openai import RateLimitError
 
@@ -17,32 +20,57 @@ class KnowledgeBase:
     """
     Handles embedding, retrieval, and repository structure mapping.
     Supports both Google and OpenAI-compatible (e.g., incubator) embedding models.
-    """
-    def __init__(self, google_api_key: str = None, 
-                 embedding_model: str = "gemini-embedding-001", 
-                 local_model: str = None):
+
+    Args:
+        api_key: API key for the embedding provider.
+        embedding_model: Name of the embedding model.
+        base_url: Base URL for internal proxy endpoint.
+        use_litellm: If True and base_url is None, use LiteLLM.
         
-        if google_api_key is None:
-            google_api_key = get_api_key('google')
-            if not google_api_key:
-                raise APIKeyNotFoundError('google')
+        google_api_key: DEPRECATED. Use 'api_key' instead.
+        local_model: DEPRECATED. Use 'base_url' instead.
+    """
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        embedding_model: str = "gemini-embedding-001",
+        base_url: Optional[str] = None,
+        use_litellm: bool = False,
+        # Deprecated parameters
+        google_api_key: Optional[str] = None,
+        local_model: Optional[str] = None,
+    ):
+   
+        # Handle deprecated parameters
+        api_key, base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source="KnowledgeBase"
+        )
         
         self.embedding_model_name = embedding_model
         
-        # --- Logic to Switch Embedding Backends ---
-        if local_model and 'ai-incubator' in local_model:
-            logging.info(f"🏛️  Using OpenAI-compatible incubator model for embeddings: {self.embedding_model_name}")
+        # Initialize embedding client
+        if base_url:
+            logging.info(f"🏛️ KnowledgeBase using internal proxy for embeddings")
             self.embedding_client = OpenAIAsEmbeddingModel(
-                model=self.embedding_model_name,
-                api_key=google_api_key, # This key is for the incubator service
-                base_url=local_model
+                model=embedding_model,
+                api_key=api_key,
+                base_url=base_url
+            )
+        elif use_litellm:
+            logging.info(f"🌐 KnowledgeBase using LiteLLM for embeddings: {embedding_model}")
+            self.embedding_client = LiteLLMEmbeddingModel(
+                model=embedding_model,
+                api_key=api_key
             )
         else:
-            logging.info(f"☁️  Using Google Gemini model for embeddings: {self.embedding_model_name}")
-            # Use the wrapper instead of legacy google.generativeai module
-            self.embedding_client = GenAIAsLegacyEmbeddingModel(
-                model=self.embedding_model_name,
-                api_key=google_api_key
+            logging.info(f"🔷 KnowledgeBase using OpenAI client for embeddings")
+            self.embedding_client = OpenAIAsEmbeddingModel(
+                model=embedding_model,
+                api_key=api_key
             )
             
         self.index = None

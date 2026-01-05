@@ -4,12 +4,10 @@ import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import PIL.Image as PIL_Image
 
-from ...auth import get_api_key, APIKeyNotFoundError
-from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
-from ...wrappers.google_wrapper import GenAIAsLegacyGenerativeModel
+from ...auth import get_api_key_for_model, infer_provider, APIKeyNotFoundError
 from .parser_utils import parse_json_from_response 
 from ...tools.bo_tools import get_optimizer
 from .instruct import (
@@ -18,6 +16,11 @@ from .instruct import (
     BO_VISUAL_INSPECTION_PROMPT,
     BO_VISUAL_INSPECTION_MOO_PROMPT
 )
+
+from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
+
+from ._deprecation import normalize_params
 
 from .base_agent import BaseAgent
 
@@ -53,37 +56,61 @@ class BOAgent(BaseAgent):
     5.  **Restart:** Run the agent again. It automatically re-reads the updated data 
         and the history file (`bo_history.json`) to pick up exactly where it left off.
 
-    **ARGUMENTS:**
-    --------------
-    google_api_key (str): Google Gemini API Key.
-    model_name (str): LLM model name (default: "gemini-3-pro-preview").
-    local_model (str): Optional URL for local/OpenAI-compatible endpoints.
+    Args:
+        api_key: API key for the LLM provider.
+        model_name: Model name. For public deployments, use LiteLLM format
+            (e.g., "gemini/gemini-2.0-flash", "gpt-4o", "claude-sonnet-4-20250514").
+        base_url: Base URL for internal proxy endpoint.
+            When provided, uses OpenAI-compatible client.
+            When None, uses LiteLLM for multi-provider support.
+        output_dir: Output directory for artifacts.
+        
+        google_api_key: DEPRECATED. Use 'api_key' instead.
+        local_model: DEPRECATED. Use 'base_url' instead.
     """
-    def __init__(self, 
-                 google_api_key: str = None, 
-                 model_name: str = "gemini-3-pro-preview", 
-                 local_model: str = None,
-                 output_dir: str = "."):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model_name: str = "gemini-3-pro-preview",
+        base_url: Optional[str] = None,
+        output_dir: str = ".",
+        # Deprecated
+        google_api_key: Optional[str] = None,
+        local_model: Optional[str] = None,
+    ):
+        
         super().__init__(output_dir)
         self.agent_type = "bo"
+
+        # Handle deprecated parameters
+        api_key, base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source="BOAgent"
+        )
         
-        if google_api_key is None:
-            google_api_key = get_api_key('google')
-            if not google_api_key:
-                raise APIKeyNotFoundError('google')
-        
-        if local_model and ('ai-incubator' in local_model or 'openai' in local_model):
-            logging.info(f"🏛️  BO Agent using OpenAI-compatible model: {model_name}")
+        # Resolve API key from environment if not provided
+        if api_key is None:
+            api_key = get_api_key_for_model(model_name)
+            if not api_key:
+                provider = infer_provider(model_name) or "unknown"
+                raise APIKeyNotFoundError(provider)
+
+        # Initialize LLM client
+        if base_url:
+            logging.info(f"🏛️ BOAgent using internal proxy: {base_url}")
             self.model = OpenAIAsGenerativeModel(
-                model=model_name, 
-                api_key=google_api_key, 
-                base_url=local_model
+                model=model_name,
+                api_key=api_key,
+                base_url=base_url
             )
         else:
-            logging.info(f"☁️  BOAgent using Google Gemini model: {model_name}")
-            self.model = GenAIAsLegacyGenerativeModel(
-                model_name=model_name,
-                api_key=google_api_key
+            logging.info(f"🌐 BOAgent using LiteLLM: {model_name}")
+            self.model = LiteLLMGenerativeModel(
+                model=model_name,
+                api_key=api_key
             )
         
         self.generation_config = None

@@ -6,13 +6,14 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 import google.generativeai as genai
 
-from ...auth import get_api_key, APIKeyNotFoundError
+from ...auth import get_api_key_for_model, infer_provider, APIKeyNotFoundError
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
-from ...wrappers.google_wrapper import GenAIAsLegacyGenerativeModel
+from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .planning_agent import PlanningAgent
 from .scalarizer_agent import ScalarizerAgent
 from .bo_agent import BOAgent
 from .orchestrator_tools import OrchestratorTools
+from ._deprecation import normalize_params
 
 ORCHESTRATOR_SYSTEM_PROMPT = """
 You are the **Semi-Autonomous Research Agent**. Your goal is to coordinate a scientific campaign.
@@ -141,16 +142,62 @@ Assume user runs agent from project directory. For example, when user says "file
 
 
 class PlanningOrchestratorAgent:
-    def __init__(self, 
-                 objective: str = "Undefined Research Goal",
-                 base_dir: str = "./campaign_outputs",
-                 google_api_key: str = None, 
-                 futurehouse_api_key: str = None,
-                 model_name: str = "gemini-3-pro-preview",
-                 local_model: str = None,
-                 embedding_model: str = "gemini-embedding-001",
-                 restore_checkpoint: bool = False):
+    """
+    Orchestrator agent for coordinating multi-iteration research campaigns.
+    
+    Manages the full experimental loop:
+    1. Hypothesis generation (PlanningAgent)
+    2. Experiment execution (external)
+    3. Result analysis (ScalarizerAgent)
+    4. Parameter optimization (BOAgent)
+    5. Iteration decisions
+    
+    Args:
+        objective: Research objective description.
+        base_dir: Base directory for campaign outputs.
+        api_key: API key for the LLM provider.
+        model_name: Model name. For public deployments, use LiteLLM format
+            (e.g., "gemini/gemini-2.0-flash", "gpt-4o", "claude-sonnet-4-20250514").
+        base_url: Base URL for internal proxy endpoint.
+            When provided, uses OpenAI-compatible client.
+            When None, uses LiteLLM for multi-provider support.
+        embedding_model: Embedding model name.
+        futurehouse_api_key: Optional FutureHouse API key for literature search.
+        restore_checkpoint: Whether to restore from previous checkpoint.
         
+        google_api_key: DEPRECATED. Use 'api_key' instead.
+        local_model: DEPRECATED. Use 'base_url' instead.
+    """
+    def __init__(
+        self,
+        objective: str = "Undefined Research Goal",
+        base_dir: str = "./campaign_outputs",
+        api_key: Optional[str] = None,
+        model_name: str = "gemini/gemini-2.0-flash",
+        base_url: Optional[str] = None,
+        embedding_model: str = "gemini-embedding-001",
+        futurehouse_api_key: Optional[str] = None,
+        restore_checkpoint: bool = False,
+        # Deprecated
+        google_api_key: Optional[str] = None,
+        local_model: Optional[str] = None,
+    ):
+        # Handle deprecated parameters
+        api_key, base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source="PlanningOrchestratorAgent"
+        )
+        
+        # Resolve API key from environment if not provided
+        if api_key is None:
+            api_key = get_api_key_for_model(model_name)
+            if not api_key:
+                provider = infer_provider(model_name) or "unknown"
+                raise APIKeyNotFoundError(provider)
+
         self.objective = objective
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
@@ -189,52 +236,46 @@ class PlanningOrchestratorAgent:
         # --- Init Sub-Agents ---
         print("🤖 Agent: Hiring sub-agents...")
         self.planner = PlanningAgent(
-            google_api_key=google_api_key, 
-            futurehouse_api_key=futurehouse_api_key,
-            model_name=model_name, 
-            local_model=local_model,
+            api_key=api_key,
+            model_name=model_name,
+            base_url=base_url,
             embedding_model=embedding_model,
+            futurehouse_api_key=futurehouse_api_key,
             output_dir=str(self.base_dir)
         )
         self.scalarizer = ScalarizerAgent(
-            google_api_key=google_api_key, 
-            model_name=model_name, 
-            local_model=local_model,
+            api_key=api_key,
+            model_name=model_name,
+            base_url=base_url,
             output_dir=str(self.base_dir / "scalarizer_outputs")
         )
         self.bo = BOAgent(
-            google_api_key=google_api_key, 
-            model_name=model_name, 
-            local_model=local_model,
+            api_key=api_key,
+            model_name=model_name,
+            base_url=base_url,
             output_dir=str(self.base_dir / "bo_artifacts")
         )
 
         # --- Initialize Tools Registry ---
         self.tools = OrchestratorTools(self)
         
-        # --- Auth & Model Initialization ---
-        if google_api_key is None:
-            google_api_key = get_api_key('google')
-            if not google_api_key:
-                raise APIKeyNotFoundError('google')
-        
-        if local_model and ('ai-incubator' in local_model or 'openai' in local_model):
-            logging.info(f"🏛️  Orchestrator using OpenAI-compatible model: {model_name}")
+        # --- LLM Initialization ---
+        if base_url:
+            logging.info(f"🏛️ Orchestrator using internal proxy: {base_url}")
             self.model = OpenAIAsGenerativeModel(
-                model=model_name, 
-                api_key=google_api_key, 
-                base_url=local_model
+                model=model_name,
+                api_key=api_key,
+                base_url=base_url
             )
             self.use_openai = True
             self.tools_for_model = self.tools.openai_schemas
         else:
-            logging.info(f"☁️  Orchestrator using Google Gemini model: {model_name}")
-            # NEW: Use the wrapper instead of legacy genai module
-            self.model = GenAIAsLegacyGenerativeModel(
-                model_name=model_name,
-                api_key=google_api_key,
-                tools=self.tools.gemini_functions,
-                system_instruction=ORCHESTRATOR_SYSTEM_PROMPT
+            logging.info(f"🌐 Orchestrator using LiteLLM: {model_name}")
+            self.model = LiteLLMGenerativeModel(
+                model=model_name,
+                api_key=api_key,
+                system_instruction=ORCHESTRATOR_SYSTEM_PROMPT,
+                tools=self.tools.gemini_functions
             )
             self.use_openai = False
             self.tools_for_model = self.tools.gemini_functions
@@ -277,7 +318,7 @@ class PlanningOrchestratorAgent:
             print(f"       - Analysis script: {Path(self.active_scalarizer_script).name if self.active_scalarizer_script else 'None'}")
             print(f"       - Schema: {self.expected_input_columns} → {self.expected_target_columns}")
             print(f"       - Data points: {state.get('data_points_collected', 0)}")
-            print(f"       - TEA results: {'Available' if self.latest_tea_results else 'None'}")  # ← ADD THIS LINE
+            print(f"       - TEA results: {'Available' if self.latest_tea_results else 'None'}")
             
         except Exception as e:
             logging.warning(f"Failed to restore checkpoint: {e}")
@@ -309,8 +350,6 @@ class PlanningOrchestratorAgent:
 
     def chat(self, user_input: str) -> str:
         """Main chat interface with robust function calling support."""
-        #print(f"\n👤 User: {user_input}")
-        
         self.message_count += 1
         
         # AUTO-CHECKPOINT: Every 10 messages
@@ -464,6 +503,7 @@ class PlanningOrchestratorAgent:
 
     # --- MEMORY MANAGEMENT ---
     def _load_history(self) -> List[Dict]:
+        """Load conversation history from disk."""
         if not self.history_path.exists(): 
             return []
         print("  🧠 Memory: Loading previous conversation...")
@@ -474,7 +514,7 @@ class PlanningOrchestratorAgent:
             if self.use_openai:
                 return saved  # OpenAI format
             else:
-                # Gemini format
+                # Gemini/LiteLLM format
                 return [{"role": t["role"], "parts": [t["text"]]} for t in saved]
         except Exception as e:
             logging.warning(f"Failed to load history: {e}")
@@ -489,17 +529,19 @@ class PlanningOrchestratorAgent:
                 # Save OpenAI messages directly (excluding system message)
                 history_data = [m for m in self.messages if m["role"] != "system"]
             else:
-                # Gemini format
+                # LiteLLM/Gemini format
                 if not hasattr(self.chat_session, 'history'):
                     return
                 
                 for content in self.chat_session.history:
-                    role = content.role
+                    role = content.role if hasattr(content, 'role') else content.get('role', 'user')
                     text_parts = []
                     if hasattr(content, 'parts'):
                         text_parts = [p.text for p in content.parts if hasattr(p, 'text') and p.text]
                     elif hasattr(content, 'content'):
-                         text_parts = [content.content]
+                        text_parts = [content.content]
+                    elif isinstance(content, dict) and 'content' in content:
+                        text_parts = [content['content']]
                     
                     if text_parts: 
                         history_data.append({"role": role, "text": " ".join(text_parts)})
@@ -516,9 +558,9 @@ class PlanningOrchestratorAgent:
         Factory method to create an OrchestratorAgent from a checkpoint.
         
         Usage:
-            agent = OrchestratorAgent.restore_from_checkpoint(
+            agent = PlanningOrchestratorAgent.restore_from_checkpoint(
                 base_dir="./campaign_outputs",
-                google_api_key="..."
+                api_key="..."
             )
         """
         return cls(base_dir=base_dir, restore_checkpoint=True, **kwargs)
