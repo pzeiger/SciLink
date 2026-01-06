@@ -136,6 +136,7 @@ class PlanningAgent(BaseAgent):
                 api_key=api_key
             )
             use_litellm = True
+            embedding_api_key = None
         
         self.generation_config = None
 
@@ -157,7 +158,7 @@ class PlanningAgent(BaseAgent):
 
         # 1. Scientific/Docs KB
         self.kb_docs = KnowledgeBase(
-            api_key=api_key,
+            api_key=embedding_api_key,
             embedding_model=embedding_model,
             base_url=base_url,
             use_litellm=use_litellm
@@ -169,7 +170,7 @@ class PlanningAgent(BaseAgent):
 
         # 2. Implementation/Code KB
         self.kb_code = KnowledgeBase(
-            api_key=api_key,
+            api_key=embedding_api_key,
             embedding_model=embedding_model,
             base_url=base_url,
             use_litellm=use_litellm
