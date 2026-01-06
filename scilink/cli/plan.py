@@ -20,58 +20,123 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Start with default Gemini model (uses $GOOGLE_API_KEY)
+  # Start with default Gemini model (uses $GEMINI_API_KEY or $GOOGLE_API_KEY)
   scilink plan
   
-  # Use a different Gemini model
-  scilink plan --model gemini-2.0-flash-exp
+  # Use a different model
+  scilink plan --model gemini-2.0-flash
   
-  # Use local/OpenAI-compatible model with custom embedding model
-  scilink plan --local-model http://localhost:8000/v1 --model llama-3 --embedding-model text-embedding-3-small
+  # Use Claude
+  scilink plan --model claude-sonnet-4-20250514
+  
+  # Use OpenAI
+  scilink plan --model gpt-4o
+  
+  # Use internal proxy with custom endpoint
+  scilink plan --base-url https://my-proxy.example.com/v1 --model my-model
+
+  # Mix providers (Claude for LLM, Gemini for embeddings)
+  scilink plan --model claude-sonnet-4-20250514 --embedding-model gemini-embedding-001
 
 Environment Variables:
-  GOOGLE_API_KEY         Google Gemini API key (required for Gemini models)
+  GEMINI_API_KEY         Google Gemini API key
+  GOOGLE_API_KEY         Google API key (alias for GEMINI_API_KEY)
+  OPENAI_API_KEY         OpenAI API key
+  ANTHROPIC_API_KEY      Anthropic API key
+  CLAUDE_API_KEY         Anthropic API key (alias for ANTHROPIC_API_KEY)
   FUTUREHOUSE_API_KEY    FutureHouse API key for literature search (optional)
 
-Note on Embeddings:
-  - Gemini: Uses gemini-embedding-001 by default
-  - Local models: Specify --embedding-model for your embedding endpoint
-  - The embedding model is used for the knowledge base (RAG)
+Supported Models:
+  Google:    gemini-3-pro-preview, gemini-2.0-flash, gemini-1.5-pro, etc.
+  OpenAI:    gpt-4o, gpt-4-turbo, o1-preview, etc.
+  Anthropic: claude-sonnet-4-20250514, claude-opus-4-20250514, etc.
+
+Note: Model prefixes (gemini/, openai/, anthropic/) are added automatically.
         """
     )
     
+    # Current arguments
     parser.add_argument(
         '--model',
         type=str,
         default='gemini-3-pro-preview',
-        help='Model name to use (default: gemini-3-pro-preview)'
+        help='Model name (default: gemini-3-pro-preview). Prefix auto-detected.'
     )
     
     parser.add_argument(
-        '--local-model',
+        '--base-url',
         type=str,
-        help='Base URL for OpenAI-compatible local model (e.g., http://localhost:8000/v1)'
+        dest='base_url',
+        help='Base URL for OpenAI-compatible endpoint (e.g., https://my-proxy.com/v1)'
     )
     
     parser.add_argument(
         '--embedding-model',
         type=str,
-        help='Embedding model name (default: gemini-embedding-001 for Gemini, or specify for local models)'
+        dest='embedding_model',
+        default='gemini-embedding-001',
+        help='Embedding model name (default: gemini-embedding-001)'
+    )
+    
+    parser.add_argument(
+        '--api-key',
+        type=str,
+        dest='api_key',
+        help='API key for LLM provider (overrides environment variables)'
+    )
+    
+    # Deprecated arguments (hidden but functional for backward compatibility)
+    parser.add_argument(
+        '--local-model',
+        type=str,
+        dest='local_model',
+        help=argparse.SUPPRESS  # Hidden from help
+    )
+    
+    parser.add_argument(
+        '--google-api-key',
+        type=str,
+        dest='google_api_key',
+        help=argparse.SUPPRESS  # Hidden from help
     )
     
     args = parser.parse_args()
     
-    # Set model configuration in environment
-    if args.model:
-        os.environ['SCILINK_MODEL_NAME'] = args.model
+    # Handle deprecated --local-model -> --base-url
+    base_url = args.base_url
     if args.local_model:
-        os.environ['SCILINK_LOCAL_MODEL'] = args.local_model
-    if args.embedding_model:
-        os.environ['SCILINK_EMBEDDING_MODEL'] = args.embedding_model
+        import warnings
+        warnings.warn(
+            "'--local-model' is deprecated. Use '--base-url' instead.",
+            DeprecationWarning
+        )
+        print("⚠️  Warning: '--local-model' is deprecated. Use '--base-url' instead.")
+        if not base_url:
+            base_url = args.local_model
+    
+    # Handle deprecated --google-api-key -> --api-key
+    api_key = args.api_key
+    if args.google_api_key:
+        import warnings
+        warnings.warn(
+            "'--google-api-key' is deprecated. Use '--api-key' instead.",
+            DeprecationWarning
+        )
+        print("⚠️  Warning: '--google-api-key' is deprecated. Use '--api-key' instead.")
+        if not api_key:
+            api_key = args.google_api_key
+    
+    # Build config dict
+    config = {
+        'model_name': args.model,
+        'base_url': base_url,
+        'embedding_model': args.embedding_model,
+        'api_key': api_key,
+    }
     
     # Run the interactive orchestrator
     try:
-        playground = OrchestratorPlayground()
+        playground = OrchestratorPlayground(config)
         playground.run()
         return 0
     except KeyboardInterrupt:
@@ -91,19 +156,58 @@ Note on Embeddings:
 class OrchestratorPlayground:
     """Interactive session manager for the Planning Orchestrator Agent."""
     
-    def __init__(self):
+    def __init__(self, config: dict = None):
         self.agent = None
         self.session_dir = None
+        self.config = config or {}
+        
+    def _infer_provider(self, model_name: str) -> tuple:
+        """
+        Infer provider info from model name.
+        
+        Returns:
+            (provider_name, env_var_hint, env_vars_to_check)
+        """
+        model_lower = model_name.lower()
+        
+        if 'claude' in model_lower:
+            return (
+                "Anthropic",
+                "ANTHROPIC_API_KEY or CLAUDE_API_KEY",
+                ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"]
+            )
+        elif model_lower.startswith(('gpt-', 'o1-', 'o3-', 'text-embedding')):
+            return (
+                "OpenAI",
+                "OPENAI_API_KEY",
+                ["OPENAI_API_KEY"]
+            )
+        else:
+            # Default to Gemini
+            return (
+                "Google Gemini",
+                "GEMINI_API_KEY or GOOGLE_API_KEY",
+                ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
+            )
+    
+    def _get_api_key_from_env(self, env_vars: list) -> str:
+        """Get API key from list of environment variables."""
+        for var in env_vars:
+            key = os.getenv(var)
+            if key:
+                return key
+        return None
         
     def setup(self):
         """Setup the agent with user configuration."""
         
-        # Read model configuration from environment (set by CLI)
-        model_name = os.getenv('SCILINK_MODEL_NAME', 'gemini-3-pro-preview')
-        local_model = os.getenv('SCILINK_LOCAL_MODEL', None)
-        embedding_model = os.getenv('SCILINK_EMBEDDING_MODEL', None)
+        # Read from config (passed from CLI)
+        model_name = self.config.get('model_name', 'gemini-3-pro-preview')
+        base_url = self.config.get('base_url')
+        embedding_model = self.config.get('embedding_model', 'gemini-embedding-001')
+        api_key = self.config.get('api_key')
         
-        # Logo already shown by main CLI, just show directory guide
+        # Show directory guide
         print("\n" + "="*60)
         print("📁 RECOMMENDED DIRECTORY STRUCTURE")
         print("="*60)
@@ -122,14 +226,27 @@ class OrchestratorPlayground:
     """)
         print("="*60)
         
-        # Get API key
-        api_key = os.getenv("GOOGLE_API_KEY")
+        # Resolve API key if not provided via CLI
         if not api_key:
-            print("\n⚠️  No GOOGLE_API_KEY found in environment.")
-            api_key = input("Enter your Google API key (or press Enter to skip): ").strip()
-            if not api_key:
-                print("❌ Cannot proceed without API key.")
-                sys.exit(1)
+            provider_name, env_var_hint, env_vars = self._infer_provider(model_name)
+            api_key = self._get_api_key_from_env(env_vars)
+            
+            # If using internal proxy, api_key is required
+            # If using LiteLLM (no base_url), it can auto-detect from env vars
+            if not api_key and base_url:
+                print(f"\n⚠️  No {env_var_hint} found in environment.")
+                api_key = input(f"Enter your {provider_name} API key: ").strip()
+                if not api_key:
+                    print("❌ Cannot proceed without API key for internal proxy.")
+                    sys.exit(1)
+            elif not api_key:
+                # For LiteLLM without base_url, check if env vars are set
+                # LiteLLM will auto-detect, but we should warn if nothing is set
+                print(f"\n⚠️  No {env_var_hint} found in environment.")
+                print(f"   LiteLLM will attempt to auto-detect credentials.")
+                user_key = input(f"Enter your {provider_name} API key (or press Enter to let LiteLLM auto-detect): ").strip()
+                if user_key:
+                    api_key = user_key
 
         # Get FutureHouse API key (optional)
         futurehouse_key = os.getenv("FUTUREHOUSE_API_KEY")
@@ -140,6 +257,7 @@ class OrchestratorPlayground:
             if futurehouse_key:
                 print("   ✅ Literature search will be enabled")
             else:
+                futurehouse_key = None
                 print("   ℹ️  Literature search will be skipped")
         
         # Get objective
@@ -174,11 +292,11 @@ class OrchestratorPlayground:
             self.agent = OrchestratorAgent(
                 objective=objective,
                 base_dir=str(self.session_dir),
-                google_api_key=api_key,
-                futurehouse_api_key=futurehouse_key if futurehouse_key else None,
+                api_key=api_key,
                 model_name=model_name,
-                local_model=local_model,
-                embedding_model=embedding_model
+                base_url=base_url,
+                embedding_model=embedding_model,
+                futurehouse_api_key=futurehouse_key,
             )
             print("✅ Agent ready!")
             
@@ -190,6 +308,7 @@ class OrchestratorPlayground:
             print("   1. Make sure you're in the correct directory")
             print("   2. Check that planning_agents package is installed/accessible")
             print("   3. Verify all dependencies are installed")
+            print("   4. Check your API key is valid")
             sys.exit(1)
         
         # Show session info
@@ -200,19 +319,21 @@ class OrchestratorPlayground:
         print(f"Session Directory: {self.session_dir}")
         
         # Show model configuration
-        if local_model:
-            print(f"Model: {model_name} (Local: {local_model})")
-            if embedding_model:
-                print(f"Embedding Model: {embedding_model}")
+        provider_name, _, _ = self._infer_provider(model_name)
+        if base_url:
+            print(f"Model: {model_name}")
+            print(f"Endpoint: {base_url}")
         else:
-            print(f"Model: {model_name} (Gemini)")
-            if embedding_model:
-                print(f"Embedding Model: {embedding_model}")
-            else:
-                print(f"Embedding Model: gemini-embedding-001 (default)")
+            print(f"Model: {model_name} ({provider_name})")
         
+        print(f"Embedding Model: {embedding_model}")
+        print(f"Literature Search: {'Enabled' if futurehouse_key else 'Disabled'}")
         print(f"Available Tools: {len(self.agent.tools.functions_map)}")
-        print(f"  - {', '.join(list(self.agent.tools.functions_map.keys())[:5])}...")
+        tool_names = list(self.agent.tools.functions_map.keys())
+        if len(tool_names) > 5:
+            print(f"  - {', '.join(tool_names[:5])}...")
+        else:
+            print(f"  - {', '.join(tool_names)}")
         
     def print_help(self):
         """Print available commands."""
@@ -230,7 +351,7 @@ class OrchestratorPlayground:
         print("="*60)
     
     def handle_command(self, user_input: str) -> bool:
-        """Handle special commands. Returns True if command was handled."""
+        """Handle special commands. Returns True if command was handled, 'QUIT' to exit."""
         cmd = user_input.lower().strip()
         
         if cmd == "/help":
@@ -247,8 +368,15 @@ class OrchestratorPlayground:
             print("\n📁 Workspace Files:")
             files = list(self.session_dir.iterdir())
             if files:
-                for f in files:
-                    print(f"  - {f.name}")
+                for f in sorted(files):
+                    size = f.stat().st_size
+                    if size < 1024:
+                        size_str = f"{size} B"
+                    elif size < 1024 * 1024:
+                        size_str = f"{size / 1024:.1f} KB"
+                    else:
+                        size_str = f"{size / (1024 * 1024):.1f} MB"
+                    print(f"  - {f.name} ({size_str})")
             else:
                 print("  (empty)")
             return True
@@ -259,7 +387,7 @@ class OrchestratorPlayground:
             print(f"  Message Count: {self.agent.message_count}")
             print(f"  Active Script: {Path(self.agent.active_scalarizer_script).name if self.agent.active_scalarizer_script else 'None'}")
             print(f"  Input Columns: {self.agent.expected_input_columns}")
-            print(f"  Target Column: {self.agent.expected_target_column}")
+            print(f"  Target Columns: {self.agent.expected_target_columns}")
             
             # Check data points
             if self.agent.bo_data_path.exists():
@@ -267,7 +395,7 @@ class OrchestratorPlayground:
                 try:
                     df = pd.read_csv(self.agent.bo_data_path)
                     print(f"  Data Points: {len(df)}")
-                except:
+                except Exception:
                     print(f"  Data Points: Error reading file")
             else:
                 print(f"  Data Points: 0")
@@ -284,7 +412,7 @@ class OrchestratorPlayground:
             print("🤖 Orchestrator Agent - Session Resumed\n")
             return True
         
-        elif cmd in ["/quit", "/exit"]:
+        elif cmd in ["/quit", "/exit", "/q"]:
             return "QUIT"
         
         return False
