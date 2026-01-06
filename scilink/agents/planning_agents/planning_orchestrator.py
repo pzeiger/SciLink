@@ -173,7 +173,7 @@ class PlanningOrchestratorAgent:
         objective: str = "Undefined Research Goal",
         base_dir: str = "./campaign_outputs",
         api_key: Optional[str] = None,
-        model_name: str = "gemini/gemini-2.0-flash",
+        model_name: str = "gemini-3-pro-preview",
         base_url: Optional[str] = None,
         embedding_model: str = "gemini-embedding-001",
         futurehouse_api_key: Optional[str] = None,
