@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import faiss
 import time
@@ -292,11 +293,14 @@ class KnowledgeBase:
             source_difference = [dict(t) for t in difference_tuples]
             
         else:
-            # 1. Filter existing sources to only check strings
-            existing_strings = {s for s in self.sources if isinstance(s, str)}
+            # Helper to normalize paths: "./foo" and "foo" become the same
+            normalize = lambda p: os.path.normpath(p)
             
-            # 2. Calculate difference
-            source_difference = list(set(new_sources) - existing_strings)
+            # 1. Filter existing sources to only check strings (normalized)
+            existing_strings = {normalize(s) for s in self.sources if isinstance(s, str)}
+            
+            # 2. Calculate difference (comparing normalized paths)
+            source_difference = [s for s in new_sources if normalize(s) not in existing_strings]
         
         # Update history
         self.sources.extend(source_difference)
