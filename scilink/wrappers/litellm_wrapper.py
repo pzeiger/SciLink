@@ -69,6 +69,13 @@ def _check_litellm():
             "LiteLLM is required for public deployments. "
             "Install with: pip install litellm"
         )
+    
+    # Suppress verbose logging
+    import logging
+    logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+    logging.getLogger("litellm").setLevel(logging.WARNING)
+    
+    litellm.suppress_debug_info = True
 
 
 class LiteLLMGenerativeModel:
@@ -125,7 +132,7 @@ class LiteLLMGenerativeModel:
         """
         _check_litellm()
         
-        self.model = model
+        self.model = _normalize_model_name(model)
         self.api_key = api_key
         self.base_url = base_url
         self.system_instruction = system_instruction
@@ -295,15 +302,30 @@ class LiteLLMGenerativeModel:
         """Convert LiteLLM response to legacy format."""
         candidates = []
         
-        for choice in getattr(response, "choices", []):
+        choices = getattr(response, "choices", None) or []
+        
+        if not choices:
+            logging.warning(f"LiteLLM response has no choices")
+            return SimpleNamespace(
+                text="",
+                candidates=[SimpleNamespace(
+                    content=SimpleNamespace(parts=[], role="model"),
+                    finish_reason=1
+                )]
+            )
+        
+        for choice in choices:
             parts = []
             
-            message = getattr(choice, "message", None) or getattr(choice, "delta", None)
+            message = getattr(choice, "message", None)
+            if message is None:
+                message = getattr(choice, "delta", None)
             
             text = ""
             if message:
-                text = getattr(message, "content", None) or ""
-                text = self._clean_text(text)
+                content = getattr(message, "content", None)
+                if content:
+                    text = self._clean_text(str(content))
             
             tool_calls = getattr(message, "tool_calls", None) if message else None
             if tool_calls:
@@ -341,13 +363,35 @@ class LiteLLMGenerativeModel:
         return SimpleNamespace(text=first_text, candidates=candidates)
     
     def _clean_text(self, text: str) -> str:
-        """Clean response text (strip markdown fences)."""
+        """
+        Extract JSON from LLM response, handling preamble text and code fences.
+        """
         if not text:
             return ""
-        if "```" in text:
-            text = text.replace("```", "")
-        if text.lstrip().startswith("json"):
-            text = text.lstrip()[4:]
+        
+        text = text.strip()
+        
+        import re
+        
+        # Pattern 1: ```json ... ``` anywhere in text
+        json_match = re.search(r'```json\s*([\s\S]*?)\s*```', text)
+        if json_match:
+            return json_match.group(1).strip()
+        
+        # Pattern 2: ``` ... ``` anywhere in text
+        code_match = re.search(r'```\s*([\s\S]*?)\s*```', text)
+        if code_match:
+            extracted = code_match.group(1).strip()
+            if extracted.startswith('{') or extracted.startswith('['):
+                return extracted
+        
+        # Pattern 3: Raw JSON object anywhere in text
+        json_obj_match = re.search(r'(\{[\s\S]*\})', text)
+        if json_obj_match:
+            potential = json_obj_match.group(1)
+            if '"' in potential and ':' in potential:
+                return potential
+        
         return text
 
 
