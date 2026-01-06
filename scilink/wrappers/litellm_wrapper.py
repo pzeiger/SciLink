@@ -10,6 +10,7 @@ Replaces:
 - llama_wrapper.py
 """
 
+import os
 import io
 import base64
 import json
@@ -30,6 +31,15 @@ except ImportError:
     litellm = None
 
 
+def _ensure_gemini_api_key():
+    """
+    Ensure GEMINI_API_KEY is set for LiteLLM.
+    Falls back to GOOGLE_API_KEY for backward compatibility.
+    """
+    if not os.environ.get("GEMINI_API_KEY"):
+        google_key = os.environ.get("GOOGLE_API_KEY")
+        if google_key:
+            os.environ["GEMINI_API_KEY"] = google_key
 
 def _normalize_model_name(model: str) -> str:
     """
@@ -69,6 +79,8 @@ def _check_litellm():
             "LiteLLM is required for public deployments. "
             "Install with: pip install litellm"
         )
+    
+    _ensure_gemini_api_key()
     
     # Suppress verbose logging
     import logging
