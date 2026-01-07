@@ -39,6 +39,7 @@ Examples:
   scilink plan --model claude-sonnet-4-20250514 --embedding-model gemini-embedding-001
 
 Environment Variables:
+SCILINK_API_KEY          API key for internal proxy
   GEMINI_API_KEY         Google Gemini API key
   GOOGLE_API_KEY         Google API key (alias for GEMINI_API_KEY)
   OPENAI_API_KEY         OpenAI API key
@@ -228,25 +229,29 @@ class OrchestratorPlayground:
         
         # Resolve API key if not provided via CLI
         if not api_key:
-            provider_name, env_var_hint, env_vars = self._infer_provider(model_name)
-            api_key = self._get_api_key_from_env(env_vars)
-            
-            # If using internal proxy, api_key is required
-            # If using LiteLLM (no base_url), it can auto-detect from env vars
-            if not api_key and base_url:
-                print(f"\n⚠️  No {env_var_hint} found in environment.")
-                api_key = input(f"Enter your {provider_name} API key: ").strip()
+            # If using internal proxy (base_url), check for SCILINK_API_KEY first
+            if base_url:
+                api_key = os.getenv("SCILINK_API_KEY")
                 if not api_key:
-                    print("❌ Cannot proceed without API key for internal proxy.")
-                    sys.exit(1)
-            elif not api_key:
-                # For LiteLLM without base_url, check if env vars are set
-                # LiteLLM will auto-detect, but we should warn if nothing is set
-                print(f"\n⚠️  No {env_var_hint} found in environment.")
-                print(f"   LiteLLM will attempt to auto-detect credentials.")
-                user_key = input(f"Enter your {provider_name} API key (or press Enter to let LiteLLM auto-detect): ").strip()
-                if user_key:
-                    api_key = user_key
+                    print(f"\n⚠️  No SCILINK_API_KEY found in environment.")
+                    print(f"   When using --base-url, set SCILINK_API_KEY for authentication.")
+                    api_key = input(f"Enter your proxy API key (SCILINK_API_KEY): ").strip()
+                    if not api_key:
+                        print("❌ Cannot proceed without API key for internal proxy.")
+                        sys.exit(1)
+            else:
+                # Public deployment - check provider-specific keys
+                provider_name, env_var_hint, env_vars = self._infer_provider(model_name)
+                api_key = self._get_api_key_from_env(env_vars)
+                
+                if not api_key:
+                    # For LiteLLM without base_url, check if env vars are set
+                    # LiteLLM will auto-detect, but we should warn if nothing is set
+                    print(f"\n⚠️  No {env_var_hint} found in environment.")
+                    print(f"   LiteLLM will attempt to auto-detect credentials.")
+                    user_key = input(f"Enter your {provider_name} API key (or press Enter to let LiteLLM auto-detect): ").strip()
+                    if user_key:
+                        api_key = user_key
 
         # Get FutureHouse API key (optional)
         futurehouse_key = os.getenv("FUTUREHOUSE_API_KEY")
@@ -323,6 +328,7 @@ class OrchestratorPlayground:
         if base_url:
             print(f"Model: {model_name}")
             print(f"Endpoint: {base_url}")
+            print(f"Auth: SCILINK_API_KEY")
         else:
             print(f"Model: {model_name} ({provider_name})")
         
