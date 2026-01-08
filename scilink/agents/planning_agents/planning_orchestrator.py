@@ -4,7 +4,7 @@ import pandas as pd
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-import google.generativeai as genai
+from enum import Enum
 
 from ...auth import get_internal_proxy_key
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
@@ -15,12 +15,59 @@ from .bo_agent import BOAgent
 from .orchestrator_tools import OrchestratorTools
 from ._deprecation import normalize_params
 
-ORCHESTRATOR_SYSTEM_PROMPT = """
-You are the **Semi-Autonomous Research Agent**. Your goal is to coordinate a scientific campaign.
 
-**CRITICAL OPERATING MODE: SINGLE-TOOL EXECUTION**
+class AutonomyLevel(Enum):
+    """
+    Defines the level of autonomy for the orchestrator.
+    
+    CO_PILOT: AI assists human (default). Human reviews all plans/code.
+    SUPERVISED: Human assists AI. AI proceeds unless human intervenes.
+    AUTONOMOUS: Full autonomy. No human feedback requested.
+    """
+    CO_PILOT = "co_pilot"       # Human leads, AI assists (current default)
+    SUPERVISED = "supervised"   # AI leads, human can intervene
+    AUTONOMOUS = "autonomous"   # Full autonomy, no human feedback
+
+
+# Mode-specific directives (inserted at the top)
+_CO_PILOT_DIRECTIVE = """
+**CRITICAL OPERATING MODE: CO-PILOT (Human Leads, AI Assists)**
+- You are assisting the human researcher. They are in control.
+- ALWAYS wait for human approval before proceeding to next steps.
+- After generating plans or code, summarize and wait for feedback.
+- Do NOT chain multiple tool calls without human confirmation.
+- Ask clarifying questions when objectives are ambiguous.
+
+**SINGLE-TOOL EXECUTION RULE:**
 1. **EXECUTE ONE TOOL**: Call only ONE tool per response.
 2. **OBSERVE OUTPUT**: meaningful "next steps" depend on what the tool *actually* returned.
+"""
+
+_SUPERVISED_DIRECTIVE = """
+**CRITICAL OPERATING MODE: SUPERVISED (AI Leads, Human Supervises)**
+- You lead the research workflow. Human supervises and can intervene.
+- Proceed with reasonable next steps without asking for permission.
+- Human will still review generated plans and code through the standard review interface.
+- Do NOT ask clarifying questions unless truly ambiguous - make reasonable assumptions.
+- If a tool returns error or unexpected results, pause and report to human.
+- Periodically summarize progress (every 3-5 steps) but don't wait for response.
+- Use your judgment but remain open to human corrections.
+"""
+
+_AUTONOMOUS_DIRECTIVE = """
+**CRITICAL OPERATING MODE: FULLY AUTONOMOUS**
+- Execute the complete research workflow independently.
+- Chain tool calls as needed to achieve the objective.
+- Only pause for human input if you encounter unrecoverable errors.
+- Make decisions based on tool outputs and scientific reasoning.
+- Save checkpoints regularly for human review later.
+- Proceed through: plan → execute → analyze → optimize → iterate.
+- Report final results and key decision points at the end.
+- NOTE: Human still performs physical experiments in the lab
+"""
+
+_SYSTEM_PROMPT_BODY = """
+You are the **Research Agent**. Your goal is to coordinate a scientific campaign.
 
 **RESPONSE GUIDELINES (STRICT):**
 - **NO REDUNDANCY**: Do NOT repeat the tool's output. Summarize insights only.
@@ -141,11 +188,22 @@ Assume user runs agent from project directory. For example, when user says "file
 """
 
 
+def get_system_prompt(autonomy_level: AutonomyLevel) -> str:
+    """Returns the appropriate system prompt for the given autonomy level."""
+    directives = {
+        AutonomyLevel.CO_PILOT: _CO_PILOT_DIRECTIVE,
+        AutonomyLevel.SUPERVISED: _SUPERVISED_DIRECTIVE,
+        AutonomyLevel.AUTONOMOUS: _AUTONOMOUS_DIRECTIVE,
+    }
+    return directives[autonomy_level] + _SYSTEM_PROMPT_BODY
+
+
+
 class PlanningOrchestratorAgent:
     """
     Orchestrator agent for coordinating multi-iteration research campaigns.
     
-    Manages the full experimental loop:
+    Manages the full experimental loop with configurable autonomy:
     1. Hypothesis generation (PlanningAgent)
     2. Experiment execution (external)
     3. Result analysis (ScalarizerAgent)
@@ -156,15 +214,13 @@ class PlanningOrchestratorAgent:
         objective: Research objective description.
         base_dir: Base directory for campaign outputs.
         api_key: API key for the LLM provider.
-        model_name: Model name. For public deployments, use LiteLLM format
-            (e.g., "gemini/gemini-2.0-flash", "gpt-4o", "claude-sonnet-4-20250514").
+        model_name: Model name.
         base_url: Base URL for internal proxy endpoint.
-            When provided, uses OpenAI-compatible client.
-            When None, uses LiteLLM for multi-provider support.
         embedding_model: Embedding model name.
-        embedding_api_key: API key for the embedding LLM provider
+        embedding_api_key: API key for the embedding LLM provider.
         futurehouse_api_key: Optional FutureHouse API key for literature search.
         restore_checkpoint: Whether to restore from previous checkpoint.
+        autonomy_level: Level of autonomy (CO_PILOT, SUPERVISED, or AUTONOMOUS).
         
         google_api_key: DEPRECATED. Use 'api_key' instead.
         local_model: DEPRECATED. Use 'base_url' instead.
@@ -180,6 +236,10 @@ class PlanningOrchestratorAgent:
         embedding_api_key: Optional[str] = None,
         futurehouse_api_key: Optional[str] = None,
         restore_checkpoint: bool = False,
+        autonomy_level: AutonomyLevel = AutonomyLevel.CO_PILOT,
+        data_dir: Optional[str] = None,
+        knowledge_dir: Optional[str] = None,
+        code_dir: Optional[str] = None,
         # Deprecated
         google_api_key: Optional[str] = None,
         local_model: Optional[str] = None,
@@ -194,7 +254,6 @@ class PlanningOrchestratorAgent:
         )
         
         if base_url:
-        # INTERNAL PROXY
             if api_key is None:
                 api_key = get_internal_proxy_key()
             
@@ -212,12 +271,34 @@ class PlanningOrchestratorAgent:
             
             embedding_api_key = api_key
 
+        # Store autonomy level
+        self.autonomy_level = autonomy_level
+        self._enable_human_feedback = self._should_enable_human_feedback()
+        logging.info(f"🎛️  Autonomy Level: {autonomy_level.value.upper()}")
+
+        # Validate and store workspace directories
+        if autonomy_level in (AutonomyLevel.SUPERVISED, AutonomyLevel.AUTONOMOUS):
+            if data_dir is None:
+                raise ValueError(
+                    f"data_dir is required for {autonomy_level.value} mode.\n"
+                    f"Specify the directory containing experimental results."
+                )
+            if not Path(data_dir).exists():
+                raise ValueError(f"data_dir does not exist: {data_dir}")
+
+        self.data_dir = Path(data_dir) if data_dir else None
+        self.knowledge_dir = Path(knowledge_dir) if knowledge_dir else None
+        self.code_dir = Path(code_dir) if code_dir else None
+
+        if self.data_dir:
+            logging.info(f"   Data directory: {self.data_dir}")
+
         self.objective = objective
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
         self.analyzed_files_path = self.base_dir / "analyzed_files.json"
-        self.analyzed_files = {}  # {file_path: row_count}
+        self.analyzed_files = {}
         
         if self.analyzed_files_path.exists():
             try:
@@ -231,19 +312,14 @@ class PlanningOrchestratorAgent:
         self.history_path = self.base_dir / "chat_history.json"
         self.checkpoint_path = self.base_dir / "checkpoint.json"
         
-        # STATE: Tracks the currently approved analysis script AND expected schema
         self.active_scalarizer_script = None
         self.expected_input_columns = None
         self.expected_target_columns = []
-
-        # TEA results for auto-context
         self.latest_tea_results = None
         
-        # CAMPAIGN METRICS
         self.message_count = 0
         self.last_checkpoint_message_count = 0
         
-        # --- Restore from Checkpoint (if requested) ---
         if restore_checkpoint and self.checkpoint_path.exists():
             self._restore_checkpoint()
         
@@ -274,6 +350,10 @@ class PlanningOrchestratorAgent:
         # --- Initialize Tools Registry ---
         self.tools = OrchestratorTools(self)
         
+        # --- Get appropriate system prompt based on autonomy level ---
+        system_prompt = get_system_prompt(self.autonomy_level)
+        system_prompt += self._build_workspace_context()
+        
         # --- LLM Initialization ---
         if base_url:
             logging.info(f"🏛️ Orchestrator using internal proxy: {base_url}")
@@ -289,20 +369,21 @@ class PlanningOrchestratorAgent:
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key,
-                system_instruction=ORCHESTRATOR_SYSTEM_PROMPT,
+                system_instruction=system_prompt,
                 tools=self.tools.gemini_functions
             )
             self.use_openai = False
             self.tools_for_model = self.tools.gemini_functions
         
+        # Store system prompt for OpenAI mode
+        self._system_prompt = system_prompt
+        
         # --- MEMORY INITIALIZATION ---
         history = self._load_history()
         
-        # Start Chat Session
         if self.use_openai:
-            self.messages = [{"role": "system", "content": ORCHESTRATOR_SYSTEM_PROMPT}]
+            self.messages = [{"role": "system", "content": system_prompt}]
             if history:
-                # CONTEXT WINDOW MANAGEMENT: Keep only recent history
                 recent_history = self._trim_history(history, max_messages=100)
                 self.messages.extend(recent_history)
         else:
@@ -310,6 +391,57 @@ class PlanningOrchestratorAgent:
                 history=history,
                 enable_automatic_function_calling=True
             )
+
+    def _build_workspace_context(self) -> str:
+        """Build workspace context string for system prompt."""
+        if self.autonomy_level == AutonomyLevel.CO_PILOT:
+            return ""  # Not needed, human will guide
+        
+        context_parts = ["\n\n**WORKSPACE CONFIGURATION:**"]
+        
+        if self.data_dir:
+            context_parts.append(f"- Data directory: {self.data_dir}")
+        if self.knowledge_dir:
+            context_parts.append(f"- Knowledge directory: {self.knowledge_dir}")
+        if self.code_dir:
+            context_parts.append(f"- Code directory: {self.code_dir}")
+        
+        context_parts.append("\nUse these paths directly without asking for confirmation.")
+        
+        return "\n".join(context_parts)
+    
+    def _should_enable_human_feedback(self) -> bool:
+        """Determines if human feedback should be enabled based on autonomy level."""
+        # CO_PILOT and SUPERVISED both keep human review of plans/code
+        # Only AUTONOMOUS skips human feedback entirely
+        return self.autonomy_level != AutonomyLevel.AUTONOMOUS
+
+    def set_autonomy_level(self, level: AutonomyLevel) -> None:
+        """
+        Change the autonomy level at runtime.
+        
+        Args:
+            level: New autonomy level to set.
+        """
+        old_level = self.autonomy_level
+        self.autonomy_level = level
+        self._enable_human_feedback = self._should_enable_human_feedback()
+        
+        # Update system prompt
+        new_system_prompt = get_system_prompt(level)
+        self._system_prompt = new_system_prompt
+        
+        if self.use_openai:
+            # Update system message in OpenAI format
+            if self.messages and self.messages[0]["role"] == "system":
+                self.messages[0]["content"] = new_system_prompt
+        
+        logging.info(f"🔄 Autonomy level changed: {old_level.value} → {level.value}")
+        logging.info(f"   Human feedback enabled: {self._enable_human_feedback}")
+
+    def get_human_feedback_setting(self) -> bool:
+        """Returns current human feedback setting for sub-agents."""
+        return self._enable_human_feedback
 
     def _restore_checkpoint(self):
         """Restore campaign state from checkpoint."""
@@ -327,34 +459,44 @@ class PlanningOrchestratorAgent:
             else:
                 self.expected_target_columns = []
 
-            self.latest_tea_results = state.get("latest_tea_results") 
+            self.latest_tea_results = state.get("latest_tea_results")
+            
+            # Restore autonomy level if saved
+            if "autonomy_level" in state:
+                try:
+                    self.autonomy_level = AutonomyLevel(state["autonomy_level"])
+                    self._enable_human_feedback = self._should_enable_human_feedback()
+                except ValueError:
+                    pass  # Keep default if invalid value
+
+            if "data_dir" in state and state["data_dir"]:
+                self.data_dir = Path(state["data_dir"])
+            if "knowledge_dir" in state and state["knowledge_dir"]:
+                self.knowledge_dir = Path(state["knowledge_dir"])
+            if "code_dir" in state and state["code_dir"]:
+                self.code_dir = Path(state["code_dir"])
             
             print(f"    ✅ Restored state:")
             print(f"       - Analysis script: {Path(self.active_scalarizer_script).name if self.active_scalarizer_script else 'None'}")
             print(f"       - Schema: {self.expected_input_columns} → {self.expected_target_columns}")
             print(f"       - Data points: {state.get('data_points_collected', 0)}")
-            print(f"       - TEA results: {'Available' if self.latest_tea_results else 'None'}")
+            print(f"       - Autonomy level: {self.autonomy_level.value}")
             
         except Exception as e:
             logging.warning(f"Failed to restore checkpoint: {e}")
 
     def _trim_history(self, history: List[Dict], max_messages: int = 100) -> List[Dict]:
-        """
-        Keep only recent messages to avoid context window overflow.
-        Uses a sliding window approach with summary preservation.
-        """
+        """Keep only recent messages to avoid context window overflow."""
         if len(history) <= max_messages:
             return history
         
         print(f"  ⚠️  Trimming history: {len(history)} → {max_messages} messages")
         
-        # Strategy: Keep first 10 messages (context) + last N messages (recent)
         context_window = 10
         recent_window = max_messages - context_window
         
         trimmed = history[:context_window] + history[-recent_window:]
         
-        # Insert summary marker
         summary_marker = {
             "role": "system",
             "content": f"[{len(history) - max_messages} messages omitted for context management]"
@@ -383,9 +525,8 @@ class PlanningOrchestratorAgent:
             print(f"🤖 Agent: {response_text}")
             self._save_history()
             
-            # CONTEXT WARNING: If conversation is getting too long
             if self.message_count > 80:
-                warning = "\n\n⚠️ Note: Conversation is getting long. Consider calling save_checkpoint and restarting to avoid context overflow."
+                warning = "\n\n⚠️ Note: Conversation is getting long. Consider calling save_checkpoint and restarting."
                 response_text += warning
             
             return response_text
@@ -393,7 +534,6 @@ class PlanningOrchestratorAgent:
         except Exception as e:
             logging.error(f"Chat Error: {e}", exc_info=True)
             
-            # AUTO-SAVE on error
             print("  💾 Error detected - saving emergency checkpoint...")
             self._auto_checkpoint()
             
@@ -411,7 +551,11 @@ class PlanningOrchestratorAgent:
                 "data_points_collected": len(pd.read_csv(self.bo_data_path)) if self.bo_data_path.exists() else 0,
                 "planner_state": self.planner.state,
                 "message_count": self.message_count,
-                "latest_tea_results": self.latest_tea_results
+                "latest_tea_results": self.latest_tea_results,
+                "autonomy_level": self.autonomy_level.value,
+                "data_dir": str(self.data_dir) if self.data_dir else None,
+                "knowledge_dir": str(self.knowledge_dir) if self.knowledge_dir else None,
+                "code_dir": str(self.code_dir) if self.code_dir else None,
             }
             
             with open(self.checkpoint_path, 'w') as f:
@@ -423,10 +567,7 @@ class PlanningOrchestratorAgent:
             logging.warning(f"Auto-checkpoint failed: {e}")
 
     def _handle_openai_chat(self, user_input: str) -> str:
-        """
-        Handle chat with OpenAI-compatible models with manual function calling loop.
-        Includes context window management.
-        """
+        """Handle chat with OpenAI-compatible models with manual function calling loop."""
         from openai import OpenAI
         
         client = OpenAI(
@@ -434,23 +575,20 @@ class PlanningOrchestratorAgent:
             base_url=self.model.base_url
         )
         
-        # Add user message
         self.messages.append({"role": "user", "content": user_input})
         
-        # CONTEXT WINDOW MANAGEMENT: Trim if getting too long
-        if len(self.messages) > 120:  # System + 100 history + 20 current
+        if len(self.messages) > 120:
             print("  ⚠️  Context window getting full - trimming history...")
             system_msg = self.messages[0]
             recent_msgs = self._trim_history(self.messages[1:], max_messages=100)
             self.messages = [system_msg] + recent_msgs
         
-        max_iterations = 20  # Prevent infinite loops
+        max_iterations = 20
         iteration = 0
         
         while iteration < max_iterations:
             iteration += 1
             
-            # Call LLM
             response = client.chat.completions.create(
                 model=self.model.model,
                 messages=self.messages,
@@ -460,16 +598,13 @@ class PlanningOrchestratorAgent:
             
             message = response.choices[0].message
             
-            # Check if tool calls are needed
             if not message.tool_calls:
-                # No more tool calls, return final response
                 self.messages.append({
                     "role": "assistant",
                     "content": message.content
                 })
                 return message.content
             
-            # Add assistant message with tool calls
             self.messages.append({
                 "role": "assistant",
                 "content": message.content,
@@ -485,17 +620,14 @@ class PlanningOrchestratorAgent:
                 ]
             })
             
-            # Execute each tool call
             for tool_call in message.tool_calls:
                 func_name = tool_call.function.name
                 args = json.loads(tool_call.function.arguments)
                 
                 print(f"  🔧 Calling tool: {func_name}")
                 
-                # Execute tool
                 result = self.tools.execute_tool(func_name, **args)
                 
-                # Add tool result to messages
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
@@ -516,7 +648,6 @@ class PlanningOrchestratorAgent:
         else:
             return str(response)
 
-    # --- MEMORY MANAGEMENT ---
     def _load_history(self) -> List[Dict]:
         """Load conversation history from disk."""
         if not self.history_path.exists(): 
@@ -527,9 +658,8 @@ class PlanningOrchestratorAgent:
                 saved = json.load(f)
             
             if self.use_openai:
-                return saved  # OpenAI format
+                return saved
             else:
-                # Gemini/LiteLLM format
                 return [{"role": t["role"], "parts": [t["text"]]} for t in saved]
         except Exception as e:
             logging.warning(f"Failed to load history: {e}")
@@ -541,10 +671,8 @@ class PlanningOrchestratorAgent:
         
         try:
             if self.use_openai:
-                # Save OpenAI messages directly (excluding system message)
                 history_data = [m for m in self.messages if m["role"] != "system"]
             else:
-                # LiteLLM/Gemini format
                 if not hasattr(self.chat_session, 'history'):
                     return
                 
@@ -569,13 +697,5 @@ class PlanningOrchestratorAgent:
 
     @classmethod
     def restore_from_checkpoint(cls, base_dir: str, **kwargs):
-        """
-        Factory method to create an OrchestratorAgent from a checkpoint.
-        
-        Usage:
-            agent = PlanningOrchestratorAgent.restore_from_checkpoint(
-                base_dir="./campaign_outputs",
-                api_key="..."
-            )
-        """
+        """Factory method to create an OrchestratorAgent from a checkpoint."""
         return cls(base_dir=base_dir, restore_checkpoint=True, **kwargs)

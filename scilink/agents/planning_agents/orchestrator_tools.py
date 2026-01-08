@@ -33,6 +33,13 @@ class OrchestratorTools:
         
         self._register_all_tools()
 
+    def _get_human_feedback_enabled(self) -> bool:
+        """
+        Get current human feedback setting from orchestrator.
+        Returns True if not set (backwards compatible default).
+        """
+        return getattr(self.orch, '_enable_human_feedback', True)
+
     def _compute_file_hash(self, file_path: str) -> str:
         """Compute MD5 hash of file content for deduplication."""
         hasher = hashlib.md5()
@@ -329,7 +336,7 @@ class OrchestratorTools:
                     knowledge_paths=knowledge_list,
                     primary_data_set=primary_dataset,
                     additional_context=context_dict,
-                    enable_human_feedback=True,
+                    enable_human_feedback=self._get_human_feedback_enabled(),
                     reset_state=False
                 )
                 
@@ -474,7 +481,7 @@ class OrchestratorTools:
                 updated_plan = self.orch.planner.generate_implementation_code(
                     plan=current_plan,
                     code_paths=code_list,
-                    enable_human_feedback=True  # Will pause for code review
+                    enable_human_feedback=self._get_human_feedback_enabled()
                 )
                 
                 if updated_plan.get("error"):
@@ -691,7 +698,7 @@ class OrchestratorTools:
             try:
                 plan = self.orch.planner.refine_plan(
                     results=payload,
-                    enable_human_feedback=True,
+                    enable_human_feedback=self._get_human_feedback_enabled(),
                     use_literature_rag=use_literature_rag
                 )
                 
@@ -770,7 +777,7 @@ class OrchestratorTools:
             try:
                 updated_plan = self.orch.planner.refine_implementation_code(
                     plan=current_plan,
-                    enable_human_feedback=True
+                    enable_human_feedback=self._get_human_feedback_enabled()
                 )
                 
                 if updated_plan.get("error"):
@@ -897,7 +904,7 @@ class OrchestratorTools:
                     objective_query=enhanced_objective,  
                     reuse_script_path=script_to_use,
                     experiment_context=exp_context, 
-                    enable_human_review=True
+                    enable_human_review=self._get_human_feedback_enabled()
                 )
                 
                 if res["status"] != "success":
@@ -1487,7 +1494,11 @@ class OrchestratorTools:
                 "data_points_collected": data_points,
                 "message_count": message_count,
                 "planner_state": self.orch.planner.state if hasattr(self.orch.planner, 'state') else None,
-                "latest_tea_results": self.orch.latest_tea_results
+                "latest_tea_results": self.orch.latest_tea_results,
+                "autonomy_level": self.orch.autonomy_level.value if hasattr(self.orch, 'autonomy_level') and self.orch.autonomy_level else None,
+                "data_dir": str(self.orch.data_dir) if self.orch.data_dir else None,
+                "knowledge_dir": str(self.orch.knowledge_dir) if self.orch.knowledge_dir else None,
+                "code_dir": str(self.orch.code_dir) if self.orch.code_dir else None,
             }
             
             try:
