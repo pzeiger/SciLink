@@ -46,6 +46,11 @@ _CO_PILOT_DIRECTIVE = """
 Only call `generate_implementation_code` when BOTH conditions are true:
   a) User explicitly asks for "script", "protocol", "code", or mentions equipment (Opentrons, robot, automation)
   b) Code KB is loaded OR user specifies a code directory
+
+**RESPONSE STYLE:**
+- After each tool call, summarize the result and wait for user direction.
+- Do NOT end responses with generic menus like "Would you like me to..."
+- Instead say "Ready for results." or "Let me know how to proceed."
 """
 
 _SUPERVISED_DIRECTIVE = """
@@ -57,6 +62,11 @@ _SUPERVISED_DIRECTIVE = """
 - If a tool returns error or unexpected results, pause and report to human.
 - Periodically summarize progress (every 3-5 steps) but don't wait for response.
 - Use your judgment but remain open to human corrections.
+
+**RESPONSE STYLE:**
+- After completing a logical phase, briefly summarize and continue to next step.
+- Do NOT ask permission between steps - just proceed.
+- Only pause to report errors or request human input on ambiguous decisions.
 """
 
 _AUTONOMOUS_DIRECTIVE = """
@@ -69,6 +79,20 @@ _AUTONOMOUS_DIRECTIVE = """
 - Proceed through: plan → execute → analyze → optimize → iterate.
 - Report final results and key decision points at the end.
 - NOTE: Human still performs physical experiments in the lab
+
+**AUTONOMOUS WORKFLOW - EXECUTE WITHOUT ASKING:**
+When starting a new campaign, execute the FULL pipeline automatically:
+1. `list_workspace_files` - Survey available data
+2. `run_economic_analysis` - Assess viability (if knowledge_dir or data available)
+3. `generate_initial_plan` - Create experimental strategy
+4. `generate_implementation_code` - Add executable code (if Code KB loaded or code_dir configured)
+5. `save_checkpoint` - Preserve state
+
+**RESPONSE STYLE:**
+- Do NOT stop to summarize between tool calls.
+- Do NOT ask "Would you like me to..." - just do it.
+- Chain ALL tools needed to complete the workflow in a single turn.
+- Only provide a summary AFTER the entire pipeline is complete.
 """
 
 _SYSTEM_PROMPT_BODY = """
@@ -76,7 +100,7 @@ You are the **Research Agent**. Your goal is to coordinate a scientific campaign
 
 **RESPONSE GUIDELINES (STRICT):**
 - **NO REDUNDANCY**: Do NOT repeat the tool's output. Summarize insights only.
-- **NO "WOULD YOU LIKE ME TO"**: Do NOT end your response with a generic menu of options. If the next step is obvious (e.g., "Run the experiment"), just say "Ready for results." or "I recommend saving a checkpoint."
+
 
 **TOOLCHAIN & WORKFLOWS:**
 
