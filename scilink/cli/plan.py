@@ -20,13 +20,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Start with default settings (co-pilot mode, Gemini model)
+  # Start with default settings (co-pilot mode)
   scilink plan
   
-  # Use supervised mode with explicit directories
+  # Use supervised mode (AI leads, human reviews plans/code)
   scilink plan --autonomy supervised --data-dir ./experimental_results
   
-  # Full autonomous mode with all directories specified
+  # Full autonomous mode (no human review)
   scilink plan --autonomy autonomous --data-dir ./data --knowledge-dir ./papers --code-dir ./code
   
   # Use a different model
@@ -42,9 +42,11 @@ Examples:
   scilink plan --base-url https://my-proxy.example.com/v1 --model my-model
 
 Autonomy Levels:
-  co-pilot     Human leads, AI assists. Reviews every step. (default)
-  supervised   AI leads, human supervises. Human reviews plans/code only.
-  autonomous   Full autonomy. No human review, AI chains all tools.
+  co-pilot (default)  Human leads, AI assists. Reviews every step.
+  supervised          AI leads, human supervises. Human reviews plans/code only.
+  autonomous          Full autonomy. No human review, AI chains all tools.
+
+  Note: supervised and autonomous modes require --data-dir to be specified.
 
 Environment Variables:
   SCILINK_API_KEY          API key for internal proxy
@@ -97,8 +99,8 @@ Supported Models:
         '--autonomy',
         type=str,
         choices=['co-pilot', 'supervised', 'autonomous'],
-        default=None,  # None means "ask interactively"
-        help='Autonomy level (default: interactive selection)'
+        default='co-pilot',
+        help='Autonomy level (default: co-pilot). Higher levels require --data-dir.'
     )
     
     parser.add_argument(
@@ -163,13 +165,30 @@ Supported Models:
         if not api_key:
             api_key = args.google_api_key
     
+    # Validate: higher autonomy requires data-dir
+    if args.autonomy in ('supervised', 'autonomous') and not args.data_dir:
+        parser.error(
+            f"--data-dir is required for {args.autonomy} mode.\n"
+            f"Example: scilink plan --autonomy {args.autonomy} --data-dir ./experimental_results"
+        )
+    
+    # Validate data-dir exists if provided
+    if args.data_dir and not Path(args.data_dir).exists():
+        parser.error(f"--data-dir path does not exist: {args.data_dir}")
+    
+    # Validate optional dirs if provided
+    if args.knowledge_dir and not Path(args.knowledge_dir).exists():
+        parser.error(f"--knowledge-dir path does not exist: {args.knowledge_dir}")
+    if args.code_dir and not Path(args.code_dir).exists():
+        parser.error(f"--code-dir path does not exist: {args.code_dir}")
+    
     # Build config dict
     config = {
         'model_name': args.model,
         'base_url': base_url,
         'embedding_model': args.embedding_model,
         'api_key': api_key,
-        'autonomy_level': args.autonomy,  # None if not specified
+        'autonomy_level': args.autonomy,
         'data_dir': args.data_dir,
         'knowledge_dir': args.knowledge_dir,
         'code_dir': args.code_dir,
@@ -242,170 +261,6 @@ class OrchestratorPlayground:
             if key:
                 return key
         return None
-    
-    def _auto_detect_directory(self, candidates: list, purpose: str) -> str:
-        """
-        Try to auto-detect a directory from a list of candidates.
-        
-        Returns:
-            Path string if found and confirmed, None otherwise
-        """
-        for candidate in candidates:
-            if Path(candidate).exists():
-                confirm = input(f"   Found {purpose}: {candidate}. Use this? [Y/n]: ").strip().lower()
-                if confirm != 'n':
-                    return candidate
-        return None
-    
-    def _prompt_for_directory(self, purpose: str, required: bool = False) -> str:
-        """
-        Prompt user for a directory path.
-        
-        Returns:
-            Valid path string, or None if skipped/invalid
-        """
-        prompt = f"   Path to {purpose}"
-        if required:
-            prompt += " (required): "
-        else:
-            prompt += " (optional, Enter to skip): "
-        
-        path = input(prompt).strip()
-        
-        if not path:
-            if required:
-                return None  # Caller handles the error
-            return None
-        
-        if not Path(path).exists():
-            print(f"   ⚠️  Directory does not exist: {path}")
-            if required:
-                return None
-            return None
-        
-        return path
-    
-    def _select_autonomy_level(self):
-        """
-        Interactive autonomy level selection.
-        
-        Returns:
-            AutonomyLevel enum value
-        """
-        from scilink.agents.planning_agents.planning_orchestrator import AutonomyLevel
-        
-        print("\n" + "="*60)
-        print("🎛️  AUTONOMY LEVEL SELECTION")
-        print("="*60)
-        print("""
-  1. Co-Pilot (default)
-     Human leads, AI assists.
-     - Reviews every plan and code before proceeding
-     - One tool at a time, waits for your approval
-     - Best for: learning, exploration, sensitive work
-
-  2. Supervised
-     AI leads, human supervises.
-     - You still review generated plans and code
-     - AI chains tools without asking permission
-     - Pauses only on errors
-     - Best for: routine analysis, batch processing
-     - Requires: organized data directory
-
-  3. Autonomous
-     Full autonomy, no human review.
-     - AI chains all tools independently
-     - Only stops on unrecoverable errors
-     - Best for: overnight runs, well-defined workflows
-     - Requires: organized data directory
-""")
-        print("="*60)
-        
-        choice = input("\nSelect autonomy level [1/2/3] (default: 1): ").strip()
-        
-        if choice == '2':
-            return AutonomyLevel.SUPERVISED
-        elif choice == '3':
-            return AutonomyLevel.AUTONOMOUS
-        else:
-            return AutonomyLevel.CO_PILOT
-    
-    def _configure_workspace_directories(self, autonomy_level) -> bool:
-        """
-        Configure workspace directories for higher autonomy modes.
-        
-        Returns:
-            True if configuration successful, False if should fall back to CO_PILOT
-        """
-        from scilink.agents.planning_agents.planning_orchestrator import AutonomyLevel
-        
-        print(f"\n" + "="*60)
-        print(f"📂 WORKSPACE CONFIGURATION ({autonomy_level.value} mode)")
-        print("="*60)
-        print("Higher autonomy modes require organized directories so the")
-        print("agent can find files without asking questions.\n")
-        
-        # Data directory (required for SUPERVISED/AUTONOMOUS)
-        if not self.data_dir:
-            print("📊 Data Directory (required)")
-            self.data_dir = self._auto_detect_directory(
-                ['./experimental_results', './data', './results'],
-                'data directory'
-            )
-            
-            if not self.data_dir:
-                self.data_dir = self._prompt_for_directory(
-                    'experimental data directory',
-                    required=True
-                )
-            
-            if not self.data_dir:
-                print("\n❌ Data directory is required for higher autonomy modes.")
-                print("   Falling back to co-pilot mode.\n")
-                return False
-        
-        print(f"   ✅ Data directory: {self.data_dir}")
-        
-        # Knowledge directory (optional)
-        if not self.knowledge_dir:
-            print("\n📚 Knowledge Directory (optional)")
-            self.knowledge_dir = self._auto_detect_directory(
-                ['./papers', './docs', './literature', './reports'],
-                'knowledge directory'
-            )
-            
-            if not self.knowledge_dir:
-                self.knowledge_dir = self._prompt_for_directory(
-                    'papers/literature directory',
-                    required=False
-                )
-        
-        if self.knowledge_dir:
-            print(f"   ✅ Knowledge directory: {self.knowledge_dir}")
-        else:
-            print("   ℹ️  Knowledge directory: not configured")
-        
-        # Code directory (optional)
-        if not self.code_dir:
-            print("\n💻 Code Directory (optional)")
-            self.code_dir = self._auto_detect_directory(
-                ['./code', './scripts', './opentrons_api', './automation'],
-                'code directory'
-            )
-            
-            if not self.code_dir:
-                self.code_dir = self._prompt_for_directory(
-                    'code/API documentation directory',
-                    required=False
-                )
-        
-        if self.code_dir:
-            print(f"   ✅ Code directory: {self.code_dir}")
-        else:
-            print("   ℹ️  Code directory: not configured")
-        
-        print()
-        return True
         
     def setup(self):
         """Setup the agent with user configuration."""
@@ -419,53 +274,47 @@ class OrchestratorPlayground:
         base_url = self.config.get('base_url')
         embedding_model = self.config.get('embedding_model', 'gemini-embedding-001')
         api_key = self.config.get('api_key')
-        autonomy_level_str = self.config.get('autonomy_level')  # None if not specified
+        autonomy_level_str = self.config.get('autonomy_level', 'co-pilot')
         self.data_dir = self.config.get('data_dir')
         self.knowledge_dir = self.config.get('knowledge_dir')
         self.code_dir = self.config.get('code_dir')
         
-        # === AUTONOMY LEVEL SELECTION ===
-        if autonomy_level_str:
-            # Specified via CLI
-            autonomy_map = {
-                'co-pilot': AutonomyLevel.CO_PILOT,
-                'supervised': AutonomyLevel.SUPERVISED,
-                'autonomous': AutonomyLevel.AUTONOMOUS,
-            }
-            autonomy_level = autonomy_map.get(autonomy_level_str, AutonomyLevel.CO_PILOT)
-        else:
-            # Interactive selection
-            autonomy_level = self._select_autonomy_level()
+        # Convert autonomy level string to enum
+        autonomy_map = {
+            'co-pilot': AutonomyLevel.CO_PILOT,
+            'supervised': AutonomyLevel.SUPERVISED,
+            'autonomous': AutonomyLevel.AUTONOMOUS,
+        }
+        autonomy_level = autonomy_map.get(autonomy_level_str, AutonomyLevel.CO_PILOT)
         
-        # === SHOW DIRECTORY GUIDE (CO-PILOT ONLY) ===
+        # === SHOW DIRECTORY GUIDE (CO-PILOT MODE ONLY) ===
         if autonomy_level == AutonomyLevel.CO_PILOT:
             print("\n" + "="*60)
             print("📁 RECOMMENDED DIRECTORY STRUCTURE")
             print("="*60)
             print("""
-        Run orchestrator from your project directory:
+    Run orchestrator from your project directory:
 
-        📁 my_project/
-        ├── 📚 papers/               ← PDFs, scientific literature
-        ├── 📊 experimental_results/ ← CSV/XLSX data files  
-        └── 💻 code/                 ← (Optional) Scripts, API docs
+    📁 my_project/
+    ├── 📚 papers/               ← PDFs, scientific literature
+    ├── 📊 experimental_results/ ← CSV/XLSX data files  
+    └── 💻 code/                 ← (Optional) Scripts, API docs
 
-        Then use natural language:
-        "Generate a plan using ./papers/"
-        "Analyze ./experimental_results/batch_001.csv"
-        "Run optimization"
-    """)
+    Then use natural language:
+    "Generate a plan using ./papers/"
+    "Analyze ./experimental_results/batch_001.csv"
+    "Run optimization"
+""")
             print("="*60)
-        
-        # === DIRECTORY CONFIGURATION FOR HIGHER AUTONOMY ===
-        if autonomy_level in (AutonomyLevel.SUPERVISED, AutonomyLevel.AUTONOMOUS):
-            success = self._configure_workspace_directories(autonomy_level)
-            if not success:
-                autonomy_level = AutonomyLevel.CO_PILOT
-                self.data_dir = None
-                self.knowledge_dir = None
-                self.code_dir = None
-
+        else:
+            # Show workspace config for higher autonomy modes
+            print("\n" + "="*60)
+            print(f"📂 WORKSPACE CONFIGURATION ({autonomy_level.value} mode)")
+            print("="*60)
+            print(f"  Data directory:      {self.data_dir}")
+            print(f"  Knowledge directory: {self.knowledge_dir or 'not configured'}")
+            print(f"  Code directory:      {self.code_dir or 'not configured'}")
+            print("="*60)
         
         # === API KEY RESOLUTION ===
         if not api_key:
@@ -551,7 +400,7 @@ class OrchestratorPlayground:
             print("   1. Check that planning_agents package is installed")
             print("   2. Verify all dependencies are installed")
             print("   3. Check your API key is valid")
-            print("   4. For supervised/autonomous: ensure data directory exists")
+            print("   4. For supervised/autonomous: ensure directories exist")
             sys.exit(1)
         
         # === SHOW SESSION INFO ===
@@ -682,6 +531,7 @@ class OrchestratorPlayground:
                 print(f"\n🎛️  Current Autonomy Level: {self.agent.autonomy_level.value}")
                 print(f"   Human Feedback: {'Enabled' if self.agent._enable_human_feedback else 'Disabled'}")
                 print("\n   To change: /autonomy <co-pilot|supervised|autonomous>")
+                print("   Note: Higher autonomy works best when started with --data-dir")
             else:
                 # Change level
                 level_map = {
@@ -697,8 +547,8 @@ class OrchestratorPlayground:
                     if new_level in (AutonomyLevel.SUPERVISED, AutonomyLevel.AUTONOMOUS):
                         if not self.data_dir:
                             print(f"\n   ⚠️  Warning: No data directory configured.")
-                            print(f"   Higher autonomy modes work best with organized directories.")
-                            print(f"   Agent may need to ask for file locations.")
+                            print(f"   For best results, restart with: scilink plan --autonomy {new_level.value} --data-dir ./your_data")
+                            print(f"   Proceeding anyway - agent may need to ask for file locations.")
                     
                     self.agent.set_autonomy_level(new_level)
                     print(f"\n   ✅ Autonomy level changed to: {new_level.value}")
