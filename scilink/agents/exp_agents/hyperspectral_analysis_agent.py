@@ -17,6 +17,7 @@ from .pipelines.hyperspectral_pipelines import (
     create_hyperspectral_synthesis_pipeline
 )
 from ...tools.image_processor import load_image, convert_numpy_to_jpeg_bytes # For structure image
+from ._deprecation import normalize_params
 
 class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
@@ -25,15 +26,32 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     
     MAX_REFINEMENT_ITERATIONS = 2 # Global + 2 zoom-ins
 
-    def __init__(self, google_api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-06-05",
+    def __init__(self, 
+                 # New standard params
+                 api_key: str | None = None, 
+                 model_name: str = "gemini-3-pro-preview",
+                 base_url: str | None = None,
+                 # Deprecated params
+                 google_api_key: str | None = None, 
                  local_model: str = None,
+                 # Agent specific params
                  spectral_unmixing_settings: dict | None = None,
                  run_preprocessing: bool = True,
                  output_dir: str = "spectroscopy_output",
                  enable_human_feedback: bool = True):
         
-        BaseAnalysisAgent.__init__(self, google_api_key, model_name, local_model)
-        SimpleFeedbackMixin.__init__(self, enable_human_feedback=enable_human_feedback)
+        # Normalize params locally to pass to sub-agents (like preprocessor)
+        self.api_key, self.base_url = normalize_params(
+            api_key, google_api_key, base_url, local_model, source="HyperspectralAnalysisAgent"
+        )
+        
+        # initialize base
+        super().__init__(
+            api_key=self.api_key,
+            model_name=model_name,
+            base_url=self.base_url,
+            enable_human_feedback=enable_human_feedback
+        )
         
         # --- Settings ---
         default_settings = {
@@ -57,9 +75,9 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # --- Sub-Agent Initialization ---
         # The preprocessor is a dependency required by the pipeline
         self.preprocessor = HyperspectralPreprocessingAgent(
-            google_api_key=google_api_key,
+            api_key=self.api_key,
             model_name=model_name,
-            local_model=local_model
+            base_url=self.base_url
         )
 
         # --- Common Pipeline Arguments ---

@@ -448,7 +448,7 @@ class CurvePreprocessingAgent(BaseAnalysisAgent):
     """
     
     MAX_SCRIPT_ATTEMPTS = 5
-    MAX_MODEL_ATTEMPTS = 3
+    MAX_MODEL_ATTEMPTS = 5
 
     def __init__(self, *args,
                  output_dir: str = "preprocessing_output",

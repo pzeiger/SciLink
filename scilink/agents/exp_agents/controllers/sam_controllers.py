@@ -9,6 +9,7 @@ from ....tools.sam import (
 from ....tools.image_processor import convert_numpy_to_jpeg_bytes
 from ..instruct import SAM_ANALYSIS_REFINE_INSTRUCTIONS
 
+
 class RunSAMRefinementLoopController:
     """
     [🛠️ Tool Step + 🧠 LLM Step]
@@ -44,9 +45,13 @@ class RunSAMRefinementLoopController:
             prompt_parts.append("\n\n**ANALYSIS TASK:**")
             prompt_parts.append("Compare the segmentation result against the original image. Provide refined parameters to improve accuracy.")
             
+            # Using self.generation_config passed from Agent (which is None, effectively default settings)
+            # If you want specific params (like low temp), use a dict:
+            # config = {"temperature": 0.2, "response_mime_type": "application/json"}
+            
             response = self.model.generate_content(
                 contents=prompt_parts,
-                generation_config=self.generation_config,
+                generation_config=self.generation_config, 
                 safety_settings=self.safety_settings,
             )
             result_json, error_dict = self._parse_llm_response(response)

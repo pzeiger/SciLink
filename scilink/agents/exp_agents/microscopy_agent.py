@@ -14,6 +14,7 @@ from ...tools.image_processor import (
     preprocess_image, 
     convert_numpy_to_jpeg_bytes
 )
+from ._deprecation import normalize_params
 
 
 class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
@@ -31,20 +32,34 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
 
     def __init__(self,
+                 api_key: str | None = None,
+                 model_name: str = None,#"gemini-3-pro-preview",
+                 base_url: str | None = None,
+                 # Deprecated params
                  google_api_key: str | None = None,
-                 model_name: str = "gemini-2.5-pro-preview-06-05",
                  local_model: str = None,
+                 # Agent specific params
                  fft_nmf_settings: dict | None = None,
                  enable_human_feedback: bool = True):
         
-        super().__init__(google_api_key, model_name, local_model, enable_human_feedback=enable_human_feedback)
+        # 1. Normalize Params
+        self.api_key, self.base_url = normalize_params(
+            api_key, google_api_key, base_url, local_model, source="MicroscopyAnalysisAgent"
+        )
         
-        # This agent is defined by its settings
+        super().__init__(
+            api_key=self.api_key, 
+            model_name=model_name, 
+            base_url=self.base_url, 
+            enable_human_feedback=enable_human_feedback
+        )
+        
+        # 3. Agent-Specific Settings
         self.settings = fft_nmf_settings if fft_nmf_settings else {}
         self._recommendation_agent = None
         
-        # --- Pipeline Initialization ---
-        # The agent's behavior is defined by its pipeline.
+        # 4. Pipeline Initialization
+        # Pass self.generation_config (which is None) to pipelines
         self.pipeline = create_fftnmf_pipeline(
             model=self.model,
             logger=self.logger,
@@ -135,7 +150,12 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         if cached_detailed_analysis and additional_prompt_context:
             self.logger.info("Delegating DFT recommendations to RecommendationAgent.")
             if not self._recommendation_agent:
-                self._recommendation_agent = RecommendationAgent(self.google_api_key, self.model_name, self.local_model)
+                # Use base_url and api_key here as well
+                self._recommendation_agent = RecommendationAgent(
+                    api_key=self.api_key, 
+                    model_name=self.model_name, 
+                    base_url=self.base_url
+                )
             return self._recommendation_agent.generate_dft_recommendations_from_text(
                 cached_detailed_analysis=cached_detailed_analysis,
                 additional_prompt_context=additional_prompt_context,

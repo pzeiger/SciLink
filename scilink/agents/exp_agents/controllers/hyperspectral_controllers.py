@@ -25,19 +25,8 @@ from ..instruct import (
     SPECTROSCOPY_REFLECTION_UPDATE_INSTRUCTIONS
 )
 
-AGENT_METADATA_KEYS_TO_STRIP = [
-    'enable_human_feedback', 
-    'run_preprocessing', 
-    'output_dir', 
-    'visualization_dir', 
-    
-    'enabled', 
-    'auto_components', 
-    'min_auto_components', 
-    'max_auto_components',
-    
-    # Other potential non-tool keys
-]
+from ....tools.hyperspectral_tools import AGENT_METADATA_KEYS_TO_STRIP
+
 
 def _sanitize_filename(text: str) -> str:
     """Helper to create safe filenames from labels."""
@@ -191,7 +180,7 @@ class GetInitialComponentParamsController:
         
         prompt_parts.append("\n\nBased on the system description and data characteristics, estimate the optimal number of spectral components.")
         
-        param_gen_config = GenerationConfig(response_mime_type="application/json")
+        param_gen_config = None#GenerationConfig(response_mime_type="application/json")
         try:
             response = self.model.generate_content(
                 contents=prompt_parts,
@@ -375,7 +364,7 @@ class GetFinalComponentSelectionController:
 
         prompt_parts.append(f"\n\nBased on the elbow plot AND the visual examples, decide the optimal number of components.")
         
-        param_gen_config = GenerationConfig(response_mime_type="application/json")
+        param_gen_config = None#GenerationConfig(response_mime_type="application/json")
         try:
             response = self.model.generate_content(
                 contents=prompt_parts,
@@ -692,7 +681,7 @@ class SelectRefinementTargetController:
 
         prompt_parts.append("\n\nBased on these results, decide if a focused refinement is needed.")
 
-        param_gen_config = GenerationConfig(response_mime_type="application/json")
+        param_gen_config = None#GenerationConfig(response_mime_type="application/json")
         try:
             response = self.model.generate_content(
                 contents=prompt_parts,
@@ -1558,7 +1547,7 @@ class RunDynamicAnalysisController:
         
         try:
             # Low temperature for strict consistency
-            config = GenerationConfig(response_mime_type="application/json", temperature=0.1)
+            config = None#GenerationConfig(response_mime_type="application/json", temperature=0.1)
             resp = self.model.generate_content(
                 check_prompt, 
                 generation_config=config,
@@ -1619,7 +1608,7 @@ class RunSelfReflectionController:
 
         # 4. Run Model
         try:
-            param_gen_config = GenerationConfig(response_mime_type="application/json")
+            param_gen_config = None#GenerationConfig(response_mime_type="application/json")
             response = self.model.generate_content(
                 contents=prompt_parts,
                 generation_config=param_gen_config,
@@ -1686,7 +1675,7 @@ class ApplyReflectionUpdatesController:
 
         # 2. Run Model
         try:
-            param_gen_config = GenerationConfig(response_mime_type="application/json")
+            param_gen_config = None#GenerationConfig(response_mime_type="application/json")
             response = self.model.generate_content(
                 contents=prompt_parts,
                 generation_config=param_gen_config,

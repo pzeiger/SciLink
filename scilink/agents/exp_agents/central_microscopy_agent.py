@@ -7,6 +7,7 @@ from .pipeline_registry import (
     create_pipeline_for_agent,
     get_prompt_for_pipeline
 )
+from ._deprecation import normalize_params
 
 from ...tools.image_processor import (
     load_image, 
@@ -51,20 +52,36 @@ class CentralMicroscopyAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
 
     def __init__(self,
+                 # New standard params
+                 api_key: str | None = None,
+                 model_name: str = "gemini-2.0-flash",
+                 base_url: str | None = None,
+                 # Deprecated params
                  google_api_key: str | None = None,
-                 model_name: str = "gemini-2.5-pro-preview-06-05",
                  local_model: str = None,
+                 # Agent specific params
                  agent_settings: dict | None = None,
                  enable_human_feedback: bool = True,
-                 selector_model_name="gemini-2.5-pro-preview-06-05",
+                 selector_model_name="gemini-2.0-flash",
                  # Backward compatibility parameters
                  fft_nmf_settings: dict | None = None,
                  sam_settings: dict | None = None,
                  atomistic_analysis_settings: dict | None = None):
         
-        super().__init__(google_api_key, model_name, local_model, enable_human_feedback=enable_human_feedback)
+        # Normalize Params
+        self.api_key, self.base_url = normalize_params(
+            api_key, google_api_key, base_url, local_model, source="CentralMicroscopyAgent"
+        )
+
+        # 2. Initialize Base
+        super().__init__(
+            api_key=self.api_key,
+            model_name=model_name,
+            base_url=self.base_url,
+            enable_human_feedback=enable_human_feedback
+        )
         
-        # Handle backward compatibility
+        # Handle backward compatibility for settings
         if agent_settings is None:
             agent_settings = self._build_legacy_settings(
                 fft_nmf_settings, sam_settings, atomistic_analysis_settings
@@ -76,10 +93,11 @@ class CentralMicroscopyAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Initialize pipeline selector
         self.auto_select = agent_settings.get('auto_select_pipeline', True)
         if self.auto_select:
+            # Pass normalized params to selector
             self.pipeline_selector = PipelineSelector(
-                google_api_key=google_api_key,
+                api_key=self.api_key,
                 model_name=selector_model_name,
-                local_model=local_model
+                base_url=self.base_url
             )
         else:
             self.pipeline_selector = None
@@ -91,7 +109,7 @@ class CentralMicroscopyAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.current_pipeline = None
         self.current_pipeline_id = None
         
-        self.logger.info(f"MicroscopyAnalysisAgent initialized. Auto-select: {self.auto_select}, Default: {self.default_pipeline_id}")
+        self.logger.info(f"CentralMicroscopyAgent initialized. Auto-select: {self.auto_select}, Default: {self.default_pipeline_id}")
 
     def _build_legacy_settings(self, fft_nmf_settings, sam_settings, atomistic_settings) -> dict:
         """Convert old-style settings to new unified format."""
@@ -123,9 +141,6 @@ class CentralMicroscopyAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     def _select_and_create_pipeline(self, image_blob: dict, system_info: dict) -> tuple[list, str, str]:
         """
         Select and create the appropriate pipeline for analysis.
-        
-        Returns:
-            tuple: (pipeline, pipeline_id, reasoning)
         """
         available_pipelines = get_available_pipelines('microscopy')
         
@@ -157,7 +172,7 @@ class CentralMicroscopyAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             agent_type='microscopy',
             model=self.model,
             logger=self.logger,
-            generation_config=self.generation_config,
+            generation_config=self.generation_config, # None from BaseAgent
             safety_settings=self.safety_settings,
             settings=pipeline_settings,
             parse_fn=self._parse_llm_response,
@@ -176,12 +191,6 @@ class CentralMicroscopyAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         """
         The agent's main execution engine.
         It selects the appropriate pipeline, prepares the initial state, and runs it.
-        
-        Args:
-            image_path: Path to the image file
-            system_info: Metadata dictionary
-            prompt_type: Type of prompt ('analysis', 'claims', 'recommendations')
-            additional_context: Optional additional context for the prompt
         """
         try:
             # --- 1. Common State Initialization ---
@@ -288,7 +297,12 @@ class CentralMicroscopyAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         if cached_detailed_analysis and additional_prompt_context:
             self.logger.info("Delegating DFT recommendations to RecommendationAgent.")
             if not self._recommendation_agent:
-                self._recommendation_agent = RecommendationAgent(self.google_api_key, self.model_name, self.local_model)
+                # Use base_url and api_key here as well
+                self._recommendation_agent = RecommendationAgent(
+                    api_key=self.api_key,
+                    model_name=self.model_name,
+                    base_url=self.base_url
+                )
             return self._recommendation_agent.generate_dft_recommendations_from_text(
                 cached_detailed_analysis=cached_detailed_analysis,
                 additional_prompt_context=additional_prompt_context,

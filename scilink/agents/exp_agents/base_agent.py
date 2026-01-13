@@ -3,10 +3,10 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List
 
-import google.generativeai as genai
-from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockThreshold
-
-from ...auth import get_api_key, APIKeyNotFoundError
+from ...auth import get_internal_proxy_key
+from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
+from ._deprecation import normalize_params
 
 
 class BaseAnalysisAgent:
@@ -14,51 +14,67 @@ class BaseAnalysisAgent:
     Base class for analysis agents
     """
     
-    def __init__(self, google_api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-06-05", local_model: str = None):
-        if local_model is not None:
-            if 'gguf' in local_model:
-                logging.info(f"💻 Using local agent as the analysis agent.")
-                from ...wrappers.llama_wrapper import LocalLlamaModel
-                self.model = LocalLlamaModel(local_model)
-                self.generation_config = None
-                self.safety_settings = None
-                self.model_name = local_model
-            elif 'ai-incubator' in local_model:
-                logging.info(f"🏛️ Using network agent as the analysis agent.")
-                from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
-                # Auto-discover API key
-                if google_api_key is None:
-                    google_api_key = get_api_key('google')
-                    if not google_api_key:
-                        raise APIKeyNotFoundError('google')
-                self.model = OpenAIAsGenerativeModel(model_name, api_key = google_api_key, base_url= local_model) #This not google API key but API key
-                self.generation_config = None
-                self.safety_settings = None
-                self.model_name = model_name
-            else:
-                logging.info(f"Invalid local_model argument.")
-                self.model = None
-                self.generation_config = None
-                self.safety_settings = None
-        else:
-            logging.info(f"☁️ Using cloud agent as the analysis agent.")
-            # Auto-discover API key
-            if google_api_key is None:
-                google_api_key = get_api_key('google')
-                if not google_api_key:
-                    raise APIKeyNotFoundError('google')
-            genai.configure(api_key=google_api_key)
+    def __init__(self, 
+                 api_key: str | None = None, 
+                 model_name: str = "gemini-3-pro-preview", 
+                 base_url: str = None,
+                 # Deprecated arguments
+                 google_api_key: str | None = None,
+                 local_model: str = None,
+                 **kwargs):
         
-            self.model = genai.GenerativeModel(model_name)
-            self.generation_config = GenerationConfig(response_mime_type="application/json")
-            self.safety_settings = {
-                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-            }
-            self.model_name = model_name
-        self.local_model = local_model    
         self.logger = logging.getLogger(__name__)
-        self.google_api_key = google_api_key 
         
+        # Normalize parameters (api_key vs google_api_key, base_url vs local_model)
+        self.api_key, self.base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source=self.__class__.__name__
+        )
+        
+        self.model_name = model_name
+        self.generation_config = None
+        self.safety_settings = None
+        
+        # Initialize Model based on configuration
+        if self.base_url:
+            # A. GGUF / Local File Mode
+            if 'gguf' in self.base_url:
+                 logging.info(f"💻 Using local agent (GGUF path detected): {self.base_url}")
+                 from ...wrappers.llama_wrapper import LocalLlamaModel
+                 self.model = LocalLlamaModel(self.base_url)
+
+            # B. Internal Proxy / Network Mode
+            else:
+                logging.info(f"🏛️ Using OpenAI-compatible agent: {self.base_url}")
+                
+                # Match planning_agents logic: Use specific proxy key
+                if self.api_key is None:
+                    self.api_key = get_internal_proxy_key()
+                
+                if not self.api_key:
+                    raise ValueError(
+                        "API key required for internal proxy.\n"
+                        "Set SCILINK_API_KEY environment variable or pass api_key parameter."
+                    )
+                
+                self.model = OpenAIAsGenerativeModel(
+                    model=model_name, 
+                    api_key=self.api_key, 
+                    base_url=self.base_url
+                )
+        else:
+            # C. Public / LiteLLM Mode
+            logging.info(f"☁️ Using LiteLLM agent: {model_name}")
+            
+            # LiteLLM looks for env vars automatically, so self.api_key can be None here
+            self.model = LiteLLMGenerativeModel(
+                model=model_name,
+                api_key=self.api_key
+            )
+
         self._stored_analysis_images = []
         self._stored_analysis_metadata = {}
 
@@ -85,7 +101,6 @@ class BaseAnalysisAgent:
     def _parse_llm_response(self, response) -> tuple[dict | None, dict | None]:
         """
         Parses the LLM response, expecting JSON.
-        Shared implementation used by all agents.
         """
         result_json = None
         error_dict = None
@@ -93,7 +108,14 @@ class BaseAnalysisAgent:
         json_string = None
 
         try:
-            raw_text = response.text
+            # Handle LiteLLM/OpenAI wrapper response object
+            if hasattr(response, 'text'):
+                raw_text = response.text
+            elif hasattr(response, 'choices'): # Fallback for raw OpenAI objects
+                 raw_text = response.choices[0].message.content
+            else:
+                 raw_text = str(response)
+
             first_brace_index = raw_text.find('{')
             last_brace_index = raw_text.rfind('}')
             if first_brace_index != -1 and last_brace_index != -1 and last_brace_index > first_brace_index:
@@ -104,22 +126,9 @@ class BaseAnalysisAgent:
 
         except (json.JSONDecodeError, AttributeError, IndexError, ValueError) as e:
             error_details = str(e)
-            error_raw_response = raw_text if raw_text is not None else getattr(response, 'text', 'N/A')
             self.logger.error(f"Error parsing LLM JSON response: {e}")
-            parsed_substring_for_log = json_string if json_string else 'N/A'
-            self.logger.debug(f"Attempted to parse substring: {parsed_substring_for_log[:500]}...")
-            self.logger.debug(f"Original Raw response text: {error_raw_response[:500]}...")
-
-            if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
-                block_reason = response.prompt_feedback.block_reason
-                self.logger.error(f"Request blocked due to: {block_reason}")
-                error_dict = {"error": f"Content blocked by safety filters", "details": f"Reason: {block_reason}"}
-            elif response.candidates and response.candidates[0].finish_reason != 1: # 1 == Stop
-                finish_reason = response.candidates[0].finish_reason
-                self.logger.error(f"Generation finished unexpectedly: {finish_reason}")
-                error_dict = {"error": f"Generation finished unexpectedly: {finish_reason}", "details": error_details, "raw_response": error_raw_response}
-            else:
-                error_dict = {"error": "Failed to parse valid JSON from LLM response", "details": error_details, "raw_response": error_raw_response}
+            error_dict = {"error": "Failed to parse valid JSON from LLM response", "details": error_details, "raw_response": raw_text}
+        
         except Exception as e:
             self.logger.exception(f"Unexpected error processing response: {e}")
             error_dict = {"error": "Unexpected error processing LLM response", "details": str(e)}

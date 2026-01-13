@@ -1,10 +1,11 @@
-import google.generativeai as genai
 import json
 import logging
 import os
-from google.generativeai.types import GenerationConfig
-from scilink.auth import get_api_key, APIKeyNotFoundError
-from scilink.wrappers.openai_wrapper import OpenAIAsGenerativeModel
+
+from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
+from ._deprecation import normalize_params
+from ...auth import get_internal_proxy_key
 
 
 # Configure logging
@@ -147,139 +148,97 @@ Ensure the output JSON accurately reflects the information present in the text d
 
 
 def generate_metadata_json_from_text(
-    input_text_filepath: str,          
+    input_text_filepath: str,           
+    api_key: str | None = None,
+    model_name: str = "gemini-3-flash-preview",
+    base_url: str | None = None,
+    # Deprecated
     google_api_key: str | None = None,
-    model_name: str = "gemini-2.5-flash-preview-05-20",
     local_model: str | None = None
 ) -> dict | None:
     """
-    Reads a plain text experimental description from a file, uses an LLM model
-    (Gemini or OpenAI-compatible) to convert it into a structured JSON metadata
-    dictionary, saves the JSON to a file, and returns the dictionary.
-
-    Args:
-        input_text_filepath: Path to the input text file containing the description.
-        google_api_key: Your Google AI API key (used for Gemini or as the key for OpenAI-compatible endpoint).
-                          If None, attempts to retrieve via scilink.auth.get_api_key('google').
-        model_name: The Gemini model to use (if local_model is None).
-                    For OpenAI-compatible endpoints, this might specify the model served at the endpoint.
-        local_model: Optional. The base URL of the OpenAI-compatible API endpoint.
-                     If provided, this function will use the OpenAI wrapper.
-
-    Returns:
-        A dictionary containing the extracted metadata, or None if an error occurs.
-        Saves the output JSON to a file named based on the input file.
+    Reads a plain text experimental description and converts it to metadata JSON.
     """
-    # --- Input File Validation and Reading ---
+    
+    # 1. Normalize Parameters
+    api_key, base_url = normalize_params(
+        api_key=api_key,
+        google_api_key=google_api_key,
+        base_url=base_url,
+        local_model=local_model,
+        source="generate_metadata_json_from_text"
+    )
+
+    # 2. Input Validation
     if not input_text_filepath or not os.path.exists(input_text_filepath):
-        logger.error(f"Input text file not found or path is invalid: {input_text_filepath}")
+        logger.error(f"Input text file not found: {input_text_filepath}")
         return None
     try:
         with open(input_text_filepath, 'r', encoding='utf-8') as f:
             text_description = f.read()
-        if not text_description.strip():
-            logger.error(f"Input text file is empty: {input_text_filepath}")
-            return None
-        logger.info(f"Read description from: {input_text_filepath}")
+        if not text_description.strip(): return None
     except Exception as e:
-        logger.error(f"Error reading input file {input_text_filepath}: {e}", exc_info=True)
+        logger.error(f"Error reading input file: {e}")
         return None
 
-    # --- Determine Output File Path ---
     base_name = os.path.splitext(input_text_filepath)[0]
     output_json_filepath = f"{base_name}.json"
 
-    # --- API Key Configuration ---
-    api_key_to_use = google_api_key
-    if api_key_to_use is None:
-        try:
-            api_key_to_use = get_api_key('google')
-            if not api_key_to_use:
-                raise ValueError("API Key not found via scilink.auth.get_api_key('google').")
-        except (ImportError, ValueError, ModuleNotFoundError, APIKeyNotFoundError) as e:
-            logger.error(f"Failed to get Google API key via scilink.auth: {e}. Provide key or configure scilink.auth.")
-            return None
-
+    # 3. Model Initialization
     model = None
-    use_openai_wrapper = False
-    generation_config_dict = None # Use dict for Gemini
+    
+    if base_url:
+        if 'gguf' in base_url:
+             # Support GGUF here for completeness
+             from scilink.wrappers.llama_wrapper import LocalLlamaModel
+             model = LocalLlamaModel(base_url)
+        else:
+            if api_key is None:
+                api_key = get_internal_proxy_key()
+            if not api_key:
+                # Fallback or error based on preference, here we log warning
+                logger.warning("No API key found for proxy, attempting connection anyway...")
 
+            logger.info(f"🏛️ Using OpenAI-compatible agent: {base_url}")
+            model = OpenAIAsGenerativeModel(model=model_name, api_key=api_key, base_url=base_url)
+    else:
+        logger.info(f"☁️ Using LiteLLM agent: {model_name}")
+        model = LiteLLMGenerativeModel(model=model_name, api_key=api_key)
+
+    # 4. Prepare Prompt
+    prompt_parts = [
+        METADATA_GENERATION_PROMPT,
+        "\n--- Plain Text Description ---",
+        text_description, 
+        "\n--- Extracted JSON Metadata ---"
+    ]
+
+    # 5. Generate
     try:
-        # --- Conditional Model Initialization ---
-        if local_model and 'ai-incubator' in local_model: # Using trigger string convention
-            logger.info(f"🏛️ Using network agent (OpenAI wrapper) via endpoint: {local_model}")
-            model = OpenAIAsGenerativeModel(
-                model=model_name,
-                api_key=api_key_to_use,
-                base_url=local_model
-            )
-            use_openai_wrapper = True
+        response = model.generate_content(contents=prompt_parts)
+        
+        # 6. Parse
+        if not hasattr(response, 'text'):
+            if hasattr(response, 'candidates'): raw_text = response.candidates[0].content.parts[0].text
+            else: raw_text = str(response)
         else:
-            logger.info(f"☁️ Using Google Generative AI model: {model_name}")
-            genai.configure(api_key=api_key_to_use)
-            model = genai.GenerativeModel(model_name)
-            use_openai_wrapper = False
-            generation_config_dict = {
-                "response_mime_type": "application/json",
-                "response_schema": METADATA_SCHEMA_DICT
-            }
+             raw_text = response.text
 
-        # --- Prepare Prompt ---
-        prompt_parts = [
-            METADATA_GENERATION_PROMPT,
-            "\n--- Plain Text Description ---",
-            text_description, # Use content read from file
-            "\n--- Extracted JSON Metadata ---"
-        ]
-
-        # --- API Call ---
-        logger.info(f"Sending request to {'OpenAI wrapper' if use_openai_wrapper else model_name} for metadata extraction...")
-        if use_openai_wrapper:
-            response = model.generate_content(contents=prompt_parts)
-        else:
-            response = model.generate_content(
-                contents=prompt_parts,
-                generation_config=generation_config_dict,
-            )
-
-        # --- Response Processing ---
-        json_text = ""
-        if hasattr(response, 'candidates') and not response.candidates:
-             logger.error("LLM response was empty or blocked.")
-             if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
-                  logger.error(f"Request blocked due to: {response.prompt_feedback.block_reason}")
-             return None
-        elif not hasattr(response, 'text'):
-             logger.error("LLM response object does not contain expected 'text' attribute.")
-             try: logger.error(f"Raw response: {response}")
-             except: pass
-             return None
-
-        json_text = response.text
-        if json_text.strip().startswith("```json"):
-            json_text = json_text.strip()[7:]
-        if json_text.strip().endswith("```"):
-            json_text = json_text.strip()[:-3]
-        logger.debug(f"Raw LLM JSON response text: {json_text}")
-
-        metadata_dict = json.loads(json_text.strip())
-        logger.info("Successfully extracted and parsed metadata JSON.")
-
-        # --- Save Output JSON File ---
-        try:
-            with open(output_json_filepath, 'w', encoding='utf-8') as f:
-                json.dump(metadata_dict, f, indent=4)
-            logger.info(f"Successfully saved metadata to: {output_json_filepath}")
-        except Exception as e:
-            logger.error(f"Error saving metadata JSON to {output_json_filepath}: {e}", exc_info=True)
-            # Continue to return the dict even if saving fails
-
+        # Clean markdown
+        if "```json" in raw_text:
+            raw_text = raw_text.split("```json")[1].split("```")[0]
+        elif "```" in raw_text:
+            raw_text = raw_text.split("```")[1].split("```")[0]
+            
+        metadata_dict = json.loads(raw_text.strip())
+        
+        # Save
+        with open(output_json_filepath, 'w', encoding='utf-8') as f:
+            json.dump(metadata_dict, f, indent=4)
+        logger.info(f"Saved metadata to: {output_json_filepath}")
+        
         return metadata_dict
 
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse JSON from LLM response: {e}")
-        logger.error(f"Raw text received: {json_text}")
-        return None
     except Exception as e:
-        logger.error(f"An unexpected error occurred during API call or processing: {e}", exc_info=True)
+        logger.error(f"Error generating metadata: {e}", exc_info=True)
         return None

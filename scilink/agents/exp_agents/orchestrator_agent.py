@@ -9,7 +9,11 @@ from .atomistic_microscopy_agent import AtomisticMicroscopyAnalysisAgent
 from .hyperspectral_analysis_agent import HyperspectralAnalysisAgent
 from .holistic_microscopy_agent import HolisticMicroscopyAgent
 from .instruct import ORCHESTRATOR_INSTRUCTIONS
-from ...auth import get_api_key, APIKeyNotFoundError
+
+from ...auth import get_internal_proxy_key
+from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
+from ._deprecation import normalize_params
 
 # Mapping from integer ID to the corresponding agent class
 AGENT_MAP = {
@@ -22,49 +26,50 @@ AGENT_MAP = {
 
 class OrchestratorAgent:
     """
-    An LLM-powered agent that selects the most appropriate experimental analysis agent
-    based on the user's scientific intent.
+    An LLM-powered agent that selects the most appropriate experimental analysis agent.
     """
-    def __init__(self, google_api_key: str | None = None, model_name: str = "gemini-2.5-flash-preview-05-20", local_model: str = None):
-        if local_model is not None:
-            if 'gguf' in local_model:
-                logging.info(f"💻 Using local agent as the orchestrator.")
-                from ...wrappers.llama_wrapper import LocalLlamaModel
-                self.model = LocalLlamaModel(local_model)
-                self.generation_config = None
-                self.safety_settings = None
-            elif 'ai-incubator' in local_model:
-                logging.info(f"🏛️ Using network agent as the orchestrator.")
-                from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
-                # Auto-discover API key
-                if google_api_key is None:
-                    google_api_key = get_api_key('google')
-                    if not google_api_key:
-                        raise APIKeyNotFoundError('google')
-                #model_name = 'gemini-2.5-pro-birthright'# This is hard-coded, which will be a problem in the future: the calling of **some** agents uses hard-coded model names. A dict being passed from the outmost API or a config file would work better.
-                self.model = OpenAIAsGenerativeModel(model_name, api_key = google_api_key, base_url= local_model) #This not google API key but API key
-                self.generation_config = None
-                self.safety_settings = None
-                self.model_name = model_name
-            else:
-                logging.info(f"Invalid local_model argument.")
-                self.model = None
-                self.generation_config = None
-                self.safety_settings = None
-        else:
-            logging.info(f"☁️ Using cloud agent as the orchestrator.")
-            if google_api_key is None:
-                google_api_key = get_api_key('google')
-                if not google_api_key:
-                    raise APIKeyNotFoundError('google')
-            genai.configure(api_key=google_api_key)
+    def __init__(self, 
+                 api_key: str | None = None, 
+                 model_name: str = "gemini-3-flash-preview", 
+                 base_url: str = None,
+                 # Deprecated
+                 google_api_key: str | None = None, 
+                 local_model: str = None):
         
-            self.model = genai.GenerativeModel(model_name)
-            self.generation_config = GenerationConfig(response_mime_type="application/json")
-            self.safety_settings = {
-                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-            }
         self.logger = logging.getLogger(__name__)
+
+        self.api_key, self.base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source="OrchestratorAgent"
+        )
+        
+        # Initialize Model
+        if self.base_url:
+            if 'gguf' in self.base_url:
+                logging.info(f"💻 Using local agent (GGUF path detected): {self.base_url}")
+                from ...wrappers.llama_wrapper import LocalLlamaModel
+                self.model = LocalLlamaModel(self.base_url)
+            else:
+                logging.info(f"🏛️ Using OpenAI-compatible agent as orchestrator: {self.base_url}")
+                if self.api_key is None:
+                    self.api_key = get_internal_proxy_key()
+                
+                if not self.api_key:
+                    raise ValueError("API key required for internal proxy.")
+
+                self.model = OpenAIAsGenerativeModel(model=model_name, api_key=self.api_key, base_url=self.base_url)
+        else:
+            logging.info(f"☁️ Using LiteLLM agent as the orchestrator: {model_name}")
+            # LiteLLM finds API keys in env vars automatically
+            self.model = LiteLLMGenerativeModel(
+                model=model_name, 
+                api_key=self.api_key
+            )
+
+        self.generation_config = None
 
     def _parse_llm_response(self, response) -> tuple[dict | None, dict | None]:
         """Parses the LLM response, expecting JSON."""

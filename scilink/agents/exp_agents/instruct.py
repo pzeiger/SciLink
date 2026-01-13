@@ -1107,14 +1107,34 @@ First, think step-by-step:
 2.  **Select a Composite Model**: Based on your analysis and the literature context, choose an appropriate model. If there are multiple features, the model MUST be a *sum of multiple functions* (e.g., `gaussian1 + gaussian2 + linear_baseline`).
 3.  **Plan the Script**: Plan the full script, including defining the composite model function, making reasonable initial guesses (`p0`) for **all** parameters, and calling the fitting routine. Good initial guesses are critical for complex fits to converge.
 
-Then, generate a *complete* and *executable* Python script that follows these rules:
-1.  The script MUST include all necessary imports (`numpy`, `json`, `matplotlib.pyplot`, `scipy.optimize.curve_fit`).
-2.  The script MUST load the data from the specified file path. Crucially, when loading CSV or TXT data with `numpy.loadtxt`, assume there might be a header row and use `skiprows=1` to ignore it.
-3.  The script MUST define the chosen fitting function(s). For multiple features, this should be a composite function (e.g., `def double_gaussian(x, a1, c1, s1, a2, c2, s2): return gaussian(x, a1, c1, s1) + gaussian(x, a2, c2, s2)`).
-4.  The script MUST perform the fit using `scipy.optimize.curve_fit`.
-5.  The script MUST save a plot of the data and the complete fit (including all components) to a file named `fit_visualization.png`.
-6.  **CRITICALLY**: After saving the plot, the script MUST print the final, optimized parameters for **all components** to standard output as a JSON string on a single line, prefixed with `FIT_RESULTS_JSON:`.
-7.  Your entire response must be ONLY the Python code. Do NOT add any conversational text or explanations outside of the code itself.
+The script must follow these rules:
+1.  Include all necessary imports (`numpy`, `json`, `matplotlib.pyplot`, `scipy.optimize.curve_fit`).
+2.  Load the data from the specified file path. When loading CSV or TXT data with `numpy.loadtxt`, assume there might be a header row and use `skiprows=1` to ignore it.
+3.  Define the chosen fitting function(s). For multiple features, use a composite function.
+4.  Perform the fit using `scipy.optimize.curve_fit`.
+5.  Save a plot of the data and the complete fit to `fit_visualization.png`.
+6.  Compute fit quality metrics (R², RMSE) and output results as JSON.
+
+**Required Output:**
+Print results to stdout using `json.dumps()`:
+```python
+print(f"FIT_RESULTS_JSON:{json.dumps(results)}")
+```
+Example: `FIT_RESULTS_JSON:{"model_type": "gaussian", "parameters": {"amplitude": 1.2, "center": 520.5, "sigma": 15.3}, "fit_quality": {"r_squared": 0.95, "rmse": 0.02}}`
+
+**LLM RESPONSE FORMAT:**
+Return ONLY a single JSON object:
+```json
+{
+  "reasoning": "Brief explanation of why you chose this model and approach",
+  "script": "import numpy as np\\nimport json\\nimport matplotlib.pyplot as plt\\n..."
+}
+```
+
+IMPORTANT: 
+- The "script" value must be a valid JSON string with escaped newlines (\\n) and escaped quotes (\\") where needed.
+- Do NOT include markdown code blocks outside the JSON.
+- Return ONLY the JSON object, nothing else.
 """
 
 FITTING_RESULTS_INTERPRETATION_INSTRUCTIONS = """You are an expert scientist specializing in spectroscopy and data analysis.
@@ -1149,19 +1169,15 @@ FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """You are an expert data scientist deb
 
 **Context:**
 - The script is intended to fit 1D experimental data using a physical model derived from the literature.
-- The script MUST load data, define a fitting function, use `scipy.optimize.curve_fit`, save a plot to `fit_visualization.png`, and print the final parameters as a JSON string prefixed with `FIT_RESULTS_JSON:`.
-- Crucially, when loading CSV or TXT data with `numpy.loadtxt`, assume there might be a header row and use `skiprows=1` to ignore it.
-- Ensure your entire response is ONLY the corrected Python code inside a markdown block. Do NOT include the word 'python' or any other text outside the code itself.
+- The script MUST load data, define a fitting function, use `scipy.optimize.curve_fit`, save a plot to `fit_visualization.png`, and output results as JSON.
+- When loading CSV or TXT data with `numpy.loadtxt`, assume there might be a header row and use `skiprows=1` to ignore it.
 
-**Provided Information:**
-1.  **Literature Context**: The scientific background for the model selection.
-2.  **Failed Script**: The exact Python code that produced the error.
-3.  **Error Message**: The full traceback from the script's execution.
-
-**Your Task:**
-1.  Analyze the error message and traceback to identify the bug in the failed script.
-2.  Generate a complete, corrected, and executable Python script that fixes the bug while still fulfilling all original requirements.
-3.  Ensure your entire response is ONLY the corrected Python code inside a markdown block. Do not add any conversational text.
+**Required Output:**
+Print results to stdout using `json.dumps()`:
+```python
+print(f"FIT_RESULTS_JSON:{{json.dumps(results)}}")
+```
+Example: `FIT_RESULTS_JSON:{{"model_type": "gaussian", "parameters": {{"amplitude": 1.2, "center": 520.5, "sigma": 15.3}}, "fit_quality": {{"r_squared": 0.95, "rmse": 0.02}}}}`
 
 ## Literature Context
 {literature_context}
@@ -1170,10 +1186,24 @@ FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """You are an expert data scientist deb
 ```python
 {failed_script}
 ```
+
 ## Error Message
 {error_message}
-"""
 
+**LLM RESPONSE FORMAT:**
+Return ONLY a single JSON object:
+```json
+{{
+  "diagnosis": "Brief explanation of what caused the error and how you fixed it",
+  "script": "import numpy as np\\nimport json\\nimport matplotlib.pyplot as plt\\n..."
+}}
+```
+
+IMPORTANT: 
+- The "script" value must be a valid JSON string with escaped newlines (\\n) and escaped quotes (\\") where needed.
+- Do NOT include markdown code blocks outside the JSON.
+- Return ONLY the JSON object, nothing else.
+"""
 
 CURVE_FITTING_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS = """You are an expert scientist analyzing quantitative results from fitting 1D experimental data (like spectroscopy or diffraction) to recommend optimal follow-up measurements.
 
@@ -1278,58 +1308,73 @@ You MUST respond in a valid JSON format with the following keys:
 
 
 
-FITTING_QUALITY_ASSESSMENT_INSTRUCTIONS = """You are an expert data scientist evaluating the quality of a curve fit.
+FITTING_QUALITY_ASSESSMENT_INSTRUCTIONS = """You are an expert scientist evaluating the quality of a curve fit for spectroscopic data.
 
-You will be provided with:
-1.  **Original Data Plot**: The experimental data.
-2.  **Fit Visualization**: The data with the model's fit overlaid.
-3.  **Literature Context**: The rationale for the initial model choice.
+You will receive:
+1. The original data plot
+2. The fit visualization (data + fitted model)
+3. Computed fit quality metrics (R², RMSE, etc.)
+4. Literature context about the expected model
 
-Your task is to critically assess how well the model fits the data.
+**Evaluate whether the fit is scientifically adequate based on BOTH the visual evidence AND the computed metrics.**
 
-**Evaluation Criteria:**
-- **Residuals**: Does the fitted line systematically deviate from the data points in any region?
-- **Feature Capture**: Does the fit capture all the key features of the data (e.g., all peaks, shoulders, baseline trends)?
-- **Physical Plausibility**: Is the model consistent with the literature context and the visual appearance of the data?
+**Criteria for a GOOD fit (is_good_fit: true):**
+- R² ≥ 0.90 (ideally > 0.95)
+- All major spectral features (peaks, edges, shoulders) are captured
+- No obvious systematic deviations
 
-**INSTRUCTIONS:**
+**Criteria for a BAD fit (is_good_fit: false):**
+- R² < 0.90
+- Major peaks or features are missing
+- Wrong number of components for the spectrum
 
-1. First, write a detailed critique analyzing the fit quality. Be specific about what works and what doesn't.
-
-2. If the fit is inadequate, suggest a specific improvement (e.g., 'Add a second Gaussian component' or 'Change to an exponential baseline').
-
-3. Finally, answer this question based ONLY on your critique:
-   **"Does this critique indicate the fit is GOOD quality?"**
-   
-   Your answer to this question (true/false) is the value of `is_good_fit`.
-
-You MUST respond in valid JSON format:
+**Output Format:**
+Return ONLY a valid JSON object:
+```json
 {
-  "critique": "[Your detailed analysis of the fit quality. Be specific about problems if any exist.]",
-  "suggestion": "[Specific improvement if needed, or 'No changes needed' if good]",
-  "is_good_fit": "[true/false - Direct answer: Does YOUR critique above indicate good quality?]"
+  "is_good_fit": false,
+  "critique": "Detailed explanation of fit quality",
+  "suggestion": "Specific suggestion for improvement if is_good_fit is false"
 }
-
-Remember: The value of `is_good_fit` must match your critique. If you identified problems, it must be false.
+```
 """
 
-FITTING_MODEL_CORRECTION_INSTRUCTIONS = """You are an expert data scientist tasked with correcting an inadequate physical model for curve fitting. A previous attempt resulted in a poor fit.
+FITTING_MODEL_CORRECTION_INSTRUCTIONS = """You are an expert data scientist. A previous curve fitting attempt produced a poor fit. Based on the critique and visual evidence, you must select a DIFFERENT or improved physical model and generate a new fitting script.
 
-**Provided Information:**
-1.  **Literature Context**: The original scientific background.
-2.  **The Bad Fit**: A plot showing the poor fit from the previous attempt.
-3.  **Critique and Suggestion**: An expert critique explaining *why* the fit was bad and a suggestion for a better model.
-4.  **The Old Script**: The Python script that generated the bad fit.
+**Your Task:**
+1. Analyze the critique and the plot of the bad fit.
+2. Identify why the previous model was inadequate (wrong functional form, missing components, etc.).
+3. Propose a better model and generate a complete, corrected Python script.
 
-Your task is to generate a new, complete, and executable Python script that implements the suggested model improvement.
+The script must follow these rules:
+1. Include all necessary imports (`numpy`, `json`, `matplotlib.pyplot`, `scipy.optimize.curve_fit`).
+2. Load the data from the SAME file path as the original script.
+3. Define an IMPROVED fitting function based on the critique.
+4. Perform the fit using `scipy.optimize.curve_fit`.
+5. Save a plot of the data and the complete fit to `fit_visualization.png`.
+6. Compute fit quality metrics (R², RMSE) and output results as JSON.
 
-- **Incorporate the Suggestion**: Modify the model function (e.g., add a new component, change the baseline) as suggested in the critique.
-- **Adjust Initial Guesses**: You MUST provide new, reasonable initial guesses (`p0`) for **all parameters** in the new composite model. This is critical for the new fit to succeed.
-- **Maintain Requirements**: The new script must still load the data, save a plot named `fit_visualization.png`, and print the final parameters as a JSON string prefixed with `FIT_RESULTS_JSON:`.
+**Required Output:**
+Print results to stdout using `json.dumps()`:
+```python
+print(f"FIT_RESULTS_JSON:{json.dumps(results)}")
+```
+Example: `FIT_RESULTS_JSON:{"model_type": "gaussian", "parameters": {"amplitude": 1.2, "center": 520.5, "sigma": 15.3}, "fit_quality": {"r_squared": 0.95, "rmse": 0.02}}`
 
-Your entire response must be ONLY the new, corrected Python code. Do not add any conversational text.
+**LLM RESPONSE FORMAT:**
+Return ONLY a single JSON object:
+```json
+{
+  "revised_model_rationale": "Explanation of what was wrong and why the new model is better",
+  "script": "import numpy as np\\nimport json\\nimport matplotlib.pyplot as plt\\n..."
+}
+```
+
+IMPORTANT: 
+- The "script" value must be a valid JSON string with escaped newlines (\\n) and escaped quotes (\\") where needed.
+- Do NOT include markdown code blocks outside the JSON.
+- Return ONLY the JSON object, nothing else.
 """
-
 
 MICROSCOPY_PIPELINE_SELECTION_INSTRUCTIONS = """You are an expert materials scientist. Your task is to match the input microscopy data to one of the available pipelines.
 

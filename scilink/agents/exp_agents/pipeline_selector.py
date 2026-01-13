@@ -4,64 +4,50 @@ from typing import Dict, List, Callable
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockThreshold
 
-from ...auth import get_api_key, APIKeyNotFoundError
+from ...auth import get_internal_proxy_key
+from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
+from ._deprecation import normalize_params
 
 
 class PipelineSelector:
-    """
-    A general-purpose pipeline selector that uses an LLM to choose
-    the most appropriate analysis pipeline based on the input data.
-    """
-    
     def __init__(self, 
-                 google_api_key: str | None = None,
-                 model_name: str = "gemini-2.5-flash-preview-05-20",
+                 api_key: str | None = None, 
+                 model_name: str = "gemini-3-flash-preview", 
+                 base_url: str = None,
+                 # Deprecated
+                 google_api_key: str | None = None, 
                  local_model: str = None):
-        """
-        Initialize the pipeline selector.
         
-        Args:
-            google_api_key: Google API key for Gemini models
-            model_name: Name of the model to use
-            local_model: Optional local model endpoint
-        """
         self.logger = logging.getLogger(__name__)
         
-        # Model initialization (similar to orchestrator)
-        if local_model is not None:
-            if 'gguf' in local_model:
-                self.logger.info(f"💻 Using local agent as pipeline selector.")
-                from ...wrappers.llama_wrapper import LocalLlamaModel
-                self.model = LocalLlamaModel(local_model)
-                self.generation_config = None
-                self.safety_settings = None
-            elif 'ai-incubator' in local_model:
-                self.logger.info(f"🏛️ Using network agent as pipeline selector.")
-                from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
-                if google_api_key is None:
-                    google_api_key = get_api_key('google')
-                    if not google_api_key:
-                        raise APIKeyNotFoundError('google')
-                self.model = OpenAIAsGenerativeModel(model_name, api_key=google_api_key, base_url=local_model)
-                self.generation_config = None
-                self.safety_settings = None
+        self.api_key, self.base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source="PipelineSelector"
+        )
+        
+        if self.base_url:
+            if 'gguf' in self.base_url:
+                 self.logger.info(f"💻 Using local agent as pipeline selector.")
+                 from ...wrappers.llama_wrapper import LocalLlamaModel
+                 self.model = LocalLlamaModel(self.base_url)
             else:
-                self.logger.info(f"Invalid local_model argument.")
-                self.model = None
-                self.generation_config = None
-                self.safety_settings = None
+                 self.logger.info(f"🏛️ Using OpenAI-compatible agent as pipeline selector.")
+                 if self.api_key is None:
+                     self.api_key = get_internal_proxy_key()
+                 
+                 if not self.api_key:
+                     raise ValueError("API key required for internal proxy.")
+                     
+                 self.model = OpenAIAsGenerativeModel(model=model_name, api_key=self.api_key, base_url=self.base_url)
         else:
-            self.logger.info(f"☁️ Using cloud agent as pipeline selector.")
-            if google_api_key is None:
-                google_api_key = get_api_key('google')
-                if not google_api_key:
-                    raise APIKeyNotFoundError('google')
-            genai.configure(api_key=google_api_key)
-            self.model = genai.GenerativeModel(model_name)
-            self.generation_config = GenerationConfig(response_mime_type="application/json")
-            self.safety_settings = {
-                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-            }
+             self.logger.info(f"☁️ Using LiteLLM as pipeline selector.")
+             self.model = LiteLLMGenerativeModel(model=model_name, api_key=self.api_key)
+        
+        self.generation_config = None
     
     def select_pipeline(self,
                        available_pipelines: Dict[str, Dict],

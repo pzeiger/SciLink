@@ -3,46 +3,40 @@ import matplotlib.pyplot as plt
 from io import BytesIO
 import logging
 import os
-import json
 
 logger = logging.getLogger(__name__)
 
+
 def load_curve_data(data_path: str) -> np.ndarray:
     """
-    Loads 1D curve data (X, Y) from .csv, .txt, or .npy files.
+    Robustly loads curve data (X, Y) from text files.
+    Handles CSV, TSV, and whitespace separation automatically.
     """
     if not os.path.exists(data_path):
-        logger.error(f"Data file not found: {data_path}")
-        raise FileNotFoundError(f"Data file not found: {data_path}")
-        
+        raise FileNotFoundError(f"File not found: {data_path}")
+
     try:
-        if data_path.endswith(('.csv', '.txt')):
-            # Assume comma delimiter, skip 1 header row by default
-            data = np.loadtxt(data_path, delimiter=',', skiprows=1)
-        elif data_path.endswith('.npy'):
-            data = np.load(data_path)
-        else:
-            raise ValueError(f"Unsupported file type: {data_path}")
-            
-        if data.ndim != 2 or data.shape[1] != 2:
-            raise ValueError(f"Data must be a 2-column array (X, Y). Got shape {data.shape}")
-        
-        logger.info(f"Loaded curve data from {data_path}, shape: {data.shape}")
-        return data
-    except Exception as e:
-        logger.error(f"Error loading curve data from {data_path}: {e}")
-        # Try again without skipping row for simple text files
-        if data_path.endswith(('.csv', '.txt')):
-            try:
-                data = np.loadtxt(data_path, delimiter=',')
-                if data.ndim != 2 or data.shape[1] != 2:
-                    raise ValueError(f"Data must be a 2-column array (X, Y). Got shape {data.shape}")
-                logger.info("Loaded curve data after fallback (no skipped row).")
-                return data
-            except Exception as e2:
-                logger.error(f"Fallback loading also failed: {e2}")
-                raise ValueError(f"Unsupported file format or invalid data structure in {data_path}.")
-        raise
+        # Attempt 1: Auto-detect whitespace (tabs/spaces) skipping potential header
+        # 'comments' handles lines starting with #, skiprows handles explicit headers
+        # If no delimiter is given, numpy matches any whitespace (tabs OR spaces)
+        return np.loadtxt(data_path) 
+    except Exception:
+        pass
+
+    try:
+        # Attempt 2: Auto-detect but try skipping the first row (common for headers without #)
+        return np.loadtxt(data_path, skiprows=1)
+    except Exception:
+        pass
+
+    try:
+        # Attempt 3: Explicit Comma (CSV)
+        return np.loadtxt(data_path, delimiter=',', skiprows=1)
+    except Exception:
+        pass
+
+    # If all fail, raise descriptive error
+    raise ValueError(f"Unsupported file format or invalid data structure in {data_path}.")
 
 def plot_curve_to_bytes(curve_data: np.ndarray, system_info: dict, title_suffix: str = "") -> bytes:
     """

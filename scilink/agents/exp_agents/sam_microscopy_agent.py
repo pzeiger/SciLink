@@ -6,6 +6,7 @@ from .instruct import (
 )
 
 from .pipelines.sam_pipelines import create_sam_pipeline
+from ._deprecation import normalize_params
 
 from ...tools.image_processor import (
     load_image, 
@@ -19,7 +20,6 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     This agent executes a modular pipeline to analyze microscopy
     images using the Segment Anything Model (SAM).
     
-    
     Configuration (`sam_settings`):
     ---------------------------------
     - SAM_ENABLED (bool): Master switch.
@@ -31,11 +31,29 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
 
     def __init__(self,
-                 google_api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-06-05",
+                 # New standard params
+                 api_key: str | None = None,
+                 model_name: str = "gemini-3-pro-preview",
+                 base_url: str | None = None,
+                 # Deprecated params
+                 google_api_key: str | None = None,
                  local_model: str = None,
-                 sam_settings: dict | None = None, enable_human_feedback: bool = False):
+                 # Agent specific params
+                 sam_settings: dict | None = None,
+                 enable_human_feedback: bool = False):
         
-        super().__init__(google_api_key, model_name, local_model, enable_human_feedback=enable_human_feedback)
+        # Normalize Params
+        self.api_key, self.base_url = normalize_params(
+            api_key, google_api_key, base_url, local_model, source="SAMMicroscopyAnalysisAgent"
+        )
+        
+        # Initialize Base
+        super().__init__(
+            api_key=self.api_key,
+            model_name=model_name,
+            base_url=self.base_url,
+            enable_human_feedback=enable_human_feedback
+        )
         
         self.settings = sam_settings if sam_settings else {}
         # Ensure SAM is enabled by default if settings are provided
@@ -48,7 +66,7 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             self.pipeline = create_sam_pipeline(
                 model=self.model,
                 logger=self.logger,
-                generation_config=self.generation_config,
+                generation_config=self.generation_config, # None from BaseAgent
                 safety_settings=self.safety_settings,
                 settings=self.settings,
                 parse_fn=self._parse_llm_response,

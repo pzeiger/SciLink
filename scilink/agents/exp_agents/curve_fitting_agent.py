@@ -11,7 +11,8 @@ from .instruct import (
 )
 from .preprocess import CurvePreprocessingAgent
 from .pipelines.curve_fitting_pipelines import create_curve_fitting_pipeline
-from ...tools.curve_fitting_tools import load_curve_data # Import from new tool file
+from ...tools.curve_fitting_tools import load_curve_data
+from ._deprecation import normalize_params
 
 
 logger = logging.getLogger(__name__)
@@ -22,14 +23,36 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     literature-informed fitting pipeline.
     """
 
-    def __init__(self, google_api_key: str = None, futurehouse_api_key: str = None,  
-                 model_name: str = "gemini-2.5-pro-preview-06-05", local_model: str = None,  
+    def __init__(self, 
+                 # New standard params
+                 api_key: str | None = None,
+                 model_name: str = "gemini-3-pro-preview", 
+                 base_url: str | None = None,
+                 # Deprecated params
+                 google_api_key: str | None = None, 
+                 local_model: str = None,
+                 # Agent specific params
+                 futurehouse_api_key: str = None,  
                  run_preprocessing: bool = True,
-                 enable_human_feedback: bool = True, executor_timeout: int = 60,  
-                 output_dir: str = "curve_analysis_output", max_wait_time: int = 1000, **kwargs):
+                 enable_human_feedback: bool = True, 
+                 executor_timeout: int = 60,  
+                 output_dir: str = "curve_analysis_output", 
+                 max_wait_time: int = 1000, 
+                 **kwargs):
         
-        super().__init__(google_api_key, model_name, local_model, enable_human_feedback=enable_human_feedback)
+        # Normalize Params
+        self.api_key, self.base_url = normalize_params(
+            api_key, google_api_key, base_url, local_model, source="CurveFittingAgent"
+        )
         
+        # Initialize Base
+        super().__init__(
+            api_key=self.api_key,
+            model_name=model_name,
+            base_url=self.base_url,
+            enable_human_feedback=enable_human_feedback
+        )
+
         self.output_dir = os.path.abspath(output_dir)
         os.makedirs(self.output_dir, exist_ok=True)
         
@@ -40,10 +63,11 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         self.run_preprocessing = run_preprocessing
         if self.run_preprocessing:  
+            # Pass normalized params to preprocessor sub-agent
             self.preprocessor = CurvePreprocessingAgent(
-                google_api_key=google_api_key,  
+                api_key=self.api_key,  
                 model_name=model_name,  
-                local_model=local_model,
+                base_url=self.base_url,
                 output_dir=os.path.join(self.output_dir, "preprocessing"),
                 executor_timeout=executor_timeout
             )
@@ -64,15 +88,15 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.pipeline = create_curve_fitting_pipeline(
             model=self.model,
             logger=self.logger,
-            generation_config=self.generation_config,
+            generation_config=self.generation_config, # This is None from BaseAgent
             safety_settings=self.safety_settings,
-            settings={}, # Pass any future agent-level settings here
+            settings={}, 
             parse_fn=self._parse_llm_response,
             store_fn=self._store_analysis_images,
             preprocessor=self.preprocessor,
             literature_agent=self.literature_agent,
             executor=self.executor,
-            output_dir=self.output_dir # Pass output_dir for temp files
+            output_dir=self.output_dir 
         )
 
     def _run_analysis_pipeline(
@@ -82,7 +106,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         instruction_prompt: str
     ) -> tuple[dict | None, dict | None]:
         """
-        The agent's main execution engine (refactored).
+        The agent's main execution engine.
         It prepares the initial state and runs the loaded pipeline.
         """
         
@@ -170,8 +194,4 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         return FITTING_RESULTS_INTERPRETATION_INSTRUCTIONS
     
     def _get_measurement_recommendations_prompt(self) -> str:
-        """
-        Returns the instruction prompt for generating measurement recommendations
-        based on curve fitting results.
-        """
         return CURVE_FITTING_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS

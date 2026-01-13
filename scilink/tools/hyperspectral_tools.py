@@ -9,6 +9,26 @@ import matplotlib.gridspec as gridspec
 from sklearn.decomposition import PCA
 import cv2
 
+
+# Keys that are agent-specific configuration and should NOT be passed to sklearn models
+AGENT_METADATA_KEYS_TO_STRIP = [
+    # Human feedback / agent workflow settings
+    'enable_human_feedback',
+    'feedback_depths',
+    
+    # Preprocessing settings
+    'run_preprocessing',
+    'output_dir',
+    'visualization_dir',
+    
+    # Auto-component selection settings
+    'enabled',
+    'auto_components',
+    'min_auto_components',
+    'max_auto_components',
+]
+
+
 def run_spectral_unmixing(
     hspy_data: np.ndarray,
     n_components: int,
@@ -16,7 +36,7 @@ def run_spectral_unmixing(
     logger: logging.Logger
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """
-    Runs the atomai.stat.SpectralUnmixer tool.
+    Runs the SpectralUnmixer tool.
     
     Returns:
         tuple: (components, abundance_maps, reconstruction_error)
@@ -24,27 +44,35 @@ def run_spectral_unmixing(
     try:
         logger.info(f"  (Tool Info: Running SpectralUnmixer with n_components={n_components})")
         
+        # Create a copy to avoid mutating the original settings
         tool_kwargs = settings.copy()
-        tool_kwargs.pop('n_components', None)
-        tool_kwargs.pop('method', None)
-        tool_kwargs.pop('normalize', None)
-
+        
+        # Remove all agent-specific keys that sklearn doesn't understand
+        for key in AGENT_METADATA_KEYS_TO_STRIP:
+            tool_kwargs.pop(key, None)
+        
+        # Extract SpectralUnmixer-specific args (passed explicitly below)
+        method = tool_kwargs.pop('method', 'nmf')
+        normalize = tool_kwargs.pop('normalize', True)
+        tool_kwargs.pop('n_components', None)  # Passed as explicit parameter
+        
+        # Anything remaining in tool_kwargs gets passed to the sklearn model
         unmixer = SpectralUnmixer(
-            method=tool_kwargs.pop('method', 'nmf'),
+            method=method,
             n_components=n_components,
-            normalize=tool_kwargs.pop('normalize', True),
-            random_state=42 if 'random_state' not in tool_kwargs else tool_kwargs['random_state'],
+            normalize=normalize,
+            random_state=tool_kwargs.pop('random_state', 42),
             **tool_kwargs
         )
         
         components, abundance_maps = unmixer.fit(hspy_data)
-        error = getattr(unmixer.model, 'reconstruction_err_', 0.0) # Get error if available
+        error = getattr(unmixer.model, 'reconstruction_err_', 0.0)
         
         return components, abundance_maps, float(error)
         
     except Exception as e:
         logger.error(f"  (Tool Error: Spectral unmixing failed: {e})", exc_info=True)
-        raise # Re-raise for the controller to catch
+        raise
 
 def create_energy_axis(n_channels: int, system_info: dict = None) -> tuple[np.ndarray, str, bool]:
     """
