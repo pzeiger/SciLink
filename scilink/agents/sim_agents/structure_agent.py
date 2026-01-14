@@ -1,10 +1,11 @@
 import logging
-from typing import Optional, Tuple
+from typing import Optional
 import os
+import json
 
 import google.generativeai as genai
+from google.generativeai.types import GenerationConfig
 
-from .tools import get_available_tools
 from .instruct import (
     INITIAL_PROMPT_TEMPLATE, 
     CORRECTION_PROMPT_TEMPLATE, 
@@ -16,7 +17,32 @@ from .utils import save_generated_script, MaterialsProjectHelper
 from ...executors import ScriptExecutor, DEFAULT_TIMEOUT
 
 
-MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS = 5 
+MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS = 5
+
+# Tool configurations for keyword matching and documentation
+TOOL_CONFIGS = {
+    "GrainBoundary": {
+        "docs_path": "docs/aimsgb.txt",
+        "keywords": ["grain boundary", "grain-boundary", "gb ", "sigma", "csl", 
+                    "twist", "tilt", "bicrystal", "rotation axis", "aimsgb"],
+    },
+    "ASE": {
+        "docs_path": None,
+        "keywords": [],
+    }
+}
+
+JSON_OUTPUT_INSTRUCTION = """
+
+IMPORTANT: You must respond with a JSON object in this exact format:
+{
+    "script_content": "your complete Python script here as a single string"
+}
+
+The script_content must be a valid, complete Python script that can be executed directly.
+Escape any special characters properly for JSON (newlines as \\n, quotes as \\", etc.).
+"""
+
 
 class StructureGenerator:
     def __init__(self, api_key: str, model_name: str,
@@ -26,16 +52,18 @@ class StructureGenerator:
                 mp_api_key: str = None):
         """Initialize StructureGenerator with improved logging."""
         
-        # Initialize LLM model directly (replaces LLMClient)
         if not api_key:
             raise ValueError("API key not provided to StructureGenerator.")
         
-        if (local_model is not None) and ('ai-incubator' in local_model):
+        # Initialize LLM model
+        if local_model and 'ai-incubator' in local_model:
             from ...wrappers.openai_wrapper_tools import OpenAIAsGenerativeModel
             self.model = OpenAIAsGenerativeModel(model_name, api_key=api_key, base_url=local_model)
+            self.generation_config = None  # Local models may not support JSON mode
         else:
             genai.configure(api_key=api_key)
             self.model = genai.GenerativeModel(model_name)
+            self.generation_config = GenerationConfig(response_mime_type="application/json")
         
         self.model_name = model_name
         self.ase_executor = ScriptExecutor(timeout=executor_timeout, mp_api_key=mp_api_key)
@@ -43,136 +71,180 @@ class StructureGenerator:
         self.logger = logging.getLogger(__name__)
         self.logger.info(f"StructureGenerator initialized with model: {self.model_name}")
         
-        self.tools = get_available_tools()
+        # Load tool configurations
+        self.tool_configs = self._load_tool_configs()
         self.mp_helper = MaterialsProjectHelper(api_key=mp_api_key)
         
-        # Improved initialization message
+        # Initialization message
+        tools_with_docs = [name for name, cfg in self.tool_configs.items() if cfg.get("docs_content")]
         print(f"🔧 Structure Generator Ready")
-        print(f"   📚 Available tools: {len(self.tools)} ({', '.join(t.name for t in self.tools)})")
+        print(f"   📚 Available tools: ASE (default)" + (f", {', '.join(tools_with_docs)}" if tools_with_docs else ""))
         if self.mp_helper.enabled:
             print(f"   🗃️  Materials Project: Connected")
         else:
             print(f"   🗃️  Materials Project: Not configured")
 
-    def _select_tool(self, request_text: str):
+    def _load_tool_configs(self) -> dict:
+        """Load tool configurations and their documentation."""
+        configs = {}
+        for name, config in TOOL_CONFIGS.items():
+            configs[name] = {
+                "keywords": config.get("keywords", []),
+                "docs_content": self._load_docs(config.get("docs_path"))
+            }
+        return configs
+
+    def _load_docs(self, docs_path: Optional[str]) -> Optional[str]:
+        """Load documentation from file if it exists."""
+        if not docs_path:
+            return None
+            
+        possible_paths = [
+            docs_path,
+            os.path.join(os.path.dirname(__file__), docs_path),
+            os.path.join(os.path.dirname(__file__), "../..", docs_path),
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    max_length = 60000
+                    if len(content) > max_length:
+                        content = content[:max_length] + "\n\n[... Documentation truncated ...]"
+                    self.logger.info(f"Loaded docs from: {path}")
+                    return content
+                except Exception as e:
+                    self.logger.error(f"Failed to read docs from {path}: {e}")
+        return None
+
+    def _select_tool(self, request_text: str) -> str:
         """Select the appropriate tool based on request content."""
-        # Check specialized tools first
-        for tool in self.tools:
-            if tool.matches_request(request_text):
-                self.logger.info(f"Selected {tool.name} tool based on keywords")
-                return tool
+        request_lower = request_text.lower()
         
-        # Default to ASE tool (first one without keywords)
-        ase_tool = next((t for t in self.tools if not t.keywords), self.tools[0])
-        self.logger.info(f"Selected default {ase_tool.name} tool")
-        return ase_tool
+        for name, config in self.tool_configs.items():
+            keywords = config.get("keywords", [])
+            if keywords and any(kw in request_lower for kw in keywords):
+                self.logger.info(f"Selected {name} tool based on keywords")
+                return name
+        
+        self.logger.info("Selected default ASE tool")
+        return "ASE"
 
-    def _build_initial_prompt(self, description: str, use_fallback: bool = False) -> str:
+    def _get_tool_docs(self, tool_name: str) -> Optional[str]:
+        """Get documentation for a tool."""
+        return self.tool_configs.get(tool_name, {}).get("docs_content")
+
+    def _build_initial_prompt(self, description: str, tool_name: str) -> str:
         """Build initial prompt with tool-specific documentation and MP integration."""
-        selected_tool = self._select_tool(description)
-        tool_name = next(iter(selected_tool.tool.function_declarations)).name
+        docs_content = self._get_tool_docs(tool_name)
         
-        enhanced_docs = selected_tool.docs_content
-        if enhanced_docs and self.mp_helper.enabled:
-            enhanced_docs += self.mp_helper.get_common_materials_info()
+        if docs_content and self.mp_helper.enabled:
+            docs_content += self.mp_helper.get_common_materials_info()
         
-        if use_fallback or not enhanced_docs:
-            return INITIAL_PROMPT_TEMPLATE.format(description=description, tool_name=tool_name)
-        else:
-            return DOCS_ENHANCED_INITIAL_PROMPT_TEMPLATE.format(
-                description=description, tool_name=tool_name, documentation=enhanced_docs
+        if docs_content:
+            base_prompt = DOCS_ENHANCED_INITIAL_PROMPT_TEMPLATE.format(
+                description=description, 
+                tool_name=tool_name, 
+                documentation=docs_content
             )
-
-    def _build_script_execution_error_correction_prompt(self, original_request: str, failed_script: str, error_message: str) -> str:
-        """Build correction prompt with tool-specific documentation if available."""
-        selected_tool = self._select_tool(original_request)
-        tool_name = next(iter(selected_tool.tool.function_declarations)).name
+        else:
+            base_prompt = INITIAL_PROMPT_TEMPLATE.format(
+                description=description, 
+                tool_name=tool_name
+            )
         
+        return base_prompt + JSON_OUTPUT_INSTRUCTION
+
+    def _build_correction_prompt(self, original_request: str, failed_script: str, 
+                                 error_message: str, tool_name: str) -> str:
+        """Build correction prompt with tool-specific documentation if available."""
         max_error_len = 2000
         if len(error_message) > max_error_len:
             error_message = error_message[:max_error_len] + "\n[... Error message truncated ...]"
         
-        if selected_tool.docs_content:
-            return DOCS_ENHANCED_CORRECTION_PROMPT_TEMPLATE.format(
+        docs_content = self._get_tool_docs(tool_name)
+        
+        if docs_content:
+            base_prompt = DOCS_ENHANCED_CORRECTION_PROMPT_TEMPLATE.format(
                 original_request=original_request,
                 failed_script=failed_script,
                 error_message=error_message,
                 tool_name=tool_name,
-                documentation=selected_tool.docs_content
+                documentation=docs_content
             )
         else:
-            return CORRECTION_PROMPT_TEMPLATE.format(
+            base_prompt = CORRECTION_PROMPT_TEMPLATE.format(
                 original_request=original_request,
                 failed_script=failed_script,
                 error_message=error_message,
                 tool_name=tool_name
             )
+        
+        return base_prompt + JSON_OUTPUT_INSTRUCTION
 
-    def _build_script_correction_from_validation_prompt(
-            self, original_request: str, attempted_script_content: str,
-            validator_assessment: str, validator_issues: list, validator_hints: list) -> str:
-        """Build validation correction prompt with appropriate tool."""
-        selected_tool = self._select_tool(original_request)
-        tool_name = next(iter(selected_tool.tool.function_declarations)).name
+    def _build_validation_correction_prompt(self, original_request: str, 
+                                            attempted_script_content: str,
+                                            validator_feedback: dict,
+                                            tool_name: str) -> str:
+        """Build validation correction prompt."""
+        validator_issues = validator_feedback.get("all_identified_issues", [])
+        validator_hints = validator_feedback.get("script_modification_hints", [])
         
         issues_str = "\n".join([f"- {issue}" for issue in validator_issues]) if validator_issues else "No specific issues listed."
         hints_str = "\n".join([f"- {hint}" for hint in validator_hints]) if validator_hints else "No specific hints provided."
 
-        return SCRIPT_CORRECTION_FROM_VALIDATION_TEMPLATE.format(
+        base_prompt = SCRIPT_CORRECTION_FROM_VALIDATION_TEMPLATE.format(
             original_request=original_request,
             attempted_script_content=attempted_script_content,
-            validator_overall_assessment=validator_assessment,
+            validator_overall_assessment=validator_feedback.get("overall_assessment", "N/A"),
             validator_specific_issues=issues_str,
             validator_script_hints=hints_str,
             tool_name=tool_name
         )
+        
+        return base_prompt + JSON_OUTPUT_INSTRUCTION
 
-    def _parse_llm_response(self, response) -> Tuple[Optional[str], Optional[dict]]:
-        """Parse LLM response to extract text content or function call."""
-        try:
-            if not response or not response.candidates:
-                feedback = getattr(response, 'prompt_feedback', None)
-                block_reason = getattr(feedback, 'block_reason', 'Unknown reason')
-                self.logger.warning(f"LLM response empty/no candidates. Block Reason: {block_reason}")
-                return f"[Warning: LLM response was empty or blocked. Reason: {block_reason}]", None
-
-            candidate = response.candidates[0]
-            finish_reason = getattr(candidate, 'finish_reason', 'N/A')
-            if finish_reason not in [1, "STOP", "TOOL_CALL"]:
-                self.logger.warning(f"LLM response candidate finished unexpectedly: {finish_reason}")
-
-            if not candidate.content or not candidate.content.parts:
-                self.logger.warning(f"LLM response candidate has no content parts. Finish reason: {finish_reason}")
-                return "[Warning: LLM response content was empty.]", None
-
-            for part in candidate.content.parts:
-                if hasattr(part, 'function_call') and getattr(part.function_call, 'name', None):
-                    args_dict = {key: value for key, value in getattr(part.function_call, 'args', {}).items()}
-                    return None, {"name": part.function_call.name, "args": args_dict}
-            
-            text_content = "".join(part.text for part in candidate.content.parts if hasattr(part, 'text')).strip()
-            if text_content:
-                return text_content, None
-            
-            self.logger.warning(f"LLM response contained neither function call nor text. Finish reason: {finish_reason}")
-            return "[Warning: LLM response was valid but contained neither function call nor text.]", None
-
-        except (AttributeError, IndexError, ValueError, TypeError) as e:
-            self.logger.exception(f"Error parsing LLM response structure: {e}")
-            return f"[Error: Could not parse LLM response: {e}]", None
-
-    def _generate_with_tools(self, prompt: str, tools: list, generation_config=None):
-        """Generate content with tool/function calling support."""
-        self.logger.info("Sending request to LLM with tools...")
+    def _generate_json(self, prompt: str) -> dict:
+        """Generate JSON response from LLM."""
+        self.logger.info("Sending request to LLM...")
         self.logger.debug(f"Prompt length: {len(prompt)} chars")
+        
         try:
-            response = self.model.generate_content(
-                prompt,
-                tools=tools,
-                generation_config=generation_config
-            )
-            self.logger.debug(f"LLM Raw Response received")
-            return response
+            response = self.model.generate_content(prompt, generation_config=self.generation_config)
+            
+            if not response or not response.text:
+                raise ValueError("Empty response from LLM")
+            
+            raw_text = response.text.strip()
+            
+            # Handle markdown code blocks if present
+            if raw_text.startswith("```"):
+                lines = raw_text.split("\n")
+                json_lines = []
+                in_block = False
+                for line in lines:
+                    if line.startswith("```"):
+                        in_block = not in_block
+                        continue
+                    if in_block:
+                        json_lines.append(line)
+                raw_text = "\n".join(json_lines)
+            
+            # Try to find JSON object if there's extra text
+            if not raw_text.startswith("{"):
+                start = raw_text.find("{")
+                end = raw_text.rfind("}") + 1
+                if start != -1 and end > start:
+                    raw_text = raw_text[start:end]
+            
+            return json.loads(raw_text)
+            
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Failed to parse JSON response: {e}")
+            self.logger.debug(f"Raw response: {response.text[:500] if response and response.text else 'None'}")
+            raise
         except Exception as e:
             self.logger.exception(f"Error during LLM content generation: {e}")
             raise
@@ -181,171 +253,148 @@ class StructureGenerator:
                        is_refinement_from_validation: bool = False,
                        previous_script_content: Optional[str] = None,
                        validator_feedback: Optional[dict] = None) -> dict:
-        """Generate or refine a script using appropriate tool and documentation with improved output."""
+        """Generate or refine a script using appropriate tool and documentation."""
         
-        # Select tool and get its info
-        selected_tool = self._select_tool(original_user_request)
-        tool_name = next(iter(selected_tool.tool.function_declarations)).name
+        # Select tool based on request
+        tool_name = self._select_tool(original_user_request)
         
         if is_refinement_from_validation:
-            print(f"   🔄 Refining script using {selected_tool.name} (cycle {attempt_number_overall})")
+            print(f"   🔄 Refining script using {tool_name} (cycle {attempt_number_overall})")
             if not previous_script_content or not validator_feedback:
                 return {"status": "error", "message": "Internal error: Refinement requires previous script and validation feedback."}
-            current_prompt = self._build_script_correction_from_validation_prompt(
+            current_prompt = self._build_validation_correction_prompt(
                 original_request=original_user_request,
                 attempted_script_content=previous_script_content,
-                validator_assessment=validator_feedback.get("overall_assessment", "N/A"),
-                validator_issues=validator_feedback.get("all_identified_issues", []),
-                validator_hints=validator_feedback.get("script_modification_hints", [])
+                validator_feedback=validator_feedback,
+                tool_name=tool_name
             )
         else:
-            print(f"   🤖 Generating script using {selected_tool.name} (cycle {attempt_number_overall})")
-            current_prompt = self._build_initial_prompt(original_user_request)
+            print(f"   🤖 Generating script using {tool_name} (cycle {attempt_number_overall})")
+            current_prompt = self._build_initial_prompt(original_user_request, tool_name)
 
-        tools_list = [selected_tool.tool]
-        last_error_message_internal = "No internal attempts made yet."
-        current_script_being_processed = previous_script_content if is_refinement_from_validation else None
+        last_error_message = "No attempts made yet."
+        current_script = previous_script_content if is_refinement_from_validation else None
+        final_script_path = None
         
         # Internal correction loop for script execution errors
-        for internal_exec_attempt in range(1, MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS + 1):
-            
-            generated_script_this_llm_call = None
-            final_script_path_this_attempt = None
-
+        for attempt in range(1, MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS + 1):
             try:
-                # Show progress for multiple attempts
-                if internal_exec_attempt > 1:
-                    print(f"      🔧 Fixing script issues (attempt {internal_exec_attempt}/{MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS})")
+                if attempt > 1:
+                    print(f"      🔧 Fixing script issues (attempt {attempt}/{MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS})")
                 
-                # Direct call to model instead of through LLMClient
-                llm_response = self._generate_with_tools(current_prompt, tools_list)
-                text_content, function_call = self._parse_llm_response(llm_response)
-
-                if function_call and function_call["name"] == tool_name:
-                    generated_script_this_llm_call = function_call["args"].get("script_content")
-                    if not generated_script_this_llm_call:
-                        last_error_message_internal = f"LLM tool call missing 'script_content' (attempt {internal_exec_attempt})"
-                        self.logger.error(last_error_message_internal)
-                        if internal_exec_attempt == MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS: 
-                            break
-                        continue
-
-                    current_script_being_processed = generated_script_this_llm_call
-
-                    # Save script
-                    script_desc_for_filename = f"{original_user_request[:30]}_cycle{attempt_number_overall}_exec_attempt{internal_exec_attempt}"
-                    final_script_path_this_attempt = save_generated_script(
-                        current_script_being_processed,
-                        script_desc_for_filename,
-                        1,
-                        output_dir=self.generated_script_dir
-                    )
-                    
-                    if not final_script_path_this_attempt:
-                        last_error_message_internal = f"Failed to save script (attempt {internal_exec_attempt})"
-                        self.logger.error(last_error_message_internal)
-                        break
-
-                    # Execute script with progress indication
-                    if internal_exec_attempt == 1:
-                        print(f"      ⚙️  Executing script...")
-                    else:
-                        print(f"      ⚙️  Re-executing corrected script...")
-                        
-                    exec_result = self.ase_executor.execute_script(current_script_being_processed, working_dir=self.generated_script_dir)
-
-                    if exec_result["status"] == "success":
-                        output_file = None
-                        for line in exec_result.get("stdout", "").splitlines():
-                            if line.startswith("STRUCTURE_SAVED:"):
-                                output_file = line.split(":", 1)[1].strip()
-                                break
-
-                        if output_file and os.path.exists(os.path.join(self.generated_script_dir, output_file)):
-                            print(f"     ✅ Script executed successfully")
-                            full_output_path = os.path.abspath(os.path.join(self.generated_script_dir, output_file))
-                            return {
-                                "status": "success",
-                                "message": f"Script generated and executed successfully on attempt {internal_exec_attempt}",
-                                "output_file": full_output_path,
-                                "final_script_path": final_script_path_this_attempt,
-                                "final_script_content": current_script_being_processed,
-                                "tool_used": selected_tool.name,
-                                "execution_attempts": internal_exec_attempt
-                            }
-                    else:
-                        last_error_message_internal = exec_result.get("message", f"Unknown script execution error (attempt {internal_exec_attempt})")
-                        
-                        if internal_exec_attempt == MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS:
-                            print(f"      ❌ Script execution failed after {MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS} attempts")
-                            self.logger.error("Max internal script execution correction attempts reached.")
-                            break
-                        
-                        # Show what went wrong for user awareness
-                        error_summary = self._summarize_error(last_error_message_internal)
-                        print(f"      ⚠️  Execution failed: {error_summary}")
-                        print(f"         Attempting to fix...")
-                        
-                        current_prompt = self._build_script_execution_error_correction_prompt(
-                            original_request=original_user_request,
-                            failed_script=current_script_being_processed,
-                            error_message=last_error_message_internal
-                        )
-                        continue
-
-                elif text_content:
-                    last_error_message_internal = f"LLM responded with text instead of tool call (attempt {internal_exec_attempt})"
-                    if internal_exec_attempt == MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS: 
+                # Generate script via JSON response
+                response_data = self._generate_json(current_prompt)
+                script_content = response_data.get("script_content")
+                
+                if not script_content:
+                    last_error_message = f"LLM response missing 'script_content' (attempt {attempt})"
+                    self.logger.error(last_error_message)
+                    if attempt == MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS:
                         break
                     continue
 
-                else:
-                    last_error_message_internal = text_content if text_content else f"LLM gave unusable response (attempt {internal_exec_attempt})"
-                    self.logger.error(last_error_message_internal)
+                current_script = script_content
+
+                # Save script
+                script_desc = f"{original_user_request[:30]}_cycle{attempt_number_overall}_attempt{attempt}"
+                final_script_path = save_generated_script(
+                    current_script, script_desc, 1, output_dir=self.generated_script_dir
+                )
+                
+                if not final_script_path:
+                    last_error_message = f"Failed to save script (attempt {attempt})"
+                    self.logger.error(last_error_message)
                     break
 
-            except Exception as e: 
-                self.logger.exception(f"Unexpected error during script generation/execution (attempt {internal_exec_attempt}): {e}")
-                last_error_message_internal = f"Unexpected workflow error: {e}"
-                break
+                # Execute script
+                if attempt == 1:
+                    print(f"      ⚙️  Executing script...")
+                else:
+                    print(f"      ⚙️  Re-executing corrected script...")
+                    
+                exec_result = self.ase_executor.execute_script(
+                    current_script, working_dir=self.generated_script_dir
+                )
+
+                if exec_result["status"] == "success":
+                    output_file = None
+                    for line in exec_result.get("stdout", "").splitlines():
+                        if line.startswith("STRUCTURE_SAVED:"):
+                            output_file = line.split(":", 1)[1].strip()
+                            break
+
+                    if output_file and os.path.exists(os.path.join(self.generated_script_dir, output_file)):
+                        print(f"     ✅ Script executed successfully")
+                        full_output_path = os.path.abspath(os.path.join(self.generated_script_dir, output_file))
+                        return {
+                            "status": "success",
+                            "message": f"Script generated and executed successfully on attempt {attempt}",
+                            "output_file": full_output_path,
+                            "final_script_path": final_script_path,
+                            "final_script_content": current_script,
+                            "tool_used": tool_name,
+                            "execution_attempts": attempt
+                        }
+                    else:
+                        last_error_message = f"Script ran but output file not found (attempt {attempt})"
+                else:
+                    last_error_message = exec_result.get("message", f"Unknown execution error (attempt {attempt})")
+                
+                if attempt == MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS:
+                    print(f"      ❌ Script execution failed after {MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS} attempts")
+                    break
+                
+                # Prepare correction prompt for next attempt
+                error_summary = self._summarize_error(last_error_message)
+                print(f"      ⚠️  Execution failed: {error_summary}")
+                print(f"         Attempting to fix...")
+                
+                current_prompt = self._build_correction_prompt(
+                    original_request=original_user_request,
+                    failed_script=current_script,
+                    error_message=last_error_message,
+                    tool_name=tool_name
+                )
+
+            except Exception as e:
+                self.logger.exception(f"Unexpected error (attempt {attempt}): {e}")
+                last_error_message = f"Unexpected error: {e}"
+                if attempt == MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS:
+                    break
+                # On JSON parse error, retry with same prompt
+                continue
         
-        # Internal loop finished without success
+        # All attempts failed
         print(f"      ❌ Failed to generate working script after {MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS} attempts")
         return {
             "status": "error",
             "message": f"Failed to generate executable script after {MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS} attempts",
-            "last_error": last_error_message_internal,
-            "last_attempted_script_path": final_script_path_this_attempt if 'final_script_path_this_attempt' in locals() else None,
-            "last_attempted_script_content": current_script_being_processed,
-            "tool_attempted": selected_tool.name
+            "last_error": last_error_message,
+            "last_attempted_script_path": final_script_path,
+            "last_attempted_script_content": current_script,
+            "tool_attempted": tool_name
         }
 
     def _summarize_error(self, error_message: str) -> str:
         """Create a brief, user-friendly error summary."""
         error_lower = error_message.lower()
         
-        # Common error patterns
-        if "modulenotfounderror" in error_lower or "import" in error_lower:
-            return "Missing Python module/import"
-        elif "nameerror" in error_lower:
-            return "Undefined variable or function"
-        elif "syntaxerror" in error_lower:
-            return "Python syntax error"
-        elif "indexerror" in error_lower:
-            return "Array/list index out of range"
-        elif "keyerror" in error_lower:
-            return "Dictionary key not found"
-        elif "typeerror" in error_lower:
-            return "Incorrect data type usage"
-        elif "valueerror" in error_lower:
-            return "Invalid value or parameter"
-        elif "filenotfounderror" in error_lower:
-            return "File or path not found"
-        elif "timeout" in error_lower:
-            return "Script execution timeout"
-        elif "structure_saved" in error_lower:
-            return "Missing output confirmation"
-        else:
-            # Extract first line of error for brevity
-            first_line = error_message.split('\n')[0]
-            return first_line[:80] + "..." if len(first_line) > 80 else first_line
+        error_patterns = {
+            "modulenotfounderror": "Missing Python module/import",
+            "nameerror": "Undefined variable or function",
+            "syntaxerror": "Python syntax error",
+            "indexerror": "Array/list index out of range",
+            "keyerror": "Dictionary key not found",
+            "typeerror": "Incorrect data type usage",
+            "valueerror": "Invalid value or parameter",
+            "filenotfounderror": "File or path not found",
+            "timeout": "Script execution timeout",
+            "structure_saved": "Missing output confirmation",
+        }
+        
+        for pattern, message in error_patterns.items():
+            if pattern in error_lower:
+                return message
+        
+        first_line = error_message.split('\n')[0]
+        return first_line[:80] + "..." if len(first_line) > 80 else first_line
