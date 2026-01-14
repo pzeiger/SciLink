@@ -1,8 +1,11 @@
 import os
 import json
 import logging
-import google.generativeai as genai
-from google.generativeai.types import GenerationConfig
+from typing import Optional
+
+from ...auth import get_internal_proxy_key
+from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 
 from .instruct import VASP_INPUT_GENERATION_INSTRUCTIONS
 
@@ -10,20 +13,26 @@ from .instruct import VASP_INPUT_GENERATION_INSTRUCTIONS
 class VaspInputAgent:
     """Agent for generating VASP INCAR and KPOINTS files."""
 
-    def __init__(self, api_key: str, model_name: str = "gemini-2.5-pro-preview-05-06", local_model: str = None):
-        if not api_key:
-            api_key = os.environ.get("GOOGLE_API_KEY")
-        if not api_key:
-            raise ValueError("API key required")
-        if (local_model is not None) and ('ai-incubator' in local_model): # True when we are using the local network models
-            from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
-            self.model = OpenAIAsGenerativeModel(model_name, api_key = api_key, base_url= local_model) #This not google API key but API key
-            self.generation_config = None
-        else:
-            genai.configure(api_key=api_key)
-            self.model = genai.GenerativeModel(model_name)
-            self.generation_config = GenerationConfig(response_mime_type="application/json")
+    def __init__(self, api_key: str = None, 
+                 model_name: str = "gemini-3-pro-preview", 
+                 base_url: Optional[str] = None):
+        
         self.logger = logging.getLogger(__name__)
+        
+        if base_url:
+            if api_key is None:
+                api_key = get_internal_proxy_key()
+            self.model = OpenAIAsGenerativeModel(
+                model=model_name,
+                api_key=api_key,
+                base_url=base_url
+            )
+        else:
+            self.model = LiteLLMGenerativeModel(
+                model=model_name,
+                api_key=api_key
+            )
+        self.generation_config = None
 
     def generate_vasp_inputs(self, poscar_path: str, original_request: str) -> dict:
         """Generate VASP INCAR and KPOINTS files."""
@@ -73,9 +82,9 @@ class VaspInputAgent:
         
         except Exception as e:
             return {"error": f"Save failed: {e}"}
-             
+              
     def apply_improvements(self, original_incar: str, validation_result: dict, 
-                          poscar_path: str, original_request: str, output_dir: str = ".") -> dict:
+                           poscar_path: str, original_request: str, output_dir: str = ".") -> dict:
         """Regenerate INCAR using LLM with improvement instructions."""
         
         if validation_result.get("validation_status") != "needs_adjustment":

@@ -1,6 +1,6 @@
 import re
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from .vasp_agent import VaspInputAgent
 
@@ -9,8 +9,15 @@ class VaspUpdater:
     Inline‐updater: takes the VASP error log + old INCAR/KPOINTS,
     and uses VaspInputAgent.generate_vasp_inputs to propose fixes.
     """
-    def __init__(self, api_key: str, model_name: str = "gemini-2.5-pro-preview-06-05"):
-        self.vasp_agent = VaspInputAgent(api_key, model_name)
+    def __init__(self, api_key: str = None, 
+                 model_name: str = "gemini-3-pro-preview", 
+                 base_url: Optional[str] = None):
+        
+        self.vasp_agent = VaspInputAgent(
+            api_key=api_key, 
+            model_name=model_name,
+            base_url=base_url
+        )
 
     def _extract_errors(self, log: str) -> str:
         patterns = [r"Fatal error.*", r"ERROR.*", r"KPAR.*", r"too many k-points.*"]

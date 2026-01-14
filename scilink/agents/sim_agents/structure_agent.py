@@ -3,8 +3,9 @@ from typing import Optional
 import os
 import json
 
-import google.generativeai as genai
-from google.generativeai.types import GenerationConfig
+from ...auth import get_internal_proxy_key
+from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 
 from .instruct import (
     INITIAL_PROMPT_TEMPLATE, 
@@ -24,7 +25,7 @@ TOOL_CONFIGS = {
     "GrainBoundary": {
         "docs_path": "docs/aimsgb.txt",
         "keywords": ["grain boundary", "grain-boundary", "gb ", "sigma", "csl", 
-                    "twist", "tilt", "bicrystal", "rotation axis", "aimsgb"],
+                     "twist", "tilt", "bicrystal", "rotation axis", "aimsgb"],
     },
     "ASE": {
         "docs_path": None,
@@ -45,31 +46,48 @@ Escape any special characters properly for JSON (newlines as \\n, quotes as \\",
 
 
 class StructureGenerator:
-    def __init__(self, api_key: str, model_name: str,
-                executor_timeout: int = DEFAULT_TIMEOUT,
-                generated_script_dir: str = "generated_scripts",
-                local_model: str = None,
-                mp_api_key: str = None):
-        """Initialize StructureGenerator with improved logging."""
-        
-        if not api_key:
-            raise ValueError("API key not provided to StructureGenerator.")
-        
-        # Initialize LLM model
-        if local_model and 'ai-incubator' in local_model:
-            from ...wrappers.openai_wrapper_tools import OpenAIAsGenerativeModel
-            self.model = OpenAIAsGenerativeModel(model_name, api_key=api_key, base_url=local_model)
-            self.generation_config = None  # Local models may not support JSON mode
-        else:
-            genai.configure(api_key=api_key)
-            self.model = genai.GenerativeModel(model_name)
-            self.generation_config = GenerationConfig(response_mime_type="application/json")
-        
-        self.model_name = model_name
-        self.ase_executor = ScriptExecutor(timeout=executor_timeout, mp_api_key=mp_api_key)
-        self.generated_script_dir = generated_script_dir
+    def __init__(self, api_key: str = None, 
+                 model_name: str = "gemini-3-pro-preview",
+                 base_url: Optional[str] = None,
+                 executor_timeout: int = DEFAULT_TIMEOUT,
+                 generated_script_dir: str = "generated_scripts",
+                 mp_api_key: str = None):
+        """
+        Initialize StructureGenerator with Multi-Backend Support.
+        """
         self.logger = logging.getLogger(__name__)
-        self.logger.info(f"StructureGenerator initialized with model: {self.model_name}")
+        self.model_name = model_name
+        self.generated_script_dir = generated_script_dir
+        
+        # --- LLM Initialization Logic ---
+        if base_url:
+            # Internal Proxy
+            if api_key is None:
+                api_key = get_internal_proxy_key()
+            
+            if not api_key:
+                raise ValueError("API key required for internal proxy.")
+
+            self.logger.info(f"StructureGenerator using internal proxy: {base_url}")
+            self.model = OpenAIAsGenerativeModel(
+                model=model_name,
+                api_key=api_key,
+                base_url=base_url
+            )
+        else:
+            # Public / LiteLLM
+            self.logger.info(f"StructureGenerator using LiteLLM: {model_name}")
+            self.model = LiteLLMGenerativeModel(
+                model=model_name,
+                api_key=api_key
+            )
+
+        # We rely on the prompt to enforce JSON, 
+        # rather than the generation config.
+        self.generation_config = None
+
+        # Executor Setup
+        self.ase_executor = ScriptExecutor(timeout=executor_timeout, mp_api_key=mp_api_key)
         
         # Load tool configurations
         self.tool_configs = self._load_tool_configs()
@@ -77,7 +95,7 @@ class StructureGenerator:
         
         # Initialization message
         tools_with_docs = [name for name, cfg in self.tool_configs.items() if cfg.get("docs_content")]
-        print(f"🔧 Structure Generator Ready")
+        print(f"🔧 Structure Generator Ready ({model_name})")
         print(f"   📚 Available tools: ASE (default)" + (f", {', '.join(tools_with_docs)}" if tools_with_docs else ""))
         if self.mp_helper.enabled:
             print(f"   🗃️  Materials Project: Connected")
@@ -212,6 +230,7 @@ class StructureGenerator:
         self.logger.debug(f"Prompt length: {len(prompt)} chars")
         
         try:
+            # Using the wrapper's generate_content
             response = self.model.generate_content(prompt, generation_config=self.generation_config)
             
             if not response or not response.text:
@@ -250,9 +269,9 @@ class StructureGenerator:
             raise
 
     def generate_script(self, original_user_request: str, attempt_number_overall: int, 
-                       is_refinement_from_validation: bool = False,
-                       previous_script_content: Optional[str] = None,
-                       validator_feedback: Optional[dict] = None) -> dict:
+                        is_refinement_from_validation: bool = False,
+                        previous_script_content: Optional[str] = None,
+                        validator_feedback: Optional[dict] = None) -> dict:
         """Generate or refine a script using appropriate tool and documentation."""
         
         # Select tool based on request
@@ -324,7 +343,7 @@ class StructureGenerator:
                             break
 
                     if output_file and os.path.exists(os.path.join(self.generated_script_dir, output_file)):
-                        print(f"     ✅ Script executed successfully")
+                        print(f"      ✅ Script executed successfully")
                         full_output_path = os.path.abspath(os.path.join(self.generated_script_dir, output_file))
                         return {
                             "status": "success",
@@ -361,7 +380,6 @@ class StructureGenerator:
                 last_error_message = f"Unexpected error: {e}"
                 if attempt == MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS:
                     break
-                # On JSON parse error, retry with same prompt
                 continue
         
         # All attempts failed
