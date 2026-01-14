@@ -6,14 +6,17 @@ import subprocess
 import re
 from typing import Dict, Any, List, Optional
 
-import google.generativeai as genai
-from google.generativeai.types import GenerationConfig
+from ...auth import get_internal_proxy_key
+from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 
 from .instruct import (
     MOLECULE_EXTRACTION_TEMPLATE,
     SMILES_GENERATION_TEMPLATE,
     PACKMOL_SCRIPT_GENERATION_TEMPLATE
 )
+from ._deprecation import normalize_params
+
 from ase.build import molecule
 from ase.collections import g2
 from ase.io import write
@@ -36,21 +39,70 @@ class PackmolGeneratorAgent:
     4. Providing detailed, educational prompts for PACKMOL generation
     """
     
-    def __init__(self, api_key: str, model_name: str = "gemini-2.5-flash-preview-05-20", 
-                 working_dir: str = "packmol_run"):
+    def __init__(self, 
+                 api_key: Optional[str] = None, 
+                 model_name: str = "gemini-2.5-flash-preview-05-20", 
+                 working_dir: str = "packmol_run",
+                 base_url: Optional[str] = None,
+                 # Legacy parameters
+                 local_model: Optional[str] = None,
+                 google_api_key: Optional[str] = None):
+        """
+        Initialize the PACKMOL generator agent.
         
-        # Initialize LLM model directly (replaces LLMClient)
-        if not api_key:
-            raise ValueError("API key not provided to PackmolGeneratorAgent.")
-        
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel(model_name)
-        self.model_name = model_name
-        self.generation_config = GenerationConfig()
-        
+        Args:
+            api_key: API key for the LLM provider
+            model_name: Model name to use
+            working_dir: Working directory for output files
+            base_url: Optional base URL for internal proxy
+            local_model: Deprecated, use base_url instead
+            google_api_key: Deprecated, use api_key instead
+        """
         self.working_dir = working_dir
+        
+        # Configure logging
         self.logger = logging.getLogger(__name__)
-        self.logger.info(f"PackmolGeneratorAgent initialized with model: {self.model_name}")
+        self.logger.setLevel(logging.INFO)
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+
+        # Normalize deprecated parameters
+        api_key, base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source="PackmolGeneratorAgent"
+        )
+        
+        # Initialize model using wrapper structure
+        if base_url:
+            # Internal Proxy
+            if api_key is None:
+                api_key = get_internal_proxy_key()
+            
+            if not api_key:
+                raise ValueError("API key required for internal proxy.")
+
+            self.logger.info(f"PackmolGeneratorAgent using internal proxy: {base_url}")
+            self.model = OpenAIAsGenerativeModel(
+                model=model_name,
+                api_key=api_key,
+                base_url=base_url
+            )
+        else:
+            # Public / LiteLLM
+            self.logger.info(f"PackmolGeneratorAgent using LiteLLM: {model_name}")
+            self.model = LiteLLMGenerativeModel(
+                model=model_name,
+                api_key=api_key
+            )
+        
+        self.model_name = model_name
+        self.generation_config = None
         
         # Initialize available molecule sources
         self.ase_molecules = set(g2.names)
@@ -59,11 +111,57 @@ class PackmolGeneratorAgent:
         if not shutil.which("packmol"):
             raise FileNotFoundError("PACKMOL executable not found in PATH")
 
-    def _generate_content(self, prompt: str) -> str:
-        """Generate content from LLM and return raw text."""
+    def _generate_json(self, prompt: str) -> dict:
+        """Generate JSON response from LLM."""
+        self.logger.info("Sending request to LLM...")
+        
         try:
             response = self.model.generate_content(prompt, generation_config=self.generation_config)
-            return response.text
+            
+            if not response or not response.text:
+                raise ValueError("Empty response from LLM")
+            
+            raw_text = response.text.strip()
+            
+            # Handle markdown code blocks if present
+            if raw_text.startswith("```"):
+                lines = raw_text.split("\n")
+                json_lines = []
+                in_block = False
+                for line in lines:
+                    if line.startswith("```"):
+                        in_block = not in_block
+                        continue
+                    if in_block:
+                        json_lines.append(line)
+                raw_text = "\n".join(json_lines)
+            
+            # Try to find JSON object if there's extra text
+            if not raw_text.startswith("{"):
+                start = raw_text.find("{")
+                end = raw_text.rfind("}") + 1
+                if start != -1 and end > start:
+                    raw_text = raw_text[start:end]
+            
+            return json.loads(raw_text)
+            
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Failed to parse JSON response: {e}")
+            raise
+        except Exception as e:
+            self.logger.exception(f"Error during LLM content generation: {e}")
+            raise
+
+    def _generate_text(self, prompt: str) -> str:
+        """Generate text response from LLM."""
+        try:
+            response = self.model.generate_content(prompt, generation_config=self.generation_config)
+            
+            if not response or not response.text:
+                raise ValueError("Empty response from LLM")
+            
+            return response.text.strip()
+            
         except Exception as e:
             self.logger.exception(f"Error during LLM content generation: {e}")
             raise
@@ -74,13 +172,7 @@ class PackmolGeneratorAgent:
         extraction_prompt = MOLECULE_EXTRACTION_TEMPLATE.format(description=description)
 
         try:
-            raw_text = self._generate_content(extraction_prompt)
-            
-            start_brace = raw_text.find('{')
-            end_brace = raw_text.rfind('}')
-            json_string = raw_text[start_brace:end_brace+1]
-            
-            analysis = json.loads(json_string)
+            analysis = self._generate_json(extraction_prompt)
             self.logger.info(f"LLM extracted molecules: {[mol['identifier'] for mol in analysis['molecules']]}")
             return analysis['molecules']
             
@@ -267,7 +359,7 @@ class PackmolGeneratorAgent:
         smiles_prompt = SMILES_GENERATION_TEMPLATE.format(molecule_identifier=molecule_identifier)
 
         try:
-            smiles = self._generate_content(smiles_prompt).strip()
+            smiles = self._generate_text(smiles_prompt).strip()
             
             if smiles == "UNKNOWN" or len(smiles) > 200:  # Sanity check
                 return None
@@ -334,12 +426,7 @@ class PackmolGeneratorAgent:
             prompt = self._create_comprehensive_packmol_prompt(description, built_molecules)
             
             try:
-                raw_text = self._generate_content(prompt)
-                
-                start_brace = raw_text.find('{')
-                end_brace = raw_text.rfind('}')
-                json_string = raw_text[start_brace:end_brace+1]
-                llm_response = json.loads(json_string)
+                llm_response = self._generate_json(prompt)
                 
             except Exception as e:
                 return {"status": "error", "message": f"LLM script generation failed: {str(e)}"}

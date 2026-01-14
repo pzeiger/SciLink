@@ -4,25 +4,40 @@ import shutil
 import logging
 import json
 from typing import Dict, Any, Optional, List
-import google.generativeai as genai
+
 from ase import io
 from ase.io.lammpsdata import read_lammps_data
+
+from ...auth import get_internal_proxy_key
+from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
+
 from .instruct import LAMMPS_INPUT_GENERATION_TEMPLATE
+from ._deprecation import normalize_params
+
 
 class LAMMPSSimulationAgent:
-    def __init__(self, working_dir: str, api_key: Optional[str] = None):
+    def __init__(self, 
+                 working_dir: str, 
+                 api_key: Optional[str] = None,
+                 model_name: str = "gemini-2.5-pro-preview-05-06",
+                 base_url: Optional[str] = None,
+                 # Legacy parameters
+                 local_model: Optional[str] = None,
+                 google_api_key: Optional[str] = None):
         """
         Initialize the LAMMPS simulation agent.
         
         Args:
             working_dir: Directory for output files
-            api_key: API key for Google Gemini API (optional if set in environment)
+            api_key: API key for the LLM provider
+            model_name: Model name to use
+            base_url: Optional base URL for internal proxy
+            local_model: Deprecated, use base_url instead
+            google_api_key: Deprecated, use api_key instead
         """
         self.working_dir = working_dir
         os.makedirs(working_dir, exist_ok=True)
-        self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
-        genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel("gemini-2.5-pro-preview-05-06")
         
         # Configure logging
         self.logger = logging.getLogger(__name__)
@@ -32,6 +47,95 @@ class LAMMPSSimulationAgent:
             formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
             handler.setFormatter(formatter)
             self.logger.addHandler(handler)
+
+        # Normalize deprecated parameters
+        api_key, base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source="LAMMPSSimulationAgent"
+        )
+        
+        # Initialize model using wrapper structure
+        if base_url:
+            # Internal Proxy
+            if api_key is None:
+                api_key = get_internal_proxy_key()
+            
+            if not api_key:
+                raise ValueError("API key required for internal proxy.")
+
+            self.logger.info(f"LAMMPSSimulationAgent using internal proxy: {base_url}")
+            self.model = OpenAIAsGenerativeModel(
+                model=model_name,
+                api_key=api_key,
+                base_url=base_url
+            )
+        else:
+            # Public / LiteLLM
+            self.logger.info(f"LAMMPSSimulationAgent using LiteLLM: {model_name}")
+            self.model = LiteLLMGenerativeModel(
+                model=model_name,
+                api_key=api_key
+            )
+        
+        self.generation_config = None
+
+    def _generate_json(self, prompt: str) -> dict:
+        """Generate JSON response from LLM."""
+        self.logger.info("Sending request to LLM...")
+        
+        try:
+            response = self.model.generate_content(prompt, generation_config=self.generation_config)
+            
+            if not response or not response.text:
+                raise ValueError("Empty response from LLM")
+            
+            raw_text = response.text.strip()
+            
+            # Handle markdown code blocks if present
+            if raw_text.startswith("```"):
+                lines = raw_text.split("\n")
+                json_lines = []
+                in_block = False
+                for line in lines:
+                    if line.startswith("```"):
+                        in_block = not in_block
+                        continue
+                    if in_block:
+                        json_lines.append(line)
+                raw_text = "\n".join(json_lines)
+            
+            # Try to find JSON object if there's extra text
+            if not raw_text.startswith("{"):
+                start = raw_text.find("{")
+                end = raw_text.rfind("}") + 1
+                if start != -1 and end > start:
+                    raw_text = raw_text[start:end]
+            
+            return json.loads(raw_text)
+            
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Failed to parse JSON response: {e}")
+            raise
+        except Exception as e:
+            self.logger.exception(f"Error during LLM content generation: {e}")
+            raise
+
+    def _generate_text(self, prompt: str) -> str:
+        """Generate text response from LLM."""
+        try:
+            response = self.model.generate_content(prompt, generation_config=self.generation_config)
+            
+            if not response or not response.text:
+                raise ValueError("Empty response from LLM")
+            
+            return response.text.strip()
+            
+        except Exception as e:
+            self.logger.exception(f"Error during LLM content generation: {e}")
+            raise
 
     def _integrate_force_field_files(self, script_text: str, force_field_files: Dict[str, str]) -> str:
         """
@@ -173,6 +277,7 @@ class LAMMPSSimulationAgent:
             "system_info": system_info,
             "simulation_parameters": simulation_params
         }    
+
     def analyze_system(self, data_file: str) -> Dict[str, Any]:
         """Analyze a LAMMPS data file using ASE to identify its components."""
         self.logger.info(f"Analyzing system from {data_file}")
@@ -325,7 +430,6 @@ class LAMMPSSimulationAgent:
         7. What specific analysis commands are needed in LAMMPS
         
         Respond with a JSON object with the following structure:
-        ```json
         {{
             "properties_to_calculate": ["list of properties"],
             "ensemble": "NPT",
@@ -340,16 +444,12 @@ class LAMMPSSimulationAgent:
                 "additional parameters as key-value pairs"
             }}
         }}
-        ```
         
         Include only the JSON response with no additional text.
         """
         
         try:
-            # Generate response from LLM
-            generation_config = {"response_mime_type": "application/json"}
-            response = self.model.generate_content(prompt, generation_config=generation_config)
-            params = json.loads(response.text)
+            params = self._generate_json(prompt)
             
             # Add default values if missing
             params.setdefault("ensemble", "NPT")
@@ -421,7 +521,7 @@ class LAMMPSSimulationAgent:
         # Generate outputs section based on required outputs
         output_commands = self._generate_output_commands(required_outputs, properties_to_calculate, system_info)
         
-       # Format the template with actual values
+        # Format the template with actual values
         prompt = LAMMPS_INPUT_GENERATION_TEMPLATE.format(
             research_goal=research_goal,
             system_description=system_description,
@@ -443,9 +543,10 @@ class LAMMPSSimulationAgent:
             equil_steps=equil_steps,
             prod_steps=prod_steps,
             data_filename=data_filename,
-            output_commands=output_commands) 
-        response = self.model.generate_content(prompt)
-        script_text = response.text
+            output_commands=output_commands
+        )
+        
+        script_text = self._generate_text(prompt)
         
         # Clean the script output
         script_text = self._clean_script(script_text)

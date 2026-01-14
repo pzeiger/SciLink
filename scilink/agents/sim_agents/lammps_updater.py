@@ -4,22 +4,36 @@ import logging
 import json
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
-import google.generativeai as genai
+
+from ...auth import get_internal_proxy_key
+from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
+
 from .lammps_agent import LAMMPSSimulationAgent
+from ._deprecation import normalize_params
+
 
 class LAMMPSUpdater:
     """
     Self-evolving updater that analyzes LAMMPS errors and generates solutions.
     """
-    def __init__(self, api_key: Optional[str] = None, model_name: str = "gemini-2.5-pro-preview-05-06"):
-        if not api_key:
-            api_key = os.environ.get("GOOGLE_API_KEY")
-        if not api_key:
-            raise ValueError("API key required")
-        self.api_key = api_key
-        genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel(model_name)
+    def __init__(self, 
+                 api_key: Optional[str] = None, 
+                 model_name: str = "gemini-2.5-pro-preview-05-06",
+                 base_url: Optional[str] = None,
+                 # Legacy parameters
+                 local_model: Optional[str] = None,
+                 google_api_key: Optional[str] = None):
+        """
+        Initialize the LAMMPS updater.
         
+        Args:
+            api_key: API key for the LLM provider
+            model_name: Model name to use
+            base_url: Optional base URL for internal proxy
+            local_model: Deprecated, use base_url instead
+            google_api_key: Deprecated, use api_key instead
+        """
         # Configure logging
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.INFO)
@@ -28,6 +42,95 @@ class LAMMPSUpdater:
             formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
             handler.setFormatter(formatter)
             self.logger.addHandler(handler)
+
+        # Normalize deprecated parameters
+        api_key, base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source="LAMMPSUpdater"
+        )
+        
+        # Initialize model using wrapper structure
+        if base_url:
+            # Internal Proxy
+            if api_key is None:
+                api_key = get_internal_proxy_key()
+            
+            if not api_key:
+                raise ValueError("API key required for internal proxy.")
+
+            self.logger.info(f"LAMMPSUpdater using internal proxy: {base_url}")
+            self.model = OpenAIAsGenerativeModel(
+                model=model_name,
+                api_key=api_key,
+                base_url=base_url
+            )
+        else:
+            # Public / LiteLLM
+            self.logger.info(f"LAMMPSUpdater using LiteLLM: {model_name}")
+            self.model = LiteLLMGenerativeModel(
+                model=model_name,
+                api_key=api_key
+            )
+        
+        self.generation_config = None
+
+    def _generate_json(self, prompt: str) -> dict:
+        """Generate JSON response from LLM."""
+        self.logger.info("Sending request to LLM...")
+        
+        try:
+            response = self.model.generate_content(prompt, generation_config=self.generation_config)
+            
+            if not response or not response.text:
+                raise ValueError("Empty response from LLM")
+            
+            raw_text = response.text.strip()
+            
+            # Handle markdown code blocks if present
+            if raw_text.startswith("```"):
+                lines = raw_text.split("\n")
+                json_lines = []
+                in_block = False
+                for line in lines:
+                    if line.startswith("```"):
+                        in_block = not in_block
+                        continue
+                    if in_block:
+                        json_lines.append(line)
+                raw_text = "\n".join(json_lines)
+            
+            # Try to find JSON object if there's extra text
+            if not raw_text.startswith("{"):
+                start = raw_text.find("{")
+                end = raw_text.rfind("}") + 1
+                if start != -1 and end > start:
+                    raw_text = raw_text[start:end]
+            
+            return json.loads(raw_text)
+            
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Failed to parse JSON response: {e}")
+            raise
+        except Exception as e:
+            self.logger.exception(f"Error during LLM content generation: {e}")
+            raise
+
+    def _generate_text(self, prompt: str) -> str:
+        """Generate text response from LLM."""
+        try:
+            response = self.model.generate_content(prompt, generation_config=self.generation_config)
+            
+            if not response or not response.text:
+                raise ValueError("Empty response from LLM")
+            
+            return response.text.strip()
+            
+        except Exception as e:
+            self.logger.exception(f"Error during LLM content generation: {e}")
+            raise
 
     def _extract_errors(self, log_content: str) -> List[str]:
         """Extract all errors from LAMMPS output with the following line for context."""
@@ -57,7 +160,7 @@ class LAMMPSUpdater:
         4. Analyze how far the simulation progressed before the error
 
         ERRORS/WARNINGS:
-        {'\n'.join(errors)}
+        {chr(10).join(errors)}
 
         INPUT SCRIPT:
         {input_script}
@@ -94,9 +197,7 @@ class LAMMPSUpdater:
         """
         
         try:
-            generation_config = {"response_mime_type": "application/json"}
-            response = self.model.generate_content(analysis_prompt, generation_config=generation_config)
-            analysis = json.loads(response.text)
+            analysis = self._generate_json(analysis_prompt)
             self.logger.info(f"Analysis completed: {len(analysis.get('issues', []))} issues identified")
             return analysis
         except Exception as e:
@@ -302,8 +403,7 @@ class LAMMPSUpdater:
         
         # Step 3: Generate corrected script
         self.logger.info("Generating corrected LAMMPS script")
-        response = self.model.generate_content(correction_prompt)
-        corrected_script = response.text
+        corrected_script = self._generate_text(correction_prompt)
         
         # Step 4: Clean and format the script
         corrected_script = self._clean_script(corrected_script)
