@@ -17,6 +17,8 @@ from .instruct import (
 from .utils import save_generated_script, MaterialsProjectHelper
 from ...executors import ScriptExecutor, DEFAULT_TIMEOUT
 
+from ._deprecation import normalize_params
+
 
 MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS = 5
 
@@ -51,15 +53,25 @@ class StructureGenerator:
                  base_url: Optional[str] = None,
                  executor_timeout: int = DEFAULT_TIMEOUT,
                  generated_script_dir: str = "generated_scripts",
-                 mp_api_key: str = None):
+                 mp_api_key: str = None,
+                 # Legacy parameters
+                 local_model: str = None,
+                 google_api_key: str = None):
         """
         Initialize StructureGenerator with Multi-Backend Support.
         """
         self.logger = logging.getLogger(__name__)
         self.model_name = model_name
         self.generated_script_dir = generated_script_dir
+
+        api_key, base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source="StructureGenerator"
+        )
         
-        # --- LLM Initialization Logic ---
         if base_url:
             # Internal Proxy
             if api_key is None:
@@ -80,8 +92,8 @@ class StructureGenerator:
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key
-            )
-
+            )        
+        
         # We rely on the prompt to enforce JSON, 
         # rather than the generation config.
         self.generation_config = None

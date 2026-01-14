@@ -8,6 +8,7 @@ from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 
 from .instruct import VASP_INPUT_GENERATION_INSTRUCTIONS
+from ._deprecation import normalize_params
 
 
 class VaspInputAgent:
@@ -15,9 +16,20 @@ class VaspInputAgent:
 
     def __init__(self, api_key: str = None, 
                  model_name: str = "gemini-3-pro-preview", 
-                 base_url: Optional[str] = None):
+                 base_url: Optional[str] = None,
+                 # Legacy params
+                 local_model: str = None,
+                 google_api_key: str = None):
         
         self.logger = logging.getLogger(__name__)
+
+        api_key, base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source="VaspInputAgent"
+        )
         
         if base_url:
             if api_key is None:
@@ -32,6 +44,7 @@ class VaspInputAgent:
                 model=model_name,
                 api_key=api_key
             )
+            
         self.generation_config = None
 
     def generate_vasp_inputs(self, poscar_path: str, original_request: str) -> dict:

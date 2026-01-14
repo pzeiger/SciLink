@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 from .vasp_agent import VaspInputAgent
+from ._deprecation import normalize_params
 
 class VaspUpdater:
     """
@@ -11,7 +12,19 @@ class VaspUpdater:
     """
     def __init__(self, api_key: str = None, 
                  model_name: str = "gemini-3-pro-preview", 
-                 base_url: Optional[str] = None):
+                 base_url: Optional[str] = None,
+                 # Legacy params
+                 local_model: str = None,
+                 google_api_key: str = None):
+        
+    
+        api_key, base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source="VaspUpdater"
+        )
         
         self.vasp_agent = VaspInputAgent(
             api_key=api_key, 

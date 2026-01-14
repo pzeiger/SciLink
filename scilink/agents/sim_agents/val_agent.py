@@ -13,15 +13,27 @@ from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .instruct import VALIDATOR_PROMPT_TEMPLATE, INCAR_VALIDATION_INSTRUCTIONS
 from ..lit_agents.literature_agent import IncarLiteratureAgent
 from .utils import generate_structure_views
+from ._deprecation import normalize_params
 
 
 class StructureValidatorAgent:
     def __init__(self, api_key: str = None, 
                  model_name: str = "gemini-3-pro-preview", 
-                 base_url: Optional[str] = None):
+                 base_url: Optional[str] = None,
+                 # Legacy params
+                 local_model: str = None,
+                 google_api_key: str = None):
         
         self.logger = logging.getLogger(__name__)
         self.model_name = model_name
+
+        api_key, base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source="StructureValidatorAgent"
+        )
         
         if base_url:
             # Internal Proxy
@@ -41,6 +53,7 @@ class StructureValidatorAgent:
                 model=model_name,
                 api_key=api_key
             )
+            
         # We rely on the prompt to enforce JSON, 
         # rather than the generation config.
         self.generation_config = None
@@ -257,12 +270,23 @@ class IncarValidatorAgent:
     """Agent that validates and suggests improvements to VASP INCAR files using literature."""
 
     def __init__(self, api_key: str = None, 
-                 model_name: str = "gemini-2.0-flash", 
+                 model_name: str = "gemini-3-pro-preview", 
                  base_url: Optional[str] = None,
                  futurehouse_api_key: str = None, 
-                 max_wait_time: int = 500):
+                 max_wait_time: int = 500,
+                 # Legacy params
+                 local_model: str = None,
+                 google_api_key: str = None):
         
         self.logger = logging.getLogger(__name__)
+
+        api_key, base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source="IncarValidatorAgent"
+        )
         
         if base_url:
             if api_key is None:
@@ -272,13 +296,13 @@ class IncarValidatorAgent:
                 api_key=api_key,
                 base_url=base_url
             )
-            self.generation_config = None
         else:
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key
             )
-            self.generation_config = {"response_mime_type": "application/json"}
+            
+        self.generation_config = None
         
         # Initialize literature agent
         self.literature_agent = IncarLiteratureAgent(
