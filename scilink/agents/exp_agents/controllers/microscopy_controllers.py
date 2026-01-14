@@ -1,7 +1,6 @@
 import os
 import json
 import logging
-from google.generativeai.types import GenerationConfig
 from ..instruct import FFT_NMF_PARAMETER_ESTIMATION_INSTRUCTIONS
 from ....tools.fft_nmf import run_fft_nmf_analysis
 from ....tools.image_processor import normalize_and_convert_to_image_bytes, calculate_global_fft
@@ -27,7 +26,7 @@ class GetFFTParamsController:
         if system_info:
              prompt_parts.append(f"\n\nAdditional System Information:\n{json.dumps(system_info, indent=2)}")
         
-        param_gen_config = GenerationConfig(response_mime_type="application/json")
+        param_gen_config = None#GenerationConfig(response_mime_type="application/json")
         try:
             response = self.model.generate_content(
                 contents=prompt_parts,

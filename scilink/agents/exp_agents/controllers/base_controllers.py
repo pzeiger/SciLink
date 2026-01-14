@@ -2,8 +2,6 @@ import logging
 from typing import Callable
 import json
 
-from google.generativeai.types import GenerationConfig
-
 
 class RunFinalInterpretationController:
     """
@@ -197,7 +195,7 @@ Output must strictly adhere to the JSON format defined above.
 
         
         # Call LLM for structured revision
-        param_gen_config = GenerationConfig(response_mime_type="application/json")
+        param_gen_config = None#GenerationConfig(response_mime_type="application/json")
         try:
             response = self.model.generate_content(
                 contents=prompt_parts,

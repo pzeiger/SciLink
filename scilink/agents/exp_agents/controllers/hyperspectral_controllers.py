@@ -7,7 +7,6 @@ from datetime import datetime
 import base64
 import cv2
 from typing import Callable
-from google.generativeai.types import GenerationConfig
 
 import traceback
 import matplotlib.pyplot as plt
