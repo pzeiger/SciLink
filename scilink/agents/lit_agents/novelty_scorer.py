@@ -1,43 +1,116 @@
 """
 Enhanced novelty scoring system for scientific claims assessment.
 
+Updated to use LiteLLM for multi-provider support instead of google.generativeai.
 """
 
 import json
 import logging
 import os
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Optional
 
-import google.generativeai as genai
-from google.generativeai.types import GenerationConfig
-
-from ...auth import get_api_key, APIKeyNotFoundError
 from .instruct import NOVELTY_SCORING_INSTRUCTIONS
+
+from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel, LITELLM_AVAILABLE
+
+import warnings
+from typing import Tuple
+
+from ._deprecation import _normalize_params
+
+
 class NoveltyScorer:
-    """Enhanced novelty assessment using structured scoring instead of binary Yes/No."""
+    """
+    Enhanced novelty assessment using structured scoring instead of binary Yes/No.
     
-    def __init__(self, google_api_key: str = None, model_name: str = "gemini-2.5-flash-preview-05-20", local_model: str = None):
+    Now supports multiple LLM providers through LiteLLM or internal proxy.
+    
+    Args:
+        api_key: API key for the LLM provider.
+        model_name: Model name. For public deployments, use LiteLLM format
+            (e.g., "gemini-3-flash-preview", "gpt-4o", "claude-sonnet-4-20250514").
+        base_url: Base URL for internal proxy endpoint.
+            When provided, uses OpenAI-compatible client.
+            When None, uses LiteLLM for multi-provider support.
+        
+        google_api_key: DEPRECATED. Use 'api_key' instead.
+        local_model: DEPRECATED. Use 'base_url' instead.
+    """
+    
+    def __init__(
+        self, 
+        api_key: Optional[str] = None,
+        model_name: str = "gemini-3-flash-preview",
+        base_url: Optional[str] = None,
+        # Deprecated parameters
+        google_api_key: Optional[str] = None,
+        local_model: Optional[str] = None
+    ):
         """
         Initialize the novelty scorer.
         
         Args:
-            google_api_key: Google API key for Gemini access
-            model_name: Gemini model to use for scoring (Flash recommended for speed)
+            api_key: API key for the LLM provider
+            model_name: Model to use for scoring
+            base_url: Base URL for internal proxy endpoint
+            google_api_key: DEPRECATED - use api_key instead
+            local_model: DEPRECATED - use base_url instead
         """
-        if google_api_key is None:
-            google_api_key = get_api_key('google')
-            if not google_api_key:
-                raise APIKeyNotFoundError('google')
-        if (local_model is not None) and ('ai-incubator' in local_model): # True when we are using the local network models
-            from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
-            #model_name = 'gemini-2.5-pro-birthright' # This is hard-coded
-            self.model = OpenAIAsGenerativeModel(model_name, api_key = google_api_key, base_url= local_model) #This not google API key but API key
-            self.generation_config = None
-        else:
-            genai.configure(api_key=google_api_key)
-            self.model = genai.GenerativeModel(model_name)
-            self.generation_config = GenerationConfig(response_mime_type="application/json")
         self.logger = logging.getLogger(__name__)
+        
+        # Handle deprecated parameters
+        api_key, base_url = _normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source="NoveltyScorer"
+        )
+        
+        # Initialize LLM client based on deployment mode
+        if base_url:
+            # INTERNAL PROXY - use OpenAI-compatible client
+            if api_key is None:
+                # Try to get internal proxy key
+                try:
+                    from ...auth import get_internal_proxy_key
+                    api_key = get_internal_proxy_key()
+                except ImportError:
+                    try:
+                        from ...auth import get_internal_proxy_key
+                        api_key = get_internal_proxy_key()
+                    except ImportError:
+                        import os
+                        api_key = os.environ.get("SCILINK_API_KEY")
+            
+            if not api_key:
+                raise ValueError(
+                    "API key required for internal proxy.\n"
+                    "Set SCILINK_API_KEY environment variable or pass api_key parameter."
+                )
+            
+            self.logger.info(f"🏛️ NoveltyScorer using internal proxy: {base_url}")
+            self.model = OpenAIAsGenerativeModel(
+                model=model_name,
+                api_key=api_key,
+                base_url=base_url
+            )
+        else:
+            # PUBLIC LITELLM - multi-provider support
+            if not LITELLM_AVAILABLE:
+                raise ImportError(
+                    "LiteLLM is required for public deployments. "
+                    "Install with: pip install litellm"
+                )
+            
+            self.logger.info(f"🌐 NoveltyScorer using LiteLLM: {model_name}")
+            self.model = LiteLLMGenerativeModel(
+                model=model_name,
+                api_key=api_key
+            )
+        
+        self.generation_config = None
         self.logger.info(f"NoveltyScorer initialized with model: {model_name}")
     
     def score_novelty(self, question: str, owl_response: str) -> Dict[str, Any]:
@@ -60,11 +133,15 @@ class NoveltyScorer:
             self.logger.debug(f"Scoring novelty for question: {question[:100]}...")
             
             response = self.model.generate_content(
-                prompt,
+                [prompt],
                 generation_config=self.generation_config
             )
             
-            result = json.loads(response.text)
+            # Extract text from response
+            response_text = self._extract_response_text(response)
+            
+            # Parse JSON from response
+            result = self._parse_json_response(response_text)
             
             # Validate the response
             if not self._validate_scoring_response(result):
@@ -77,6 +154,36 @@ class NoveltyScorer:
         except Exception as e:
             self.logger.error(f"Failed to score novelty: {e}")
             return self._create_fallback_score(question, owl_response)
+    
+    def _extract_response_text(self, response) -> str:
+        """Extract text from various response formats."""
+        if hasattr(response, 'text'):
+            return response.text
+        elif hasattr(response, 'candidates') and response.candidates:
+            candidate = response.candidates[0]
+            if hasattr(candidate, 'content'):
+                content = candidate.content
+                if hasattr(content, 'parts') and content.parts:
+                    return content.parts[0].text if hasattr(content.parts[0], 'text') else str(content.parts[0])
+                return str(content)
+        return str(response)
+    
+    def _parse_json_response(self, text: str) -> Dict[str, Any]:
+        """Parse JSON from response text, handling code blocks."""
+        text = text.strip()
+        
+        # Remove markdown code blocks
+        if text.startswith("```json"):
+            text = text[7:]
+        elif text.startswith("```"):
+            text = text[3:]
+        
+        if text.endswith("```"):
+            text = text[:-3]
+        
+        text = text.strip()
+        
+        return json.loads(text)
     
     def _validate_scoring_response(self, result: Dict[str, Any]) -> bool:
         """Validate the scoring response format and content."""
@@ -158,19 +265,29 @@ class NoveltyScorer:
 
 
 def enhanced_novelty_assessment(literature_results: List[Dict[str, Any]], 
-                               novelty_scorer: NoveltyScorer = None) -> Dict[str, Any]:
+                               novelty_scorer: NoveltyScorer = None,
+                               api_key: Optional[str] = None,
+                               model_name: str = "gemini-3-flash-preview",
+                               base_url: Optional[str] = None) -> Dict[str, Any]:
     """
     Enhanced novelty assessment with structured scoring.
     
     Args:
         literature_results: List of literature search results from OWL
         novelty_scorer: Optional NoveltyScorer instance
+        api_key: API key for LLM provider (used if novelty_scorer not provided)
+        model_name: Model name (used if novelty_scorer not provided)
+        base_url: Base URL for internal proxy (used if novelty_scorer not provided)
         
     Returns:
         Enhanced novelty assessment with scores and categorization
     """
     if novelty_scorer is None:
-        novelty_scorer = NoveltyScorer()
+        novelty_scorer = NoveltyScorer(
+            api_key=api_key,
+            model_name=model_name,
+            base_url=base_url
+        )
     
     scored_results = []
     logger = logging.getLogger(__name__)
