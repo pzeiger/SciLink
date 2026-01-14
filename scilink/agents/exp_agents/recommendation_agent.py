@@ -2,9 +2,6 @@ import json
 import logging
 from typing import Dict, Any, List, Optional, Tuple
 
-import google.generativeai as genai
-from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockThreshold
-
 from .instruct import TEXT_ONLY_DFT_RECOMMENDATION_INSTRUCTIONS
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
