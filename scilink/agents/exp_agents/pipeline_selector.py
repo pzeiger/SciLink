@@ -46,11 +46,12 @@ class PipelineSelector:
              self.model = LiteLLMGenerativeModel(model=model_name, api_key=self.api_key)
         
         self.generation_config = None
+        self.safety_settings = None
     
-    def select_pipeline(self,
-                       available_pipelines: Dict[str, Dict],
-                       image_blob: Dict | None = None,
-                       system_info: Dict | None = None) -> tuple[str, str]:
+    def select_pipeline(self, 
+                        available_pipelines: Dict[str, Dict], 
+                        image_blob: Dict | None = None, 
+                        system_info: Dict | None = None) -> tuple[str, str]:
         """
         Select the most appropriate pipeline for the given input.
         
@@ -79,7 +80,7 @@ class PipelineSelector:
         
         # Build prompt with domain-specific instructions
         prompt_parts = [selection_instructions.replace('**Available Pipelines:**\n(These will be inserted automatically)', 
-                                                    f'**Available Pipelines:**\n{pipeline_desc_text}')]
+                                                       f'**Available Pipelines:**\n{pipeline_desc_text}')]
 
         
         # Add image if available
@@ -99,7 +100,7 @@ class PipelineSelector:
             response = self.model.generate_content(
                 contents=prompt_parts,
                 generation_config=self.generation_config,
-                safety_settings=self.safety_settings,
+                safety_settings=self.safety_settings, # Now this attribute exists
             )
             
             result_json = self._parse_llm_response(response)
@@ -129,7 +130,14 @@ class PipelineSelector:
     def _parse_llm_response(self, response) -> dict | None:
         """Parse JSON response from LLM."""
         try:
-            raw_text = response.text
+            # Handle LiteLLM/OpenAI wrapper response object
+            if hasattr(response, 'text'):
+                raw_text = response.text
+            elif hasattr(response, 'choices'): 
+                 raw_text = response.choices[0].message.content
+            else:
+                 raw_text = str(response)
+
             first_brace = raw_text.find('{')
             last_brace = raw_text.rfind('}')
             if first_brace != -1 and last_brace != -1 and last_brace > first_brace:

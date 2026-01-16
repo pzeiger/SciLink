@@ -1,7 +1,10 @@
 import json
 import logging
+from typing import Dict, Any, List, Optional
+from pathlib import Path
+import uuid
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List
+from datetime import datetime
 
 from ...auth import get_internal_proxy_key
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
@@ -9,7 +12,7 @@ from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from ._deprecation import normalize_params
 
 
-class BaseAnalysisAgent:
+class BaseAnalysisAgent(ABC):
     """
     Base class for analysis agents
     """
@@ -18,12 +21,19 @@ class BaseAnalysisAgent:
                  api_key: str | None = None, 
                  model_name: str = "gemini-3-pro-preview", 
                  base_url: str = None,
+                 output_dir: str = ".",
                  # Deprecated arguments
                  google_api_key: str | None = None,
                  local_model: str = None,
                  **kwargs):
         
         self.logger = logging.getLogger(__name__)
+
+        # --- State Management Init ---
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.agent_type = "base_analysis"  # Subclasses should override
+        self.state: Dict[str, Any] = {}
         
         # Normalize parameters (api_key vs google_api_key, base_url vs local_model)
         self.api_key, self.base_url = normalize_params(
@@ -77,6 +87,94 @@ class BaseAnalysisAgent:
 
         self._stored_analysis_images = []
         self._stored_analysis_metadata = {}
+
+    def _get_initial_state_fields(self) -> Dict[str, Any]:
+        """Override in subclasses to add agent-specific state fields."""
+        return {}
+    
+    def _init_state(self, **context) -> None:
+        """Initialize state for a new session."""
+        if self.state.get("session_id") is None:
+            self.state = {
+                "session_id": str(uuid.uuid4()),
+                "start_time": datetime.now().isoformat(),
+                "agent_type": self.agent_type,
+                "action_history": [],
+                "status": "initialized"
+            }
+            # Add agent-specific fields
+            self.state.update(self._get_initial_state_fields())
+        
+        # Update with provided context
+        for key, value in context.items():
+            self.state[key] = value
+        
+        self.state["status"] = "active"
+        self._save_state()
+
+    def _log_action(self, 
+                    action: str, 
+                    input_ctx: Dict[str, Any], 
+                    result: Dict[str, Any], 
+                    rationale: Optional[str] = None, 
+                    feedback: Optional[str] = None) -> None:
+        """Record an atomic action to state history and save."""
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "action": action,
+            "input": input_ctx,
+            "rationale": rationale,
+            "result": self._normalize_result(result),
+            "feedback": feedback
+        }
+        
+        if "action_history" not in self.state:
+            self.state["action_history"] = []
+        
+        self.state["action_history"].append(entry)
+        self._save_state()
+
+    def _normalize_result(self, result: Any) -> Dict[str, Any]:
+        """Normalize result for JSON serialization."""
+        if isinstance(result, dict):
+            # Create a summary copy to avoid dumping massive arrays if they exist
+            summary = result.copy()
+            # If result contains massive keys (like 'image_data'), summarize them
+            return summary
+        return {"raw_result": str(result)}
+    
+    def _get_state_filename(self) -> str:
+        return f"{self.agent_type}_state.json"
+
+    def _save_state(self) -> None:
+        """Persist state to disk."""
+        state_file = self.output_dir / self._get_state_filename()
+        try:
+            with open(state_file, 'w') as f:
+                # Use default=str to handle non-serializable objects like numpy arrays
+                json.dump(self.state, f, indent=2, default=str)
+        except Exception as e:
+            self.logger.warning(f"Failed to save {self.agent_type} state: {e}")
+
+    def load_state(self, state_path: str) -> bool:
+        """Restore state from disk."""
+        path = Path(state_path)
+        if not path.exists():
+            self.logger.warning(f"State file not found: {state_path}")
+            return False
+        
+        try:
+            with open(path, 'r') as f:
+                self.state = json.load(f)
+            
+            if "action_history" not in self.state:
+                self.state["action_history"] = []
+            
+            self.logger.info(f"Restored {self.agent_type} state: session {self.state.get('session_id')}")
+            return True
+        except Exception as e:
+            self.logger.warning(f"Failed to load {self.agent_type} state: {e}")
+            return False
 
     @abstractmethod
     def analyze_for_claims(self, data_path: str, system_info: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:

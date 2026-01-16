@@ -593,7 +593,7 @@ class BuildHyperspectralPromptController:
                 prompt_parts.append("\n**2. RIGHT (TOP PANEL): Spectral Fit & Variance**")
                 prompt_parts.append("- **Black Line (Mean):** The abundance-weighted average spectrum of the raw data (Ground Truth).")
                 prompt_parts.append("- **Red Dashed Line (Model):** The NMF component (Mathematical Model).")
-                prompt_parts.append("- **Blue Shaded Band:** The Weighted Standard Deviation ($\pm 1\sigma$). This represents the natural heterogeneity of the data in this region.")
+                prompt_parts.append(r"- **Blue Shaded Band:** The Weighted Standard Deviation ($\pm 1\sigma$). This represents the natural heterogeneity of the data in this region.")
                 
                 prompt_parts.append("\n**3. RIGHT (BOTTOM PANEL): Residuals**")
                 prompt_parts.append("- **Gray Area:** The difference between the Data and the Model.")

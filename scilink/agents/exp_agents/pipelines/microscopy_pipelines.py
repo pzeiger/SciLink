@@ -28,7 +28,7 @@ def create_fftnmf_pipeline(
     
     # --- 1. Global FFT (runs for every image) ---
     pipeline.append(
-        RunGlobalFFTController(logger)
+        RunGlobalFFTController(logger, settings)
     )
 
     # --- 2. Sliding FFT/NMF Specific Workflow ---

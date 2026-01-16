@@ -103,8 +103,9 @@ class RunGlobalFFTController:
     A modular controller that calculates the global FFT of the primary image
     and tells the tool to save a visualization to disk.
     """
-    def __init__(self, logger: logging.Logger):
+    def __init__(self, logger: logging.Logger, settings: dict):
         self.logger = logger
+        self.settings = settings
 
     def execute(self, state: dict) -> dict:
         self.logger.info("\n\n🛠️ --- CALLING TOOL: Global FFT --- 🛠️\n")
@@ -113,7 +114,7 @@ class RunGlobalFFTController:
             image_array = state["preprocessed_image_array"]
             
             # 1. Prepare the save path
-            output_dir = "fft_nmf_visualizations" 
+            output_dir = self.settings.get("visualization_dir", "fft_nmf_visualizations")
             base_name = os.path.splitext(os.path.basename(state["image_path"]))[0]
             safe_base_name = "".join(c if c.isalnum() else "_" for c in base_name)
             # Use a simpler timestamp or just the name for predictability

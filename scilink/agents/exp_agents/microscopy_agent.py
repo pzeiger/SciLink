@@ -33,16 +33,17 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
     def __init__(self,
                  api_key: str | None = None,
-                 model_name: str = None,#"gemini-3-pro-preview",
+                 model_name: str = "gemini-3-pro-preview",
                  base_url: str | None = None,
                  # Deprecated params
                  google_api_key: str | None = None,
                  local_model: str = None,
                  # Agent specific params
                  fft_nmf_settings: dict | None = None,
-                 enable_human_feedback: bool = True):
+                 enable_human_feedback: bool = True,
+                 output_dir: str = "microscopy_analysis_output"):
         
-        # 1. Normalize Params
+        # Normalize Params
         self.api_key, self.base_url = normalize_params(
             api_key, google_api_key, base_url, local_model, source="MicroscopyAnalysisAgent"
         )
@@ -51,14 +52,34 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             api_key=self.api_key, 
             model_name=model_name, 
             base_url=self.base_url, 
-            enable_human_feedback=enable_human_feedback
+            output_dir=output_dir,
+            enable_human_feedback=enable_human_feedback,
         )
+
+        self.agent_type = "microscopy"
+
+        self.output_dir = self.output_dir.resolve()
         
-        # 3. Agent-Specific Settings
+        # Define sub-directories nested inside the main output_dir
+        # 1. Visualization Dir (for plots, FFTs)
+        viz_dir = self.output_dir / "fft_nmf_visualizations"
+        # 2. Analysis Dir (for numpy arrays, raw data)
+        data_dir = self.output_dir / "analysis_output"
+        
+        # Agent-Specific Settings
         self.settings = fft_nmf_settings if fft_nmf_settings else {}
+
+        # Tools typically expect strings
+        self.settings['visualization_dir'] = str(viz_dir)
+        self.settings['output_dir'] = str(data_dir)
+        
+        # Create them now to be sure
+        viz_dir.mkdir(parents=True, exist_ok=True)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        
         self._recommendation_agent = None
         
-        # 4. Pipeline Initialization
+        # Pipeline Initialization
         # Pass self.generation_config (which is None) to pipelines
         self.pipeline = create_fftnmf_pipeline(
             model=self.model,
@@ -72,7 +93,13 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         )
         self.logger.info(f"MicroscopyAnalysisAgent initialized with a pipeline of {len(self.pipeline)} controllers.")
 
-
+    def _get_initial_state_fields(self) -> dict:
+        return {
+            "current_image": None,
+            "pipeline_type": "general",
+            "analysis_results": []
+        }
+    
     def _run_analysis_pipeline(
         self, 
         image_path: str, 
@@ -194,30 +221,46 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         """
         Analyze microscopy image to generate scientific claims.
         """
+        # 1. Initialize State for this run
+        self._init_state(current_image=image_path, system_info=system_info)
+
+        # 2. Run Pipeline
         result_json, error_dict = self._run_analysis_pipeline(
             image_path, 
             system_info, 
             MICROSCOPY_CLAIMS_INSTRUCTIONS
         )
 
-        if error_dict: return error_dict
-        if result_json is None: return {"error": "Analysis for claims failed unexpectedly."}
+        if error_dict: 
+            self._log_action("analyze_for_claims", {"image": image_path}, {"error": error_dict})
+            return error_dict
+
+        if result_json is None: 
+            return {"error": "Analysis failed."}
 
         valid_claims = self._validate_scientific_claims(result_json.get("scientific_claims", []))
         
-        if not valid_claims:
-            self.logger.warning("Pipeline ran but LLM returned no valid claims.")
-            
         initial_result = {
-            "detailed_analysis": result_json.get("detailed_analysis", "Analysis complete, but no text was returned."), 
+            "detailed_analysis": result_json.get("detailed_analysis", "Analysis complete."),
             "scientific_claims": valid_claims
         }
         
-        return self._apply_feedback_if_enabled(
+        # 3. Apply Feedback
+        final_result = self._apply_feedback_if_enabled(
             initial_result, 
             image_path=image_path, 
             system_info=system_info
         )
+
+        # 4. Log Success
+        self._log_action(
+            action="analyze_for_claims",
+            input_ctx={"image": image_path, "system_info": system_info},
+            result=final_result,
+            rationale="Standard microscopy analysis pipeline completed."
+        )
+
+        return final_result
     
     def _get_claims_instruction_prompt(self) -> str:
         return MICROSCOPY_CLAIMS_INSTRUCTIONS

@@ -31,13 +31,13 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                  api_key: str | None = None, 
                  model_name: str = "gemini-3-pro-preview",
                  base_url: str | None = None,
+                 output_dir: str = "hyperspectral_analysis_output",
                  # Deprecated params
                  google_api_key: str | None = None, 
                  local_model: str = None,
                  # Agent specific params
                  spectral_unmixing_settings: dict | None = None,
                  run_preprocessing: bool = True,
-                 output_dir: str = "spectroscopy_output",
                  enable_human_feedback: bool = True):
         
         # Normalize params locally to pass to sub-agents (like preprocessor)
@@ -50,8 +50,11 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             api_key=self.api_key,
             model_name=model_name,
             base_url=self.base_url,
+            output_dir=output_dir,
             enable_human_feedback=enable_human_feedback
         )
+
+        self.agent_type = "hyperspectral"
         
         # --- Settings ---
         default_settings = {
@@ -69,15 +72,19 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.spectral_settings['output_dir'] = output_dir
         self.spectral_settings['feedback_depths'] = [0]
         
-        self.output_dir = output_dir
-        os.makedirs(output_dir, exist_ok=True)
+        self.output_dir = self.output_dir.resolve()
+
+        # --- Sub-Agent Initialization ---
+        # Define nested output dir for preprocessor
+        preprocess_dir = self.output_dir / "preprocessing"
 
         # --- Sub-Agent Initialization ---
         # The preprocessor is a dependency required by the pipeline
         self.preprocessor = HyperspectralPreprocessingAgent(
             api_key=self.api_key,
             model_name=model_name,
-            base_url=self.base_url
+            base_url=self.base_url,
+            output_dir=str(preprocess_dir)
         )
 
         # --- Common Pipeline Arguments ---
@@ -101,6 +108,13 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         )
         self.logger.info(f"HyperspectralAnalysisAgent initialized with recursive pipelines.")
 
+    def _get_initial_state_fields(self) -> dict:
+        return {
+            "data_path": None,
+            "analysis_depth": 0,
+            "components_found": []
+        }
+    
     def _load_hyperspectral_data(self, data_path: str) -> np.ndarray:
         """
         Load hyperspectral data from numpy array.
@@ -303,6 +317,9 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         """
         Analyze hyperspectral data to generate scientific claims.
         """
+
+        self._init_state(data_path=data_path, metadata=metadata_path)
+
         # 1. Run the Pipeline (Generates Draft 1 Report)
         result_json, error_dict = self._run_analysis_pipeline(
             data_path=data_path,
@@ -312,8 +329,11 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             structure_system_info=structure_system_info
         )
         
-        if error_dict: return error_dict
-        if result_json is None: return {"error": "Spectroscopy analysis failed unexpectedly."}
+        if error_dict:
+            self._log_action("analyze_for_claims", {"data": data_path}, {"error": error_dict})
+            return error_dict
+        if result_json is None: 
+            return {"error": "Spectroscopy analysis failed unexpectedly."}
 
         # 2. Get Valid Claims (Draft 1)
         valid_claims = self._validate_scientific_claims(result_json.get("scientific_claims", []))
@@ -350,6 +370,14 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             report_gen.execute(repot_state)
             
             self.logger.info("✅ Refined HTML report generated.")
+
+        # 4. Log Action
+        self._log_action(
+            action="analyze_for_claims",
+            input_ctx={"data": data_path},
+            result=final_result,
+            rationale="Hyperspectral analysis with feedback loop completed."
+        )
         
         return final_result
         
