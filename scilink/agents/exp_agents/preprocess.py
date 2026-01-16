@@ -29,32 +29,59 @@ class HyperspectralPreprocessingAgent(BaseAnalysisAgent):
     """
     An agent that uses an LLM to determine the optimal pre-processing strategy
     AND can run custom Python scripts for non-standard processing.
-
-    **Standard Mode:**
-    By default, the agent will analyze data statistics and ask an LLM
-    to choose a standard strategy (despiking, masking, etc.).
-
-    **Custom Script Mode:**
-    To override this, you can provide a special key named "custom_processing_instruction"
-    in the metadata json file file. If the agent this key, it will read the string value 
-    and automatically generate, execute, and self-correct a Python script 
-    to perform that specific task.
     """
 
     MAX_SCRIPT_ATTEMPTS = 3
 
-    def __init__(self, *args,
-                 output_dir: str = "preprocessing_output",
+    def __init__(self, *args, 
+                 output_dir: str = "preprocessing_output", 
                  executor_timeout: int = 120,
                  **kwargs):
         """Initialize the pre-processing agent."""
-        super().__init__(*args, **kwargs)
-        self.logger = logging.getLogger(self.__class__.__name__)
         
-        self.output_dir = os.path.abspath(output_dir)
-        os.makedirs(self.output_dir, exist_ok=True)
+        # Pass output_dir to BaseAnalysisAgent for state management
+        super().__init__(*args, output_dir=output_dir, **kwargs) 
+        self.logger = logging.getLogger(self.__class__.__name__)
+        self.agent_type = "hyperspectral_preprocessing"
+        
+        # BaseAgent created self.output_dir as a Path. We just ensure it's absolute.
+        self.output_dir = self.output_dir.resolve()
+        
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
         self.executor = ScriptExecutor(timeout=executor_timeout, enforce_sandbox=False)
         self.logger.info(f"HyperspectralPreprocessingAgent initialized. Custom script output dir: {self.output_dir}")
+
+    def _get_initial_state_fields(self) -> Dict[str, Any]:
+        """Initialize state fields specific to preprocessing."""
+        return {
+            "processed_files": [],
+            "strategies_used": []
+        }
+
+    def analyze_for_claims(self, data_path: str, system_info: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
+        """
+        Implementation of abstract method to satisfy BaseAnalysisAgent.
+        Redirects to run_preprocessing logic.
+        """
+        self.logger.info(f"analyze_for_claims called on Preprocessor. Redirecting to run_preprocessing.")
+        
+        try:
+            # Assuming data_path points to an .npy file
+            data = np.load(data_path)
+            processed_data, mask, quality = self.run_preprocessing(data, system_info or {})
+            
+            return {
+                "detailed_analysis": f"Preprocessing complete. SNR Estimate: {quality.get('snr_estimate', 'N/A')}",
+                "scientific_claims": [], # Preprocessors don't make scientific claims
+                "data_quality": quality,
+                "status": "success",
+                # Note: Actual processed arrays are usually handled via return values or temp files 
+                # in the pipeline controller, not directly in this state dict to save memory.
+            }
+        except Exception as e:
+            self.logger.error(f"Analysis failed: {e}")
+            return {"error": str(e)}
         
     def _calculate_statistics(self, hspy_data: np.ndarray) -> Dict[str, Any]:
         """Calculates robust statistics for the LLM and for deterministic SNR."""
@@ -84,9 +111,6 @@ class HyperspectralPreprocessingAgent(BaseAnalysisAgent):
     def _calculate_snr(self, stats: Dict[str, Any]) -> Tuple[float, str]:
         """
         Calculates a robust, deterministic SNR from the pre-calculated stats.
-        
-        Returns:
-            Tuple[float, str]: (snr_estimate, reasoning_string)
         """
         self.logger.debug("Calculating deterministic SNR...")
         
@@ -114,10 +138,6 @@ class HyperspectralPreprocessingAgent(BaseAnalysisAgent):
     def run_preprocessing(self, hspy_data: np.ndarray, system_info: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
         """
         Runs the full LLM-guided pre-processing pipeline.
-        
-        This will check for a `custom_processing_instruction` in system_info.
-        If present, it runs the script executor.
-        If absent, it runs the standard strategy selection.
         """
         if hspy_data.ndim != 3:
             self.logger.error(f"Input data must be 3D (h, w, e), but got {hspy_data.ndim}D. Skipping processing.")
@@ -212,7 +232,7 @@ class HyperspectralPreprocessingAgent(BaseAnalysisAgent):
                 raise ValueError("LLM parsing failed")
 
             self.logger.info(f"LLM Pre-processing Strategy: {result_json.get('reasoning', 'No reasoning provided.')}")
-            return result_json # This is the strategy dict
+            return result_json 
 
         except Exception as e:
             self.logger.error(f"LLM strategy selection failed: {e}. Falling back to default (clip and mask).")
@@ -227,8 +247,8 @@ class HyperspectralPreprocessingAgent(BaseAnalysisAgent):
 
     def _apply_preprocessing(self, hspy_data: np.ndarray, strategy: dict) -> tuple[np.ndarray, np.ndarray]:
         """
-        Applies a robust pre-processing pipeline:
-        (No changes needed here)
+        Applies a robust pre-processing pipeline.
+        
         """
         self.logger.info("\n\n🤖 -------------------- DATA AGENT STEP: APPLYING PRE-PROCESSING -------------------- 🤖\n")
         data_to_process = hspy_data.copy()
@@ -242,7 +262,6 @@ class HyperspectralPreprocessingAgent(BaseAnalysisAgent):
             data_to_process = median_filter(data_to_process, size=kernel_tuple)
         
         # 2. Clip all negative values to zero
-        # This is a hard-coded safety step, independent of LLM strategy
         self.logger.info("Clipping all negative data points to 0.0...")
         np.clip(data_to_process, 0, None, out=data_to_process)
 
@@ -284,21 +303,18 @@ class HyperspectralPreprocessingAgent(BaseAnalysisAgent):
         if match:
             return match.group(1).strip()
         
-        # Fallback: check if it starts with 'python' and strip it
         if script_content.lower().startswith("python"):
             potential_code = script_content[len("python"):].strip()
             if potential_code.startswith(("import ", "def ", "#")):
                 return potential_code
         
-        # Fallback: check if it starts directly with code
         if script_content.startswith(("import ", "def ", "#")):
             return script_content
 
         self.logger.error(f"LLM response did not contain a recognizable Python code block: {script_content[:300]}")
         raise ValueError("LLM failed to generate Python script in a recognizable format.")
 
-    def _generate_custom_script(self, stats: dict, instruction: str, input_filename: str) -> str: # <-- Renamed variable
-        """Uses an LLM to generate a Python fitting script."""
+    def _generate_custom_script(self, stats: dict, instruction: str, input_filename: str) -> str:
         self.logger.info("Generating Python script for custom preprocessing...")
         
         prompt = CUSTOM_PREPROCESSING_SCRIPT_INSTRUCTIONS.format(
@@ -316,11 +332,8 @@ class HyperspectralPreprocessingAgent(BaseAnalysisAgent):
         return fitting_script
 
     def _generate_and_execute_custom_script_with_retry(
-        self, stats: dict, instruction: str, input_filename: str # <-- Renamed variable
+        self, stats: dict, instruction: str, input_filename: str 
     ) -> dict:
-        """
-        Generates and executes the custom script, with a retry loop for self-correction.
-        """
         last_error = "No script generated yet."
         custom_script = None
 
@@ -339,9 +352,8 @@ class HyperspectralPreprocessingAgent(BaseAnalysisAgent):
                     )
                     response = self.model.generate_content(correction_prompt)
                     custom_script = self._extract_script_from_response(response.text)
-                # Execute the current version of the script
+                
                 self.logger.info(f"Executing script (attempt {attempt})...")
-                # Scripts are run *in the output directory*
                 exec_result = self.executor.execute_script(custom_script, working_dir=self.output_dir)
 
                 if exec_result.get("status") == "success":
@@ -360,7 +372,6 @@ class HyperspectralPreprocessingAgent(BaseAnalysisAgent):
                 last_error = f"An error occurred during script generation/execution: {str(e)}"
                 self.logger.error(last_error, exc_info=True)
 
-        # If loop finishes without success
         self.logger.error(f"Script processing failed after {self.MAX_SCRIPT_ATTEMPTS} attempts.")
         return {
             "status": "error",
@@ -371,14 +382,7 @@ class HyperspectralPreprocessingAgent(BaseAnalysisAgent):
     def _run_custom_script_processing(
         self, hspy_data: np.ndarray, stats: dict, instruction: str
     ) -> tuple[np.ndarray, np.ndarray, str]:
-        """
-        Orchestrates the custom script pipeline:
-        1. Saves input data to a temp file.
-        2. Calls the generate/execute retry loop.
-        3. Saves the final script.
-        4. Loads the resulting data and mask from the output files.
-        """
-        # 1. Save input data so the script can access it
+        
         input_filename = f"input_data_{os.getpid()}.npy"
         input_data_path = os.path.join(self.output_dir, input_filename)
         try:
@@ -387,18 +391,15 @@ class HyperspectralPreprocessingAgent(BaseAnalysisAgent):
         except Exception as e:
             raise RuntimeError(f"Failed to save temporary input data: {e}")
 
-        # 2. Run the generation and execution loop
         script_bundle = self._generate_and_execute_custom_script_with_retry(
             stats, instruction, input_filename
         )
 
         if script_bundle["status"] != "success":
-            # Clean up input file even on failure
             if os.path.exists(input_data_path):
                 os.remove(input_data_path)
             raise RuntimeError(script_bundle["message"])
         
-        # 3. Save the final, successful script for transparency
         final_script = script_bundle.get("final_script", "# No script was returned.")
         script_save_path = os.path.join(self.output_dir, "custom_preprocessing_script.py")
         try:
@@ -410,9 +411,8 @@ class HyperspectralPreprocessingAgent(BaseAnalysisAgent):
             self.logger.info(f"✅ Saved final script for transparency to: {script_save_path}")
         except Exception as e:
             self.logger.warning(f"Failed to save final script: {e}")
-            script_save_path = None # Don't crash, just log the warning
+            script_save_path = None 
         
-        # 4. Load the results produced by the script
         processed_data_path = os.path.join(self.output_dir, "processed_data.npy")
         mask_path = os.path.join(self.output_dir, "mask_2d.npy")
         
@@ -425,7 +425,6 @@ class HyperspectralPreprocessingAgent(BaseAnalysisAgent):
         processed_data = np.load(processed_data_path)
         mask_2d = np.load(mask_path)
         
-        # 5. Clean up all temp files
         os.remove(input_data_path)
         os.remove(processed_data_path)
         os.remove(mask_path)
@@ -433,47 +432,66 @@ class HyperspectralPreprocessingAgent(BaseAnalysisAgent):
         return processed_data, mask_2d, script_save_path
     
 
-
 class CurvePreprocessingAgent(BaseAnalysisAgent):
     """
     An agent that pre-processes 1D (X, Y) curve data.
-    
-   **Standard Mode:**
-    Uses an LLM to analyze stats and metadata to choose a safe, simple
-    strategy (clipping, smoothing) appropriate for the experiment type.
-    
-    **Custom Script Mode:**
-    If a "custom_processing_instruction" key is found in the metadata,
-    it will generate and execute a Python script to perform the custom task.
     """
     
     MAX_SCRIPT_ATTEMPTS = 5
     MAX_MODEL_ATTEMPTS = 5
 
-    def __init__(self, *args,
-                 output_dir: str = "preprocessing_output",
+    def __init__(self, *args, 
+                 output_dir: str = "preprocessing_output", 
                  executor_timeout: int = 120,
                  **kwargs):
         """Initialize the 1D pre-processing agent."""
-        super().__init__(*args, **kwargs)
+        # Pass output_dir to BaseAnalysisAgent for state management
+        super().__init__(*args, output_dir=output_dir, **kwargs) 
         self.logger = logging.getLogger(self.__class__.__name__)
+        self.agent_type = "curve_preprocessing"
         
-        self.output_dir = os.path.abspath(output_dir)
-        os.makedirs(self.output_dir, exist_ok=True)
-        # It needs its own executor
+        self.output_dir = self.output_dir.resolve()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
         self.executor = ScriptExecutor(timeout=executor_timeout, enforce_sandbox=False)
         self.logger.info(f"CurvePreprocessingAgent initialized. Custom script output dir: {self.output_dir}")
+
+    def _get_initial_state_fields(self) -> Dict[str, Any]:
+        """Initialize state fields specific to curve preprocessing."""
+        return {
+            "processed_curves": [],
+            "custom_scripts": []
+        }
+
+    def analyze_for_claims(self, data_path: str, system_info: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
+        """
+        Implementation of abstract method to satisfy BaseAnalysisAgent.
+        Redirects to run_preprocessing.
+        """
+        self.logger.info(f"analyze_for_claims called on CurvePreprocessor. Redirecting to run_preprocessing.")
+        try:
+            # Handle loading: standard flow expects numpy array
+            if isinstance(data_path, str) and os.path.exists(data_path):
+                data = np.load(data_path)
+            else:
+                data = data_path # Assumed to be array if not path
+
+            processed_data, quality = self.run_preprocessing(data, system_info or {})
+            
+            return {
+                "detailed_analysis": f"1D Preprocessing complete. {quality.get('reasoning')}",
+                "scientific_claims": [], # Preprocessors don't make scientific claims
+                "data_quality": quality,
+                "status": "success",
+            }
+        except Exception as e:
+            self.logger.error(f"Curve analysis failed: {e}")
+            return {"error": str(e)}
 
     def run_preprocessing(self, curve_data: np.ndarray, system_info: Dict[str, Any]) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         Runs the full 1D pre-processing pipeline.
         
-        Args:
-            curve_data: A (N, 2) numpy array [X, Y].
-            system_info: The metadata dictionary.
-            
-        Returns:
-            A tuple of (processed_data, data_quality_dict).
         """
         if curve_data.ndim != 2 or curve_data.shape[1] != 2:
             self.logger.error(f"Input data must be 2D (N, 2), but got {curve_data.shape}. Skipping processing.")
@@ -500,7 +518,7 @@ class CurvePreprocessingAgent(BaseAnalysisAgent):
                 processed_data = curve_data
                 data_quality["reasoning"] = f"CUSTOM 1D SCRIPT FAILED: {e}"
 
-        else: # Stadnard path
+        else: # Standard path
             self.logger.info("No custom instruction. Running LLM-guided standard 1D processing.")
             
             # 1. Calculate stats (needed for the LLM)
@@ -637,11 +655,15 @@ class CurvePreprocessingAgent(BaseAnalysisAgent):
         match = re.search(r"```(?:python)?\n(.*?)\n```", script_content, re.DOTALL | re.IGNORECASE)
         if match:
             return match.group(1).strip()
+        
         if script_content.lower().startswith("python"):
-            # ... (omitted for brevity, just copy from your hyperspectral agent) ...
-            pass
+            potential_code = script_content[len("python"):].strip()
+            if potential_code.startswith(("import ", "def ", "#")):
+                return potential_code
+        
         if script_content.startswith(("import ", "def ", "#")):
             return script_content
+
         self.logger.error(f"LLM response did not contain a recognizable Python code block: {script_content[:300]}")
         raise ValueError("LLM failed to generate Python script in a recognizable format.")
 
@@ -667,7 +689,6 @@ class CurvePreprocessingAgent(BaseAnalysisAgent):
     ) -> dict:
         """
         Generates and executes the custom 1D script, with a retry loop.
-        (This is copied from the 3D agent, but calls the 1D-specific prompts)
         """
         last_error = "No script generated yet."
         custom_script = None

@@ -28,6 +28,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                  api_key: str | None = None,
                  model_name: str = "gemini-3-pro-preview", 
                  base_url: str | None = None,
+                 output_dir: str = "curve_analysis_output",
                  # Deprecated params
                  google_api_key: str | None = None, 
                  local_model: str = None,
@@ -36,7 +37,6 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                  run_preprocessing: bool = True,
                  enable_human_feedback: bool = True, 
                  executor_timeout: int = 60,  
-                 output_dir: str = "curve_analysis_output", 
                  max_wait_time: int = 1000, 
                  **kwargs):
         
@@ -50,11 +50,13 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             api_key=self.api_key,
             model_name=model_name,
             base_url=self.base_url,
+            output_dir=output_dir,
             enable_human_feedback=enable_human_feedback
         )
 
-        self.output_dir = os.path.abspath(output_dir)
-        os.makedirs(self.output_dir, exist_ok=True)
+        self.agent_type = "curve_fitting"
+
+        self.output_dir = self.output_dir.resolve()
         
         # --- Dependency Initialization ---
         self.executor = ScriptExecutor(timeout=executor_timeout, enforce_sandbox=False)
@@ -163,8 +165,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     self.logger.warning(f"Could not clean up temp file {processed_data_path}: {e}")
 
     def analyze_for_claims(self, data_path: str, system_info: dict = None, **kwargs) -> dict:
-        self.logger.info(f"Starting advanced curve analysis with fitting for: {data_path}")
         
+        # 1. Init
+        self._init_state(data_path=data_path, system_info=system_info)
+        self.logger.info(f"Starting curve analysis: {data_path}")
+
+        # 2. Run Pipeline
         result_json, error_dict = self._run_analysis_pipeline(
             data_path, 
             system_info, 
@@ -172,13 +178,17 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         )
 
         if error_dict:
-            return {"status": "error", "message": error_dict.get("error", "Pipeline failed"), "details": error_dict.get("details")}
+            self._log_action("curve_fit", {"data": data_path}, {"error": error_dict})
+            return {"status": "error", "message": error_dict.get("error")}
         if not result_json:
             return {"status": "error", "message": "Analysis failed unexpectedly, no results returned."}
 
         initial_result = {
             "detailed_analysis": result_json.get("detailed_analysis"),
-            "scientific_claims": self._validate_scientific_claims(result_json.get("scientific_claims", []))
+            "scientific_claims": self._validate_scientific_claims(result_json.get("scientific_claims", [])),
+            # Pass these through so they aren't lost during simple feedback cycles
+            "fitting_parameters": result_json.get("fitting_parameters"),
+            "literature_files": result_json.get("literature_files")
         }
         
         final_result = self._apply_feedback_if_enabled(initial_result, system_info=system_info)
@@ -187,6 +197,18 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         final_result["status"] = "success"
         final_result["fitting_parameters"] = result_json.get("fitting_parameters")
         final_result["literature_files"] = result_json.get("literature_files")
+
+        # 5. Log Action
+        model_type = "unknown"
+        if final_result.get("fitting_parameters"):
+             model_type = final_result["fitting_parameters"].get("model_type", "unknown")
+
+        self._log_action(
+            action="curve_fit",
+            input_ctx={"data": data_path},
+            result=final_result,
+            rationale=f"Fitted model: {model_type}"
+        )
 
         return final_result
 

@@ -31,7 +31,6 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
 
     def __init__(self,
-                 # New standard params
                  api_key: str | None = None,
                  model_name: str = "gemini-3-pro-preview",
                  base_url: str | None = None,
@@ -40,42 +39,66 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                  local_model: str = None,
                  # Agent specific params
                  sam_settings: dict | None = None,
-                 enable_human_feedback: bool = False):
+                 enable_human_feedback: bool = False,
+                 output_dir: str = "sam_output"): # Default output directory
         
         # Normalize Params
         self.api_key, self.base_url = normalize_params(
             api_key, google_api_key, base_url, local_model, source="SAMMicroscopyAnalysisAgent"
         )
         
-        # Initialize Base
         super().__init__(
-            api_key=self.api_key,
-            model_name=model_name,
-            base_url=self.base_url,
+            api_key=self.api_key, 
+            model_name=model_name, 
+            base_url=self.base_url, 
+            output_dir=output_dir,
             enable_human_feedback=enable_human_feedback
         )
         
+        self.agent_type = "sam_microscopy"
+
+        # 1. Resolve main output directory to absolute path
+        self.output_dir = self.output_dir.resolve()
+        
+        # 2. Define sub-directories nested INSIDE the main output_dir
+        viz_dir = self.output_dir / "sam_visualizations"
+        data_dir = self.output_dir / "sam_analysis"
+        
+        # 3. Create them immediately
+        viz_dir.mkdir(parents=True, exist_ok=True)
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        # 4. Prepare Settings and INJECT paths
         self.settings = sam_settings if sam_settings else {}
-        # Ensure SAM is enabled by default if settings are provided
         if 'SAM_ENABLED' not in self.settings:
             self.settings['SAM_ENABLED'] = True 
         
+        # Overwrite defaults to force nesting
+        self.settings['visualization_dir'] = str(viz_dir)
+        self.settings['output_dir'] = str(data_dir)
+
         # --- Pipeline Initialization ---
         self.pipeline = []
         if self.settings.get('SAM_ENABLED', True):
             self.pipeline = create_sam_pipeline(
                 model=self.model,
                 logger=self.logger,
-                generation_config=self.generation_config, # None from BaseAgent
+                generation_config=self.generation_config, 
                 safety_settings=self.safety_settings,
-                settings=self.settings,
+                settings=self.settings, # Now contains nested paths
                 parse_fn=self._parse_llm_response,
                 store_fn=self._store_analysis_images
             )
-            self.logger.info(f"SAMMicroscopyAnalysisAgent initialized with a pipeline of {len(self.pipeline)} controllers.")
+            self.logger.info(f"SAMMicroscopyAnalysisAgent initialized. Outputs will be saved to: {self.output_dir}")
         else:
-             self.logger.warning("SAMMicroscopyAnalysisAgent initialized, but 'SAM_ENABLED' is False. Agent will not run analysis.")
+             self.logger.warning("SAMMicroscopyAnalysisAgent initialized, but 'SAM_ENABLED' is False.")
 
+    def _get_initial_state_fields(self) -> dict:
+        return {
+            "current_image": None,
+            "pipeline_type": "sam",
+            "particles_detected": 0
+        }
 
     def _run_analysis_pipeline(
         self, 
@@ -143,30 +166,46 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         """
         Analyze microscopy image to generate scientific claims.
         """
+        # 1. Initialize State
+        self._init_state(current_image=image_path, system_info=system_info)
+
+        # 2. Run Pipeline
         result_json, error_dict = self._run_analysis_pipeline(
             image_path, 
             system_info, 
             SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS
         )
 
-        if error_dict: return error_dict
-        if result_json is None: return {"error": "Analysis for claims failed unexpectedly."}
+        if error_dict: 
+            self._log_action("analyze_for_claims", {"image": image_path}, {"error": error_dict})
+            return error_dict
+
+        if result_json is None: 
+            return {"error": "Analysis for claims failed unexpectedly."}
 
         valid_claims = self._validate_scientific_claims(result_json.get("scientific_claims", []))
         
-        if not valid_claims:
-            self.logger.warning("Pipeline ran but LLM returned no valid claims.")
-            
         initial_result = {
             "detailed_analysis": result_json.get("detailed_analysis", "Analysis complete, but no text was returned."), 
             "scientific_claims": valid_claims
         }
         
-        return self._apply_feedback_if_enabled(
+        # 3. Apply Feedback
+        final_result = self._apply_feedback_if_enabled(
             initial_result, 
             image_path=image_path, 
             system_info=system_info
         )
+
+        # 4. Log Success
+        self._log_action(
+            action="analyze_for_claims",
+            input_ctx={"image": image_path, "system_info": system_info},
+            result=final_result,
+            rationale="SAM microscopy analysis pipeline completed."
+        )
+
+        return final_result
     
     def _get_claims_instruction_prompt(self) -> str:
         return SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS
