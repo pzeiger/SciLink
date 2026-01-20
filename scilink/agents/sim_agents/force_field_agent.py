@@ -5,9 +5,15 @@ import json
 import tempfile
 import subprocess
 from typing import Dict, Any, List, Optional, Tuple, Union
-import google.generativeai as genai
 from MDAnalysis import Universe
 import numpy as np
+
+from ...auth import get_internal_proxy_key
+from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
+
+from ._deprecation import normalize_params
+
 
 class ForceFieldAgent:
     """
@@ -22,21 +28,27 @@ class ForceFieldAgent:
     The agent works in conjunction with other simulation agents in the pipeline.
     """
     
-    def __init__(self, working_dir: str, api_key: Optional[str] = None):
+    def __init__(self, 
+                 working_dir: str, 
+                 api_key: Optional[str] = None,
+                 model_name: str = "gemini-2.5-pro-preview-05-06",
+                 base_url: Optional[str] = None,
+                 # Legacy parameters
+                 local_model: Optional[str] = None,
+                 google_api_key: Optional[str] = None):
         """
         Initialize the ForceFieldAgent.
         
         Args:
             working_dir: Directory for output files and intermediate calculations
-            api_key: API key for Google Gemini API (optional if set in environment)
+            api_key: API key for the LLM provider
+            model_name: Model name to use
+            base_url: Optional base URL for internal proxy
+            local_model: Deprecated, use base_url instead
+            google_api_key: Deprecated, use api_key instead
         """
         self.working_dir = working_dir
         os.makedirs(working_dir, exist_ok=True)
-        
-        # Set up API access
-        self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
-        genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel("gemini-2.5-pro-preview-05-06")
         
         # Configure logging
         self.logger = logging.getLogger(__name__)
@@ -46,6 +58,40 @@ class ForceFieldAgent:
             formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
             handler.setFormatter(formatter)
             self.logger.addHandler(handler)
+
+        # Normalize deprecated parameters
+        api_key, base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source="ForceFieldAgent"
+        )
+        
+        # Initialize model using wrapper structure
+        if base_url:
+            # Internal Proxy
+            if api_key is None:
+                api_key = get_internal_proxy_key()
+            
+            if not api_key:
+                raise ValueError("API key required for internal proxy.")
+
+            self.logger.info(f"ForceFieldAgent using internal proxy: {base_url}")
+            self.model = OpenAIAsGenerativeModel(
+                model=model_name,
+                api_key=api_key,
+                base_url=base_url
+            )
+        else:
+            # Public / LiteLLM
+            self.logger.info(f"ForceFieldAgent using LiteLLM: {model_name}")
+            self.model = LiteLLMGenerativeModel(
+                model=model_name,
+                api_key=api_key
+            )
+        
+        self.generation_config = None
             
         # Force field databases and methods
         self.ff_databases = {
@@ -78,6 +124,61 @@ class ForceFieldAgent:
                 "strengths": ["Highest accuracy", "Novel molecules"]
             }
         }
+
+    def _generate_json(self, prompt: str) -> dict:
+        """Generate JSON response from LLM."""
+        self.logger.info("Sending request to LLM...")
+        
+        try:
+            response = self.model.generate_content(prompt, generation_config=self.generation_config)
+            
+            if not response or not response.text:
+                raise ValueError("Empty response from LLM")
+            
+            raw_text = response.text.strip()
+            
+            # Handle markdown code blocks if present
+            if raw_text.startswith("```"):
+                lines = raw_text.split("\n")
+                json_lines = []
+                in_block = False
+                for line in lines:
+                    if line.startswith("```"):
+                        in_block = not in_block
+                        continue
+                    if in_block:
+                        json_lines.append(line)
+                raw_text = "\n".join(json_lines)
+            
+            # Try to find JSON object if there's extra text
+            if not raw_text.startswith("{"):
+                start = raw_text.find("{")
+                end = raw_text.rfind("}") + 1
+                if start != -1 and end > start:
+                    raw_text = raw_text[start:end]
+            
+            return json.loads(raw_text)
+            
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Failed to parse JSON response: {e}")
+            raise
+        except Exception as e:
+            self.logger.exception(f"Error during LLM content generation: {e}")
+            raise
+
+    def _generate_text(self, prompt: str) -> str:
+        """Generate text response from LLM."""
+        try:
+            response = self.model.generate_content(prompt, generation_config=self.generation_config)
+            
+            if not response or not response.text:
+                raise ValueError("Empty response from LLM")
+            
+            return response.text.strip()
+            
+        except Exception as e:
+            self.logger.exception(f"Error during LLM content generation: {e}")
+            raise
         
     def select_force_field(self, 
                          pdb_file: str, 
@@ -596,7 +697,6 @@ class ForceFieldAgent:
         5. Recent advancements in force field development
         
         Provide your response as JSON with this structure:
-        ```json
         {{
             "force_field": "Name of recommended force field",
             "compatible_water_model": "Recommended water model",
@@ -605,15 +705,11 @@ class ForceFieldAgent:
             "cautions": "Any limitations or issues to be aware of",
             "parameter_availability": "Ease of obtaining parameters (high/medium/low)"
         }}
-        ```
         Include only the JSON response with no additional text.
         """
         
         try:
-            # Generate response from LLM
-            generation_config = {"response_mime_type": "application/json"}
-            response = self.model.generate_content(prompt, generation_config=generation_config)
-            ff_selection = json.loads(response.text)
+            ff_selection = self._generate_json(prompt)
             
             # Ensure all expected fields are present
             ff_selection.setdefault("force_field", "AMBER ff14SB")
@@ -690,7 +786,6 @@ class ForceFieldAgent:
         5. Availability of QM-level parameterization tools if needed
         
         Provide your response as JSON with this structure:
-        ```json
         {{
             "method": "database|analogy|quantum",
             "justification": "Detailed scientific explanation for this choice",
@@ -700,15 +795,11 @@ class ForceFieldAgent:
                 "Detailed step-by-step approaches to obtain parameters"
             ]
         }}
-        ```
         Include only the JSON response with no additional text.
         """
         
         try:
-            # Generate response from LLM
-            generation_config = {"response_mime_type": "application/json"}
-            response = self.model.generate_content(prompt, generation_config=generation_config)
-            param_method = json.loads(response.text)
+            param_method = self._generate_json(prompt)
             
             # Ensure all expected fields are present
             param_method.setdefault("method", "database")
@@ -1125,7 +1216,6 @@ class ForceFieldAgent:
         For each parameter type, provide values compatible with LAMMPS syntax and the selected force field.
         
         Please provide parameters in the following JSON format:
-        ```json
         {{
             "atom_types": {{
                 "1": {{"name": "O", "mass": 15.9994, "description": "Water oxygen", "charge": -0.8476, "epsilon": 0.1553, "sigma": 3.166}},
@@ -1145,17 +1235,13 @@ class ForceFieldAgent:
                 "cutoff": 10.0
             }}
         }}
-        ```
         
         Include only parameters relevant to the system composition. The parameters should be scientifically accurate for the {force_field} force field.
         Include only the JSON response with no additional text.
         """
         
         try:
-            # Generate response from LLM
-            generation_config = {"response_mime_type": "application/json"}
-            response = self.model.generate_content(prompt, generation_config=generation_config)
-            parameters = json.loads(response.text)
+            parameters = self._generate_json(prompt)
             
             # Ensure all parameter categories exist
             for category in ["atom_types", "bonds", "angles", "dihedrals", "nonbonded_terms"]:
@@ -1218,7 +1304,6 @@ class ForceFieldAgent:
             Adjust parameters like bond lengths, angles, charges, and non-bonded terms based on chemical intuition and the force field paradigm.
             
             Please provide enhanced parameters in this JSON format:
-            ```json
             {{
                 "atom_types": {{
                     "1": {{"name": "O", "mass": 15.9994, "description": "Water oxygen", "charge": -0.8476, "epsilon": 0.1553, "sigma": 3.166}}
@@ -1230,7 +1315,6 @@ class ForceFieldAgent:
                     "1": {{"type": "harmonic", "atoms": ["H", "O", "H"], "k": 55.0, "theta0": 109.47, "description": "H-O-H angle in water"}}
                 }}
             }}
-            ```
             Include only the JSON response with no additional text.
             """
             
@@ -1253,7 +1337,6 @@ class ForceFieldAgent:
             and dihedral parameters that reflect the electronic structure of the molecules.
             
             Please provide quantum-derived parameters in this JSON format:
-            ```json
             {{
                 "atom_types": {{
                     "1": {{"name": "O", "mass": 15.9994, "description": "Water oxygen", "charge": -0.8476, "epsilon": 0.1553, "sigma": 3.166}}
@@ -1265,7 +1348,6 @@ class ForceFieldAgent:
                     "1": {{"type": "harmonic", "atoms": ["H", "O", "H"], "k": 55.0, "theta0": 109.47, "description": "H-O-H angle in water"}}
                 }}
             }}
-            ```
             Include only the JSON response with no additional text.
             """
             
@@ -1274,10 +1356,7 @@ class ForceFieldAgent:
             return parameters
             
         try:
-            # Generate response from LLM
-            generation_config = {"response_mime_type": "application/json"}
-            response = self.model.generate_content(prompt, generation_config=generation_config)
-            enhanced_params = json.loads(response.text)
+            enhanced_params = self._generate_json(prompt)
             
             # Merge enhanced parameters with original parameters
             for category in ["atom_types", "bonds", "angles", "dihedrals"]:
@@ -1531,7 +1610,6 @@ class ForceFieldAgent:
         10. kspace_style (allowed, as it defines long-range interaction handling) 
 
         Format the output as a JSON object with the main parameter file content and any additional files needed:
-        ```json
         {{
             "main": "# LAMMPS parameters for {force_field}\\n\\npair_style lj/cut/coul/long 10.0\\n...",
             "additional": {{
@@ -1539,17 +1617,13 @@ class ForceFieldAgent:
                 "other_file": "# Other parameters\\n\\n..."
             }}
         }}
-        ```
         
         Make sure the LAMMPS syntax is correct and all parameters are scientifically accurate for the {force_field} force field.
         Include only the JSON response with no additional text.
         """
         
         try:
-            # Generate response from LLM
-            generation_config = {"response_mime_type": "application/json"}
-            response = self.model.generate_content(prompt, generation_config=generation_config)
-            param_files = json.loads(response.text)
+            param_files = self._generate_json(prompt)
             
             # Ensure main content exists
             if "main" not in param_files:
@@ -1732,30 +1806,30 @@ class ForceFieldAgent:
             
         return "\n".join(lines)
 
-def _fix_lammps_syntax(self, lammps_text: str) -> str:
-    """
-    Fix common LAMMPS syntax issues in generated parameters.
-    
-    Args:
-        lammps_text: LAMMPS parameter text
+    def _fix_lammps_syntax(self, lammps_text: str) -> str:
+        """
+        Fix common LAMMPS syntax issues in generated parameters.
         
-    Returns:
-        Corrected LAMMPS parameter text
-    """
-    lines = lammps_text.split('\n')
-    fixed_lines = []
-    
-    for line in lines:
-        # Fix missing spaces after commas
-        line = re.sub(r',(?=\S)', ', ', line)
-        
-        # Fix incorrect comment syntax
-        line = re.sub(r'(//.+)$', r'#\1', line)
-        
-        # Fix invalid syntax in pair_coeff commands
-        if line.strip().startswith("pair_coeff") and re.search(r'pair_coeff\s+\*\s+\*\s+[\d\.]+\s*$', line):
-            line = line + " # Missing sigma parameter"
+        Args:
+            lammps_text: LAMMPS parameter text
             
-        fixed_lines.append(line)
+        Returns:
+            Corrected LAMMPS parameter text
+        """
+        lines = lammps_text.split('\n')
+        fixed_lines = []
         
-    return '\n'.join(fixed_lines)
+        for line in lines:
+            # Fix missing spaces after commas
+            line = re.sub(r',(?=\S)', ', ', line)
+            
+            # Fix incorrect comment syntax
+            line = re.sub(r'(//.+)$', r'#\1', line)
+            
+            # Fix invalid syntax in pair_coeff commands
+            if line.strip().startswith("pair_coeff") and re.search(r'pair_coeff\s+\*\s+\*\s+[\d\.]+\s*$', line):
+                line = line + " # Missing sigma parameter"
+                
+            fixed_lines.append(line)
+            
+        return '\n'.join(fixed_lines)
