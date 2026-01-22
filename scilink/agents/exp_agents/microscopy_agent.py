@@ -371,7 +371,14 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     SeriesBatchController(self.logger, self.settings),
                     SummaryScriptController(self.model, self.logger, self.generation_config, 
                         self.safety_settings, self._parse_llm_response, self.settings),
-                    ReportGenerationController(self.logger, self.settings)
+                    ReportGenerationController(
+                        self.model, 
+                        self.logger, 
+                        self.generation_config, 
+                        self.safety_settings, 
+                        self._parse_llm_response, 
+                        self.settings
+                    )
                 ]
             else:
                 pipeline = [
@@ -382,7 +389,14 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     SeriesBatchController(self.logger, self.settings),
                     SummaryScriptController(self.model, self.logger, self.generation_config, 
                         self.safety_settings, self._parse_llm_response,self.settings),
-                    ReportGenerationController(self.logger, self.settings)
+                    ReportGenerationController(
+                        self.model, 
+                        self.logger, 
+                        self.generation_config, 
+                        self.safety_settings, 
+                        self._parse_llm_response, 
+                        self.settings
+                    )
                 ]
             
             # Calculate nm_per_pixel
