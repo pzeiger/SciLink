@@ -4,7 +4,6 @@ from .atomistic_microscopy_agent import AtomisticMicroscopyAnalysisAgent
 from .hyperspectral_analysis_agent import HyperspectralAnalysisAgent
 from .orchestrator_agent import OrchestratorAgent, AGENT_MAP
 from .curve_fitting_agent import CurveFittingAgent
-from .holistic_microscopy_agent import HolisticMicroscopyAgent
 
 from .central_microscopy_agent import CentralMicroscopyAgent
 
@@ -23,7 +22,6 @@ __all__ = [
     'AtomisticMicroscopyAnalysisAgent',
     'HyperspectralAnalysisAgent',
     'CurveFittingAgent',
-    'HolisticMicroscopyAgent',
     'OrchestratorAgent',
     'CentralMicroscopyAgent',
     'PipelineSelector',

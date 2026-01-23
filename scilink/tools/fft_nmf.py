@@ -1,101 +1,246 @@
 import os
-import logging
 import numpy as np
-import matplotlib.pyplot as plt
-from datetime import datetime
-from atomai.stat import SlidingFFTNMF
+from scipy import fftpack, ndimage
+from sklearn.decomposition import NMF
+from skimage.util import view_as_windows
+from skimage import io, color
+import warnings
 
-def run_fft_nmf_analysis(
-    image_path: str,
-    window_size: int,
-    n_components: int,
-    window_step: int,
-    fft_nmf_settings: dict,
-    logger: logging.Logger
-) -> tuple[np.ndarray | None, np.ndarray | None]:
-    """
-    Run sliding FFT + NMF analysis using AtomAI.
-    This is a standalone tool callable by any agent.
-    """
-    try:        
-        fft_output_dir = fft_nmf_settings.get('output_dir', 'microscopy_analysis')
-        os.makedirs(fft_output_dir, exist_ok=True)
-        
-        base_name = os.path.splitext(os.path.basename(image_path))[0]
-        safe_base_name = "".join(c if c.isalnum() else "_" for c in base_name)
-        fft_output_base = os.path.join(fft_output_dir, f"{safe_base_name}_output")
-        
-        analyzer = SlidingFFTNMF(
-            window_size_x=window_size if window_size and window_size > 0 else None,
-            window_size_y=window_size if window_size and window_size > 0 else None,
-            window_step_x=window_step if window_step and window_step > 0 else None,
-            window_step_y=window_step if window_step and window_step > 0 else None,
-            interpolation_factor=fft_nmf_settings.get('interpolation_factor', 2),
-            zoom_factor=fft_nmf_settings.get('zoom_factor', 2),
-            hamming_filter=fft_nmf_settings.get('hamming_filter', True),
-            components=n_components
-        )
-        
-        # atomai's 'analyze_image' can take the path directly
-        components, abundances = analyzer.analyze_image(image_path, output_path=fft_output_base)
-        
-        logger.info(f"   (Tool Info: FFT-NMF analysis complete. Components: {components.shape})")
-        
-        _save_fft_nmf_plots(
-            components, 
-            abundances, 
-            image_path, 
-            fft_nmf_settings, 
-            logger
-        )
-
-        return components, abundances
-        
-    except Exception as fft_e:
-        logger.error(f"❌ Tool Failed: AtomAI Sliding FFT + NMF analysis failed: {fft_e}", exc_info=True)
-        return None, None
-
-def _save_fft_nmf_plots(
-    components: np.ndarray, 
-    abundances: np.ndarray, 
-    image_path: str, 
-    fft_nmf_settings: dict, 
-    logger: logging.Logger
-):
-    """Creates and saves nice plots for each NMF component and its abundance map."""
+# --- Helper Function for Standalone Usage ---
+def load_image(file_path):
+    """Simple wrapper to load images using skimage."""
     try:
-        output_dir = fft_nmf_settings.get('visualization_dir', 'fft_nmf_visualizations')
-        os.makedirs(output_dir, exist_ok=True)
-        
-        num_components = components.shape[0]
-        logger.info(f"   (Tool Info: Creating and saving {num_components} NMF visualization plots...)")
-
-        base_name = os.path.splitext(os.path.basename(image_path))[0]
-        safe_base_name = "".join(c if c.isalnum() else "_" for c in base_name)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        for i in range(num_components):
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-            fig.suptitle(f'NMF Result {i+1}/{num_components}', fontsize=16)
-
-            comp_img = np.log1p(components[i]) # Log-scale for viz
-            ax1.imshow(comp_img, cmap='inferno')
-            ax1.set_title(f'Component {i+1} (FFT Pattern)')
-            ax1.axis('off')
-
-            im = ax2.imshow(abundances[i], cmap='inferno')
-            ax2.set_title(f'Abundance Map {i+1} (Spatial Location)')
-            ax2.axis('off')
-            fig.colorbar(im, ax=ax2, label="Abundance", fraction=0.046, pad=0.04)
-
-            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-            
-            plot_filename = f"{safe_base_name}_nmf_plot_{i+1}_{timestamp}.png"
-            plot_filepath = os.path.join(output_dir, plot_filename)
-            plt.savefig(plot_filepath, dpi=150, bbox_inches='tight')
-            plt.close(fig)
-
-        logger.info(f"   (Tool Info: ✅ Saved NMF visualizations to: {output_dir})")
-
+        img = io.imread(file_path)
+        # Handle RGBA/RGB
+        if img.ndim == 3 and img.shape[2] in [3, 4]:
+            img = color.rgb2gray(img[:, :, :3])
+        return img
     except Exception as e:
-        logger.error(f"   (Tool Info: Failed to create or save NMF plots: {e})", exc_info=True)
+        raise ValueError(f"Could not load image at {file_path}: {e}")
+
+class SlidingFFTNMF:
+    def __init__(self, window_size_x=None, window_size_y=None, 
+                 window_step_x=None, window_step_y=None,
+                 interpolation_factor=2, zoom_factor=2, 
+                 hamming_filter=True, components=4):
+        """
+        Sliding Window FFT with NMF unmixing.
+        Supports both Single Images (2D) and Time-Series Stacks (3D).
+        """
+        self.window_size_x = window_size_x
+        self.window_size_y = window_size_y
+        self.window_step_x = window_step_x
+        self.window_step_y = window_step_y
+        
+        self.interpol_factor = interpolation_factor
+        self.zoom_factor = zoom_factor
+        self.hamming_filter = hamming_filter
+        self.n_components = components
+        
+        # Internal state
+        self.hamming_window = None
+        self.windows_shape = None # (n_frames, n_windows_y, n_windows_x)
+        self.fft_size = None
+        
+    def _calculate_window_params(self, image_shape):
+        """Auto-calculates window parameters based on the spatial dimensions (H, W)."""
+        # image_shape is expected to be (Height, Width) here
+        height, width = image_shape
+        
+        # 1. Defaults for Window Size
+        if self.window_size_x is None:
+            val = max(32, min(128, height // 8))
+            self.window_size_x = 2 ** int(np.log2(val))
+        if self.window_size_y is None:
+            val = max(32, min(128, width // 8))
+            self.window_size_y = 2 ** int(np.log2(val))
+            
+        # 2. Defaults for Step Size (25% overlap is standard)
+        if self.window_step_x is None:
+            self.window_step_x = max(1, self.window_size_x // 4)
+        if self.window_step_y is None:
+            self.window_step_y = max(1, self.window_size_y // 4)
+            
+        # 3. Create Hamming Window
+        bw2d = np.outer(np.hamming(self.window_size_x), np.ones(self.window_size_y))
+        self.hamming_window = np.sqrt(bw2d * bw2d.T)
+
+    def _extract_windows_from_frame(self, frame):
+        """Extracts sliding windows from a SINGLE 2D frame."""
+        # Pad if necessary
+        pad_h = max(0, self.window_size_x - frame.shape[0])
+        pad_w = max(0, self.window_size_y - frame.shape[1])
+        if pad_h > 0 or pad_w > 0:
+            frame = np.pad(frame, ((0, pad_h), (0, pad_w)), mode='constant')
+
+        window_shape = (self.window_size_x, self.window_size_y)
+        step = (self.window_step_x, self.window_step_y)
+        
+        # Extract windows: Shape becomes (n_win_y, n_win_x, win_h, win_w)
+        windows = view_as_windows(frame, window_shape, step=step)
+        
+        # Return flattened list of windows and the grid shape
+        grid_shape = windows.shape[:2]
+        windows_flat = windows.reshape(-1, self.window_size_x, self.window_size_y)
+        return windows_flat, grid_shape
+
+    def make_windows(self, data):
+        """
+        Extract windows from 2D (Single) or 3D (Series) data.
+        Performs GLOBAL normalization to preserve relative intensity changes.
+        """
+        data = data.astype(float)
+        
+        # 1. Global Normalization (Crucial for Time Series)
+        d_min, d_max = np.min(data), np.max(data)
+        if d_max > d_min:
+            data = (data - d_min) / (d_max - d_min)
+        else:
+            data = data - d_min # Handle flat images
+
+        # 2. Determine input type
+        if data.ndim == 2:
+            # Single Image: Add dummy time dimension -> (1, H, W)
+            data = data[np.newaxis, :, :]
+            self.is_series = False
+        elif data.ndim == 3:
+            # Time Series: (Time, H, W)
+            self.is_series = True
+        else:
+            raise ValueError(f"Input must be 2D or 3D array. Got {data.ndim}D")
+
+        # 3. Initialize Parameters based on first frame
+        self._calculate_window_params(data.shape[1:])
+        
+        all_windows = []
+        
+        # 4. Extract windows from every frame
+        for t in range(data.shape[0]):
+            windows, grid_shape = self._extract_windows_from_frame(data[t])
+            all_windows.append(windows)
+            
+        # Store grid shape for reconstruction: (Time, Grid_Y, Grid_X)
+        self.grid_shape = (data.shape[0], grid_shape[0], grid_shape[1])
+        
+        # Stack all windows into one massive array: (Total_Windows, H, W)
+        # Total_Windows = Time * Grid_Y * Grid_X
+        return np.vstack(all_windows)
+
+    def process_fft(self, windows):
+        """Compute FFT for a batch of windows."""
+        n_windows = windows.shape[0]
+        fft_results = []
+        
+        # Pre-calculate zoom indices to avoid doing it inside the loop
+        cx, cy = self.window_size_x // 2, self.window_size_y // 2
+        zoom_sz = max(1, self.window_size_x // (2 * self.zoom_factor))
+        x_sl = slice(max(0, cx - zoom_sz), min(self.window_size_x, cx + zoom_sz))
+        y_sl = slice(max(0, cy - zoom_sz), min(self.window_size_y, cy + zoom_sz))
+
+        for i in range(n_windows):
+            w = windows[i]
+            if self.hamming_filter:
+                w = w * self.hamming_window
+                
+            # FFT
+            fft_res = fftpack.fftshift(fftpack.fft2(w))
+            fft_mag = np.log1p(np.abs(fft_res)) # Log magnitude
+            
+            # Zoom
+            zoomed = fft_mag[x_sl, y_sl]
+            
+            # Interpolate (Optional)
+            if self.interpol_factor > 1:
+                zoomed = ndimage.zoom(zoomed, self.interpol_factor, order=1)
+                
+            fft_results.append(zoomed)
+            
+        # Stack and pad if necessary (though shapes should be uniform)
+        # We assume uniform shapes for efficiency here
+        self.fft_size = fft_results[0].shape
+        return np.array(fft_results)
+
+    def run_nmf(self, fft_data):
+        """
+        Run NMF on the stacked FFT data.
+        Returns reshaped components and abundances.
+        """
+        # Flatten: (N_Samples, H*W)
+        n_samples = fft_data.shape[0]
+        flat_data = fft_data.reshape(n_samples, -1)
+        
+        # Clean data
+        flat_data = np.nan_to_num(flat_data)
+        flat_data = np.maximum(0, flat_data)
+        
+        # Safety check for components
+        n_comps = min(self.n_components, n_samples, flat_data.shape[1])
+        if n_comps != self.n_components:
+            warnings.warn(f"Reduced components from {self.n_components} to {n_comps} due to data size.")
+            
+        # --- Run NMF ---
+        nmf = NMF(n_components=n_comps, init='random', random_state=42, max_iter=500)
+        W = nmf.fit_transform(flat_data) # Abundances (N_Samples, n_comps)
+        H = nmf.components_            # Components (n_comps, Features)
+        
+        # --- Reshape Results ---
+        
+        # 1. Components: (n_comps, fft_h, fft_w)
+        components_img = H.reshape(n_comps, self.fft_size[0], self.fft_size[1])
+        
+        # 2. Abundances: Reconstruct spatial/temporal structure
+        # W is currently (Time * Grid_Y * Grid_X, n_comps)
+        # We need to reshape it back to the grid structure
+        t_steps, grid_y, grid_x = self.grid_shape
+        
+        # Reshape to (Time, Grid_Y, Grid_X, n_comps)
+        abundances_grid = W.reshape(t_steps, grid_y, grid_x, n_comps)
+        
+        # Transpose to standard format: (Time, n_comps, Grid_Y, Grid_X)
+        abundances_final = abundances_grid.transpose(0, 3, 1, 2)
+        
+        # If input was single image, squeeze out the time dimension
+        if not self.is_series:
+            abundances_final = abundances_final[0] # -> (n_comps, Grid_Y, Grid_X)
+            
+        return components_img, abundances_final
+
+    def analyze(self, image_input, output_dir=None):
+        """
+        Main method. Handles file loading, analysis, and saving.
+        
+        Returns:
+            components: (n_comps, h, w)
+            abundances: (Time, n_comps, h, w) OR (n_comps, h, w) for single image
+        """
+        # 1. Load Data
+        if isinstance(image_input, str):
+            data = load_image(image_input)
+            if output_dir is None:
+                name = os.path.splitext(os.path.basename(image_input))[0]
+                output_dir = f"{name}_results"
+        elif isinstance(image_input, np.ndarray):
+            data = image_input
+            if output_dir is None:
+                output_dir = "nmf_results"
+        else:
+            raise TypeError("Input must be path (str) or array")
+            
+        # 2. Execute Pipeline
+        print(f"Processing data with shape {data.shape}...")
+        all_windows = self.make_windows(data)
+        
+        print(f"Computed {len(all_windows)} total windows. Running FFT...")
+        fft_data = self.process_fft(all_windows)
+        
+        print("Running NMF...")
+        components, abundances = self.run_nmf(fft_data)
+        
+        # 3. Save Results
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            np.save(os.path.join(output_dir, "components.npy"), components)
+            np.save(os.path.join(output_dir, "abundances.npy"), abundances)
+            print(f"Saved results to {output_dir}")
+            
+        return components, abundances

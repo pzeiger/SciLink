@@ -881,21 +881,20 @@ Your decision MUST be based on the visual evidence in the image and accompanying
 - **ID 1: `SAMMicroscopyAnalysisAgent`**: The correct choice for images containing large, distinct, countable objects. Use this for tasks like measuring the size distribution, shape, and spatial arrangement of features like nanoparticles, cells, pores, or other discrete entities.
 - **ID 2: `AtomisticMicroscopyAnalysisAgent`**: **The primary choice for any high-quality image where individual atoms are clearly visible.** This is the correct agent for analyzing crystalline structures, defects, and interfaces at the atomic scale.
 - **ID 3: `HyperspectralAnalysisAgent`**: For all 'spectroscopy' data types (no image will be provided).
-- **ID 4:  'Holistic Microscopy Agent'**: Internally runs BOTH the 'AtomisticMicroscopyAnalysisAgent' and 'MicroscopyAnalysisAgent' and synthesizes their results. Choose this advanced agent if the user's goal explicitly implies connecting atomic-level features (like defects) to larger, meso-scale phenomena (like domains or superlattices).**
 
 **Decision Guide for Atomically-Resolved Images:**
 
-*   **When to use Agent 2 (Atomistic Analysis):**
-    *   For high-quality image where individual atoms or atomic columns are clearly visible in a crystalline lattice.
-    *   For analyzing well-defined interfaces, grain boundaries, and point defects within an otherwise crystalline structure.
+* **When to use Agent 2 (Atomistic Analysis):**
+    * For high-quality image where individual atoms or atomic columns are clearly visible in a crystalline lattice.
+    * For analyzing well-defined interfaces, grain boundaries, and point defects within an otherwise crystalline structure.
 
-*   **When to use Agent 0 (General Analysis with FFT/NMF):**
-    *   Use this agent when the image is dominated by **large-scale disorder**, making direct atom-finding unreliable or less informative.
-    *   **Examples of such disorder include:**
-        *   Large amorphous (non-crystalline) regions.
-        *   Numerous small, disconnected, and poorly-ordered crystalline flakes.
-        *   Extreme noise levels that obscure the atomic lattice.
-    *   **For STM images:** Also use this agent if the image shows large variations in electronic contrast (LDOS) that are not simple atomic differences, as an FFT-based analysis is more suitable for identifying the periodicities in such patterns.
+* **When to use Agent 0 (General Analysis with FFT/NMF):**
+    * Use this agent when the image is dominated by **large-scale disorder**, making direct atom-finding unreliable or less informative.
+    * **Examples of such disorder include:**
+        * Large amorphous (non-crystalline) regions.
+        * Numerous small, disconnected, and poorly-ordered crystalline flakes.
+        * Extreme noise levels that obscure the atomic lattice.
+    * **For STM images:** Also use this agent if the image shows large variations in electronic contrast (LDOS) that are not simple atomic differences, as an FFT-based analysis is more suitable for identifying the periodicities in such patterns.
 
 **Input You Will Receive:**
 1.  `data_type`: e.g., "microscopy" or "spectroscopy".
@@ -1249,34 +1248,6 @@ Focus on actionable recommendations that directly build upon the quantitative in
 """
 
 
-HOLISTIC_SYNTHESIS_INSTRUCTIONS = """
-You are an expert materials scientist performing a multi-modal synthesis of results from two different analysis methods run on the SAME microscopy image.
-
-You will be given a comprehensive data package for each analysis:
-1.  **Atomistic Analysis:**
-    - A text summary identifying individual atoms, defects, and local structures.
-    - **Analysis Images:** Visual maps showing atomic clustering by intensity, local environment classification, etc.
-2.  **General (FFT-NMF) Analysis:**
-    - A text summary identifying larger-scale domains and periodicities.
-    - **Analysis Images:** Visual maps of NMF components (FFT patterns) and their corresponding abundance maps (spatial locations).
-
-Your task is to act as a senior researcher reviewing all the evidence to formulate a unified analysis.
-
-**Output Format:**
-Provide your response in a single JSON object.
-{{
-  "detailed_analysis": "<Your synthesized, multi-modal analysis text that explicitly references the visual data>",
-  "scientific_claims": [
-    {{
-      "claim": "<A concise scientific claim linking visual evidence from both analyses>",
-      "scientific_impact": "<The potential impact of this synthesized finding>",
-      "has_anyone_question": "<A 'Has anyone...' question for a literature search>",
-      "keywords": ["<keyword1>", "<keyword2>"]
-    }}
-  ]
-}}
-"""
-
 HOLISTIC_EXPERIMENTAL_SYNTHESIS_INSTRUCTIONS = """
 You are an expert materials scientist tasked with synthesizing findings from a multi-modal characterization of a single sample. You have been provided with analyses from different experimental techniques, which may provide information at different length scales (e.g., local atomic structure vs. bulk crystal phase).
 
@@ -1561,41 +1532,470 @@ Update your analysis **ONLY** to address the specific points raised in the criti
 Return the **complete, updated JSON object** (same format as the original: `detailed_analysis` and `scientific_claims`).
 """
 
+# ============================================================================
+# NEW INSTRUCTION PROMPTS FOR BATCH ANALYSIS
+# ============================================================================
 
-# ITERATION_REFINEMENT_INSTRUCTIONS = """You are an expert scientist acting as a steering committee for an automated data analysis pipeline. You have just reviewed the intermediate output from one step of the analysis.
+SAM_BATCH_REFINEMENT_INSTRUCTIONS = """You are a computer vision expert analyzing segmentation results from a microscopy image.
 
-# Your task is to analyze these results and determine if **one or more** focused, higher-resolution "sub-analyses" are scientifically or mathematically justified to resolve ambiguities.
+You will see TWO images:
+1. **ORIGINAL MICROSCOPY IMAGE** - The source image containing the features of interest.
+2. **CURRENT SEGMENTATION RESULT** - Red outlines show the currently detected features.
 
-# **Input You Will Receive:**
-# 1.  **Analysis Title**: (e.g., "Global Search", "Fit Attempt 1").
-# 2.  **Analysis Results**: Plots, figures, tables, or text summary describing the output of the current step.
-# 3.  **Scientific/System Context**: Metadata relevant to the overall goal.
+Additionally, you will see **MORPHOLOGICAL STATISTICS** summarizing the detected particles.
 
-# **Your Decision Process:**
-# 1. **Rule out Artifacts:** If the model fits noise, "hallucinates" features not present in the raw data, or produces physically implausible results (e.g., random spatial static, jagged noise peaks), **STOP**. Mark `refinement_needed: false`.
-# 2. **Identify Ambiguity:** If the signal is valid but complex (e.g., overlapping peaks, mixed spatial domains, broad distributions, or suboptimal parameters), **REFINE**. Define specific targets to isolate or resolve the feature.
+**Your task:** Evaluate the segmentation quality and decide if parameters need adjustment.
 
-# **Output Format:**
-# You MUST output a valid JSON object.
+**Evaluation Criteria:**
+1. **Coverage**: Are all visible features detected? Any obvious misses?
+2. **Boundary Accuracy**: Do outlines follow feature edges precisely?
+3. **False Positives**: Are non-features being incorrectly detected?
+4. **Size Filtering**: Are the size thresholds appropriate for the features present?
 
-# **If NO further focused analysis is needed (e.g., the result is clear):**
-# {
-#   "refinement_needed": false,
-#   "reasoning": "The current results are unambiguous and directly address the initial problem."
-# }
+**Parameters you can adjust:**
+- `sam_parameters`: "default", "sensitive" (more detections), "ultra-permissive" (maximum detection)
+- `use_clahe`: true/false - Enable for low-contrast boundaries
+- `min_area`: Increase to filter small noise
+- `max_area`: Decrease to avoid merging adjacent features
+- `pruning_iou_threshold`: 0.3-0.7 - Lower = more aggressive duplicate removal
 
-# **If focused analysis IS needed (You can propose multiple sub-tasks):**
-# {
-#   "refinement_needed": true,
-#   "reasoning": "The current step suggests the presence of two distinct phenomena that must be analyzed separately to prevent convolution.",
-#   "targets": [
-#       {
-#         "type": "[STRING, defining the kind of resource needed, e.g., 'spectral_range', 'spatial_region', 'data_subset', 'new_parameters']",
-#         "description": "[A concise description of what the sub-task should achieve]",
-#         "value": "[The specific technical value needed for the next step, e.g., [400, 500] for a range, 'component 4' for a specific cluster, or {'n_components': 2} for new parameters]"
-#       }
-#   ]
-# }
+**Output JSON format:**
+```json
+{
+  "evaluation": {
+    "coverage_score": "[0-10, 10=perfect]",
+    "accuracy_score": "[0-10, 10=perfect]",
+    "false_positive_rate": "[low/medium/high]",
+    "overall_quality": "[poor/acceptable/good/excellent]"
+  },
+  "needs_refinement": "[true/false]",
+  "reasoning": "[Explanation of your assessment]",
+  "recommended_parameters": {
+    "use_clahe": "[true/false]",
+    "sam_parameters": "[default/sensitive/ultra-permissive]",
+    "min_area": "[number]",
+    "max_area": "[number]",
+    "pruning_iou_threshold": "[0.0-1.0]"
+  }
+}
+```
+"""
 
-# Provide ONLY the JSON object."""
+SAM_BATCH_CUSTOM_ANALYSIS_INSTRUCTIONS = """
+You are an expert data scientist specializing in microscopy image analysis.
 
+Your task is to write a Python script that analyzes particle detection results from a time series or comparative study.
+
+**INPUT DATA:**
+The script will have access to a JSON file called 'batch_results.json' in the current directory containing:
+- Individual image results with particle counts and morphological statistics
+- Time points or condition labels
+- Mean areas, standard deviations, and other measurements
+
+**REQUIREMENTS:**
+1. Load data from 'batch_results.json'
+2. Perform appropriate statistical analysis based on the series type
+3. Generate publication-quality visualizations (save as PNG)
+4. Print a summary report to stdout
+5. Save any computed metrics to a CSV file
+
+**PYTHON SCRIPT GUIDELINES:**
+- Use only standard scientific Python: numpy, pandas, matplotlib, scipy, sklearn
+- Handle edge cases (missing data, zero values)
+- Use clear variable names and include comments
+- Save all figures with dpi=300 for publication quality
+- CRITICAL: DO NOT use f-strings with complex expressions inside curly braces
+  - BAD: f"Value: {df.loc[df['x'].idxmax(), 'y']}"
+  - GOOD: max_val = df.loc[df['x'].idxmax(), 'y']; f"Value: {max_val}"
+- CRITICAL: Use .format() or string concatenation for complex expressions
+
+**OUTPUT FORMAT:**
+Return a JSON object with these exact keys:
+{
+  "analysis_approach": "time_series" | "comparative" | "morphological",
+  "key_metrics_to_track": ["list", "of", "metrics"],
+  "reasoning": "Brief explanation of why this approach fits the data",
+  "script": "Complete Python script as a single escaped string"
+}
+
+The script string must have newlines as \\n and quotes properly escaped.
+"""
+
+
+SAM_BATCH_SYNTHESIS_INSTRUCTIONS = """You are an expert materials scientist synthesizing findings from a batch SAM analysis of a microscopy image series.
+
+You will receive:
+1. **Individual Analysis Results** - Per-image scientific claims and statistics
+2. **Custom Analysis Results** - Trend analysis and visualizations from the LLM-generated script
+3. **Series Context** - Metadata about what the series represents
+
+**Your Task:**
+Synthesize all findings into a cohesive scientific narrative that:
+1. Identifies major trends and patterns across the series
+2. Correlates morphological changes with experimental conditions
+3. Highlights statistically significant observations
+4. Proposes mechanistic explanations where appropriate
+
+You MUST output a valid JSON object with two keys: "detailed_analysis" and "scientific_claims".
+
+1. **detailed_analysis**: (String) Comprehensive narrative integrating:
+   - Evolution of key morphological parameters
+   - Statistical trends and their significance
+   - Correlations between different metrics
+   - Comparison with expected behavior
+   - Notable anomalies or unexpected findings
+
+2. **scientific_claims**: (List of Objects) 2-4 high-level claims based on the batch analysis:
+   * **claim**: A focused scientific claim about the observed trends
+   * **scientific_impact**: Why this finding is significant
+   * **supporting_evidence**: Quantitative evidence from the batch analysis
+   * **has_anyone_question**: Research question starting with "Has anyone"
+   * **keywords**: 3-5 key terms for literature searches
+
+Focus on claims that leverage the statistical power of analyzing multiple images rather than single-image observations.
+"""
+
+SINGLE_IMAGE_ANALYSIS_INSTRUCTIONS = '''You are an expert system specialized in analyzing microscopy images (TEM, STEM, SEM, AFM, etc.) of materials.
+
+You will receive:
+1. The primary microscopy image
+2. Additional derived images from Sliding FFT and NMF analysis (if available):
+   - NMF components: dominant spatial frequency patterns
+   - Abundance maps: where these patterns are located spatially
+
+Your goal is to extract key information and formulate precise scientific claims for literature search.
+
+## Required Output
+Return a JSON object with:
+
+```json
+{
+    "detailed_analysis": "Thorough text analysis correlating features in the original image with FFT/NMF patterns. Identify: point defects, line defects, extended defects, lattice distortions, strain, symmetry breaking, surface reconstructions, chemical composition differences, grain boundaries, interfaces, etc.",
+    
+    "component_interpretations": [
+        {
+            "index": 1,
+            "spectral_features": "What you see in the FFT pattern - spot positions, symmetry, intensity",
+            "physical_meaning": "What physical structure this represents",
+            "spatial_distribution": "Where this component is located in the image",
+            "confidence": "high/medium/low"
+        }
+    ],
+    
+    "scientific_claims": [
+        {
+            "claim": "A single, focused scientific claim about a specific observation.",
+            "scientific_impact": "Why this would be scientifically significant.",
+            "has_anyone_question": "A question starting with 'Has anyone' - must be portable and understandable WITHOUT seeing the image. Do NOT use 'this', 'that', 'the observed', 'the specific'.",
+            "keywords": ["keyword1", "keyword2", "keyword3"]
+        }
+    ]
+}
+```
+
+## Guidelines
+- Focus on specific, testable observations
+- Use precise scientific terminology
+- Avoid overly specific numbers
+- Generate 2-4 scientific claims
+- Ensure "has_anyone_question" is self-contained and searchable
+'''
+
+SERIES_ANALYSIS_INSTRUCTIONS = '''You are an expert microscopist analyzing FFT/NMF decomposition results from a time-series microscopy experiment.
+
+You will receive:
+1. Analysis statistics (component trends, correlations)
+2. Visualizations (components, abundances, timeseries)
+3. NMF frequency components
+
+Your goal is to provide scientific interpretation and formulate precise claims for literature search.
+
+## Required Output
+Return a JSON object with:
+
+```json
+{
+    "methodology_notes": "Brief description of the analysis and notable aspects of this dataset",
+    
+    "detailed_analysis": "Thorough analysis correlating FFT/NMF components with abundance maps and temporal dynamics. Identify: periodic structures, phase transitions, defect evolution, crystallographic changes, beam-induced effects, etc.",
+    
+    "component_interpretations": [
+        {
+            "index": 1,
+            "spectral_features": "What you see in the FFT pattern",
+            "physical_meaning": "What physical structure this represents",
+            "temporal_behavior": "How this component evolves - be descriptive about nature, timing, magnitude of changes",
+            "confidence": "high/medium/low"
+        }
+    ],
+    
+    "temporal_interpretation": "Overall dynamics analysis - processes occurring, transitions, steady states, notable events",
+    
+    "visualization_descriptions": [
+        {
+            "name": "exact_filename_without_extension",
+            "description": "What this visualization shows and its significance"
+        }
+    ],
+    
+    "scientific_claims": [
+        {
+            "claim": "A single, focused scientific claim about a specific observation.",
+            "scientific_impact": "Why this would be scientifically significant.",
+            "has_anyone_question": "A question starting with 'Has anyone' - must be portable and understandable WITHOUT seeing the images. Do NOT use 'this', 'that', 'the observed'.",
+            "keywords": ["keyword1", "keyword2", "keyword3"]
+        }
+    ]
+}
+```
+
+## Guidelines for FFT Interpretation
+- Bright spots = periodic structures at specific spatial frequencies
+- Spot distance from center = spatial frequency (further = finer features)
+- Spot arrangement = symmetry (hexagonal, square, etc.)
+- Diffuse rings = polycrystalline/disordered
+- Streaks = linear features/edges
+
+## Guidelines for Temporal Analysis
+Don't just say "increasing/decreasing". Describe:
+- Nature of change (gradual, sudden, oscillatory, stepwise)
+- When changes occur
+- Magnitude and significance
+- Possible physical explanations
+- Relationships between components
+
+## Guidelines for Claims
+- Generate 2-4 specific, testable claims
+- Avoid overly specific numbers
+- "has_anyone_question" must be self-contained
+'''
+
+"""
+SAM Analysis Instructions
+
+This module contains all LLM instruction prompts used by the SAM analysis pipeline.
+"""
+
+# =============================================================================
+# SINGLE IMAGE INSTRUCTIONS
+# =============================================================================
+
+SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS = """You are an expert microscopy analyst specializing in particle and feature analysis.
+
+Analyze the provided microscopy image and SAM segmentation results to generate scientific claims.
+
+Your response must be valid JSON with this structure:
+{
+    "detailed_analysis": "Comprehensive analysis of the microscopy image...",
+    "scientific_claims": [
+        {
+            "claim": "Specific scientific claim based on the data",
+            "supporting_evidence": "Evidence from the analysis supporting this claim",
+            "scientific_impact": "Why this finding is significant",
+            "has_anyone_question": "What research question does this address?",
+            "keywords": ["relevant", "keywords"]
+        }
+    ]
+}
+
+Guidelines:
+- Base claims ONLY on observable data and statistics
+- Be specific about particle counts, sizes, and distributions
+- Consider spatial relationships and patterns
+- Note any limitations or caveats
+- Generate 2-5 meaningful scientific claims
+"""
+
+SAM_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS = """You are an expert microscopy analyst.
+
+Based on the provided image analysis, recommend measurement strategies and follow-up analyses.
+
+Your response must be valid JSON with this structure:
+{
+    "detailed_analysis": "Analysis of current state and measurement needs...",
+    "recommendations": [
+        {
+            "measurement_type": "Type of measurement recommended",
+            "rationale": "Why this measurement would be valuable",
+            "methodology": "How to perform this measurement",
+            "expected_insight": "What we expect to learn"
+        }
+    ],
+    "priority_order": ["measurement1", "measurement2"],
+    "resource_requirements": "Equipment and time needed"
+}
+"""
+
+SAM_SINGLE_IMAGE_SYNTHESIS_INSTRUCTIONS = """You are an expert microscopy analyst tasked with providing scientific interpretation of particle analysis results.
+
+Analyze the provided segmentation results and morphological statistics to generate a comprehensive scientific interpretation.
+
+Your response must be valid JSON with this structure:
+{
+    "detailed_analysis": "A comprehensive scientific interpretation of the particle analysis results. Include observations about particle distribution, size characteristics, morphology, and any notable patterns. This should be 2-4 paragraphs of substantive scientific analysis.",
+    "scientific_claims": [
+        {
+            "claim": "A specific, evidence-based scientific claim",
+            "supporting_evidence": "The statistical evidence supporting this claim",
+            "scientific_impact": "The significance of this finding",
+            "has_anyone_question": "The research question this addresses",
+            "keywords": ["relevant", "keywords", "for", "this", "claim"]
+        }
+    ]
+}
+
+Guidelines:
+1. Base all claims strictly on the provided statistical data
+2. Be quantitative - cite specific numbers from the statistics
+3. Discuss particle size distribution (mean, std, range)
+4. Comment on particle morphology (circularity, solidity, aspect ratio)
+5. Note any patterns or anomalies in the data
+6. Generate 2-4 meaningful scientific claims
+7. Consider what the findings might indicate about the sample
+8. Acknowledge limitations of single-image analysis
+"""
+
+# =============================================================================
+# BATCH/REFINEMENT INSTRUCTIONS
+# =============================================================================
+
+SAM_BATCH_REFINEMENT_INSTRUCTIONS = """You are an expert in image segmentation quality assessment.
+
+Evaluate the provided SAM segmentation result and recommend parameter adjustments if needed.
+
+Your response must be valid JSON with this structure:
+{
+    "evaluation": {
+        "coverage_score": 8,
+        "accuracy_score": 7,
+        "false_positive_rate": "low",
+        "false_negative_rate": "moderate",
+        "overall_quality": "good"
+    },
+    "needs_refinement": true,
+    "reasoning": "Explanation of the assessment...",
+    "recommended_parameters": {
+        "use_clahe": false,
+        "sam_parameters": "default",
+        "min_area": 500,
+        "max_area": 50000,
+        "pruning_iou_threshold": 0.5
+    }
+}
+
+Parameter options:
+- use_clahe (true/false): Enable contrast enhancement for low-contrast images
+- sam_parameters: "default", "sensitive" (more detections), "ultra-permissive" (maximum detections)
+- min_area (integer): Minimum particle size in pixels (lower = detect smaller particles)
+- max_area (integer): Maximum particle size in pixels
+- pruning_iou_threshold (0.0-1.0): Overlap threshold for duplicate removal
+
+Evaluation criteria:
+1. Coverage: Are all visible particles detected? (1-10)
+2. Accuracy: Are detections correctly outlining particles? (1-10)
+3. False positives: Are there spurious detections?
+4. False negatives: Are particles being missed?
+
+If the segmentation looks good (coverage > 7, accuracy > 7, low false rates), set needs_refinement: false.
+"""
+
+SAM_ANALYSIS_REFINE_INSTRUCTIONS = """You are an expert in microscopy image segmentation parameter tuning.
+
+Compare the original microscopy image against the current segmentation result and suggest parameter improvements.
+
+Your response must be valid JSON:
+{
+    "reasoning": "Analysis of current segmentation quality and needed adjustments...",
+    "parameters": {
+        "use_clahe": false,
+        "sam_parameters": "default",
+        "min_area": 500,
+        "max_area": 50000,
+        "pruning_iou_threshold": 0.5
+    }
+}
+
+Focus on:
+- Are small particles being missed? → Lower min_area or use "sensitive" mode
+- Are large particles being fragmented? → Increase max_area or lower pruning_iou_threshold
+- Is contrast too low? → Enable use_clahe
+- Too many false detections? → Increase min_area or use "default" mode
+"""
+
+# =============================================================================
+# BATCH CUSTOM ANALYSIS INSTRUCTIONS
+# =============================================================================
+
+SAM_BATCH_CUSTOM_ANALYSIS_INSTRUCTIONS = """You are an expert data scientist specializing in time-series analysis of microscopy data.
+
+Generate a Python script to analyze trends in the batch analysis results.
+
+Your response must be valid JSON:
+{
+    "analysis_approach": "time_series" | "comparative" | "statistical",
+    "key_metrics_to_track": ["particle_count", "mean_area", "..."],
+    "reasoning": "Why this analysis approach is appropriate...",
+    "script": "#!/usr/bin/env python3\\nimport json\\nimport matplotlib.pyplot as plt\\n..."
+}
+
+Script requirements:
+1. Read data from 'batch_results.json' in the current directory
+2. The JSON structure is: {"results": [{"particle_count": N, "statistics": {...}, "success": bool}, ...]}
+3. Generate informative plots saved as PNG files
+4. Print summary statistics to stdout
+5. Handle missing/failed results gracefully
+6. Use matplotlib for plotting
+7. Save plots with descriptive filenames
+
+Example data access:
+```python
+import json
+import matplotlib.pyplot as plt
+
+with open('batch_results.json', 'r') as f:
+    data = json.load(f)
+
+results = data['results']
+counts = [r['particle_count'] for r in results if r['success']]
+areas = [r['statistics'].get('mean_area_pixels', 0) for r in results if r['success']]
+```
+
+Generate appropriate visualizations based on the data:
+- Time series plots for temporal data
+- Histograms for distributions
+- Scatter plots for correlations
+- Box plots for comparisons
+"""
+
+# =============================================================================
+# BATCH SYNTHESIS INSTRUCTIONS
+# =============================================================================
+
+SAM_BATCH_SYNTHESIS_INSTRUCTIONS = """You are an expert microscopy analyst synthesizing findings from a batch analysis of multiple images.
+
+Analyze the individual results and trend analysis to generate comprehensive scientific conclusions.
+
+Your response must be valid JSON:
+{
+    "detailed_analysis": "Comprehensive synthesis of findings across all images. Discuss temporal trends, statistical patterns, and scientific implications. This should be 3-5 paragraphs of substantive analysis.",
+    "scientific_claims": [
+        {
+            "claim": "A specific scientific claim supported by the batch data",
+            "supporting_evidence": "Statistical evidence from multiple images",
+            "scientific_impact": "Significance of this finding",
+            "has_anyone_question": "Research question addressed",
+            "keywords": ["batch", "trend", "relevant", "keywords"]
+        }
+    ]
+}
+
+Guidelines:
+1. Synthesize findings ACROSS images, not just individual observations
+2. Identify temporal trends or patterns in the data
+3. Note any statistically significant changes
+4. Comment on reproducibility and variation across the series
+5. Consider what the collective findings indicate about the sample/process
+6. Generate 2-4 meaningful scientific claims
+7. Reference specific statistics and trends from the analysis
+8. Acknowledge limitations and suggest follow-up analyses
+"""

@@ -1,6 +1,7 @@
+import re
 import json
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple, Any
 from pathlib import Path
 import uuid
 from abc import ABC, abstractmethod
@@ -196,42 +197,175 @@ class BaseAnalysisAgent(ABC):
         self._stored_analysis_metadata = metadata or {}
         self.logger.debug(f"Stored {len(self._stored_analysis_images)} analysis images.")
 
-    def _parse_llm_response(self, response) -> tuple[dict | None, dict | None]:
+    def _parse_llm_response(self, response: Any) -> Tuple[Optional[dict], Optional[dict]]:
         """
-        Parses the LLM response, expecting JSON.
+        Parse LLM response to extract JSON, with multiple fallback strategies.
+        
+        Strategies (in order):
+        1. Direct JSON parse of response text
+        2. Extract JSON from markdown code blocks (```json ... ```)
+        3. Extract JSON from anywhere in text using regex
+        4. For script generation: extract Python code blocks
+        
+        Args:
+            response: Response object from LLM API
+            
+        Returns:
+            Tuple of (result_json, error_dict) - one will be None
         """
-        result_json = None
-        error_dict = None
-        raw_text = None
-        json_string = None
-
         try:
-            # Handle LiteLLM/OpenAI wrapper response object
-            if hasattr(response, 'text'):
-                raw_text = response.text
-            elif hasattr(response, 'choices'): # Fallback for raw OpenAI objects
-                 raw_text = response.choices[0].message.content
-            else:
-                 raw_text = str(response)
-
-            first_brace_index = raw_text.find('{')
-            last_brace_index = raw_text.rfind('}')
-            if first_brace_index != -1 and last_brace_index != -1 and last_brace_index > first_brace_index:
-                json_string = raw_text[first_brace_index : last_brace_index + 1]
-                result_json = json.loads(json_string)
-            else:
-                raise ValueError("Could not find valid JSON object delimiters '{' and '}' in the response text.")
-
-        except (json.JSONDecodeError, AttributeError, IndexError, ValueError) as e:
-            error_details = str(e)
-            self.logger.error(f"Error parsing LLM JSON response: {e}")
-            error_dict = {"error": "Failed to parse valid JSON from LLM response", "details": error_details, "raw_response": raw_text}
-        
+            # Get text from response object (handle different API formats)
+            raw_text = self._extract_text_from_response(response)
+            
+            if not raw_text or not raw_text.strip():
+                return None, {
+                    "error": "Empty response from LLM",
+                    "details": "Response text was empty"
+                }
+            
+            # Strategy 1: Direct JSON parse (with markdown cleanup)
+            result = self._try_direct_json_parse(raw_text)
+            if result is not None:
+                return result, None
+            
+            # Strategy 2: Find JSON in markdown code blocks
+            result = self._try_extract_json_from_code_blocks(raw_text)
+            if result is not None:
+                return result, None
+            
+            # Strategy 3: Find any JSON object in text
+            result = self._try_extract_json_from_text(raw_text)
+            if result is not None:
+                self.logger.warning("JSON extracted via regex fallback - may be incomplete")
+                return result, None
+            
+            # Strategy 4: For script responses, try to extract Python code
+            result = self._try_extract_python_script(raw_text)
+            if result is not None:
+                self.logger.warning("JSON parsing failed, but found Python code block")
+                return result, None
+            
+            # All strategies failed
+            snippet = raw_text[:500] + "..." if len(raw_text) > 500 else raw_text
+            self.logger.error(f"All JSON parsing strategies failed. Response snippet: {snippet}")
+            
+            return None, {
+                "error": "Failed to parse valid JSON from LLM response",
+                "details": "No valid JSON found using any extraction strategy",
+                "raw_response": raw_text[:2000]  # Limit size for logging
+            }
+            
         except Exception as e:
-            self.logger.exception(f"Unexpected error processing response: {e}")
-            error_dict = {"error": "Unexpected error processing LLM response", "details": str(e)}
+            self.logger.exception(f"Unexpected error parsing LLM response: {e}")
+            return None, {
+                "error": "Exception during response parsing",
+                "details": str(e)
+            }
+    
+    def _extract_text_from_response(self, response: Any) -> str:
+        """Extract text content from various LLM response formats."""
+        # Try different attribute patterns
+        if hasattr(response, 'text'):
+            return response.text
+        if hasattr(response, 'content'):
+            return response.content
+        if hasattr(response, 'choices') and response.choices:
+            choice = response.choices[0]
+            if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
+                return choice.message.content
+            if hasattr(choice, 'text'):
+                return choice.text
+        # Fallback to string conversion
+        return str(response)
+    
+    def _try_direct_json_parse(self, raw_text: str) -> Optional[dict]:
+        """Attempt direct JSON parsing with markdown cleanup."""
+        try:
+            text_clean = raw_text.strip()
+            
+            # Remove markdown code block markers
+            if text_clean.startswith('```json'):
+                text_clean = text_clean[7:]
+            elif text_clean.startswith('```'):
+                text_clean = text_clean[3:]
+            if text_clean.endswith('```'):
+                text_clean = text_clean[:-3]
+            
+            text_clean = text_clean.strip()
+            
+            result = json.loads(text_clean)
+            if isinstance(result, dict):
+                return result
+            return None
+            
+        except json.JSONDecodeError:
+            return None
+    
+    def _try_extract_json_from_code_blocks(self, raw_text: str) -> Optional[dict]:
+        """Extract JSON from markdown code blocks."""
+        # Match ```json ... ``` or ``` ... ```
+        patterns = [
+            r'```json\s*\n?([\s\S]*?)\n?```',
+            r'```\s*\n?(\{[\s\S]*?\})\n?```'
+        ]
         
-        return result_json, error_dict
+        for pattern in patterns:
+            matches = re.findall(pattern, raw_text, re.DOTALL)
+            for match in matches:
+                try:
+                    result = json.loads(match.strip())
+                    if isinstance(result, dict) and len(result) > 0:
+                        return result
+                except json.JSONDecodeError:
+                    continue
+        
+        return None
+    
+    def _try_extract_json_from_text(self, raw_text: str) -> Optional[dict]:
+        """Extract JSON objects from anywhere in the text."""
+        # Find potential JSON objects by matching braces
+        # This handles nested objects
+        
+        start_idx = None
+        brace_count = 0
+        
+        for i, char in enumerate(raw_text):
+            if char == '{':
+                if brace_count == 0:
+                    start_idx = i
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0 and start_idx is not None:
+                    # Found a complete JSON object
+                    potential_json = raw_text[start_idx:i+1]
+                    try:
+                        result = json.loads(potential_json)
+                        if isinstance(result, dict) and len(result) > 0:
+                            return result
+                    except json.JSONDecodeError:
+                        pass
+                    start_idx = None
+        
+        return None
+    
+    def _try_extract_python_script(self, raw_text: str) -> Optional[dict]:
+        """Extract Python code blocks and wrap in synthetic JSON structure."""
+        python_block_pattern = r'```python\s*([\s\S]*?)\s*```'
+        matches = re.findall(python_block_pattern, raw_text, re.DOTALL)
+        
+        if matches:
+            # Return the first (usually longest/most complete) Python code block
+            script = matches[0].strip()
+            if script:
+                return {
+                    "script": script,
+                    "analysis_approach": "extracted_from_code_block",
+                    "key_metrics_to_track": [],
+                    "_extraction_method": "python_code_block_fallback"
+                }
+        
+        return None
 
     def _generate_json_from_text_parts(self, prompt_parts: list) -> tuple[dict | None, dict | None]:
         """
@@ -293,51 +427,94 @@ class BaseAnalysisAgent(ABC):
         
         return None
 
-    def _calculate_spatial_scale(self, system_info: dict, image_shape: tuple) -> tuple[float | None, float | None]:
+    def _calculate_spatial_scale(
+        self, 
+        system_info: dict, 
+        image_shape: tuple
+    ) -> Tuple[Optional[float], Optional[float]]:
         """
-        Calculate nm/pixel and field of view from system metadata.
+        Calculate spatial scale from system metadata.
+        
+        Supports multiple common key formats:
+        - spatial_info.nm_per_pixel (nested dict)
+        - pixel_size_nm
+        - nm_per_pixel
+        - scale_nm_per_pixel
+        - pixel_size (assumes nm)
+        - pixel_size with pixel_size_unit
         
         Args:
-            system_info: Dictionary containing spatial metadata (can be nested anywhere)
-            image_shape: (height, width) of the loaded image
+            system_info: System metadata dictionary
+            image_shape: Shape of the image (h, w) or (h, w, c)
             
         Returns:
-            tuple: (nm_per_pixel, fov_in_nm) or (None, None) if calculation fails
+            Tuple of (nm_per_pixel, field_of_view_nm) or (None, None)
         """
-        # Determine physical scale (nm/pixel) from metadata, mirroring spectroscopy agent's approach
-        nm_per_pixel = None
-        fov_in_nm = None
+        if not system_info:
+            self.logger.info("No system_info provided. Physical scale not applied.")
+            return None, None
         
-        # Search for spatial_info anywhere in the nested structure
-        spatial = self._find_spatial_info(system_info)
+        pixel_size = None
         
-        if spatial is not None:
-            fov_x = spatial.get("field_of_view_x")
-            units = spatial.get("field_of_view_units", "nm")  # Default to nm
-
-            if fov_x is not None and isinstance(fov_x, (int, float)) and fov_x > 0:
-                h, w = image_shape[:2]
-                
-                # Convert provided units to nm for consistent calculations
-                scale_to_nm = 1.0
-                if units.lower() in ['um', 'micrometer', 'micrometers']:
-                    scale_to_nm = 1000.0
-                elif units.lower() in ['a', 'angstrom', 'angstroms']:
-                    scale_to_nm = 0.1
-                
-                fov_in_nm = fov_x * scale_to_nm
-                
-                if w > 0:
-                    nm_per_pixel = fov_in_nm / w
-                    self.logger.info(f"Found spatial_info and calculated nm/pixel: {fov_x} {units} / {w} px = {nm_per_pixel:.4f} nm/pixel")
-                else:
-                    self.logger.warning("Cannot calculate scale from FOV because image width is 0.")
-            else:
-                self.logger.warning(f"Invalid or missing 'field_of_view_x' in spatial_info: {fov_x}. Physical scale not applied.")
-        else:
-            self.logger.info("No spatial_info found in system metadata. Physical scale not applied.")
+        # Strategy 1: Check nested spatial_info dict
+        if 'spatial_info' in system_info:
+            spatial = system_info['spatial_info']
+            if isinstance(spatial, dict):
+                pixel_size = spatial.get('nm_per_pixel') or spatial.get('pixel_size_nm')
         
-        return nm_per_pixel, fov_in_nm
+        # Strategy 2: Check top-level keys (various naming conventions)
+        if pixel_size is None:
+            key_candidates = [
+                'pixel_size_nm', 
+                'nm_per_pixel', 
+                'scale_nm_per_pixel',
+                'pixel_size',
+                'pixelSize',
+                'pixel_scale',
+                'scale',
+                'resolution_nm'
+            ]
+            for key in key_candidates:
+                if key in system_info and system_info[key] is not None:
+                    pixel_size = system_info[key]
+                    break
+        
+        # Strategy 3: Check for scale with units specified separately
+        if pixel_size is None and 'pixel_size' in system_info:
+            pixel_size = system_info['pixel_size']
+        
+        if pixel_size is None:
+            self.logger.info("No spatial calibration found in system metadata. Physical scale not applied.")
+            return None, None
+        
+        # Convert to float
+        try:
+            pixel_size = float(pixel_size)
+        except (TypeError, ValueError):
+            self.logger.warning(f"Invalid pixel_size value: {pixel_size}. Physical scale not applied.")
+            return None, None
+        
+        if pixel_size <= 0:
+            self.logger.warning(f"Invalid pixel_size value: {pixel_size}. Must be positive.")
+            return None, None
+        
+        # Handle unit conversion if unit is specified
+        unit = system_info.get('pixel_size_unit', 'nm').lower()
+        if unit in ['um', 'µm', 'micron', 'microns', 'micrometer']:
+            pixel_size *= 1000  # Convert um to nm
+        elif unit in ['pm', 'picometer']:
+            pixel_size /= 1000  # Convert pm to nm
+        elif unit in ['a', 'angstrom', 'å']:
+            pixel_size /= 10    # Convert Angstrom to nm
+        # 'nm' or unrecognized units are assumed to be nm
+        
+        # Calculate field of view
+        h, w = image_shape[:2]
+        fov = max(h, w) * pixel_size
+        
+        self.logger.info(f"Spatial calibration: {pixel_size:.3f} nm/pixel, FOV: {fov:.1f} nm")
+        
+        return pixel_size, fov
 
     def _validate_scientific_claims(self, scientific_claims: list) -> list:
         """
