@@ -8,8 +8,6 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 import PIL.Image as PIL_Image
 
-import google.generativeai as genai
-
 from ...auth import get_internal_proxy_key
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
