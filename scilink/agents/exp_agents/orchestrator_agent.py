@@ -2,7 +2,7 @@ import logging
 import json
 
 from .microscopy_agent import MicroscopyAnalysisAgent
-from ._sam_microscopy_agent import SAMMicroscopyAnalysisAgent
+from .sam_microscopy_agent import SAMMicroscopyAnalysisAgent
 from .atomistic_microscopy_agent import AtomisticMicroscopyAnalysisAgent
 from .hyperspectral_analysis_agent import HyperspectralAnalysisAgent
 from .instruct import ORCHESTRATOR_INSTRUCTIONS

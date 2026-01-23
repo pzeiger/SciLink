@@ -36,17 +36,9 @@ from ...tools.sam import (
     calculate_sam_statistics,
 )
 
-from .controllers.sam_controllers import (
-    HumanFeedbackRefinementController,
-    BatchImageProcessingController,
-    CustomAnalysisScriptController,
-    BatchSynthesisController
-)
-
-
-class SAMBatchAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
+class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
-    Extended SAM Analysis Agent supporting:
+    Segment Anything Model Analysis Agent supporting:
     - Single image analysis (backward compatible with SAMMicroscopyAnalysisAgent)
     - Human-in-the-loop parameter refinement on the first image
     - Batch processing of image series with parameter transfer

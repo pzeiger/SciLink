@@ -14,7 +14,7 @@ import logging
 
 # Import all pipeline factory functions
 from .pipelines.microscopy_pipelines import create_fftnmf_pipeline
-from .pipelines._sam_pipelines import create_sam_pipeline
+from .pipelines.sam_pipelines import create_sam_pipeline
 from .pipelines.atomistic_pipelines import create_atomistic_pipeline
 
 # Import instruction prompts
