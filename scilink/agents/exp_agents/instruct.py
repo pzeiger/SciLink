@@ -1995,7 +1995,7 @@ Guidelines:
 3. Note any statistically significant changes
 4. Comment on reproducibility and variation across the series
 5. Consider what the collective findings indicate about the sample/process
-6. Generate 3-6 meaningful scientific claims
+6. Generate 2-4 meaningful scientific claims
 7. Reference specific statistics and trends from the analysis
 8. Acknowledge limitations and suggest follow-up analyses
 """
