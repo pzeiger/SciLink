@@ -14,6 +14,7 @@ from ..controllers.curve_fitting_controllers import (
     LiteratureSearchController,
     ExecuteFittingController,
     BuildInterpretationPromptController,
+    GenerateCurveFittingReportController
 )
 from ..controllers.base_controllers import (
     RunFinalInterpretationController,
@@ -40,6 +41,7 @@ def create_curve_fitting_pipeline(
     output_dir: str,
     preprocessor: Any | None = None,
     literature_agent: Any | None = None,
+    enable_human_feedback=False, 
     settings: dict | None = None,  # Deprecated
 ) -> List:
     """
@@ -57,6 +59,7 @@ def create_curve_fitting_pipeline(
         output_dir: Output directory
         preprocessor: Optional preprocessor agent
         literature_agent: Optional literature agent (None = disabled)
+        enable_human_feedback: Enable human feedback on the proposed fitting approach
 
     Returns:
         List of pipeline controllers
@@ -73,7 +76,8 @@ def create_curve_fitting_pipeline(
     # 3. Plan approach (LLM)
     pipeline.append(
         PlanAnalysisController(
-            model, logger, generation_config, safety_settings, parse_fn, CURVE_ANALYSIS_INSTRUCTIONS
+            model, logger, generation_config, safety_settings, parse_fn,
+            CURVE_ANALYSIS_INSTRUCTIONS, enable_human_feedback=enable_human_feedback
         )
     )
 
@@ -104,6 +108,9 @@ def create_curve_fitting_pipeline(
 
     # 8. Store results
     pipeline.append(StoreAnalysisResultsController(logger, store_fn))
+
+    # 9. Generate HTML report
+    pipeline.append(GenerateCurveFittingReportController(logger, output_dir))
 
     logger.info(f"Pipeline created: {len(pipeline)} steps")
     return pipeline

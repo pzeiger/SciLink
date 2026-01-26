@@ -121,6 +121,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             output_dir=str(self.output_dir),
             preprocessor=self.preprocessor,
             literature_agent=self.literature_agent,
+            enable_human_feedback=enable_human_feedback
         )
 
     def _run_analysis_pipeline(
