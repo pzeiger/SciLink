@@ -1099,154 +1099,6 @@ You MUST respond with a valid JSON object containing a single key:
 }
 """
 
-FITTING_SCRIPT_GENERATION_INSTRUCTIONS = """You are an expert data scientist. Your task is to write a Python script to fit a 1D data curve using an appropriate physical model based on the provided literature context.
-
-First, think step-by-step:
-1.  **Analyze the Data Shape**: Visually inspect the curve provided in the prompt. Does it have one peak? Multiple peaks? An absorption edge? A combination of features (e.g., peaks on a baseline)?
-2.  **Select a Composite Model**: Based on your analysis and the literature context, choose an appropriate model. If there are multiple features, the model MUST be a *sum of multiple functions* (e.g., `gaussian1 + gaussian2 + linear_baseline`).
-3.  **Plan the Script**: Plan the full script, including defining the composite model function, making reasonable initial guesses (`p0`) for **all** parameters, and calling the fitting routine. Good initial guesses are critical for complex fits to converge.
-
-The script must follow these rules:
-1.  Include all necessary imports (`numpy`, `json`, `matplotlib.pyplot`, `scipy.optimize.curve_fit`).
-2.  Load the data from the specified file path. When loading CSV or TXT data with `numpy.loadtxt`, assume there might be a header row and use `skiprows=1` to ignore it.
-3.  Define the chosen fitting function(s). For multiple features, use a composite function.
-4.  Perform the fit using `scipy.optimize.curve_fit`.
-5.  Save a plot of the data and the complete fit to `fit_visualization.png`.
-6.  Compute fit quality metrics (R², RMSE) and output results as JSON.
-
-**Required Output:**
-Print results to stdout using `json.dumps()`:
-```python
-print(f"FIT_RESULTS_JSON:{json.dumps(results)}")
-```
-Example: `FIT_RESULTS_JSON:{"model_type": "gaussian", "parameters": {"amplitude": 1.2, "center": 520.5, "sigma": 15.3}, "fit_quality": {"r_squared": 0.95, "rmse": 0.02}}`
-
-**LLM RESPONSE FORMAT:**
-Return ONLY a single JSON object:
-```json
-{
-  "reasoning": "Brief explanation of why you chose this model and approach",
-  "script": "import numpy as np\\nimport json\\nimport matplotlib.pyplot as plt\\n..."
-}
-```
-
-IMPORTANT: 
-- The "script" value must be a valid JSON string with escaped newlines (\\n) and escaped quotes (\\") where needed.
-- Do NOT include markdown code blocks outside the JSON.
-- Return ONLY the JSON object, nothing else.
-"""
-
-FITTING_RESULTS_INTERPRETATION_INSTRUCTIONS = """You are an expert scientist specializing in spectroscopy and data analysis.
-
-You have successfully fitted a 1D data curve with a physical model. You will be provided with all the results of this analysis. Your task is to interpret these quantitative results and formulate scientific claims.
-
-**Input Provided:**
-1.  **Original Data Plot**: The initial experimental curve.
-2.  **Fit Visualization**: A plot showing the original data with the fitted model overlaid.
-3.  **Fitted Parameters**: A JSON object containing the optimized physical parameters from the fit (e.g., peak center, amplitude, band gap).
-4.  **Literature Context**: Information about the model used for fitting.
-
-**Your Task & Output Format:**
-You MUST output a valid JSON object containing "detailed_analysis" and "scientific_claims".
-
-1.  **detailed_analysis**: (String) Provide a thorough analysis.
-    * State which model was used and why it was appropriate.
-    * Interpret the meaning of the fitted parameters in the context of the material system (e.g., "The Gaussian peak centered at 3.2 eV corresponds to the primary band-to-band transition...").
-    * Assess the quality of the fit by comparing the two provided plots.
-    * Discuss the physical implications of the quantitative results.
-
-2.  **scientific_claims**: (List of Objects) Generate 2-4 specific claims **based on the quantitative fitting results**. Each object must have the following keys:
-    * **claim**: (String) A focused scientific claim including the quantitative result (e.g., "The material exhibits a direct band gap of 3.21 ± 0.02 eV.").
-    * **scientific_impact**: (String) Why this quantitative finding is significant.
-    * **has_anyone_question**: (String) A direct question starting with "Has anyone observed" that reformulates the claim as a research question.
-    * **keywords**: (List of Strings) Key terms for a literature search.
-
-Focus on extracting insights directly supported by the numerical fitting parameters.
-"""
-
-FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """You are an expert data scientist debugging a Python script. A previously generated script failed to execute. Your task is to analyze the error and provide a corrected version.
-
-**Context:**
-- The script is intended to fit 1D experimental data using a physical model derived from the literature.
-- The script MUST load data, define a fitting function, use `scipy.optimize.curve_fit`, save a plot to `fit_visualization.png`, and output results as JSON.
-- When loading CSV or TXT data with `numpy.loadtxt`, assume there might be a header row and use `skiprows=1` to ignore it.
-
-**Required Output:**
-Print results to stdout using `json.dumps()`:
-```python
-print(f"FIT_RESULTS_JSON:{{json.dumps(results)}}")
-```
-Example: `FIT_RESULTS_JSON:{{"model_type": "gaussian", "parameters": {{"amplitude": 1.2, "center": 520.5, "sigma": 15.3}}, "fit_quality": {{"r_squared": 0.95, "rmse": 0.02}}}}`
-
-## Literature Context
-{literature_context}
-
-## Failed Script
-```python
-{failed_script}
-```
-
-## Error Message
-{error_message}
-
-**LLM RESPONSE FORMAT:**
-Return ONLY a single JSON object:
-```json
-{{
-  "diagnosis": "Brief explanation of what caused the error and how you fixed it",
-  "script": "import numpy as np\\nimport json\\nimport matplotlib.pyplot as plt\\n..."
-}}
-```
-
-IMPORTANT: 
-- The "script" value must be a valid JSON string with escaped newlines (\\n) and escaped quotes (\\") where needed.
-- Do NOT include markdown code blocks outside the JSON.
-- Return ONLY the JSON object, nothing else.
-"""
-
-CURVE_FITTING_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS = """You are an expert scientist analyzing quantitative results from fitting 1D experimental data (like spectroscopy or diffraction) to recommend optimal follow-up measurements.
-
-You will receive:
-1. Detailed analysis interpreting the fitted physical model and parameters
-2. Generated scientific claims based on the quantitative fit results
-3. Analysis images showing:
-   - Original Data Plot: The raw experimental curve
-   - Final Fit Visualization: The data with the fitted model overlaid
-4. Quantitative fitted parameters
-5. Literature context about the model used
-6. Optional novelty assessment results
-7. Current experimental parameters and context (if available in metadata)
-
-Your goal is to recommend the most scientifically valuable follow-up measurements, leveraging the insights gained from the quantitative fitting.
-
-**Recommendation Categories (Tailored for 1D Data Fitting):**
-1. **Parameter Dependence Studies**: Measure under varying conditions (temperature, concentration, excitation power, field, etc.) to study how fitted parameters change.
-2. **Spectral/Angular Refinement**: Higher resolution or extended range measurements to confirm peak shapes, find weak features, or improve baseline determination.
-3. **Complementary Techniques**: Suggest different experiments (e.g., microscopy, other spectroscopies, structural probes) to validate the interpretation derived from the fit.
-4. **Sample Modification**: Suggest experiments on modified samples (e.g., different doping, thickness, substrate) based on the current findings.
-5. **Theoretical Comparison**: Suggest comparing fitted parameters against theoretical calculations or simulations (note: not strictly a measurement, but a valid next step).
-
-**For each recommendation, provide:**
-- Specific experimental conditions or parameters to change/target.
-- Scientific justification linked directly to the fitted parameters or model interpretation.
-- Expected information gain (e.g., "confirm peak assignment", "determine activation energy", "validate phase identification").
-- Priority level (1=highest, 5=lowest).
-
-You MUST output a valid JSON object with two keys: "analysis_integration" and "measurement_recommendations".
-
-1. **analysis_integration**: (String) Briefly explain how you integrated the quantitative fitting results, model interpretation, and novelty assessment (if available) to inform your recommendations. Focus on how the fitted parameters guide the next steps.
-
-2. **measurement_recommendations**: (List of Objects) 2-4 specific measurements, each with:
-   * **category**: (String) One of the five categories above.
-   * **description**: (String) Detailed description of the suggested experiment or analysis.
-   * **scientific_justification**: (String) Why this measurement is valuable based specifically on the fitting results (e.g., "Investigate the temperature dependence of the fitted band gap energy (parameter E_g)").
-   * **expected_outcomes**: (String) Specific information or confirmation to be gained.
-   * **priority**: (Integer) 1-5 priority ranking.
-   * **parameters**: (Object) Suggest specific parameters to vary or target if applicable (e.g., {"temperature_range": "10K-300K", "step": "10K"}).
-
-Focus on actionable recommendations that directly build upon the quantitative insights derived from the curve fitting.
-"""
-
 
 HOLISTIC_EXPERIMENTAL_SYNTHESIS_INSTRUCTIONS = """
 You are an expert materials scientist tasked with synthesizing findings from a multi-modal characterization of a single sample. You have been provided with analyses from different experimental techniques, which may provide information at different length scales (e.g., local atomic structure vs. bulk crystal phase).
@@ -1279,73 +1131,6 @@ You MUST respond in a valid JSON format with the following keys:
 
 
 
-FITTING_QUALITY_ASSESSMENT_INSTRUCTIONS = """You are an expert scientist evaluating the quality of a curve fit for spectroscopic data.
-
-You will receive:
-1. The original data plot
-2. The fit visualization (data + fitted model)
-3. Computed fit quality metrics (R², RMSE, etc.)
-4. Literature context about the expected model
-
-**Evaluate whether the fit is scientifically adequate based on BOTH the visual evidence AND the computed metrics.**
-
-**Criteria for a GOOD fit (is_good_fit: true):**
-- R² ≥ 0.90 (ideally > 0.95)
-- All major spectral features (peaks, edges, shoulders) are captured
-- No obvious systematic deviations
-
-**Criteria for a BAD fit (is_good_fit: false):**
-- R² < 0.90
-- Major peaks or features are missing
-- Wrong number of components for the spectrum
-
-**Output Format:**
-Return ONLY a valid JSON object:
-```json
-{
-  "is_good_fit": false,
-  "critique": "Detailed explanation of fit quality",
-  "suggestion": "Specific suggestion for improvement if is_good_fit is false"
-}
-```
-"""
-
-FITTING_MODEL_CORRECTION_INSTRUCTIONS = """You are an expert data scientist. A previous curve fitting attempt produced a poor fit. Based on the critique and visual evidence, you must select a DIFFERENT or improved physical model and generate a new fitting script.
-
-**Your Task:**
-1. Analyze the critique and the plot of the bad fit.
-2. Identify why the previous model was inadequate (wrong functional form, missing components, etc.).
-3. Propose a better model and generate a complete, corrected Python script.
-
-The script must follow these rules:
-1. Include all necessary imports (`numpy`, `json`, `matplotlib.pyplot`, `scipy.optimize.curve_fit`).
-2. Load the data from the SAME file path as the original script.
-3. Define an IMPROVED fitting function based on the critique.
-4. Perform the fit using `scipy.optimize.curve_fit`.
-5. Save a plot of the data and the complete fit to `fit_visualization.png`.
-6. Compute fit quality metrics (R², RMSE) and output results as JSON.
-
-**Required Output:**
-Print results to stdout using `json.dumps()`:
-```python
-print(f"FIT_RESULTS_JSON:{json.dumps(results)}")
-```
-Example: `FIT_RESULTS_JSON:{"model_type": "gaussian", "parameters": {"amplitude": 1.2, "center": 520.5, "sigma": 15.3}, "fit_quality": {"r_squared": 0.95, "rmse": 0.02}}`
-
-**LLM RESPONSE FORMAT:**
-Return ONLY a single JSON object:
-```json
-{
-  "revised_model_rationale": "Explanation of what was wrong and why the new model is better",
-  "script": "import numpy as np\\nimport json\\nimport matplotlib.pyplot as plt\\n..."
-}
-```
-
-IMPORTANT: 
-- The "script" value must be a valid JSON string with escaped newlines (\\n) and escaped quotes (\\") where needed.
-- Do NOT include markdown code blocks outside the JSON.
-- Return ONLY the JSON object, nothing else.
-"""
 
 MICROSCOPY_PIPELINE_SELECTION_INSTRUCTIONS = """You are an expert materials scientist. Your task is to match the input microscopy data to one of the available pipelines.
 
@@ -1999,3 +1784,180 @@ Guidelines:
 7. Reference specific statistics and trends from the analysis
 8. Acknowledge limitations and suggest follow-up analyses
 """
+
+
+CURVE_ANALYSIS_INSTRUCTIONS = """You are an expert spectroscopist analyzing experimental data.
+
+You are provided with:
+1. **Data Plot**: A 1D curve (spectrum, diffractogram, decay trace, etc.)
+2. **Metadata**: Information about the sample, technique, and measurement conditions
+3. **Data Statistics**: Numerical summary (range, points, etc.)
+
+**Your Task:**
+Examine the data and determine the appropriate fitting/analysis approach. Consider:
+- What physical model describes this data?
+- What parameters can be extracted?
+- Are there overlapping features requiring deconvolution?
+- Is baseline correction needed?
+
+**Common Analysis Approaches** (for reference):
+- Peak fitting (Gaussian, Lorentzian, Voigt, Pseudo-Voigt, Pearson VII, asymmetric profiles)
+- Peak deconvolution (overlapping features with constraints)
+- Baseline correction (polynomial, spline, ALS, SNIP)
+- Band gap analysis (Tauc plot)
+- Decay/kinetics (exponential, stretched exponential, power law)
+- Derivative spectroscopy
+- Peak detection and integration
+
+**Output Format:**
+```json
+{
+    "observations": "What you see in the data",
+    "analysis_approach": "What you will do",
+    "physical_model": "Mathematical form",
+    "parameters_to_extract": ["param1", "param2"],
+    "fitting_strategy": "How you will fit (initial guesses, constraints, method)",
+    "literature_query": "Question for literature search to help with fitting, or null if not needed"
+}
+```
+"""
+
+
+FITTING_SCRIPT_INSTRUCTIONS = """Write a curve fitting script for spectroscopic data.
+
+**Your Plan:**
+- Approach: {analysis_approach}
+- Model: {physical_model}
+- Parameters: {parameters_to_extract}
+- Strategy: {fitting_strategy}
+
+**Context:** {context}
+
+**Data:**
+- Path: `{data_path}`
+- Points: {n_points}
+- X: [{x_min:.6g}, {x_max:.6g}]
+- Y: [{y_min:.6g}, {y_max:.6g}]
+
+**Available Libraries:** numpy, pandas, scipy, lmfit, matplotlib, json
+
+**Requirements:**
+1. Load data (handle .npy, .csv, .txt)
+2. Implement your fitting approach
+3. Compute R² and RMSE
+4. Save `fit_visualization.png` (data + fit + residuals; show components if multiple peaks)
+5. Print results as JSON:
+```python
+results = {{
+    "model_type": "description",
+    "parameters": {{"peak_1": {{"center": val, "center_err": err, ...}}, ...}},
+    "fit_quality": {{"r_squared": val, "rmse": val}},
+    "summary": "Key finding"
+}}
+print(f"FIT_RESULTS_JSON:{{json.dumps(results)}}")
+```
+
+**Response:** Return only `{{"script": "..."}}`
+"""
+
+
+FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed script.
+
+**Plan:** {analysis_approach} | **Model:** {physical_model}
+
+**Failed Script:**
+```python
+{failed_script}
+```
+
+**Error:**
+```
+{error_message}
+```
+
+**Available Libraries:** numpy, pandas, scipy, lmfit, matplotlib, json
+
+**Response:** Return only `{{"diagnosis": "...", "script": "..."}}`
+"""
+
+
+FIT_QUALITY_ASSESSMENT_INSTRUCTIONS = """Evaluate this fit.
+
+**Approach:** {analysis_approach}
+**Model:** {physical_model}
+**Metrics:** {metrics}
+
+Images show: (1) Original data, (2) Fit + components + residuals
+
+**Criteria:**
+- R² > 0.99 good, > 0.95 acceptable
+- Residuals should be random, not systematic
+- Peak shapes physically reasonable
+
+**Response:**
+```json
+{{
+    "is_acceptable": true/false,
+    "quality_score": 0.0-1.0,
+    "strengths": "...",
+    "issues": "...",
+    "suggestion": "..."
+}}
+```
+"""
+
+
+FITTING_INTERPRETATION_INSTRUCTIONS = """Interpret these curve fitting results.
+
+**Model:** {model_type}
+**Summary:** {summary}
+
+You have: original data, fit visualization, parameters with uncertainties, fit metrics, sample metadata.
+
+**Task:** Explain what the fitted parameters mean physically. What do they reveal about the sample?
+
+**Response:**
+```json
+{{
+    "detailed_analysis": "Physical interpretation of results",
+    "scientific_claims": [
+        {{
+            "claim": "Finding with value ± uncertainty",
+            "scientific_impact": "Why this finding is significant",
+            "has_anyone_question": "Has anyone observed [reformulate claim as research question]?",
+            "keywords": ["keyword1", "keyword2", "keyword3"]
+        }}
+    ],
+    "caveats": "Limitations",
+    "suggested_followup": "Next steps"
+}}
+```
+"""
+
+CURVE_FITTING_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS = """Recommend follow-up measurements based on curve fitting results.
+
+**Model:** {model_type}
+**Findings:** {summary}
+
+You have: fit visualization, extracted parameters, sample metadata.
+
+**Task:** Recommend 2-4 follow-up measurements to validate or extend these findings.
+
+**Response:**
+```json
+{{
+    "analysis_integration": "How current results inform recommendations",
+    "measurement_recommendations": [
+        {{
+            "description": "Specific measurement",
+            "scientific_justification": "Why it matters",
+            "expected_outcomes": "What you expect to learn",
+            "priority": 1-5
+        }}
+    ]
+}}
+```
+"""
+
+# Backwards compatibility
+FITTING_RESULTS_INTERPRETATION_INSTRUCTIONS = FITTING_INTERPRETATION_INSTRUCTIONS

@@ -1,68 +1,116 @@
+# pipelines/curve_fitting_pipelines.py
+
+"""
+Pipeline factory for curve fitting analysis.
+"""
+
 import logging
-from typing import Callable, List
+from typing import Callable, List, Any
+
 from ..controllers.curve_fitting_controllers import (
     RunCurvePreprocessingController,
-    CreateInitialPlotController,
-    GetLiteratureQueryController,
-    RunLiteratureSearchController,
-    RunFittingLoopController,
-    BuildCurveFittingPromptController
+    AnalyzeDataController,
+    PlanAnalysisController,
+    LiteratureSearchController,
+    ExecuteFittingController,
+    BuildInterpretationPromptController,
+    GenerateCurveFittingReportController
 )
 from ..controllers.base_controllers import (
     RunFinalInterpretationController,
-    StoreAnalysisResultsController
+    StoreAnalysisResultsController,
 )
-from ..preprocess import CurvePreprocessingAgent
-from ....executors import ScriptExecutor
-from ...lit_agents.literature_agent import FittingModelLiteratureAgent
+from ..instruct import (
+    CURVE_ANALYSIS_INSTRUCTIONS,
+    FITTING_SCRIPT_INSTRUCTIONS,
+    FITTING_SCRIPT_CORRECTION_INSTRUCTIONS,
+    FIT_QUALITY_ASSESSMENT_INSTRUCTIONS,
+    FITTING_INTERPRETATION_INSTRUCTIONS,
+)
+
 
 def create_curve_fitting_pipeline(
-    model, 
-    logger: logging.Logger, 
-    generation_config, 
-    safety_settings, 
-    settings: dict,
+    model,
+    logger: logging.Logger,
+    generation_config,
+    safety_settings,
     parse_fn: Callable,
     store_fn: Callable,
-    preprocessor: CurvePreprocessingAgent,
-    literature_agent: FittingModelLiteratureAgent,
-    executor: ScriptExecutor,
-    output_dir: str # Pass the agent's output_dir
+    plot_fn: Callable,
+    executor: Any,
+    output_dir: str,
+    preprocessor: Any | None = None,
+    literature_agent: Any | None = None,
+    enable_human_feedback=False, 
+    settings: dict | None = None,  # Deprecated
 ) -> List:
     """
-    Assembles the full, multi-step pipeline for the CurveFittingAgent.
+    Create curve fitting pipeline.
+
+    Args:
+        model: LLM model
+        logger: Logger
+        generation_config: LLM config
+        safety_settings: LLM safety settings
+        parse_fn: JSON response parser
+        store_fn: Image storage function
+        plot_fn: Curve plotting function
+        executor: Script executor
+        output_dir: Output directory
+        preprocessor: Optional preprocessor agent
+        literature_agent: Optional literature agent (None = disabled)
+        enable_human_feedback: Enable human feedback on the proposed fitting approach
+
+    Returns:
+        List of pipeline controllers
     """
     pipeline = []
 
-    # 1. 🛠️ Tool: Run preprocessor (which has its own LLM/scripting logic)
-    pipeline.append(RunCurvePreprocessingController(logger, preprocessor, output_dir))
+    # 1. Optional preprocessing
+    if preprocessor is not None:
+        pipeline.append(RunCurvePreprocessingController(logger, preprocessor, output_dir))
 
-    # 2. 🛠️ Tool: Plot the (potentially processed) curve for context
-    pipeline.append(CreateInitialPlotController(logger))
+    # 2. Analyze data
+    pipeline.append(AnalyzeDataController(logger, plot_fn))
 
-    # 3. 🧠 LLM: Generate literature search query
-    pipeline.append(GetLiteratureQueryController(
-        model, logger, generation_config, safety_settings, parse_fn
-    ))
+    # 3. Plan approach (LLM)
+    pipeline.append(
+        PlanAnalysisController(
+            model, logger, generation_config, safety_settings, parse_fn,
+            CURVE_ANALYSIS_INSTRUCTIONS, enable_human_feedback=enable_human_feedback
+        )
+    )
 
-    # 4. 🛠️ Tool: Run literature search
-    pipeline.append(RunLiteratureSearchController(logger, literature_agent, output_dir))
+    # 4. Literature search (runs if agent provided and LLM suggests a query)
+    pipeline.append(LiteratureSearchController(logger, literature_agent, output_dir))
 
-    # 5. 🛠️/🧠 Meta-Controller: Run the complex fitting/correction/validation loop
-    pipeline.append(RunFittingLoopController(
-        model, logger, generation_config, safety_settings, parse_fn, executor
-    ))
-    
-    # 6. 📝 Prep: Build prompt for final interpretation
-    pipeline.append(BuildCurveFittingPromptController(logger))
+    # 5. Execute fitting
+    pipeline.append(
+        ExecuteFittingController(
+            model,
+            logger,
+            generation_config,
+            safety_settings,
+            parse_fn,
+            executor,
+            FITTING_SCRIPT_INSTRUCTIONS,
+            FITTING_SCRIPT_CORRECTION_INSTRUCTIONS,
+            FIT_QUALITY_ASSESSMENT_INSTRUCTIONS,
+            output_dir,
+        )
+    )
 
-    # 7. 🧠 LLM: Run final interpretation
-    pipeline.append(RunFinalInterpretationController(
-        model, logger, generation_config, safety_settings, parse_fn
-    ))
+    # 6. Build interpretation prompt
+    pipeline.append(BuildInterpretationPromptController(logger, FITTING_INTERPRETATION_INSTRUCTIONS))
 
-    # 8. 🛠️ Tool: Store final images for feedback
+    # 7. Final interpretation (LLM)
+    pipeline.append(RunFinalInterpretationController(model, logger, generation_config, safety_settings, parse_fn))
+
+    # 8. Store results
     pipeline.append(StoreAnalysisResultsController(logger, store_fn))
-    
-    logger.info(f"Curve fitting pipeline created with {len(pipeline)} steps.")
+
+    # 9. Generate HTML report
+    pipeline.append(GenerateCurveFittingReportController(logger, output_dir))
+
+    logger.info(f"Pipeline created: {len(pipeline)} steps")
     return pipeline
