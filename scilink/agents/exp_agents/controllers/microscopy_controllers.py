@@ -1,5 +1,5 @@
 """
-Microscopy Analysis Controllers - Unified Architecture
+Microscopy Analysis Controllers
 
 This module contains unified controllers that handle both single image (n=1)
 and batch (n>1) analysis identically. The key principle is:
@@ -13,7 +13,7 @@ and state["num_images"], but use the same code paths.
 import subprocess
 import json
 import logging
-import sys
+import io
 import os
 import base64
 from pathlib import Path
@@ -638,42 +638,260 @@ class UnifiedSynthesisController:
             return self._synthesize_batch(state)
     
     def _synthesize_single(self, state: dict) -> dict:
+        """
+        Synthesize findings for a single image analysis.
+        
+        Sends the original image, global FFT, and a composite of FFT/NMF components
+        and abundances to the LLM for scientific interpretation.
+        
+        Uses SINGLE_IMAGE_ANALYSIS_INSTRUCTIONS which expects these visuals.
+        """
         self.logger.info("\n\n🔬 --- SINGLE IMAGE SYNTHESIS --- 🔬\n")
         
+        # Use the existing instruction prompt from instruct.py
         prompt_parts = [SINGLE_IMAGE_ANALYSIS_INSTRUCTIONS]
         
+        # 1. Include original microscopy image
         if state.get("image_blob"):
-            prompt_parts.append("\n\n## Primary Image\n")
+            prompt_parts.append("\n\n## Primary Microscopy Image\n")
             prompt_parts.append(state["image_blob"])
+            self.logger.info("   📷 Added primary microscopy image")
         
+        # 2. Include system/sample information
         system_info = state.get("system_info", {})
         if system_info:
-            prompt_parts.append(f"\n\n## System Info\n```json\n{json.dumps(system_info, indent=2)}\n```")
+            prompt_parts.append(f"\n\n## System Information\n```json\n{json.dumps(system_info, indent=2)}\n```")
         
+        # 3. Include global FFT (resized, as raw bytes)
+        global_fft = state.get("global_fft_image")
+        if global_fft is not None:
+            global_fft_bytes = self._array_to_png_bytes_resized(global_fft, max_size=400)
+            if global_fft_bytes:
+                prompt_parts.append("\n\n## Global FFT (Frequency Space Overview)\n")
+                prompt_parts.append("Bright spots indicate dominant periodic structures. Distance from center corresponds to spatial frequency.\n")
+                prompt_parts.append({"mime_type": "image/png", "data": global_fft_bytes})
+                self.logger.info("   Added global FFT image")
+        
+        # 4. Create composite visualization of NMF components + abundances
+        #    This sends ONE image instead of 2*N images to save context window
+        composite_bytes = self._create_composite_visualization(state, max_size=800)
+        if composite_bytes:
+            prompt_parts.append("\n\n## FFT/NMF Decomposition Results\n")
+            prompt_parts.append("Top row: NMF components (dominant spatial frequency patterns extracted from sliding FFT windows).\n")
+            prompt_parts.append("Bottom row: Abundance maps (spatial distribution showing where each frequency pattern is located in the original image).\n")
+            prompt_parts.append({"mime_type": "image/png", "data": composite_bytes})
+            self.logger.info("   Added composite visualization (components + abundances)")
+        else:
+            self.logger.warning("   ⚠️ No FFT/NMF results available for synthesis")
+        
+        # 5. Include numerical statistics
         stats = state.get("summary_stats", {})
         if stats:
-            prompt_parts.append(f"\n\n## Statistics\n```json\n{json.dumps(stats, indent=2)}\n```")
+            prompt_parts.append(f"\n\n## Quantitative Statistics\n```json\n{json.dumps(stats, indent=2)}\n```")
         
-        prompt_parts.append("\n\nProvide analysis as JSON only.")
+        # 6. Include analysis parameters used
+        params = state.get("locked_params") or state.get("llm_params") or state.get("current_params", {})
+        if params:
+            prompt_parts.append(f"\n\n## Analysis Parameters\n```json\n{json.dumps(params, indent=2)}\n```")
         
+        # Log what we're sending
+        n_images = sum(1 for p in prompt_parts if isinstance(p, dict) and p.get("mime_type"))
+        self.logger.info(f"   📤 Sending {n_images} images to LLM for synthesis")
+        
+        # Call LLM
         try:
-            response = self.model.generate_content(contents=prompt_parts, generation_config=self.generation_config, safety_settings=self.safety_settings)
+            self.logger.info("   🧠 Calling LLM for synthesis...")
+            response = self.model.generate_content(
+                contents=prompt_parts,
+                generation_config=self.generation_config,
+                safety_settings=self.safety_settings
+            )
+            
             result_json, error_dict = self._parse_llm_response(response)
             
             if error_dict:
+                self.logger.error(f"   ❌ Synthesis parsing failed: {error_dict}")
                 state["synthesis_result"] = self._fallback_single(state)
             else:
                 state["synthesis_result"] = result_json
                 state["result_json"] = result_json
-                self.logger.info("✅ Single image synthesis complete.")
+                self.logger.info("   ✅ Single image synthesis complete.")
+                
         except Exception as e:
-            self.logger.error(f"Synthesis error: {e}")
+            self.logger.error(f"   ❌ Synthesis error: {e}")
             state["synthesis_result"] = self._fallback_single(state)
         
         return state
+
+
+    def _array_to_png_bytes_resized(self, array: np.ndarray, max_size: int = 512) -> Optional[bytes]:
+        """
+        Convert numpy array to PNG bytes (NOT base64) with size limit.
+        
+        The OpenAIAsGenerativeModel wrapper expects raw bytes for image data,
+        not base64-encoded strings. This is critical for proper image handling.
+        
+        Args:
+            array: 2D numpy array to convert
+            max_size: Maximum dimension (width or height) of output image
+        
+        Returns:
+            Raw PNG bytes, or None if conversion fails
+        """
+        if array is None:
+            return None
+            
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            
+            fig, ax = plt.subplots(figsize=(5, 5))
+            ax.imshow(array, cmap='viridis')
+            ax.axis('off')
+            
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.1, dpi=100)
+            plt.close(fig)
+            
+            # Resize if needed to limit context window usage
+            buf.seek(0)
+            img = Image.open(buf)
+            
+            if max(img.size) > max_size:
+                ratio = max_size / max(img.size)
+                new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+                img = img.resize(new_size, Image.LANCZOS)
+            
+            # Return raw bytes, NOT base64 string
+            out_buf = io.BytesIO()
+            img.save(out_buf, format='PNG', optimize=True)
+            return out_buf.getvalue()
+            
+        except Exception as e:
+            self.logger.warning(f"   ⚠️ Array to PNG conversion failed: {e}")
+            return None
+
+
+    def _create_composite_visualization(self, state: dict, max_size: int = 800) -> Optional[bytes]:
+        """
+        Create a single composite image showing all NMF components and their abundance maps.
+        
+        This reduces context window usage by sending ONE image instead of 2*N_components images.
+        
+        Layout:
+            Row 1: Component 1 FFT | Component 2 FFT | Component 3 FFT | ...
+            Row 2: Abundance 1     | Abundance 2     | Abundance 3     | ...
+        
+        Args:
+            state: Pipeline state containing fft_components and fft_abundances
+            max_size: Maximum dimension of output image
+        
+        Returns:
+            Raw PNG bytes, or None if creation fails
+        """
+        components = state.get("fft_components")
+        abundances = state.get("fft_abundances")
+        
+        if components is None or abundances is None:
+            self.logger.warning("   ⚠️ No components/abundances available for composite visualization")
+            return None
+        
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            
+            n_comps = components.shape[0]
+            
+            # Create figure: components on top row, abundances on bottom row
+            fig, axes = plt.subplots(2, n_comps, figsize=(3 * n_comps, 6))
+            
+            # Handle single component case
+            if n_comps == 1:
+                axes = axes.reshape(2, 1)
+            
+            for i in range(n_comps):
+                # Top row: NMF Component (frequency pattern)
+                axes[0, i].imshow(components[i], cmap='viridis')
+                axes[0, i].set_title(f'Component {i+1}\n(Frequency)', fontsize=10, fontweight='bold')
+                axes[0, i].axis('off')
+                
+                # Bottom row: Abundance map (spatial distribution)
+                axes[1, i].imshow(abundances[i], cmap='hot')
+                axes[1, i].set_title(f'Component {i+1}\n(Spatial)', fontsize=10, fontweight='bold')
+                axes[1, i].axis('off')
+            
+            plt.tight_layout()
+            
+            # Save to buffer
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+            plt.close(fig)
+            
+            # Resize if too large to fit context window
+            buf.seek(0)
+            img = Image.open(buf)
+            
+            if max(img.size) > max_size:
+                ratio = max_size / max(img.size)
+                new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+                img = img.resize(new_size, Image.LANCZOS)
+                self.logger.info(f"   Resized composite to {new_size}")
+            
+            # Return raw bytes, NOT base64 string
+            out_buf = io.BytesIO()
+            img.save(out_buf, format='PNG', optimize=True)
+            return out_buf.getvalue()
+            
+        except Exception as e:
+            self.logger.error(f"   ❌ Failed to create composite visualization: {e}")
+            return None
+
+
+    def _array_to_png_bytes(self, array: np.ndarray) -> Optional[str]:
+        """
+        Convert numpy array to base64 PNG string.
+        
+        NOTE: This method returns base64 for backward compatibility with _synthesize_batch.
+        For new code using OpenAI-compatible APIs, prefer _array_to_png_bytes_resized 
+        which returns raw bytes.
+        
+        Args:
+            array: 2D numpy array to convert
+        
+        Returns:
+            Base64-encoded PNG string, or None if conversion fails
+        """
+        if array is None:
+            return None
+            
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            
+            fig, ax = plt.subplots(figsize=(4, 4))
+            ax.imshow(array, cmap='viridis')
+            ax.axis('off')
+            
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.1, dpi=100)
+            plt.close(fig)
+            
+            buf.seek(0)
+            return base64.b64encode(buf.read()).decode('utf-8')
+            
+        except Exception as e:
+            self.logger.warning(f"Array to PNG conversion failed: {e}")
+            return None
     
     def _synthesize_batch(self, state: dict) -> dict:
-        """Synthesize findings across multiple images - includes trend analysis results."""
+        """
+        Synthesize findings across multiple images - includes trend analysis results.
+        
+        This version uses raw bytes for images (compatible with OpenAI wrapper).
+        """
         self.logger.info("\n\n🔬 --- BATCH SYNTHESIS --- 🔬\n")
         
         batch_results = state.get("batch_results", [])
@@ -692,9 +910,7 @@ class UnifiedSynthesisController:
                     "statistics": r.get("statistics", {})
                 })
         
-        # ============================================================
-        # CRITICAL: Load the trends.json generated by custom analysis
-        # ============================================================
+        # Load trends.json if available
         trends_data = {}
         trends_path = self.output_dir / "trends.json"
         if trends_path.exists():
@@ -715,20 +931,17 @@ class UnifiedSynthesisController:
         prompt_parts.append(f"- Window size: {batch_params.get('window_size_nm', 'auto')} nm ({batch_params.get('window_size_pixels', 'auto')} px)")
         
         # Add individual frame statistics (condensed)
-        prompt_parts.append(f"\n\n**INDIVIDUAL FRAME SUMMARY:**\n{json.dumps(stats_summary[:10], indent=2)}")  # Limit to first 10
+        prompt_parts.append(f"\n\n**INDIVIDUAL FRAME SUMMARY:**\n{json.dumps(stats_summary[:10], indent=2)}")
         if len(stats_summary) > 10:
             prompt_parts.append(f"\n... and {len(stats_summary) - 10} more frames")
         
-        # ============================================================
-        # CRITICAL: Include the actual trend analysis results
-        # ============================================================
+        # Include trend analysis results
         if trends_data:
             prompt_parts.append(f"\n\n**TREND ANALYSIS RESULTS (from automated script):**\n```json\n{json.dumps(trends_data, indent=2)}\n```")
         
-        # Include script stdout if available (contains printed summary)
+        # Include script stdout if available
         if custom_results.get("stdout"):
             stdout_text = custom_results["stdout"]
-            # Truncate if too long
             if len(stdout_text) > 2000:
                 stdout_text = stdout_text[:2000] + "\n... [truncated]"
             prompt_parts.append(f"\n\n**SCRIPT OUTPUT:**\n```\n{stdout_text}\n```")
@@ -737,9 +950,7 @@ class UnifiedSynthesisController:
         if series_metadata:
             prompt_parts.append(f"\n\n**SERIES METADATA:**\n{json.dumps(series_metadata, indent=2)}")
         
-        # ============================================================
-        # CRITICAL: Include generated visualization images
-        # ============================================================
+        # Include generated visualization images (as raw bytes)
         visualization_files = []
         for pattern in ["*.png", "abundance_timeseries.png", "components.png", "correlation_matrix.png"]:
             visualization_files.extend(self.output_dir.glob(pattern))
@@ -758,24 +969,28 @@ class UnifiedSynthesisController:
                 if viz_path.exists():
                     try:
                         with open(viz_path, 'rb') as f:
-                            img_b64 = base64.b64encode(f.read()).decode('utf-8')
+                            img_bytes = f.read()  # Raw bytes, not base64!
                             prompt_parts.append(f"\n{viz_path.name}:")
-                            prompt_parts.append({"mime_type": "image/png", "data": img_b64})
+                            prompt_parts.append({"mime_type": "image/png", "data": img_bytes})
                             self.logger.info(f"   📈 Added visualization: {viz_path.name}")
                     except Exception as e:
                         self.logger.warning(f"   Failed to load {viz_path}: {e}")
         
-        # Add NMF components visualization
+        # Add NMF components visualization (as raw bytes)
         components = state.get("series_components")
         if components is not None:
             prompt_parts.append("\n\n**NMF FREQUENCY COMPONENTS:**")
             for i in range(min(components.shape[0], 4)):
-                comp_bytes = self._array_to_png_bytes(components[i])
+                comp_bytes = self._array_to_png_bytes_resized(components[i], max_size=300)
                 if comp_bytes:
                     prompt_parts.append(f"\nComponent {i+1}:")
                     prompt_parts.append({"mime_type": "image/png", "data": comp_bytes})
         
         prompt_parts.append("\n\nBased on ALL the above information (individual statistics, trend analysis, and visualizations), provide a comprehensive scientific synthesis as a JSON object. Output ONLY the JSON.")
+        
+        # Log image count
+        n_images = sum(1 for p in prompt_parts if isinstance(p, dict) and p.get("mime_type"))
+        self.logger.info(f"   📤 Sending {n_images} images to LLM for batch synthesis")
         
         try:
             response = self.model.generate_content(
@@ -858,14 +1073,27 @@ class UnifiedSynthesisController:
             return None
 
 
-# ============================================================================
-# UNIFIED REPORT GENERATION CONTROLLER
-# ============================================================================
+"""
+Complete UnifiedReportGenerationController with visualization support.
+
+Replace the existing UnifiedReportGenerationController in microscopy_controllers.py with this version.
+"""
+
+import base64
+import io
+import json
+import logging
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, Optional
+import numpy as np
+from PIL import Image
+
 
 class UnifiedReportGenerationController:
     """
     [📄 Report Step]
-    Generates HTML report - adapts for single vs batch.
+    Generates HTML report with embedded visualizations - adapts for single vs batch.
     """
     
     def __init__(self, model, logger: logging.Logger, generation_config, safety_settings, 
@@ -885,15 +1113,33 @@ class UnifiedReportGenerationController:
         is_single = state.get("is_single_image", False)
         self.logger.info("\n\n📄 --- GENERATING REPORT --- 📄\n")
         
-        if is_single:
-            self._generate_single_image_report(state)
-        else:
-            self._generate_batch_report(state)
+        try:
+            if is_single:
+                self._generate_single_image_report(state)
+            else:
+                self._generate_batch_report(state)
+        except Exception as e:
+            self.logger.error(f"   ❌ Report generation failed: {e}")
+            # Don't fail the pipeline for report errors
+            import traceback
+            self.logger.debug(traceback.format_exc())
         
         return state
     
+    # =========================================================================
+    # SINGLE IMAGE REPORT
+    # =========================================================================
+    
     def _generate_single_image_report(self, state: dict) -> None:
-        """Generate report for single image analysis - matches SAM agent style."""
+        """
+        Generate comprehensive HTML report for single image analysis.
+        
+        Structure:
+            1. System Information
+            2. Scientific Analysis
+            3. Visualizations
+            4. Scientific Claims
+        """
         
         synthesis = state.get("synthesis_result", {})
         batch_results = state.get("batch_results", [])
@@ -902,99 +1148,297 @@ class UnifiedReportGenerationController:
         detailed_analysis = synthesis.get("detailed_analysis", "No analysis available.")
         scientific_claims = synthesis.get("scientific_claims", [])
         
-        # Embed visualization
-        viz_path = result.get("visualization_path")
-        viz_b64 = None
-        if viz_path and Path(viz_path).exists():
-            with open(viz_path, 'rb') as f:
-                viz_b64 = base64.b64encode(f.read()).decode('utf-8')
+        # Get parameters used
+        params = state.get("locked_params") or state.get("llm_params") or state.get("current_params", {})
+        stats = state.get("summary_stats", {})
+        system_info = state.get("system_info", {})
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        image_name = result.get('image_name', state.get('first_image_name', 'unknown'))
+        n_components = result.get('n_components', stats.get('n_components', 0))
         
+        # Generate visualizations as base64 for embedding
+        original_img_b64 = self._get_original_image_b64(state)
+        global_fft_b64 = self._array_to_b64_for_report(state.get("global_fft_image"))
+        composite_b64 = self._create_composite_for_report(state)
+        
+        # Start HTML
         html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FFT/NMF Analysis Report - Single Image</title>
+    <title> Microscopy Image Analysis Report - {image_name}</title>
     <style>
-        body {{ font-family: 'Segoe UI', sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; background: #f4f4f9; }}
-        .container {{ background: #fff; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
-        h1 {{ color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }}
-        h2 {{ color: #2980b9; margin-top: 30px; }}
-        .stats-box {{ background: #ecf0f1; padding: 15px; border-radius: 5px; border-left: 5px solid #3498db; margin: 20px 0; }}
-        .analysis-text {{ white-space: pre-wrap; background: #fafafa; padding: 20px; border-radius: 5px; border: 1px solid #eee; }}
-        .claim-card {{ background: #e8f6f3; border-left: 5px solid #1abc9c; padding: 15px; margin: 15px 0; border-radius: 0 5px 5px 0; }}
-        .viz-img {{ max-width: 100%; border-radius: 8px; margin: 20px 0; }}
-        .footer {{ margin-top: 40px; text-align: center; color: #7f8c8d; font-size: 0.8em; }}
+        body {{ 
+            font-family: 'Segoe UI', Tahoma, sans-serif; 
+            max-width: 1200px; 
+            margin: 0 auto; 
+            padding: 20px; 
+            background: #f4f4f9; 
+            line-height: 1.6;
+        }}
+        .container {{ 
+            background: #fff; 
+            padding: 40px; 
+            border-radius: 8px; 
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1); 
+        }}
+        h1 {{ 
+            color: #2c3e50; 
+            border-bottom: 3px solid #3498db; 
+            padding-bottom: 15px; 
+            margin-bottom: 30px;
+        }}
+        h2 {{ 
+            color: #2980b9; 
+            margin-top: 40px;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 10px;
+        }}
+        h3 {{
+            color: #34495e;
+            margin-top: 25px;
+        }}
+        .info-box {{
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+        }}
+        .info-box p {{
+            margin: 8px 0;
+        }}
+        .analysis-text {{ 
+            white-space: pre-wrap; 
+            background: #fafafa; 
+            padding: 25px; 
+            border-radius: 8px; 
+            border: 1px solid #eee;
+            font-size: 0.95em;
+        }}
+        .claim-card {{ 
+            background: linear-gradient(135deg, #e8f6f3 0%, #d5f5e3 100%);
+            border-left: 5px solid #1abc9c; 
+            padding: 20px; 
+            margin: 15px 0; 
+            border-radius: 0 8px 8px 0;
+        }}
+        .claim-card strong {{
+            color: #16a085;
+        }}
+        .viz-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }}
+        .viz-card {{
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 15px;
+            text-align: center;
+        }}
+        .viz-card img {{
+            max-width: 100%;
+            border-radius: 4px;
+            margin-bottom: 10px;
+        }}
+        .viz-card .caption {{
+            color: #666;
+            font-size: 0.9em;
+            font-style: italic;
+        }}
+        .full-width-viz {{
+            width: 100%;
+            margin: 20px 0;
+            text-align: center;
+        }}
+        .full-width-viz img {{
+            max-width: 100%;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }}
+        .full-width-viz .caption {{
+            color: #666;
+            font-size: 0.9em;
+            margin-top: 10px;
+        }}
+        .footer {{ 
+            margin-top: 50px; 
+            text-align: center; 
+            color: #7f8c8d; 
+            font-size: 0.8em;
+            padding-top: 20px;
+            border-top: 1px solid #eee;
+        }}
     </style>
 </head>
 <body>
 <div class="container">
-    <h1>🔬 FFT/NMF Analysis Report</h1>
-    <p><strong>Date:</strong> {timestamp} | <strong>Image:</strong> {result.get('image_name', 'unknown')}</p>
-    
-    <div class="stats-box">
-        <p><strong>Components Extracted:</strong> {result.get('n_components', 0)}</p>
+    <h1>🔬 Microscopy Image Analysis Report</h1>
+"""
+        
+        # === 1. SYSTEM INFORMATION ===
+        html += """
+    <h2>📋 System Information</h2>
+"""
+        if system_info and isinstance(system_info, dict) and len(system_info) > 0:
+            html += """
+    <div class="info-box">
+"""
+            for key, value in system_info.items():
+                if isinstance(value, np.ndarray):
+                    value = f"Array shape: {value.shape}"
+                html += f"        <p><strong>{key}:</strong> {value}</p>\n"
+            html += """
+    </div>
+"""
+        else:
+            html += """
+    <div class="info-box">
+        <p>No system information provided.</p>
     </div>
 """
         
-        if viz_b64:
-            html += f"""
-    <h2>Decomposition Result</h2>
-    <img class="viz-img" src="data:image/png;base64,{viz_b64}" alt="FFT/NMF Decomposition">
-"""
-        
+        # === 2. SCIENTIFIC ANALYSIS ===
         html += f"""
-    <h2>Scientific Analysis</h2>
+    <h2>🔍 Scientific Analysis</h2>
     <div class="analysis-text">{detailed_analysis}</div>
 """
         
-        if scientific_claims:
-            html += "<h2>Key Findings</h2>\n"
-            for i, claim in enumerate(scientific_claims, 1):
-                html += f"""<div class="claim-card">
-    <strong>Finding {i}:</strong> {claim.get('claim', 'N/A')}<br>
-    <em>Impact:</em> {claim.get('scientific_impact', 'N/A')}
-</div>\n"""
-        
+        # === 3. VISUALIZATIONS ===
         html += """
-    <div class="footer">Generated by Microscopy Analysis Agent (Unified Architecture)</div>
+    <h2>📊 Visualizations</h2>
+"""
+        
+        # Original image and Global FFT side by side
+        if original_img_b64 or global_fft_b64:
+            html += """
+    <div class="viz-grid">
+"""
+            if original_img_b64:
+                html += f"""
+        <div class="viz-card">
+            <img src="data:image/png;base64,{original_img_b64}" alt="Original Microscopy Image">
+            <div class="caption">Original Microscopy Image</div>
+        </div>
+"""
+            if global_fft_b64:
+                html += f"""
+        <div class="viz-card">
+            <img src="data:image/png;base64,{global_fft_b64}" alt="Global FFT">
+            <div class="caption">Global FFT</div>
+        </div>
+"""
+            html += """
+    </div>
+"""
+        
+        # Composite visualization (components + abundances)
+        if composite_b64:
+            html += f"""
+    <h3>FFT/NMF Decomposition Results</h3>
+    <div class="full-width-viz">
+        <img src="data:image/png;base64,{composite_b64}" alt="FFT/NMF Components and Abundances">
+        <p class="caption">
+            <strong>Top row:</strong> NMF components (frequency patterns) &nbsp;|&nbsp; 
+            <strong>Bottom row:</strong> Abundance maps (spatial distribution)
+        </p>
+    </div>
+"""
+        
+        # === 4. SCIENTIFIC CLAIMS ===
+        html += """
+    <h2>💡 Scientific Claims</h2>
+"""
+        if scientific_claims:
+            for i, claim in enumerate(scientific_claims, 1):
+                keywords = claim.get('keywords', [])
+                keywords_str = ', '.join(keywords) if keywords else 'N/A'
+                html += f"""
+    <div class="claim-card">
+        <strong>Claim {i}:</strong> {claim.get('claim', 'N/A')}<br><br>
+        <strong>Scientific Impact:</strong> {claim.get('scientific_impact', 'N/A')}<br><br>
+        <strong>Research Question:</strong> {claim.get('has_anyone_question', 'N/A')}<br><br>
+        <strong>Keywords:</strong> {keywords_str}
+    </div>
+"""
+        else:
+            html += """
+    <div class="info-box">
+        <p>No scientific claims generated.</p>
+    </div>
+"""
+        
+        # Footer
+        html += """
+    <div class="footer">
+        Generated by Microscopy Analysis Agent<br>
+        FFT/NMF decomposition reveals spatial frequency patterns in microscopy data
+    </div>
 </div>
 </body>
 </html>"""
         
+        # Write report
         report_path = self.output_dir / "analysis_report.html"
         with open(report_path, 'w') as f:
             f.write(html)
         
         self.logger.info(f"   ✅ Generated report: {report_path}")
     
+    # =========================================================================
+    # BATCH REPORT
+    # =========================================================================
+    
     def _generate_batch_report(self, state: dict) -> None:
-        """Generate report for batch analysis - matches SAM agent style."""
+        """
+        Generate comprehensive HTML report for batch analysis.
         
-        custom_results = state.get("custom_analysis_results", {})
-        series_metadata = state.get("series_metadata", {})
+        Structure:
+            1. System Information
+            2. Scientific Analysis
+            3. Visualizations
+            4. Scientific Claims
+        """
+        
         synthesis = state.get("synthesis_result", {})
         batch_results = state.get("batch_results", [])
         batch_params = state.get("batch_params", {})
+        series_metadata = state.get("series_metadata", {})
         
         detailed_analysis = synthesis.get("detailed_analysis", "No synthesis available.")
         scientific_claims = synthesis.get("scientific_claims", [])
-        
-        # Collect PNG files
-        png_files = sorted(self.output_dir.glob("*.png"))
-        embedded_images = []
-        for png_path in png_files:
-            if png_path.name.startswith("review_iteration"):
-                continue
-            if png_path.exists():
-                with open(png_path, 'rb') as f:
-                    b64 = base64.b64encode(f.read()).decode('utf-8')
-                    embedded_images.append({"name": png_path.stem, "data": b64})
+        temporal_interpretation = synthesis.get("temporal_interpretation", "")
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         num_images = state.get("num_images", len(batch_results))
         successful = sum(1 for r in batch_results if r.get("success"))
+        
+        # Collect all PNG visualizations
+        embedded_images = []
+        for png_path in sorted(self.output_dir.glob("*.png")):
+            if png_path.name.startswith("review_iteration"):
+                continue
+            try:
+                with open(png_path, 'rb') as f:
+                    b64 = base64.b64encode(f.read()).decode('utf-8')
+                    embedded_images.append({
+                        "name": png_path.stem,
+                        "data": b64,
+                        "filename": png_path.name
+                    })
+            except Exception:
+                continue
+        
+        # Get composite and series components
+        composite_b64 = self._create_composite_for_report(state)
+        series_composite_b64 = None
+        series_components = state.get("series_components")
+        if series_components is not None and composite_b64 is None:
+            series_composite_b64 = self._create_series_components_viz(series_components)
         
         html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1002,58 +1446,213 @@ class UnifiedReportGenerationController:
     <meta charset="UTF-8">
     <title>FFT/NMF Batch Analysis Report</title>
     <style>
-        body {{ font-family: 'Segoe UI', sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background: #f4f4f9; }}
-        .container {{ background: #fff; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
-        h1 {{ color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }}
-        h2 {{ color: #2980b9; margin-top: 30px; }}
-        .metadata-box {{ background: #ecf0f1; padding: 15px; border-radius: 5px; border-left: 5px solid #3498db; margin: 20px 0; }}
-        .analysis-text {{ white-space: pre-wrap; background: #fafafa; padding: 20px; border-radius: 5px; border: 1px solid #eee; }}
-        .claim-card {{ background: #e8f6f3; border-left: 5px solid #1abc9c; padding: 15px; margin: 15px 0; border-radius: 0 5px 5px 0; }}
-        .image-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 20px; margin: 20px 0; }}
-        .image-card {{ background: white; border: 1px solid #ddd; padding: 15px; border-radius: 8px; text-align: center; }}
-        .image-card img {{ max-width: 100%; border-radius: 4px; }}
-        .footer {{ margin-top: 40px; text-align: center; color: #7f8c8d; font-size: 0.8em; }}
+        body {{ 
+            font-family: 'Segoe UI', Tahoma, sans-serif; 
+            max-width: 1400px; 
+            margin: 0 auto; 
+            padding: 20px; 
+            background: #f4f4f9;
+            line-height: 1.6;
+        }}
+        .container {{ 
+            background: #fff; 
+            padding: 40px; 
+            border-radius: 8px; 
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1); 
+        }}
+        h1 {{ 
+            color: #2c3e50; 
+            border-bottom: 3px solid #3498db; 
+            padding-bottom: 15px;
+        }}
+        h2 {{ 
+            color: #2980b9; 
+            margin-top: 40px;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 10px;
+        }}
+        h3 {{
+            color: #34495e;
+            margin-top: 25px;
+        }}
+        .info-box {{
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+        }}
+        .info-box p {{
+            margin: 8px 0;
+        }}
+        .analysis-text {{ 
+            white-space: pre-wrap; 
+            background: #fafafa; 
+            padding: 25px; 
+            border-radius: 8px; 
+            border: 1px solid #eee;
+        }}
+        .claim-card {{ 
+            background: linear-gradient(135deg, #e8f6f3 0%, #d5f5e3 100%);
+            border-left: 5px solid #1abc9c; 
+            padding: 20px; 
+            margin: 15px 0; 
+            border-radius: 0 8px 8px 0;
+        }}
+        .image-grid {{ 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(450px, 1fr)); 
+            gap: 25px; 
+            margin: 25px 0; 
+        }}
+        .image-card {{ 
+            background: white; 
+            border: 1px solid #ddd; 
+            padding: 20px; 
+            border-radius: 8px; 
+            text-align: center;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        }}
+        .image-card img {{ 
+            max-width: 100%; 
+            border-radius: 4px;
+            margin-bottom: 10px;
+        }}
+        .image-card .caption {{
+            color: #666;
+            font-size: 0.9em;
+        }}
+        .full-width-viz {{
+            width: 100%;
+            margin: 25px 0;
+            text-align: center;
+        }}
+        .full-width-viz img {{
+            max-width: 100%;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }}
+        .full-width-viz .caption {{
+            color: #666;
+            font-size: 0.9em;
+            margin-top: 10px;
+        }}
+        .footer {{ 
+            margin-top: 50px; 
+            text-align: center; 
+            color: #7f8c8d; 
+            font-size: 0.8em;
+            padding-top: 20px;
+            border-top: 1px solid #eee;
+        }}
     </style>
 </head>
 <body>
 <div class="container">
     <h1>🔬 FFT/NMF Batch Analysis Report</h1>
-    
-    <div class="metadata-box">
-        <p><strong>Date:</strong> {timestamp}</p>
-        <p><strong>Images Processed:</strong> {successful}/{num_images}</p>
-        <p><strong>Analysis Approach:</strong> {custom_results.get("approach", "time_series")}</p>
-        <p><strong>Window Size:</strong> {batch_params.get("window_size_nm", "auto")} nm ({batch_params.get("window_size_pixels", "auto")} px)</p>
-        <p><strong>NMF Components:</strong> {batch_params.get("n_components", "N/A")}</p>
+"""
+        
+        # === 1. SYSTEM INFORMATION ===
+        html += """
+    <h2>📋 System Information</h2>
+"""
+        if series_metadata and isinstance(series_metadata, dict) and len(series_metadata) > 0:
+            html += """
+    <div class="info-box">
+"""
+            for key, value in series_metadata.items():
+                if isinstance(value, np.ndarray):
+                    value = f"Array shape: {value.shape}"
+                html += f"        <p><strong>{key}:</strong> {value}</p>\n"
+            html += """
     </div>
-
-    <h2>Scientific Analysis</h2>
+"""
+        else:
+            html += """
+    <div class="info-box">
+        <p>No series metadata provided.</p>
+    </div>
+"""
+        
+        # === 2. SCIENTIFIC ANALYSIS ===
+        html += f"""
+    <h2>🔍 Scientific Analysis</h2>
     <div class="analysis-text">{detailed_analysis}</div>
 """
         
+        # === 3. VISUALIZATIONS ===
+        html += """
+    <h2>📊 Visualizations</h2>
+"""
+        
+        # Components + Abundances composite
+        if composite_b64:
+            html += f"""
+    <h3>FFT/NMF Decomposition Results</h3>
+    <div class="full-width-viz">
+        <img src="data:image/png;base64,{composite_b64}" alt="FFT/NMF Components and Abundances">
+        <p class="caption">
+            <strong>Top row:</strong> NMF components (frequency patterns) &nbsp;|&nbsp; 
+            <strong>Bottom row:</strong> Abundance maps (spatial distribution)
+        </p>
+    </div>
+"""
+        elif series_composite_b64:
+            html += f"""
+    <h3>NMF Frequency Components</h3>
+    <div class="full-width-viz">
+        <img src="data:image/png;base64,{series_composite_b64}" alt="NMF Components">
+        <p class="caption">Frequency components extracted across the time series</p>
+    </div>
+"""
+        
+        # Trend visualizations
         if embedded_images:
             html += """
-    <h2>Visualizations</h2>
+    <h3>Trend Analysis</h3>
     <div class="image-grid">
 """
-            for img in embedded_images[:6]:
-                html += f"""        <div class="image-card">
-            <img src="data:image/png;base64,{img['data']}" alt="{img['name']}">
-            <p>{img['name'].replace('_', ' ').title()}</p>
+            for img in embedded_images[:8]:  # Limit to 8 images
+                nice_name = img['name'].replace('_', ' ').title()
+                html += f"""
+        <div class="image-card">
+            <img src="data:image/png;base64,{img['data']}" alt="{nice_name}">
+            <div class="caption">{nice_name}</div>
         </div>
 """
-            html += "    </div>\n"
+            html += """
+    </div>
+"""
         
-        if scientific_claims:
-            html += "    <h2>Key Scientific Claims</h2>\n"
-            for i, claim in enumerate(scientific_claims, 1):
-                html += f"""    <div class="claim-card">
-        <strong>Claim {i}:</strong> {claim.get('claim', 'N/A')}<br>
-        <em>Impact:</em> {claim.get('scientific_impact', 'N/A')}
-    </div>\n"""
-        
+        # === 4. SCIENTIFIC CLAIMS ===
         html += """
-    <div class="footer">Generated by Microscopy Batch Analysis Agent (Unified Architecture)</div>
+    <h2>💡 Scientific Claims</h2>
+"""
+        if scientific_claims:
+            for i, claim in enumerate(scientific_claims, 1):
+                keywords = claim.get('keywords', [])
+                keywords_str = ', '.join(keywords) if keywords else 'N/A'
+                html += f"""
+    <div class="claim-card">
+        <strong>Claim {i}:</strong> {claim.get('claim', 'N/A')}<br><br>
+        <strong>Scientific Impact:</strong> {claim.get('scientific_impact', 'N/A')}<br><br>
+        <strong>Research Question:</strong> {claim.get('has_anyone_question', 'N/A')}<br><br>
+        <strong>Keywords:</strong> {keywords_str}
+    </div>
+"""
+        else:
+            html += """
+    <div class="info-box">
+        <p>No scientific claims generated.</p>
+    </div>
+"""
+        
+        # Footer
+        html += """
+    <div class="footer">
+        Generated by Microscopy Batch Analysis Agent (Unified Architecture)<br>
+        Time-series FFT/NMF analysis for tracking structural dynamics
+    </div>
 </div>
 </body>
 </html>"""
@@ -1063,3 +1662,212 @@ class UnifiedReportGenerationController:
             f.write(html)
         
         self.logger.info(f"   ✅ Generated batch report: {report_path}")
+    
+    # =========================================================================
+    # HELPER METHODS
+    # =========================================================================
+    
+    def _get_original_image_b64(self, state: dict) -> Optional[str]:
+        """Get original image as base64 for report embedding."""
+        try:
+            img_array = state.get("preprocessed_image_array")
+            if img_array is None:
+                return None
+            # Use isinstance check to avoid numpy truth value ambiguity
+            if not isinstance(img_array, np.ndarray):
+                return None
+            return self._array_to_b64_for_report(img_array, cmap='gray')
+        except Exception as e:
+            self.logger.warning(f"Could not get original image: {e}")
+            return None
+    
+    def _array_to_b64_for_report(
+        self, 
+        array: np.ndarray, 
+        max_size: int = 500,
+        cmap: str = 'viridis'
+    ) -> Optional[str]:
+        """
+        Convert numpy array to base64 PNG for HTML embedding.
+        
+        Args:
+            array: 2D numpy array
+            max_size: Maximum dimension
+            cmap: Matplotlib colormap
+        
+        Returns:
+            Base64 encoded PNG string
+        """
+        # Check for None using 'is' to avoid numpy truth value issues
+        if array is None:
+            return None
+        if not isinstance(array, np.ndarray):
+            return None
+        if array.size == 0:
+            return None
+        
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            
+            fig, ax = plt.subplots(figsize=(6, 6))
+            ax.imshow(array, cmap=cmap)
+            ax.axis('off')
+            
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.1, dpi=100)
+            plt.close(fig)
+            
+            # Resize if needed
+            buf.seek(0)
+            img = Image.open(buf)
+            if max(img.size) > max_size:
+                ratio = max_size / max(img.size)
+                new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+                img = img.resize(new_size, Image.LANCZOS)
+            
+            out_buf = io.BytesIO()
+            img.save(out_buf, format='PNG', optimize=True)
+            out_buf.seek(0)
+            
+            return base64.b64encode(out_buf.read()).decode('utf-8')
+            
+        except Exception as e:
+            self.logger.warning(f"Array to b64 conversion failed: {e}")
+            return None
+    
+    def _create_composite_for_report(self, state: dict, max_size: int = 900) -> Optional[str]:
+        """
+        Create composite visualization for report (components + abundances).
+        
+        Works for both single image and batch mode by checking multiple state keys.
+        
+        Returns base64 encoded PNG.
+        """
+        # Try different state keys for components/abundances (single vs batch)
+        components = state.get("fft_components")
+        if components is None:
+            components = state.get("series_components")
+        
+        abundances = state.get("fft_abundances")
+        if abundances is None:
+            abundances = state.get("series_abundances")
+        
+        # Check if we have valid arrays
+        if components is None or not isinstance(components, np.ndarray):
+            return None
+        if abundances is None or not isinstance(abundances, np.ndarray):
+            return None
+        
+        # For batch mode, series_abundances has shape (n_frames, n_components, h, w)
+        # We want to show the first frame's abundances or average across frames
+        if abundances.ndim == 4:
+            # Use first frame's abundances for visualization
+            abundances = abundances[0]
+        
+        # Ensure shapes are compatible
+        if components.shape[0] != abundances.shape[0]:
+            self.logger.warning(f"Component/abundance shape mismatch: {components.shape} vs {abundances.shape}")
+            n_comps = min(components.shape[0], abundances.shape[0])
+            components = components[:n_comps]
+            abundances = abundances[:n_comps]
+        
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            
+            n_comps = components.shape[0]
+            
+            fig, axes = plt.subplots(2, n_comps, figsize=(4 * n_comps, 8))
+            
+            if n_comps == 1:
+                axes = axes.reshape(2, 1)
+            
+            for i in range(n_comps):
+                # Components (top row)
+                im1 = axes[0, i].imshow(components[i], cmap='viridis')
+                axes[0, i].set_title(f'Component {i+1}\n(Frequency Pattern)', fontsize=11, fontweight='bold')
+                axes[0, i].axis('off')
+                plt.colorbar(im1, ax=axes[0, i], fraction=0.046, pad=0.04)
+                
+                # Abundances (bottom row)
+                im2 = axes[1, i].imshow(abundances[i], cmap='hot')
+                axes[1, i].set_title(f'Component {i+1}\n(Spatial Distribution)', fontsize=11, fontweight='bold')
+                axes[1, i].axis('off')
+                plt.colorbar(im2, ax=axes[1, i], fraction=0.046, pad=0.04)
+            
+            plt.tight_layout()
+            
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=120, bbox_inches='tight')
+            plt.close(fig)
+            
+            # Resize if needed
+            buf.seek(0)
+            img = Image.open(buf)
+            if max(img.size) > max_size:
+                ratio = max_size / max(img.size)
+                new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+                img = img.resize(new_size, Image.LANCZOS)
+            
+            out_buf = io.BytesIO()
+            img.save(out_buf, format='PNG', optimize=True)
+            out_buf.seek(0)
+            
+            return base64.b64encode(out_buf.read()).decode('utf-8')
+            
+        except Exception as e:
+            self.logger.error(f"Composite for report failed: {e}")
+            return None
+    
+    def _create_series_components_viz(self, components: np.ndarray, max_size: int = 900) -> Optional[str]:
+        """Create visualization of series components for batch report."""
+        if components is None:
+            return None
+        if not isinstance(components, np.ndarray):
+            return None
+        if components.size == 0:
+            return None
+        
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            
+            n_comps = min(components.shape[0], 6)  # Limit to 6 components
+            
+            fig, axes = plt.subplots(1, n_comps, figsize=(4 * n_comps, 4))
+            
+            if n_comps == 1:
+                axes = [axes]
+            
+            for i in range(n_comps):
+                im = axes[i].imshow(components[i], cmap='viridis')
+                axes[i].set_title(f'Component {i+1}', fontsize=12, fontweight='bold')
+                axes[i].axis('off')
+                plt.colorbar(im, ax=axes[i], fraction=0.046, pad=0.04)
+            
+            plt.tight_layout()
+            
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+            plt.close(fig)
+            
+            buf.seek(0)
+            img = Image.open(buf)
+            if max(img.size) > max_size:
+                ratio = max_size / max(img.size)
+                new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+                img = img.resize(new_size, Image.LANCZOS)
+            
+            out_buf = io.BytesIO()
+            img.save(out_buf, format='PNG', optimize=True)
+            out_buf.seek(0)
+            
+            return base64.b64encode(out_buf.read()).decode('utf-8')
+            
+        except Exception as e:
+            self.logger.warning(f"Series components viz failed: {e}")
+            return None
