@@ -868,6 +868,7 @@ class UnifiedSeriesProcessingController:
         # Replace output filename patterns
         adapted = adapted.replace('fit_visualization.png', f'{output_prefix}_fit.png')
         adapted = re.sub(r'spectrum_\d{4}_fit\.png', f'{output_prefix}_fit.png', adapted)
+        adapted = re.sub(r'spectrum_\d{4}_T\d+K_fit\.png', f'{output_prefix}_fit.png', adapted)
         
         # Find and replace the data path in np.load() calls
         # Match patterns like: np.load("...temp_spectrum_0.npy") or np.load('...temp_spectrum_0.npy')
@@ -877,18 +878,37 @@ class UnifiedSeriesProcessingController:
             adapted
         )
         
-        # Also replace any standalone path string assignments
-        # Match: data_path = "...temp_spectrum_0.npy" or similar variable assignments
+        # Also handle np.load(variable) where variable was assigned the path
+        # Replace the path in any string that looks like a temp_spectrum path
         adapted = re.sub(
             r'(["\']).*?temp_spectrum_\d+\.npy\1',
             f'"{data_path}"',
             adapted
         )
         
-        # Replace any DATA_PATH or data_path variable assignments with the new path
+        # Replace DATA_PATH variable assignments (preserve uppercase)
         adapted = re.sub(
-            r'(DATA_PATH|data_path)\s*=\s*["\'].*?["\']',
+            r'DATA_PATH\s*=\s*["\'].*?["\']',
             f'DATA_PATH = "{data_path}"',
+            adapted
+        )
+        
+        # Replace data_path variable assignments (preserve lowercase)
+        adapted = re.sub(
+            r'data_path\s*=\s*["\'].*?["\']',
+            f'data_path = "{data_path}"',
+            adapted
+        )
+        
+        # Also handle file_path or filepath variants
+        adapted = re.sub(
+            r'file_path\s*=\s*["\'].*?temp_spectrum_\d+\.npy["\']',
+            f'file_path = "{data_path}"',
+            adapted
+        )
+        adapted = re.sub(
+            r'filepath\s*=\s*["\'].*?temp_spectrum_\d+\.npy["\']',
+            f'filepath = "{data_path}"',
             adapted
         )
         
@@ -1156,29 +1176,110 @@ class ConditionalTrendAnalysisController:
 **SERIES METADATA:**
 {series_metadata}
 
-Generate a Python script that:
-1. Loads the fit results from 'series_fit_results.json'
-2. Extracts key parameters across the series
-3. Creates publication-quality visualizations showing parameter evolution
-4. Identifies and quantifies trends (linear fits, correlations, etc.)
-5. Saves visualizations as PNG files
-6. Prints a summary of findings
+**JSON FILE STRUCTURE:**
+The file 'series_fit_results.json' has this exact structure:
+```json
+{{
+    "timestamp": "2026-01-27T...",
+    "total_spectra": N,
+    "successful": M,
+    "is_single_spectrum": false,
+    "locked_config": {{...}},
+    "results": [
+        {{
+            "index": 0,
+            "name": "spectrum_0000_T300K",
+            "success": true,
+            "model_type": "Sum of Lorentzian peaks",
+            "parameters": {{
+                "peak_0_center": 720.5,
+                "peak_0_amplitude": 0.25,
+                "peak_0_sigma": 12.3,
+                "peak_1_center": 1100.2,
+                "peak_1_amplitude": 0.55,
+                ...
+            }},
+            "fit_quality": {{"r_squared": 0.95, "rmse": 0.02}},
+            ...
+        }},
+        ...more results...
+    ]
+}}
+```
 
-The script should handle:
-- Parameter evolution vs. index/time/temperature (based on metadata)
-- Error bars if uncertainties are available
-- Correlation analysis between parameters
-- Statistical significance of trends
+**CRITICAL: USE THIS EXACT DATA EXTRACTION PATTERN:**
+```python
+import json
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import stats
 
-Output requirements:
-- Save plots to current directory (e.g., 'parameter_trends.png', 'correlation_matrix.png')
-- Print key findings to stdout
+# Load data
+with open('series_fit_results.json', 'r') as f:
+    data = json.load(f)
+
+results = data['results']  # This is a LIST of dictionaries
+
+# Extract temperatures from spectrum names (e.g., "spectrum_0000_T300K" -> 300)
+temperatures = []
+for r in results:
+    name = r['name']
+    # Extract temperature from name like "spectrum_0000_T300K"
+    if '_T' in name and 'K' in name:
+        temp_str = name.split('_T')[-1].replace('K', '')
+        temperatures.append(float(temp_str))
+    else:
+        temperatures.append(r['index'])  # fallback to index
+
+temperatures = np.array(temperatures)
+
+# Extract parameters - collect all parameter names first
+all_params = set()
+for r in results:
+    if r['success'] and 'parameters' in r:
+        all_params.update(r['parameters'].keys())
+
+# Build parameter arrays
+param_data = {{param: [] for param in all_params}}
+for r in results:
+    params = r.get('parameters', {{}})
+    for param in all_params:
+        param_data[param].append(params.get(param, np.nan))
+
+# Convert to numpy arrays
+for param in param_data:
+    param_data[param] = np.array(param_data[param])
+
+# Now plot - MAKE SURE TO ACTUALLY PLOT DATA
+fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+# ... use axes[i,j].plot(temperatures, param_data['param_name'], 'o-') ...
+```
+
+Generate a complete Python script that:
+1. Loads the fit results using the EXACT pattern shown above
+2. Extracts ALL parameters across the series
+3. Creates publication-quality visualizations with ACTUAL DATA POINTS
+4. For each subplot, call ax.plot() or ax.scatter() with real data
+5. Identifies and quantifies trends (linear fits with scipy.stats.linregress)
+6. Saves visualizations as PNG files
+7. Prints a summary of findings
+
+IMPORTANT REQUIREMENTS:
+- Use the exact data loading pattern shown above
+- Always verify data is not empty before plotting: `if len(data) > 0:`
+- Actually call plot/scatter functions with real arrays, not empty lists
+- Include error handling for missing parameters
+- Print debug info: `print(f"Found {{len(results)}} results, {{len(temperatures)}} temperatures")`
+
+Output files to save:
+- 'parameter_trends.png' - Main parameter evolution plots
+- 'correlation_matrix.png' - Parameter correlations (optional)
 
 Return JSON with:
 {{
     "analysis_approach": "description of trend analysis approach",
     "key_metrics": ["list", "of", "metrics", "tracked"],
-    "expected_outputs": ["list", "of", "output", "files"],
+    "expected_outputs": ["parameter_trends.png"],
     "script": "full python script"
 }}
 '''
@@ -1407,10 +1508,12 @@ Return JSON with:
     "detailed_analysis": "comprehensive scientific interpretation",
     "scientific_claims": [
         {{
-            "claim": "specific claim",
+            "claim": "specific claim statement",
             "evidence": "supporting evidence from fits",
             "confidence": "high/medium/low",
-            "scientific_impact": "why this matters"
+            "scientific_impact": "why this matters",
+            "source": "curve_fitting_analysis",
+            "parameters_involved": ["list of parameter names supporting this claim"]
         }}
     ],
     "parameter_trends": {{
