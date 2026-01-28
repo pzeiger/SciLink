@@ -1071,24 +1071,7 @@ class UnifiedSynthesisController:
         except Exception as e:
             self.logger.warning(f"Array to PNG conversion failed: {e}")
             return None
-
-
-"""
-Complete UnifiedReportGenerationController with visualization support.
-
-Replace the existing UnifiedReportGenerationController in microscopy_controllers.py with this version.
-"""
-
-import base64
-import io
-import json
-import logging
-from datetime import datetime
-from pathlib import Path
-from typing import Callable, Optional
-import numpy as np
-from PIL import Image
-
+        
 
 class UnifiedReportGenerationController:
     """
@@ -1114,17 +1097,107 @@ class UnifiedReportGenerationController:
         self.logger.info("\n\n📄 --- GENERATING REPORT --- 📄\n")
         
         try:
+            # For batch mode, generate trend visualizations first
+            if not is_single:
+                self._generate_trend_visualizations(state)
+            
             if is_single:
                 self._generate_single_image_report(state)
             else:
                 self._generate_batch_report(state)
         except Exception as e:
             self.logger.error(f"   ❌ Report generation failed: {e}")
-            # Don't fail the pipeline for report errors
             import traceback
             self.logger.debug(traceback.format_exc())
         
         return state
+    
+    def _generate_trend_visualizations(self, state: dict) -> None:
+        """
+        Generate trend analysis visualizations for batch/series data.
+        
+        Creates:
+            - abundance_timeseries.png: Mean abundance per component over time
+            - trends.json: Numerical trend data
+        """
+        series_abundances = state.get("series_abundances")
+        series_components = state.get("series_components")
+        
+        if series_abundances is None:
+            self.logger.warning("   No series abundances available for trend visualization")
+            return
+        
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            import json
+            
+            # series_abundances shape: (n_frames, n_components, h, w)
+            n_frames, n_comps = series_abundances.shape[:2]
+            
+            # Calculate mean abundance per component per frame
+            mean_abundances = series_abundances.mean(axis=(2, 3))  # (n_frames, n_components)
+            
+            # === 1. Abundance Time Series Plot ===
+            fig, ax = plt.subplots(figsize=(10, 5))
+            
+            colors = plt.cm.viridis(np.linspace(0, 1, n_comps))
+            for i in range(n_comps):
+                ax.plot(mean_abundances[:, i], 'o-', color=colors[i], 
+                       label=f'Component {i+1}', linewidth=2, markersize=4)
+            
+            ax.set_xlabel('Frame', fontsize=12)
+            ax.set_ylabel('Mean Abundance', fontsize=12)
+            ax.set_title('Component Abundance Over Time', fontsize=14, fontweight='bold')
+            ax.legend(loc='best')
+            ax.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            plt.savefig(self.output_dir / "abundance_timeseries.png", dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            
+            self.logger.info("   📈 Generated abundance_timeseries.png")
+            
+            # === 2. Trend Statistics ===
+            trends = {}
+            for i in range(n_comps):
+                data = mean_abundances[:, i]
+                
+                # Calculate slope (trend direction)
+                if len(data) > 1:
+                    slope = np.polyfit(range(len(data)), data, 1)[0]
+                else:
+                    slope = 0.0
+                
+                # Determine trend direction
+                if abs(slope) < 0.001:
+                    trend = "stable"
+                elif slope > 0:
+                    trend = "increasing"
+                else:
+                    trend = "decreasing"
+                
+                trends[f"component_{i+1}"] = {
+                    "mean": float(np.mean(data)),
+                    "std": float(np.std(data)),
+                    "min": float(np.min(data)),
+                    "max": float(np.max(data)),
+                    "slope": float(slope),
+                    "trend": trend
+                }
+            
+            # Save trends.json
+            with open(self.output_dir / "trends.json", 'w') as f:
+                json.dump(trends, f, indent=2)
+            
+            self.logger.info("   📊 Generated trends.json")
+            
+            # Store in state for synthesis
+            state["trend_data"] = trends
+            
+        except Exception as e:
+            self.logger.error(f"   ❌ Trend visualization failed: {e}")
     
     # =========================================================================
     # SINGLE IMAGE REPORT
@@ -1167,7 +1240,7 @@ class UnifiedReportGenerationController:
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title> Microscopy Image Analysis Report - {image_name}</title>
+    <title>Microscopy Image Analysis Report - {image_name}</title>
     <style>
         body {{ 
             font-family: 'Segoe UI', Tahoma, sans-serif; 
@@ -1375,7 +1448,7 @@ class UnifiedReportGenerationController:
         # Footer
         html += """
     <div class="footer">
-        Generated by Microscopy Analysis Agent<br>
+        Generated by Microscopy Analysis Agent (Unified Architecture)<br>
         FFT/NMF decomposition reveals spatial frequency patterns in microscopy data
     </div>
 </div>
@@ -1433,18 +1506,17 @@ class UnifiedReportGenerationController:
             except Exception:
                 continue
         
-        # Get composite and series components
-        composite_b64 = self._create_composite_for_report(state)
-        series_composite_b64 = None
+        # Get series components for visualization
         series_components = state.get("series_components")
-        if series_components is not None and composite_b64 is None:
-            series_composite_b64 = self._create_series_components_viz(series_components)
+        
+        # Get system info (provided by user) - this is the metadata for the experiment
+        system_info = state.get("system_info", {})
         
         html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FFT/NMF Batch Analysis Report</title>
+    <title>Microscopy Image Analysis Report</title>
     <style>
         body {{ 
             font-family: 'Segoe UI', Tahoma, sans-serif; 
@@ -1549,18 +1621,18 @@ class UnifiedReportGenerationController:
 </head>
 <body>
 <div class="container">
-    <h1>🔬 FFT/NMF Batch Analysis Report</h1>
+    <h1>🔬 Microscopy Image Analysis Report</h1>
 """
         
         # === 1. SYSTEM INFORMATION ===
         html += """
     <h2>📋 System Information</h2>
 """
-        if series_metadata and isinstance(series_metadata, dict) and len(series_metadata) > 0:
+        if system_info and isinstance(system_info, dict) and len(system_info) > 0:
             html += """
     <div class="info-box">
 """
-            for key, value in series_metadata.items():
+            for key, value in system_info.items():
                 if isinstance(value, np.ndarray):
                     value = f"Array shape: {value.shape}"
                 html += f"        <p><strong>{key}:</strong> {value}</p>\n"
@@ -1570,7 +1642,7 @@ class UnifiedReportGenerationController:
         else:
             html += """
     <div class="info-box">
-        <p>No series metadata provided.</p>
+        <p>No system information provided.</p>
     </div>
 """
         
@@ -1585,24 +1657,15 @@ class UnifiedReportGenerationController:
     <h2>📊 Visualizations</h2>
 """
         
-        # Components + Abundances composite
-        if composite_b64:
-            html += f"""
-    <h3>FFT/NMF Decomposition Results</h3>
-    <div class="full-width-viz">
-        <img src="data:image/png;base64,{composite_b64}" alt="FFT/NMF Components and Abundances">
-        <p class="caption">
-            <strong>Top row:</strong> NMF components (frequency patterns) &nbsp;|&nbsp; 
-            <strong>Bottom row:</strong> Abundance maps (spatial distribution)
-        </p>
-    </div>
-"""
-        elif series_composite_b64:
+        # For batch: show only components (shared across all frames)
+        # Abundances vary per frame, so they're represented in trend plots instead
+        components_b64 = self._create_components_only_viz(state)
+        if components_b64:
             html += f"""
     <h3>NMF Frequency Components</h3>
     <div class="full-width-viz">
-        <img src="data:image/png;base64,{series_composite_b64}" alt="NMF Components">
-        <p class="caption">Frequency components extracted across the time series</p>
+        <img src="data:image/png;base64,{components_b64}" alt="NMF Components">
+        <p class="caption">Shared frequency patterns extracted across the entire time series</p>
     </div>
 """
         
@@ -1870,4 +1933,79 @@ class UnifiedReportGenerationController:
             
         except Exception as e:
             self.logger.warning(f"Series components viz failed: {e}")
+            return None
+
+    def _create_components_only_viz(self, state: dict, max_size: int = 900) -> Optional[str]:
+        """
+        Create visualization showing only NMF components (no abundances).
+        
+        For batch/series analysis, components are shared across all frames,
+        while abundances vary per frame (shown in trend plots instead).
+        """
+        components = state.get("series_components")
+        if components is None:
+            components = state.get("fft_components")
+        
+        if components is None:
+            return None
+        if not isinstance(components, np.ndarray):
+            return None
+        if components.size == 0:
+            return None
+        
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            
+            n_comps = min(components.shape[0], 8)  # Limit to 8 components
+            
+            # Determine grid layout
+            if n_comps <= 4:
+                n_cols = n_comps
+                n_rows = 1
+            else:
+                n_cols = 4
+                n_rows = (n_comps + 3) // 4
+            
+            fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows))
+            
+            if n_comps == 1:
+                axes = np.array([[axes]])
+            elif n_rows == 1:
+                axes = axes.reshape(1, -1)
+            
+            for i in range(n_comps):
+                row, col = i // n_cols, i % n_cols
+                im = axes[row, col].imshow(components[i], cmap='viridis')
+                axes[row, col].set_title(f'Component {i+1}', fontsize=12, fontweight='bold')
+                axes[row, col].axis('off')
+                plt.colorbar(im, ax=axes[row, col], fraction=0.046, pad=0.04)
+            
+            # Hide unused subplots
+            for i in range(n_comps, n_rows * n_cols):
+                row, col = i // n_cols, i % n_cols
+                axes[row, col].axis('off')
+            
+            plt.tight_layout()
+            
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+            plt.close(fig)
+            
+            buf.seek(0)
+            img = Image.open(buf)
+            if max(img.size) > max_size:
+                ratio = max_size / max(img.size)
+                new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+                img = img.resize(new_size, Image.LANCZOS)
+            
+            out_buf = io.BytesIO()
+            img.save(out_buf, format='PNG', optimize=True)
+            out_buf.seek(0)
+            
+            return base64.b64encode(out_buf.read()).decode('utf-8')
+            
+        except Exception as e:
+            self.logger.warning(f"Components-only viz failed: {e}")
             return None
