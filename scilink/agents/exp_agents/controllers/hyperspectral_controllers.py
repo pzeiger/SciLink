@@ -1193,7 +1193,7 @@ class GenerateHTMLReportController:
                 <div class="claim-card">
                     <div class="claim-title">Claim {i}: {claim.get('claim', 'N/A')}</div>
                     <p><strong>Impact:</strong> {claim.get('scientific_impact', 'N/A')}</p>
-                    <p><strong>Research Question:</strong> <em>{claim.get('has_anyone_question', 'N/A')}</em></p>
+                    <p><strong>Literature Search Query:</strong> <em>{claim.get('has_anyone_question', 'N/A')}</em></p>
                 </div>
                 """
 

@@ -1434,7 +1434,7 @@ class UnifiedReportGenerationController:
     <div class="claim-card">
         <strong>Claim {i}:</strong> {claim.get('claim', 'N/A')}<br><br>
         <strong>Scientific Impact:</strong> {claim.get('scientific_impact', 'N/A')}<br><br>
-        <strong>Research Question:</strong> {claim.get('has_anyone_question', 'N/A')}<br><br>
+        <strong>Literature Search Query:</strong> {claim.get('has_anyone_question', 'N/A')}<br><br>
         <strong>Keywords:</strong> {keywords_str}
     </div>
 """
@@ -1699,7 +1699,7 @@ class UnifiedReportGenerationController:
     <div class="claim-card">
         <strong>Claim {i}:</strong> {claim.get('claim', 'N/A')}<br><br>
         <strong>Scientific Impact:</strong> {claim.get('scientific_impact', 'N/A')}<br><br>
-        <strong>Research Question:</strong> {claim.get('has_anyone_question', 'N/A')}<br><br>
+        <strong>Literature Search Query:</strong> {claim.get('has_anyone_question', 'N/A')}<br><br>
         <strong>Keywords:</strong> {keywords_str}
     </div>
 """

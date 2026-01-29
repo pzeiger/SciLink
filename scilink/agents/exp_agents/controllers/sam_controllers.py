@@ -906,12 +906,23 @@ class UnifiedReportGenerationController:
         detailed_analysis = synthesis.get("detailed_analysis", "No analysis available.")
         scientific_claims = synthesis.get("scientific_claims", [])
         
-        # Embed visualization
+        # Get visualization image
         viz_path = result.get("visualization_path")
-        viz_b64 = None
+        embedded_image = None
+        
         if viz_path and Path(viz_path).exists():
             with open(viz_path, 'rb') as f:
-                viz_b64 = base64.b64encode(f.read()).decode('utf-8')
+                b64 = base64.b64encode(f.read()).decode('utf-8')
+                embedded_image = {"name": Path(viz_path).stem, "data": b64}
+        else:
+            # Fallback: search for visualization in output directory
+            viz_dir = self.output_dir / "visualizations"
+            if viz_dir.exists():
+                viz_files = sorted(viz_dir.glob("overlay_*.png"))
+                if viz_files:
+                    with open(viz_files[0], 'rb') as f:
+                        b64 = base64.b64encode(f.read()).decode('utf-8')
+                        embedded_image = {"name": viz_files[0].stem, "data": b64}
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         
@@ -921,46 +932,63 @@ class UnifiedReportGenerationController:
     <meta charset="UTF-8">
     <title>SAM Analysis Report - Single Image</title>
     <style>
-        body {{ font-family: 'Segoe UI', sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; background: #f4f4f9; }}
+        body {{ font-family: 'Segoe UI', sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background: #f4f4f9; }}
         .container {{ background: #fff; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
         h1 {{ color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }}
         h2 {{ color: #2980b9; margin-top: 30px; }}
-        .stats-box {{ background: #ecf0f1; padding: 15px; border-radius: 5px; border-left: 5px solid #3498db; margin: 20px 0; }}
+        .metadata-box {{ background: #ecf0f1; padding: 15px; border-radius: 5px; border-left: 5px solid #3498db; margin: 20px 0; }}
         .analysis-text {{ white-space: pre-wrap; background: #fafafa; padding: 20px; border-radius: 5px; border: 1px solid #eee; }}
         .claim-card {{ background: #e8f6f3; border-left: 5px solid #1abc9c; padding: 15px; margin: 15px 0; border-radius: 0 5px 5px 0; }}
-        .viz-img {{ max-width: 100%; border-radius: 8px; margin: 20px 0; }}
+        .image-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 20px; margin: 20px 0; }}
+        .image-card {{ background: white; border: 1px solid #ddd; padding: 15px; border-radius: 8px; text-align: center; }}
+        .image-card img {{ max-width: 100%; border-radius: 4px; }}
         .footer {{ margin-top: 40px; text-align: center; color: #7f8c8d; font-size: 0.8em; }}
     </style>
 </head>
 <body>
 <div class="container">
     <h1>🔬 SAM Analysis Report</h1>
-    <p><strong>Date:</strong> {timestamp} | <strong>Image:</strong> {result.get('image_name', 'unknown')}</p>
     
-    <div class="stats-box">
+    <div class="metadata-box">
+        <p><strong>Date:</strong> {timestamp}</p>
+        <p><strong>Image:</strong> {result.get('image_name', 'unknown')}</p>
         <p><strong>Particles Detected:</strong> {result.get('particle_count', 0)}</p>
         <p><strong>Mean Area:</strong> {result.get('statistics', {}).get('mean_area_pixels', 'N/A')} px²</p>
     </div>
-"""
-        
-        if viz_b64:
-            html += f"""
-    <h2>Segmentation Result</h2>
-    <img class="viz-img" src="data:image/png;base64,{viz_b64}" alt="Segmentation">
-"""
-        
-        html += f"""
+
     <h2>Scientific Analysis</h2>
     <div class="analysis-text">{detailed_analysis}</div>
 """
         
+        if embedded_image:
+            html += """
+    <h2>Visualization</h2>
+    <div class="image-grid">
+"""
+            html += f"""        <div class="image-card">
+            <img src="data:image/png;base64,{embedded_image['data']}" alt="Segmentation Result">
+            <p>Particle Detection Overlay</p>
+        </div>
+"""
+            html += "    </div>\n"
+        
         if scientific_claims:
-            html += "<h2>Key Findings</h2>\n"
+            html += "    <h2>Key Scientific Claims</h2>\n"
             for i, claim in enumerate(scientific_claims, 1):
-                html += f"""<div class="claim-card">
-    <strong>Finding {i}:</strong> {claim.get('claim', 'N/A')}<br>
-    <em>Impact:</em> {claim.get('scientific_impact', 'N/A')}
-</div>\n"""
+                claim_text = claim.get('claim', 'N/A') if isinstance(claim, dict) else str(claim)
+                impact_text = claim.get('scientific_impact', '') if isinstance(claim, dict) else ''
+                has_anyone_text = claim.get('has_anyone_question', '') if isinstance(claim, dict) else ''
+                
+                html += f"""    <div class="claim-card">
+        <strong>Claim {i}:</strong> {claim_text}<br>
+"""
+                if impact_text:
+                    html += f"""        <em>Impact:</em> {impact_text}<br>
+"""
+                if has_anyone_text:
+                    html += f"""        <em>Literature Query:</em> {has_anyone_text}
+"""
+                html += "    </div>\n"
         
         html += """
     <div class="footer">Generated by SAM Analysis Agent (Unified Architecture)</div>
@@ -986,11 +1014,15 @@ class UnifiedReportGenerationController:
         detailed_analysis = synthesis.get("detailed_analysis", "No synthesis available.")
         scientific_claims = synthesis.get("scientific_claims", [])
         
-        # Collect PNG files
+        # Collect PNG files from main output directory (trend plots from custom analysis)
+        # Exclude review_iteration images and overlay images (individual segmentations)
         png_files = sorted(self.output_dir.glob("*.png"))
         embedded_images = []
         for png_path in png_files:
+            # Skip review iterations and individual overlay images
             if png_path.name.startswith("review_iteration"):
+                continue
+            if png_path.name.startswith("overlay_"):
                 continue
             if png_path.exists():
                 with open(png_path, 'rb') as f:
@@ -1040,10 +1072,21 @@ class UnifiedReportGenerationController:
     <h2>Visualizations</h2>
     <div class="image-grid">
 """
-            for img in embedded_images[:6]:
+            for idx, img in enumerate(embedded_images[:6], 1):
+                # Determine caption based on image type
+                name_lower = img['name'].lower()
+                if 'overlay' in name_lower:
+                    caption = f"Segmentation Result {idx}"
+                elif 'trend' in name_lower or 'time' in name_lower:
+                    caption = f"Trend Analysis {idx}"
+                elif 'histogram' in name_lower or 'distribution' in name_lower:
+                    caption = f"Distribution Plot {idx}"
+                else:
+                    caption = f"Analysis Output {idx}"
+                
                 html += f"""        <div class="image-card">
-            <img src="data:image/png;base64,{img['data']}" alt="{img['name']}">
-            <p>{img['name'].replace('_', ' ').title()}</p>
+            <img src="data:image/png;base64,{img['data']}" alt="{caption}">
+            <p>{caption}</p>
         </div>
 """
             html += "    </div>\n"
@@ -1051,10 +1094,20 @@ class UnifiedReportGenerationController:
         if scientific_claims:
             html += "    <h2>Key Scientific Claims</h2>\n"
             for i, claim in enumerate(scientific_claims, 1):
+                claim_text = claim.get('claim', 'N/A') if isinstance(claim, dict) else str(claim)
+                impact_text = claim.get('scientific_impact', '') if isinstance(claim, dict) else ''
+                has_anyone_text = claim.get('has_anyone_question', '') if isinstance(claim, dict) else ''
+                
                 html += f"""    <div class="claim-card">
-        <strong>Claim {i}:</strong> {claim.get('claim', 'N/A')}<br>
-        <em>Impact:</em> {claim.get('scientific_impact', 'N/A')}
-    </div>\n"""
+        <strong>Claim {i}:</strong> {claim_text}<br>
+"""
+                if impact_text:
+                    html += f"""        <em>Impact:</em> {impact_text}<br>
+"""
+                if has_anyone_text:
+                    html += f"""        <em>Literature Query:</em> {has_anyone_text}
+"""
+                html += "    </div>\n"
         
         html += """
     <div class="footer">Generated by SAM Batch Analysis Agent (Unified Architecture)</div>

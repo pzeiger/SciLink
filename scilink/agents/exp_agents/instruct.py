@@ -822,15 +822,18 @@ You MUST output a valid JSON object containing two keys: "detailed_analysis" and
 2.  **scientific_claims**: (List of Objects) Generate 2-4 specific scientific claims based on your analysis that can be used to search literature for similar observations. Each object must have the following keys:
     * **claim**: (String) A single, focused scientific claim written as a complete sentence about a specific, quantifiable observation from the segmentation analysis.
     * **scientific_impact**: (String) A brief explanation of why this claim would be scientifically significant if confirmed, linking it to underlying processes (e.g., formation mechanism, material properties, biological function).
-    * **has_anyone_question**: (String) A direct question starting with "Has anyone observed" that reformulates the claim as a research question.
+    * **has_anyone_question**: (String) A question that MUST start with "Has anyone" (e.g., "Has anyone observed...", "Has anyone reported...", "Has anyone characterized..."). This reformulates the claim as a literature-searchable research question.
     * **keywords**: (List of Strings) 3-5 key scientific terms from the claim that would be most useful in literature searches, including terminology specific to the observed material or biological system.
 
+**CRITICAL for has_anyone_question field:**
+- The question MUST start with "Has anyone"
+- The question must be PORTABLE: understandable without seeing the image or detailed analysis
+- DO NOT use words like "this", "that", "these", "the observed pattern", or "the specific signature"
+- Avoid overly specific numbers; focus on the phenomenon
+
 Focus on formulating claims that are specific enough to be meaningfully compared against existing literature but general enough to facilitate discovery. 
-Avoid using **overly specific** numbers from the analysis.
-Your question **must be portable** and understandable without seeing the image or having access to the detailed analysis. **DO NOT** use words like "this," "that," "the observed pattern," or "the specific signature." 
 Ensure the final output is ONLY the JSON object and nothing else.
 """
-
 
 SAM_ANALYSIS_REFINE_INSTRUCTIONS = """You are a computer vision expert analyzing segmentation results from a microscopy image.
 
@@ -1623,7 +1626,7 @@ Your response must be valid JSON with this structure:
             "claim": "A specific, evidence-based scientific claim",
             "supporting_evidence": "The statistical evidence supporting this claim",
             "scientific_impact": "The significance of this finding",
-            "has_anyone_question": "The research question this addresses",
+            "has_anyone_question": "Has anyone observed [specific observation from claim] in [material/system type]?",
             "keywords": ["relevant", "keywords", "for", "this", "claim"]
         }
     ]
@@ -1638,11 +1641,14 @@ Guidelines:
 6. Generate 2-4 meaningful scientific claims
 7. Consider what the findings might indicate about the sample
 8. Acknowledge limitations of single-image analysis
+
+**CRITICAL for has_anyone_question field:**
+- The question MUST start with "Has anyone" (e.g., "Has anyone observed...", "Has anyone reported...", "Has anyone characterized...")
+- The question must be self-contained and understandable WITHOUT seeing the image
+- DO NOT use words like "this", "that", "these", "the observed", or "the specific"
+- Reformulate the claim into a literature-searchable question
 """
 
-# =============================================================================
-# BATCH/REFINEMENT INSTRUCTIONS
-# =============================================================================
 
 SAM_BATCH_REFINEMENT_INSTRUCTIONS = """You are an expert in image segmentation quality assessment.
 
@@ -1756,35 +1762,45 @@ Generate appropriate visualizations based on the data:
 # BATCH SYNTHESIS INSTRUCTIONS
 # =============================================================================
 
-SAM_BATCH_SYNTHESIS_INSTRUCTIONS = """You are an expert microscopy analyst synthesizing findings from a batch analysis of multiple images.
+SAM_BATCH_SYNTHESIS_INSTRUCTIONS = """You are an expert materials scientist synthesizing findings from a batch SAM analysis of a microscopy image series.
 
-Analyze the individual results and trend analysis to generate comprehensive scientific conclusions.
+You will receive:
+1. **Individual Analysis Results** - Per-image scientific claims and statistics
+2. **Custom Analysis Results** - Trend analysis and visualizations from the LLM-generated script
+3. **Series Context** - Metadata about what the series represents
 
-Your response must be valid JSON:
-{
-    "detailed_analysis": "Comprehensive synthesis of findings across all images. Discuss temporal trends, statistical patterns, and scientific implications. This should be 3-5 paragraphs of substantive analysis.",
-    "scientific_claims": [
-        {
-            "claim": "A specific scientific claim supported by the batch data",
-            "supporting_evidence": "Statistical evidence from multiple images",
-            "scientific_impact": "Significance of this finding",
-            "has_anyone_question": "Research question addressed",
-            "keywords": ["batch", "trend", "relevant", "keywords"]
-        }
-    ]
-}
+**Your Task:**
+Synthesize all findings into a cohesive scientific narrative that:
+1. Identifies major trends and patterns across the series
+2. Correlates morphological changes with experimental conditions
+3. Highlights statistically significant observations
+4. Proposes mechanistic explanations where appropriate
 
-Guidelines:
-1. Synthesize findings ACROSS images, not just individual observations
-2. Identify temporal trends or patterns in the data
-3. Note any statistically significant changes
-4. Comment on reproducibility and variation across the series
-5. Consider what the collective findings indicate about the sample/process
-6. Generate 2-4 meaningful scientific claims
-7. Reference specific statistics and trends from the analysis
-8. Acknowledge limitations and suggest follow-up analyses
+You MUST output a valid JSON object with two keys: "detailed_analysis" and "scientific_claims".
+
+1. **detailed_analysis**: (String) Comprehensive narrative integrating:
+   - Evolution of key morphological parameters
+   - Statistical trends and their significance
+   - Correlations between different metrics
+   - Comparison with expected behavior
+   - Notable anomalies or unexpected findings
+
+2. **scientific_claims**: (List of Objects) 2-4 high-level claims based on the batch analysis:
+   * **claim**: A focused scientific claim about the observed trends
+   * **scientific_impact**: Why this finding is significant
+   * **supporting_evidence**: Quantitative evidence from the batch analysis
+   * **has_anyone_question**: A question starting with "Has anyone" for literature search
+   * **keywords**: 3-5 key terms for literature searches
+
+**CRITICAL for has_anyone_question field:**
+- The question MUST start with "Has anyone" (e.g., "Has anyone observed...", "Has anyone reported...", "Has anyone measured...")
+- The question must be self-contained and understandable WITHOUT seeing the images or data
+- DO NOT use words like "this", "that", "these", "the observed", or "the specific"
+- Reformulate the claim into a literature-searchable question
+- Focus on the phenomenon, not the specific numbers
+
+Focus on claims that leverage the statistical power of analyzing multiple images rather than single-image observations.
 """
-
 
 CURVE_ANALYSIS_INSTRUCTIONS = """You are an expert spectroscopist analyzing experimental data.
 
