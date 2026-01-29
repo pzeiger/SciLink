@@ -762,16 +762,11 @@ Your guidance: '''
         """Load curve data from file, handling various formats."""
         # Try using the project's load_curve_data function first
         try:
-            from ...tools.curve_fitting_tools import load_curve_data
-            return load_curve_data(data_path)
-        except ImportError:
-            pass
-        
-        try:
             from ....tools.curve_fitting_tools import load_curve_data
             return load_curve_data(data_path)
         except ImportError:
             pass
+        
         
         # Fallback: handle common formats manually
         if data_path.endswith('.npy'):
