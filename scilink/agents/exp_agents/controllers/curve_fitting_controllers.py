@@ -856,7 +856,32 @@ Your guidance: '''
                 exec_result = self.executor.execute_script(script, working_dir=str(self.output_dir))
 
                 if exec_result.get("status") == "success":
-                    break
+                    # Check if the script actually produced the expected outputs
+                    stdout = exec_result.get("stdout", "")
+                    has_fit_results = "FIT_RESULTS_JSON:" in stdout
+                    
+                    # Check for visualization file
+                    viz_path = self.output_dir / f"{output_prefix}_fit.png"
+                    if not viz_path.exists():
+                        viz_path = self.output_dir / "fit_visualization.png"
+                    has_visualization = viz_path.exists()
+                    
+                    if has_fit_results and has_visualization:
+                        # Script truly succeeded - produced expected outputs
+                        break
+                    else:
+                        # Script ran but didn't produce expected outputs
+                        missing = []
+                        if not has_fit_results:
+                            missing.append("FIT_RESULTS_JSON output")
+                        if not has_visualization:
+                            missing.append("visualization file")
+                        last_error = f"Script executed but did not produce expected outputs. Missing: {', '.join(missing)}. The script must print 'FIT_RESULTS_JSON:{{...}}' with fit results and save a visualization to '{output_prefix}_fit.png'."
+                        self.logger.warning(f"    ⚠️ Attempt {attempt}: Script ran but missing outputs: {', '.join(missing)}")
+                        if attempt >= self.MAX_ATTEMPTS:
+                            # Last attempt also failed to produce outputs
+                            exec_result["status"] = "failed"
+                            exec_result["message"] = last_error
                 else:
                     last_error = exec_result.get("message", "Unknown error")
                     self.logger.warning(f"    ⚠️ Attempt {attempt} failed: {last_error[:100]}")
@@ -1316,138 +1341,151 @@ Return JSON with:
             
             # For first spectrum, run LLM verification loop before human feedback
             if spectrum_idx == 0:
-                # LLM verification loop - iteratively improve the fit
-                for verification_iter in range(self.max_verification_iterations):
-                    self.logger.info(f"      🔍 Verification iteration {verification_iter + 1}/{self.max_verification_iterations}...")
-                    verification = self._verify_fit_with_llm(state, best_result)
-                    
-                    if verification is None:
-                        self.logger.warning(f"      Verification failed, skipping")
-                        break
-                    
-                    if verification.get("fit_acceptable", True):
-                        self.logger.info(f"      ✅ Verification passed: {verification.get('overall_assessment', 'Fit acceptable')}")
-                        break
-                    
-                    # LLM found issues - try to fix
-                    issues_count = len(verification.get("issues_found", []))
-                    self.logger.info(f"      ⚠️ Found {issues_count} issue(s): {verification.get('overall_assessment', '')}")
-                    
-                    # Log specific issues
-                    for issue in verification.get("issues_found", [])[:3]:  # Show up to 3 issues
-                        self.logger.info(f"         - {issue.get('location', '?')}: {issue.get('problem', '?')}")
-                    
-                    # Apply LLM's recommended fixes
-                    refined_config = self._apply_llm_verification_feedback(state, verification)
-                    
-                    if refined_config == state.get("locked_fitting_config", {}):
-                        self.logger.info(f"      No config changes suggested, stopping verification loop")
-                        break
-                    
-                    # Clean up old visualization
-                    old_viz_path = best_result.get("visualization_path")
-                    if old_viz_path and Path(old_viz_path).exists():
-                        try:
-                            os.remove(old_viz_path)
-                        except:
-                            pass
-                    
-                    original_config = state.get("locked_fitting_config")
-                    state["locked_fitting_config"] = refined_config
-                    
-                    # Refit with refined config
-                    self.logger.info(f"      🔄 Refitting with verification feedback...")
-                    verified_result = self._fit_single_spectrum(
-                        state=state, curve_data=curve_data, data_path=data_path,
-                        spectrum_name=spectrum_name, spectrum_idx=spectrum_idx, base_script=None
-                    )
-                    
-                    if verified_result["success"]:
-                        verified_r2 = verified_result.get("fit_quality", {}).get("r_squared", 0)
-                        self.logger.info(f"      Iteration {verification_iter + 1} result: R² = {verified_r2:.4f} (was {best_r2:.4f})")
-                        all_attempts.append({"model": f"LLM-verified-{verification_iter + 1}", "r2": verified_r2, "result": verified_result})
-                        
-                        if verified_r2 >= best_r2 - 0.01:  # Accept if not significantly worse (within 0.01)
-                            best_r2 = verified_r2
-                            best_result = verified_result
-                            # Keep the refined config for next iteration
-                        else:
-                            # Verification made it significantly worse, revert and stop
-                            state["locked_fitting_config"] = original_config
-                            self.logger.info(f"      R² decreased significantly, reverting and stopping verification")
-                            # Regenerate the previous best fit
-                            best_result = self._fit_single_spectrum(
-                                state=state, curve_data=curve_data, data_path=data_path,
-                                spectrum_name=spectrum_name, spectrum_idx=spectrum_idx, base_script=None
-                            )
-                            break
-                    else:
-                        state["locked_fitting_config"] = original_config
-                        self.logger.warning(f"      Verification-guided fit failed, reverting")
-                        break
+                # Check if the initial fit actually succeeded with meaningful results
+                if not best_result or not best_result.get("success") or best_r2 < 0.1:
+                    self.logger.warning(f"      ⚠️ Initial fit failed or produced poor results (R² = {best_r2:.4f})")
+                    self.logger.info(f"      Skipping verification, will proceed to model retry logic...")
+                    # Don't do verification or human feedback on a completely failed fit
+                    # Let the code fall through to the model retry section below
                 else:
-                    # Loop completed without breaking - max iterations reached
-                    self.logger.info(f"      Reached max verification iterations ({self.max_verification_iterations})")
-                
-                # Now offer human feedback opportunity (with potentially improved fit)
-                if self.enable_human_feedback:
-                    user_feedback = self._get_user_feedback_on_fit(state, best_result, best_r2)
+                    # Cache the initial working result in case we need to revert
+                    cached_best_result = best_result.copy() if best_result else None
+                    cached_best_r2 = best_r2
+                    cached_config = state.get("locked_fitting_config", {}).copy()
                     
-                    if user_feedback:
-                        # User wants to modify the approach
-                        refined_config = self._refine_model_from_feedback(state, user_feedback)
-                        original_config = state.get("locked_fitting_config")
-                        state["locked_fitting_config"] = refined_config
+                    # LLM verification loop - iteratively improve the fit
+                    for verification_iter in range(self.max_verification_iterations):
+                        self.logger.info(f"      🔍 Verification iteration {verification_iter + 1}/{self.max_verification_iterations}...")
+                        verification = self._verify_fit_with_llm(state, best_result)
                         
-                        # Clean up old visualization file before refitting
+                        if verification is None:
+                            self.logger.warning(f"      Verification failed, skipping")
+                            break
+                        
+                        if verification.get("fit_acceptable", True):
+                            self.logger.info(f"      ✅ Verification passed: {verification.get('overall_assessment', 'Fit acceptable')[:80]}")
+                            # Update cache with the accepted result
+                            cached_best_result = best_result.copy() if best_result else None
+                            cached_best_r2 = best_r2
+                            cached_config = state.get("locked_fitting_config", {}).copy()
+                            break
+                        
+                        # LLM found issues - try to fix
+                        issues_count = len(verification.get("issues_found", []))
+                        self.logger.info(f"      ⚠️ Found {issues_count} issue(s): {verification.get('overall_assessment', '')[:100]}")
+                        
+                        # Log specific issues
+                        for issue in verification.get("issues_found", [])[:3]:  # Show up to 3 issues
+                            self.logger.info(f"         - {issue.get('location', '?')}: {issue.get('problem', '?')[:60]}")
+                        
+                        # Apply LLM's recommended fixes
+                        refined_config = self._apply_llm_verification_feedback(state, verification)
+                        
+                        if refined_config == state.get("locked_fitting_config", {}):
+                            self.logger.info(f"      No config changes suggested, stopping verification loop")
+                            break
+                        
+                        # Clean up old visualization
                         old_viz_path = best_result.get("visualization_path")
                         if old_viz_path and Path(old_viz_path).exists():
                             try:
                                 os.remove(old_viz_path)
-                                self.logger.info(f"      Removed old visualization: {old_viz_path}")
-                            except Exception as e:
-                                self.logger.warning(f"      Could not remove old visualization: {e}")
+                            except:
+                                pass
                         
-                        self.logger.info(f"      🔄 Refitting with user feedback...")
-                        user_guided_result = self._fit_single_spectrum(
+                        state["locked_fitting_config"] = refined_config
+                        
+                        # Refit with refined config
+                        self.logger.info(f"      🔄 Refitting with verification feedback...")
+                        verified_result = self._fit_single_spectrum(
                             state=state, curve_data=curve_data, data_path=data_path,
                             spectrum_name=spectrum_name, spectrum_idx=spectrum_idx, base_script=None
                         )
                         
-                        if user_guided_result["success"]:
-                            user_r2 = user_guided_result.get("fit_quality", {}).get("r_squared", 0)
-                            self.logger.info(f"      User-guided fit: R² = {user_r2:.4f}")
-                            all_attempts.append({"model": "User-guided", "r2": user_r2, "result": user_guided_result})
+                        if verified_result["success"]:
+                            verified_r2 = verified_result.get("fit_quality", {}).get("r_squared", 0)
+                            self.logger.info(f"      Iteration {verification_iter + 1} result: R² = {verified_r2:.4f} (was {best_r2:.4f})")
+                            all_attempts.append({"model": f"LLM-verified-{verification_iter + 1}", "r2": verified_r2, "result": verified_result})
                             
-                            if user_r2 > best_r2:
-                                best_r2 = user_r2
-                                best_result = user_guided_result
-                                # Keep the refined config
-                                self.logger.info(f"      📝 Updated config based on user feedback")
+                            if verified_r2 >= best_r2 - 0.01:  # Accept if not significantly worse (within 0.01)
+                                best_r2 = verified_r2
+                                best_result = verified_result
+                                # Update cache with improved result
+                                cached_best_result = best_result.copy()
+                                cached_best_r2 = best_r2
+                                cached_config = state.get("locked_fitting_config", {}).copy()
                             else:
-                                # User-guided was worse, but user explicitly requested it - ask what to do
-                                keep_user = self._ask_keep_user_guided_fit(user_r2, best_r2)
-                                if not keep_user:
-                                    state["locked_fitting_config"] = original_config
-                                    self.logger.info(f"      Reverting to previous config (R² = {best_r2:.4f})")
-                                    # Need to refit with original config to get the visualization back
-                                    self.logger.info(f"      🔄 Regenerating previous fit...")
-                                    best_result = self._fit_single_spectrum(
-                                        state=state, curve_data=curve_data, data_path=data_path,
-                                        spectrum_name=spectrum_name, spectrum_idx=spectrum_idx, base_script=None
-                                    )
-                                else:
-                                    best_r2 = user_r2
-                                    best_result = user_guided_result
+                                # Verification made it significantly worse, revert to cached version
+                                self.logger.info(f"      R² decreased significantly, reverting to previous best (R² = {cached_best_r2:.4f})")
+                                state["locked_fitting_config"] = cached_config
+                                best_result = cached_best_result
+                                best_r2 = cached_best_r2
+                                break
                         else:
-                            self.logger.warning(f"      User-guided fit failed, keeping previous")
-                            state["locked_fitting_config"] = original_config
-                            # Regenerate previous fit visualization since we deleted it
-                            self.logger.info(f"      🔄 Regenerating previous fit...")
-                            best_result = self._fit_single_spectrum(
+                            # Fit failed, revert to cached version
+                            self.logger.warning(f"      Verification-guided fit failed, reverting to previous best")
+                            state["locked_fitting_config"] = cached_config
+                            best_result = cached_best_result
+                            best_r2 = cached_best_r2
+                            break
+                    else:
+                        # Loop completed without breaking - max iterations reached
+                        self.logger.info(f"      Reached max verification iterations ({self.max_verification_iterations})")
+                    
+                    # Now offer human feedback opportunity (with potentially improved fit)
+                    # Only show human feedback if we have a reasonable fit to show
+                    if self.enable_human_feedback and best_result and best_result.get("visualization_bytes"):
+                        user_feedback = self._get_user_feedback_on_fit(state, best_result, best_r2)
+                        
+                        if user_feedback:
+                            # User wants to modify the approach
+                            refined_config = self._refine_model_from_feedback(state, user_feedback)
+                            original_config = state.get("locked_fitting_config")
+                            state["locked_fitting_config"] = refined_config
+                            
+                            # Clean up old visualization file before refitting
+                            old_viz_path = best_result.get("visualization_path")
+                            if old_viz_path and Path(old_viz_path).exists():
+                                try:
+                                    os.remove(old_viz_path)
+                                    self.logger.info(f"      Removed old visualization: {old_viz_path}")
+                                except Exception as e:
+                                    self.logger.warning(f"      Could not remove old visualization: {e}")
+                            
+                            self.logger.info(f"      🔄 Refitting with user feedback...")
+                            user_guided_result = self._fit_single_spectrum(
                                 state=state, curve_data=curve_data, data_path=data_path,
                                 spectrum_name=spectrum_name, spectrum_idx=spectrum_idx, base_script=None
                             )
+                            
+                            if user_guided_result["success"]:
+                                user_r2 = user_guided_result.get("fit_quality", {}).get("r_squared", 0)
+                                self.logger.info(f"      User-guided fit: R² = {user_r2:.4f}")
+                                all_attempts.append({"model": "User-guided", "r2": user_r2, "result": user_guided_result})
+                                
+                                if user_r2 > best_r2:
+                                    best_r2 = user_r2
+                                    best_result = user_guided_result
+                                    # Keep the refined config
+                                    self.logger.info(f"      📝 Updated config based on user feedback")
+                                else:
+                                    # User-guided was worse, but user explicitly requested it - ask what to do
+                                    keep_user = self._ask_keep_user_guided_fit(user_r2, best_r2)
+                                    if not keep_user:
+                                        state["locked_fitting_config"] = original_config
+                                        self.logger.info(f"      Reverting to previous config (R² = {best_r2:.4f})")
+                                        # Restore from cache instead of regenerating
+                                        best_result = cached_best_result
+                                        best_r2 = cached_best_r2
+                                    else:
+                                        best_r2 = user_r2
+                                        best_result = user_guided_result
+                            else:
+                                self.logger.warning(f"      User-guided fit failed, keeping previous")
+                                state["locked_fitting_config"] = original_config
+                                # Restore from cache instead of regenerating
+                                best_result = cached_best_result
+                                best_r2 = cached_best_r2
             
             if best_r2 >= self.r2_threshold:
                 self.logger.info(f"      ✅ R² = {best_r2:.4f} (meets threshold {self.r2_threshold})")
@@ -1469,8 +1507,8 @@ Return JSON with:
                 self.logger.warning("      Could not generate alternative model suggestion")
                 break
             
-            self.logger.info(f"      Diagnosis: {alternative.get('diagnosis', 'N/A')}")
-            self.logger.info(f"      Trying: {alternative.get('alternative_model', 'N/A')}")
+            self.logger.info(f"      Diagnosis: {alternative.get('diagnosis', 'N/A')[:80]}")
+            self.logger.info(f"      Trying: {alternative.get('alternative_model', 'N/A')[:60]}")
             
             temp_config = current_config.copy()
             temp_config["physical_model"] = alternative.get("alternative_model", temp_config.get("physical_model"))
@@ -1508,7 +1546,7 @@ Return JSON with:
                 else:
                     self.logger.warning(f"      R² = {alt_r2:.4f} (still below threshold)")
             else:
-                self.logger.warning(f"      Alternative model failed: {alt_result.get('error', 'Unknown')}")
+                self.logger.warning(f"      Alternative model failed: {alt_result.get('error', 'Unknown')[:50]}")
                 all_attempts.append({
                     "model": alternative.get("alternative_model", f"Alternative {retry + 1}"),
                     "r2": 0, "result": alt_result
