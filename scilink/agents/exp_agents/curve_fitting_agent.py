@@ -56,8 +56,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     - Numpy array stack = series processing
     
     Quality control:
+    - LLM verification loop (n iterations) to catch and fix fit issues automatically
+    - Human feedback for additional refinement (if enabled)
     - Automatic model retry when R² < threshold
-    - Human feedback for unresolved quality issues
     - Statistical outlier detection for series (may indicate interesting physics)
     
     For series analysis, the fitting model is carefully selected on the
@@ -76,6 +77,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         r2_threshold: Minimum acceptable R² value (default: 0.95)
         max_model_retries: Max alternative models to try (default: 3)
         outlier_sigma: Sigma threshold for outlier detection (default: 2.0)
+        max_verification_iterations: Max LLM verification iterations (default: 3)
 
     Example:
         agent = CurveFittingAgent(api_key="...", use_literature=True)
@@ -109,9 +111,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Custom quality settings
         agent = CurveFittingAgent(
             api_key="...",
-            r2_threshold=0.90,      # Accept lower quality fits
-            max_model_retries=5,    # Try more alternatives
-            outlier_sigma=3.0       # Less aggressive outlier detection
+            r2_threshold=0.90,              # Accept lower quality fits
+            max_model_retries=5,            # Try more alternatives
+            outlier_sigma=3.0,              # Less aggressive outlier detection
+            max_verification_iterations=5   # More verification passes
         )
         
         # Get measurement recommendations
@@ -138,6 +141,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         r2_threshold: float = 0.95,
         max_model_retries: int = 3,
         outlier_sigma: float = 2.0,
+        max_verification_iterations: int = 3,
         **kwargs,
     ):
         self.api_key, self.base_url = normalize_params(
@@ -160,6 +164,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.r2_threshold = r2_threshold
         self.max_model_retries = max_model_retries
         self.outlier_sigma = outlier_sigma
+        self.max_verification_iterations = max_verification_iterations
 
         self.executor = ScriptExecutor(timeout=executor_timeout, enforce_sandbox=False)
 
@@ -400,6 +405,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             r2_threshold=effective_r2_threshold,
             max_model_retries=effective_max_retries,
             outlier_sigma=effective_outlier_sigma,
+            max_verification_iterations=self.max_verification_iterations,
         )
         
         # Execute pipeline

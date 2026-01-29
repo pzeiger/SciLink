@@ -58,6 +58,7 @@ def create_unified_curve_fitting_pipeline(
     r2_threshold: float = 0.95,
     max_model_retries: int = 3,
     outlier_sigma: float = 2.0,
+    max_verification_iterations: int = 3,
 ) -> List:
     """
     Factory function to create the unified curve fitting pipeline.
@@ -79,8 +80,9 @@ def create_unified_curve_fitting_pipeline(
     4. Unified Series Processing with Quality Control
        - Fits ALL spectra using locked configuration
        - Single spectrum = series of 1
+       - LLM verification loop (n iterations) to catch and fix issues
+       - Human feedback for additional refinement (if enabled)
        - Automatic model retry if R² below threshold
-       - Human feedback for unresolved quality issues
        - Statistical outlier detection for series
        
     5. Conditional Trend Analysis
@@ -115,6 +117,7 @@ def create_unified_curve_fitting_pipeline(
         r2_threshold: Minimum acceptable R² value (default: 0.95)
         max_model_retries: Max alternative models to try if R² inadequate (default: 3)
         outlier_sigma: Sigma threshold for outlier detection in series (default: 2.0)
+        max_verification_iterations: Max LLM verification iterations for first spectrum (default: 3)
     
     Returns:
         List of controller instances to execute in sequence
@@ -166,6 +169,7 @@ def create_unified_curve_fitting_pipeline(
             max_model_retries=max_model_retries,
             enable_human_feedback=enable_human_feedback,
             outlier_sigma=outlier_sigma,
+            max_verification_iterations=max_verification_iterations,
         )
     )
 
@@ -213,6 +217,7 @@ def create_unified_curve_fitting_pipeline(
 
     logger.info(f"Unified curve fitting pipeline created: {len(pipeline)} steps")
     logger.info(f"  Quality settings: R² threshold={r2_threshold}, max_retries={max_model_retries}, outlier_sigma={outlier_sigma}")
+    logger.info(f"  Verification iterations: {max_verification_iterations}")
     
     return pipeline
 
@@ -238,6 +243,7 @@ def create_curve_fitting_pipeline(
     r2_threshold: float = 0.95,
     max_model_retries: int = 3,
     outlier_sigma: float = 2.0,
+    max_verification_iterations: int = 3,
 ) -> List:
     """
     BACKWARD COMPATIBLE: Creates curve fitting pipeline.
@@ -270,4 +276,5 @@ def create_curve_fitting_pipeline(
         r2_threshold=r2_threshold,
         max_model_retries=max_model_retries,
         outlier_sigma=outlier_sigma,
+        max_verification_iterations=max_verification_iterations,
     )
