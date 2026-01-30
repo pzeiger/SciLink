@@ -147,7 +147,6 @@ class LLMAgentMixin:
         return str(response)
     
     def _try_direct_json_parse(self, raw_text: str) -> Optional[dict]:
-        """Attempt direct JSON parsing with markdown cleanup."""
         try:
             text_clean = raw_text.strip()
             
@@ -160,7 +159,29 @@ class LLMAgentMixin:
             
             text_clean = text_clean.strip()
             
-            result = json.loads(text_clean)
+            # First attempt: direct parse
+            try:
+                result = json.loads(text_clean)
+                if isinstance(result, dict):
+                    return result
+            except json.JSONDecodeError:
+                pass
+            
+            # Second attempt: fix common issues (unescaped newlines in strings)
+            # Replace newlines that appear between quotes
+            import re
+            
+            def escape_newlines_in_strings(match):
+                content = match.group(1)
+                # Escape newlines, carriage returns, tabs
+                content = content.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+                return '"' + content + '"'
+            
+            # Match strings: "..." (non-greedy, handles most cases)
+            # This is a simplified approach - handles most LLM outputs
+            fixed_text = re.sub(r'"((?:[^"\\]|\\.)*?)"', escape_newlines_in_strings, text_clean, flags=re.DOTALL)
+            
+            result = json.loads(fixed_text)
             if isinstance(result, dict):
                 return result
             return None
