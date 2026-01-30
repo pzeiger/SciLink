@@ -1,172 +1,444 @@
-from .base_agent import BaseAnalysisAgent
+"""
+SAM Microscopy Analysis Agent
+"""
+
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
+
+import json
+from pathlib import Path
+import numpy as np
+from typing import Dict, Any, List, Optional, Union
+
+from .base_agent import BaseAnalysisAgent, AnalysisInput
 from .human_feedback import SimpleFeedbackMixin
 from .instruct import (
-    SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS, 
+    SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS,
     SAM_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS
 )
 
-from .pipelines.sam_pipelines import create_sam_pipeline
+from .pipelines.sam_pipelines import create_unified_sam_pipeline
 from ._deprecation import normalize_params
 
 from ...tools.image_processor import (
-    load_image, 
-    preprocess_image, 
+    load_image,
+    preprocess_image,
     convert_numpy_to_jpeg_bytes
+)
+from ...tools.sam import (
+    run_sam_analysis,
+    calculate_sam_statistics,
 )
 
 
 class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
-    """    
-    This agent executes a modular pipeline to analyze microscopy
-    images using the Segment Anything Model (SAM).
-    
-    Configuration (`sam_settings`):
-    ---------------------------------
-    - SAM_ENABLED (bool): Master switch.
-    - refinement_cycles (int): Number of LLM-driven tuning loops.
-    - save_visualizations (bool): Whether the tool should save plots.
-    - model_type (str): 'vit_h', 'vit_l', 'vit_b'
-    - checkpoint_path (str): Path to the SAM .pth model file.
-    - ... (other atomai ParticleAnalyzer settings)
     """
-
-    def __init__(self,
-                 # New standard params
-                 api_key: str | None = None,
-                 model_name: str = "gemini-3-pro-preview",
-                 base_url: str | None = None,
-                 # Deprecated params
-                 google_api_key: str | None = None,
-                 local_model: str = None,
-                 # Agent specific params
-                 sam_settings: dict | None = None,
-                 enable_human_feedback: bool = False):
+    Segment Anything Model Analysis Agent.
+    
+    ALL analysis follows the batch processing pattern:
+    - Single image analysis = batch of 1
+    - Multiple images = standard batch processing
+    - Numpy array stack = batch processing
+    
+    Example:
+        agent = SAMMicroscopyAnalysisAgent(api_key="...")
         
+        # Single image
+        result = agent.analyze("sample.tif")
+        
+        # Multiple images  
+        result = agent.analyze(["img1.tif", "img2.tif"])
+        
+        # Numpy stack
+        result = agent.analyze(my_stack)
+        
+        # Get measurement recommendations
+        recommendations = agent.recommend_measurements(analysis_result=result)
+    """
+    
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model_name: str = "gemini-3-pro-preview",
+        base_url: str | None = None,
+        google_api_key: str | None = None,
+        local_model: str = None,
+        sam_settings: dict | None = None,
+        enable_human_feedback: bool = False,
+        output_dir: str = "sam_output"
+    ):
         # Normalize Params
         self.api_key, self.base_url = normalize_params(
-            api_key, google_api_key, base_url, local_model, source="SAMMicroscopyAnalysisAgent"
+            api_key, google_api_key, base_url, local_model, 
+            source="SAMMicroscopyAnalysisAgent"
         )
         
-        # Initialize Base
         super().__init__(
             api_key=self.api_key,
             model_name=model_name,
             base_url=self.base_url,
+            output_dir=output_dir,
             enable_human_feedback=enable_human_feedback
         )
         
+        self.agent_type = "sam_microscopy"
+        
+        # Resolve output directory
+        self.output_dir = self.output_dir.resolve()
+        
+        # Define sub-directories
+        self.viz_dir = self.output_dir / "sam_visualizations"
+        self.data_dir = self.output_dir / "sam_analysis"
+        self.scripts_dir = self.output_dir / "scripts"
+        
+        # Create directories
+        for d in [self.viz_dir, self.data_dir, self.scripts_dir]:
+            d.mkdir(parents=True, exist_ok=True)
+        
+        # Prepare settings
         self.settings = sam_settings if sam_settings else {}
-        # Ensure SAM is enabled by default if settings are provided
-        if 'SAM_ENABLED' not in self.settings:
-            self.settings['SAM_ENABLED'] = True 
+        self.settings.setdefault('SAM_ENABLED', True)
+        self.settings.setdefault('enable_human_feedback', enable_human_feedback)
+        self.settings.setdefault('max_feedback_iterations', 3)
+        self.settings.setdefault('max_script_corrections', 3)
+        self.settings.setdefault('save_visualizations', True)
+        self.settings['visualization_dir'] = str(self.viz_dir)
+        self.settings['output_dir'] = str(self.data_dir)
         
-        # --- Pipeline Initialization ---
-        self.pipeline = []
         if self.settings.get('SAM_ENABLED', True):
-            self.pipeline = create_sam_pipeline(
-                model=self.model,
-                logger=self.logger,
-                generation_config=self.generation_config, # None from BaseAgent
-                safety_settings=self.safety_settings,
-                settings=self.settings,
-                parse_fn=self._parse_llm_response,
-                store_fn=self._store_analysis_images
-            )
-            self.logger.info(f"SAMMicroscopyAnalysisAgent initialized with a pipeline of {len(self.pipeline)} controllers.")
+            self.logger.info(f"SAMMicroscopyAnalysisAgent initialized. Outputs: {self.output_dir}")
         else:
-             self.logger.warning("SAMMicroscopyAnalysisAgent initialized, but 'SAM_ENABLED' is False. Agent will not run analysis.")
-
-
-    def _run_analysis_pipeline(
-        self, 
-        image_path: str, 
-        system_info: dict, 
-        instruction_prompt: str, 
-        additional_context: str | None = None
-    ) -> tuple[dict | None, dict | None]:
+            self.logger.warning("SAMMicroscopyAnalysisAgent initialized, but 'SAM_ENABLED' is False.")
+    
+    def _get_initial_state_fields(self) -> dict:
+        """Return initial state fields for the agent."""
+        return {
+            "current_image": None,
+            "pipeline_type": "sam_unified",
+            "particles_detected": 0,
+            "batch_mode": False
+        }
+    
+    def _initialize_sam_params(self) -> dict:
+        """Get initial SAM parameters from settings."""
+        return {
+            "checkpoint_path": self.settings.get('checkpoint_path', None),
+            "model_type": self.settings.get('model_type', 'vit_h'),
+            "device": self.settings.get('device', 'auto'),
+            "use_clahe": self.settings.get('use_clahe', False),
+            "sam_parameters": self.settings.get('sam_parameters', 'default'),
+            "min_area": self.settings.get('min_area', 500),
+            "max_area": self.settings.get('max_area', 50000),
+            "use_pruning": self.settings.get('use_pruning', True),
+            "pruning_iou_threshold": self.settings.get('pruning_iou_threshold', 0.5)
+        }
+    
+    def analyze(
+        self,
+        data: AnalysisInput,
+        system_info: Optional[Union[Dict[str, Any], str]] = None,
+        # SAM-specific options
+        series_metadata: Optional[dict] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
         """
-        The agent's main execution engine.
-        It prepares the initial state and runs the loaded pipeline.
-        """
-        if not self.pipeline:
-             return None, {"error": "SAMAnalysisAgent pipeline is not configured (SAM_ENABLED=False?)."}
+        Unified analysis method - handles single images and batches identically.
         
-        try:
-            # --- 1. Common State Initialization ---
-            self.logger.info(f"--- Starting analysis pipeline for {image_path} ---")
-            self._clear_stored_images()
-            system_info = self._handle_system_info(system_info)
+        Single image analysis is internally converted to a batch of 1.
+        
+        Args:
+            data: Input data. Can be:
+                - str: Single image path
+                - List[str]: Multiple image paths
+                - np.ndarray: 2D (single) or 3D (stack) array
+            system_info: System/sample information
+            series_metadata: Optional metadata about the series
+        
+        Returns:
+            Dict with status, detailed_analysis, scientific_claims,
+            summary, output_directory, and SAM-specific fields
+        
+        Examples:
+            # Single image
+            result = agent.analyze("sample.tif")
             
-            loaded_image = load_image(image_path)
-            nm_per_pixel, fov_in_nm = self._calculate_spatial_scale(system_info, loaded_image.shape)
+            # Multiple images
+            result = agent.analyze(["img1.tif", "img2.tif"])
             
-            preprocessed_img_array, _ = preprocess_image(loaded_image)
-            image_bytes = convert_numpy_to_jpeg_bytes(preprocessed_img_array)
-
-            state = {
-                "image_path": image_path,
-                "system_info": system_info,
-                "instruction_prompt": instruction_prompt,
-                "additional_top_level_context": additional_context,
-                "image_blob": {"mime_type": "image/jpeg", "data": image_bytes},
-                "preprocessed_image_array": preprocessed_img_array,
-                "nm_per_pixel": nm_per_pixel,
-                "fov_in_nm": fov_in_nm,
-                "analysis_images": [
-                    {"label": "Primary Microscopy Image", "data": image_bytes}
-                ],
-                "result_json": None,
-                "error_dict": None
+            # Numpy stack
+            result = agent.analyze(my_stack)
+        """
+        # Parse input
+        data_path, data_paths, data_array, error = self._parse_data_input(data)
+        
+        if error:
+            return {
+                "status": "error",
+                "error": error,
+                "output_directory": str(self.output_dir)
             }
-
-            # --- 2. Run the Pipeline ---
-            for controller in self.pipeline:
-                state = controller.execute(state)
-                if state.get("error_dict"):
-                    self.logger.error(f"Pipeline failed at step {controller.__class__.__name__}. Stopping execution.")
-                    break
-
-            # --- 3. Return Final Results ---
-            self.logger.info(f"--- Analysis pipeline finished. ---")
-            return state.get("result_json"), state.get("error_dict")
-
-        except FileNotFoundError:
-            self._clear_stored_images()
-            self.logger.error(f"Image file not found: {image_path}")
-            return None, {"error": "Image file not found", "details": f"Path: {image_path}"}
-        except Exception as e:
-            self._clear_stored_images()
-            self.logger.exception(f"An unexpected error occurred during the analysis pipeline: {e}")
-            return None, {"error": "An unexpected error occurred", "details": str(e)}
-
-    def analyze_for_claims(self, image_path: str, system_info: dict | str | None = None):
-        """
-        Analyze microscopy image to generate scientific claims.
-        """
-        result_json, error_dict = self._run_analysis_pipeline(
-            image_path, 
-            system_info, 
-            SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS
-        )
-
-        if error_dict: return error_dict
-        if result_json is None: return {"error": "Analysis for claims failed unexpectedly."}
-
-        valid_claims = self._validate_scientific_claims(result_json.get("scientific_claims", []))
         
-        if not valid_claims:
-            self.logger.warning("Pipeline ran but LLM returned no valid claims.")
+        # Normalize to internal variables
+        image_path = data_path
+        image_paths = data_paths
+        image_stack = data_array
+        
+        # Convert single image to batch of 1
+        if image_path is not None:
+            image_paths = [image_path]
+            self.logger.info(f"Single image mode: treating as batch of 1")
+        
+        # Determine input type and count
+        if image_stack is not None:
+            if image_stack.ndim == 2:
+                # Single 2D image provided as array - convert to 3D
+                image_stack = image_stack[np.newaxis, :, :]
+                self.logger.info("Single 2D array provided, converted to shape (1, h, w)")
+            if image_stack.ndim != 3:
+                return {
+                    "status": "error",
+                    "error": {"error": "Invalid shape", "details": f"Array must be 2D or 3D, got {image_stack.ndim}D"},
+                    "output_directory": str(self.output_dir)
+                }
+            num_images = image_stack.shape[0]
+            input_type = "numpy_array"
+        else:
+            num_images = len(image_paths)
+            input_type = "file_paths"
+        
+        is_single_image = (num_images == 1)
+        
+        self.logger.info(f"\n{'='*80}")
+        self.logger.info(f"🔬 SAM ANALYSIS - {num_images} image{'s' if num_images > 1 else ''}")
+        self.logger.info(f"{'='*80}\n")
+        
+        # Load and preprocess first image for initial analysis
+        if image_stack is not None:
+            first_image = image_stack[0]
+            first_image_name = "frame_0000"
+        else:
+            try:
+                first_image = load_image(image_paths[0])
+                first_image_name = Path(image_paths[0]).stem
+            except Exception as e:
+                return {
+                    "status": "error",
+                    "error": {"error": "Failed to load image", "details": str(e)},
+                    "output_directory": str(self.output_dir)
+                }
+        
+        preprocessed_img, _ = preprocess_image(first_image)
+        image_bytes = convert_numpy_to_jpeg_bytes(preprocessed_img)
+        
+        nm_per_pixel, fov_in_nm = self._calculate_spatial_scale(
+            self._handle_system_info(system_info), first_image.shape
+        )
+        
+        # Build initial state dict
+        state = {
+            # Input data
+            "image_paths": image_paths,
+            "image_stack": image_stack,
+            "input_type": input_type,
+            "num_images": num_images,
+            "is_single_image": is_single_image,
             
-        initial_result = {
-            "detailed_analysis": result_json.get("detailed_analysis", "Analysis complete, but no text was returned."), 
-            "scientific_claims": valid_claims
+            # System info
+            "system_info": self._handle_system_info(system_info),
+            "series_metadata": series_metadata or {},
+            
+            # First image (preprocessed)
+            "image_path": image_paths[0] if image_paths else first_image_name,
+            "first_image_name": first_image_name,
+            "preprocessed_image_array": preprocessed_img,
+            "image_blob": {"mime_type": "image/jpeg", "data": image_bytes},
+            
+            # Spatial calibration
+            "nm_per_pixel": nm_per_pixel,
+            "fov_in_nm": fov_in_nm,
+            
+            # Settings and params
+            "settings": self.settings,
+            "enable_human_feedback": self.settings.get('enable_human_feedback', False),
+            "current_params": self._initialize_sam_params(),
+            
+            # Results placeholders
+            "sam_result": None,
+            "summary_stats": None,
+            "analysis_images": [
+                {"label": "Primary Microscopy Image", "data": image_bytes}
+            ],
+            "error_dict": None,
         }
         
-        return self._apply_feedback_if_enabled(
-            initial_result, 
-            image_path=image_path, 
-            system_info=system_info
+        # Run Initial SAM Analysis on First Image
+        self.logger.info("📍 Running initial SAM analysis on first image...\n")
+        
+        try:
+            sam_result = run_sam_analysis(preprocessed_img, params=state["current_params"])
+            state["sam_result"] = sam_result
+            
+            summary_stats = calculate_sam_statistics(
+                sam_result=sam_result,
+                image_path=state["image_path"],
+                preprocessed_image_shape=preprocessed_img.shape,
+                nm_per_pixel=nm_per_pixel
+            )
+            state["summary_stats"] = summary_stats
+            
+            self.logger.info(f"   Initial detection: {sam_result['total_count']} particles\n")
+            
+        except Exception as e:
+            self.logger.error(f"Initial SAM analysis failed: {e}")
+            return {
+                "status": "error",
+                "error": {"error": "Initial SAM analysis failed", "details": str(e)},
+                "output_directory": str(self.output_dir)
+            }
+        
+        # Create and Execute Unified Pipeline
+        pipeline = create_unified_sam_pipeline(
+            model=self.model,
+            logger=self.logger,
+            generation_config=self.generation_config,
+            safety_settings=self.safety_settings,
+            settings=self.settings,
+            parse_fn=self._parse_llm_response,
+            store_fn=self._store_analysis_images
         )
+        
+        # Execute pipeline steps
+        for i, controller in enumerate(pipeline, 1):
+            step_name = controller.__class__.__name__
+            self.logger.info(f"\n📍 STEP {i}: {step_name}\n")
+            
+            try:
+                state = controller.execute(state)
+                
+                # Check for errors
+                if state.get("error_dict"):
+                    self.logger.error(f"Pipeline failed at step {step_name}: {state['error_dict']}")
+                    break
+                    
+            except Exception as e:
+                self.logger.error(f"Pipeline step {step_name} raised exception: {e}")
+                state["error_dict"] = {"error": f"Pipeline step failed: {step_name}", "details": str(e)}
+                break
+        
+        if state.get("error_dict"):
+            return {
+                "status": "error",
+                "error": state["error_dict"],
+                "output_directory": str(self.output_dir)
+            }
+        
+        final_results = self._compile_results(state)
+        
+        # Save final results JSON
+        final_path = self.output_dir / "analysis_results.json"
+        with open(final_path, 'w') as f:
+            json.dump(final_results, f, indent=2, default=str)
+        
+        self.logger.info(f"\n{'='*80}")
+        self.logger.info(f"✅ ANALYSIS COMPLETE")
+        self.logger.info(f"   Results saved to: {final_path}")
+        self.logger.info(f"{'='*80}\n")
+        
+        # Log action
+        self._log_action(
+            action="analyze",
+            input_ctx={
+                "num_images": num_images,
+                "input_type": input_type,
+                "series_metadata": series_metadata
+            },
+            result=final_results.get("summary"),
+            rationale="SAM analysis completed."
+        )
+        
+        return final_results
+    
+    def _compile_results(self, state: dict) -> Dict[str, Any]:
+        """
+        Compile results into a consistent output structure.
+        """
+        is_single = state.get("is_single_image", False)
+        num_images = state.get("num_images", 1)
+        batch_results = state.get("batch_results", [])
+        
+        results = {
+            "status": "success",
+            "summary": {
+                "total_images": num_images,
+                "successful": sum(1 for r in batch_results if r.get("success", False)),
+                "input_type": state.get("input_type"),
+                "parameters_used": state.get("final_params_for_batch", state.get("current_params", {})),
+                "is_single_image": is_single
+            },
+            "output_directory": str(self.output_dir)
+        }
+        
+        if is_single:
+            # Single image: provide simplified structure for backward compatibility
+            synthesis = state.get("synthesis_result", {})
+            
+            results["detailed_analysis"] = synthesis.get(
+                "detailed_analysis", 
+                "Analysis complete."
+            )
+            results["scientific_claims"] = synthesis.get("scientific_claims", [])
+            
+            # Also include the raw data for those who want it
+            if batch_results:
+                results["statistics"] = batch_results[0].get("statistics", {})
+                results["particle_count"] = batch_results[0].get("particle_count", 0)
+                results["visualization_path"] = batch_results[0].get("visualization_path")
+        else:
+            # Batch: full structure
+            results["individual_results"] = batch_results
+            results["custom_analysis"] = state.get("custom_analysis_results", {})
+            
+            synthesis = state.get("synthesis_result", {})
+            results["detailed_analysis"] = synthesis.get("detailed_analysis", "")
+            results["scientific_claims"] = synthesis.get("scientific_claims", [])
+            results["synthesis"] = synthesis
+        
+        return results
+    
+    # =========================================================================
+    # BACKWARD COMPATIBLE METHODS
+    # =========================================================================
+    
+    def analyze_image_series(
+        self,
+        image_paths: Optional[List[str]] = None,
+        image_stack: Optional[np.ndarray] = None,
+        system_info: Optional[Union[dict, str]] = None,
+        series_metadata: Optional[dict] = None
+    ) -> Dict[str, Any]:
+        """
+        Analyze a series of images.
+        
+        BACKWARD COMPATIBLE: Delegates to unified analyze() method.
+        """
+        if image_paths is not None:
+            return self.analyze(
+                image_paths,
+                system_info=system_info,
+                series_metadata=series_metadata
+            )
+        elif image_stack is not None:
+            return self.analyze(
+                image_stack,
+                system_info=system_info,
+                series_metadata=series_metadata
+            )
+        else:
+            return {
+                "status": "error",
+                "error": {"error": "No input", "details": "Must provide image_paths or image_stack"},
+                "output_directory": str(self.output_dir)
+            }
     
     def _get_claims_instruction_prompt(self) -> str:
         return SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS

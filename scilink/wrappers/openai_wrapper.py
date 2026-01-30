@@ -93,48 +93,51 @@ class OpenAIAsGenerativeModel:
 
     def _prompt_parser(self, genai_parts):
         """
-        Convert Google-style prompt parts to OpenAI chat format:
-          messages = [
-            {"role": "user",
-             "content": [
-               {"type": "text", "text": "..."},
-               {"type": "image_url", "image_url": {"url": "data:image/png;base64,..." }}
-             ]}
-          ]
+        Convert Google-style prompt parts to OpenAI chat format.
+        Uses simple string content for single text prompts (broader API compatibility).
         """
+        # Handle case where a single string is passed directly
+        if isinstance(genai_parts, str):
+            return [{"role": "user", "content": genai_parts}]
+        
         user_content = []
+        has_images = False
 
         for part in genai_parts:
-            # plain text
             if isinstance(part, str):
                 user_content.append({"type": "text", "text": part})
                 continue
 
-            # PIL Image
             if isinstance(part, Image.Image):
                 url = self._pil_to_data_url(part, "image/png")
                 user_content.append({"type": "image_url", "image_url": {"url": url}})
+                has_images = True
                 continue
 
-            # dict parts: expect {"mime_type": "...", "data": b"..."} for images
             if isinstance(part, dict):
                 mime = part.get("mime_type", "")
                 data = part.get("data", None)
 
                 if isinstance(data, (bytes, bytearray)) and mime.startswith("image/"):
                     try:
-                        # if data is raw bytes, use directly
                         url = self._to_data_url(mime, data)
                         user_content.append({"type": "image_url", "image_url": {"url": url}})
+                        has_images = True
                         continue
-                    except Exception as _:
+                    except Exception:
                         pass
 
-                # fallback: stringify any other dict
                 user_content.append({"type": "text", "text": str(part)})
                 continue
 
-            # everything else -> string
             user_content.append({"type": "text", "text": str(part)})
 
+        # Only simplify if: no images AND exactly one text part
+        # This is the most conservative change
+        text_parts = [p for p in user_content if p.get("type") == "text"]
+        
+        if not has_images and len(text_parts) == 1:
+            return [{"role": "user", "content": text_parts[0]["text"]}]
+        
+        # Otherwise keep structured format (original behavior)
         return [{"role": "user", "content": user_content}]

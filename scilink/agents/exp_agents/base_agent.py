@@ -1,7 +1,15 @@
+# base_agent.py
+
+import re
 import json
 import logging
+from typing import Dict, Any, List, Optional, Tuple, Union
+from pathlib import Path
+import uuid
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List
+from datetime import datetime
+
+import numpy as np
 
 from ...auth import get_internal_proxy_key
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
@@ -9,48 +17,40 @@ from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from ._deprecation import normalize_params
 
 
-class BaseAnalysisAgent:
+# =============================================================================
+# MIXIN: Shared LLM functionality
+# =============================================================================
+
+class LLMAgentMixin:
     """
-    Base class for analysis agents
+    Mixin providing common LLM functionality for all agents.
+    
+    This includes model initialization, response parsing, and utility methods
+    shared between full analysis agents and utility/preprocessing agents.
     """
     
-    def __init__(self, 
-                 api_key: str | None = None, 
-                 model_name: str = "gemini-3-pro-preview", 
-                 base_url: str = None,
-                 # Deprecated arguments
-                 google_api_key: str | None = None,
-                 local_model: str = None,
-                 **kwargs):
-        
-        self.logger = logging.getLogger(__name__)
-        
-        # Normalize parameters (api_key vs google_api_key, base_url vs local_model)
-        self.api_key, self.base_url = normalize_params(
-            api_key=api_key,
-            google_api_key=google_api_key,
-            base_url=base_url,
-            local_model=local_model,
-            source=self.__class__.__name__
-        )
-        
-        self.model_name = model_name
-        self.generation_config = None
-        self.safety_settings = None
-        
-        # Initialize Model based on configuration
+    logger: logging.Logger
+    api_key: str | None
+    base_url: str | None
+    model_name: str
+    model: Any
+    generation_config: Any
+    safety_settings: Any
+    output_dir: Path
+    
+    def _initialize_model(self) -> None:
+        """Initialize the LLM model based on configuration."""
         if self.base_url:
             # A. GGUF / Local File Mode
             if 'gguf' in self.base_url:
-                 logging.info(f"💻 Using local agent (GGUF path detected): {self.base_url}")
-                 from ...wrappers.llama_wrapper import LocalLlamaModel
-                 self.model = LocalLlamaModel(self.base_url)
+                logging.info(f"💻 Using local agent (GGUF path detected): {self.base_url}")
+                from ...wrappers.llama_wrapper import LocalLlamaModel
+                self.model = LocalLlamaModel(self.base_url)
 
             # B. Internal Proxy / Network Mode
             else:
                 logging.info(f"🏛️ Using OpenAI-compatible agent: {self.base_url}")
                 
-                # Match planning_agents logic: Use specific proxy key
                 if self.api_key is None:
                     self.api_key = get_internal_proxy_key()
                 
@@ -61,84 +61,222 @@ class BaseAnalysisAgent:
                     )
                 
                 self.model = OpenAIAsGenerativeModel(
-                    model=model_name, 
-                    api_key=self.api_key, 
+                    model=self.model_name,
+                    api_key=self.api_key,
                     base_url=self.base_url
                 )
         else:
             # C. Public / LiteLLM Mode
-            logging.info(f"☁️ Using LiteLLM agent: {model_name}")
-            
-            # LiteLLM looks for env vars automatically, so self.api_key can be None here
+            logging.info(f"☁️ Using LiteLLM agent: {self.model_name}")
             self.model = LiteLLMGenerativeModel(
-                model=model_name,
+                model=self.model_name,
                 api_key=self.api_key
             )
 
-        self._stored_analysis_images = []
-        self._stored_analysis_metadata = {}
-
-    @abstractmethod
-    def analyze_for_claims(self, data_path: str, system_info: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
-        """
-        Analyze experimental data to generate a detailed summary and scientific claims.
-        This is the primary entry point for any analysis agent.
-        """
-        raise NotImplementedError
+    # =========================================================================
+    # LLM RESPONSE PARSING
+    # =========================================================================
     
-    def _get_stored_analysis_images(self) -> List[Dict[str, Any]]:
+    def _parse_llm_response(self, response: Any) -> Tuple[Optional[dict], Optional[dict]]:
         """
-        Retrieves visual evidence (processed images) generated during the analysis.
+        Parse LLM response to extract JSON, with multiple fallback strategies.
+        
+        Returns:
+            Tuple of (result_json, error_dict) - one will be None
         """
-        return self._stored_analysis_images.copy()
-
-    def _store_analysis_images(self, images: list, metadata: dict = None):
-        """Helper to store analysis images for retrieval by workflows."""
-        self._stored_analysis_images = images.copy() if images else []
-        self._stored_analysis_metadata = metadata or {}
-        self.logger.debug(f"Stored {len(self._stored_analysis_images)} analysis images.")
-
-    def _parse_llm_response(self, response) -> tuple[dict | None, dict | None]:
-        """
-        Parses the LLM response, expecting JSON.
-        """
-        result_json = None
-        error_dict = None
-        raw_text = None
-        json_string = None
-
         try:
-            # Handle LiteLLM/OpenAI wrapper response object
-            if hasattr(response, 'text'):
-                raw_text = response.text
-            elif hasattr(response, 'choices'): # Fallback for raw OpenAI objects
-                 raw_text = response.choices[0].message.content
-            else:
-                 raw_text = str(response)
-
-            first_brace_index = raw_text.find('{')
-            last_brace_index = raw_text.rfind('}')
-            if first_brace_index != -1 and last_brace_index != -1 and last_brace_index > first_brace_index:
-                json_string = raw_text[first_brace_index : last_brace_index + 1]
-                result_json = json.loads(json_string)
-            else:
-                raise ValueError("Could not find valid JSON object delimiters '{' and '}' in the response text.")
-
-        except (json.JSONDecodeError, AttributeError, IndexError, ValueError) as e:
-            error_details = str(e)
-            self.logger.error(f"Error parsing LLM JSON response: {e}")
-            error_dict = {"error": "Failed to parse valid JSON from LLM response", "details": error_details, "raw_response": raw_text}
-        
+            raw_text = self._extract_text_from_response(response)
+            
+            if not raw_text or not raw_text.strip():
+                return None, {
+                    "error": "Empty response from LLM",
+                    "details": "Response text was empty"
+                }
+            
+            # Strategy 1: Direct JSON parse
+            result = self._try_direct_json_parse(raw_text)
+            if result is not None:
+                return result, None
+            
+            # Strategy 2: Find JSON in markdown code blocks
+            result = self._try_extract_json_from_code_blocks(raw_text)
+            if result is not None:
+                return result, None
+            
+            # Strategy 3: Find any JSON object in text
+            result = self._try_extract_json_from_text(raw_text)
+            if result is not None:
+                self.logger.warning("JSON extracted via regex fallback - may be incomplete")
+                return result, None
+            
+            # Strategy 4: For script responses, try to extract Python code
+            result = self._try_extract_python_script(raw_text)
+            if result is not None:
+                self.logger.warning("JSON parsing failed, but found Python code block")
+                return result, None
+            
+            # All strategies failed
+            snippet = raw_text[:500] + "..." if len(raw_text) > 500 else raw_text
+            self.logger.error(f"All JSON parsing strategies failed. Response snippet: {snippet}")
+            
+            return None, {
+                "error": "Failed to parse valid JSON from LLM response",
+                "details": "No valid JSON found using any extraction strategy",
+                "raw_response": raw_text[:2000]
+            }
+            
         except Exception as e:
-            self.logger.exception(f"Unexpected error processing response: {e}")
-            error_dict = {"error": "Unexpected error processing LLM response", "details": str(e)}
+            self.logger.exception(f"Unexpected error parsing LLM response: {e}")
+            return None, {
+                "error": "Exception during response parsing",
+                "details": str(e)
+            }
+    
+    def _extract_text_from_response(self, response: Any) -> str:
+        """Extract text content from various LLM response formats."""
+        if hasattr(response, 'text'):
+            return response.text
+        if hasattr(response, 'content'):
+            return response.content
+        if hasattr(response, 'choices') and response.choices:
+            choice = response.choices[0]
+            if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
+                return choice.message.content
+            if hasattr(choice, 'text'):
+                return choice.text
+        return str(response)
+    
+    def _try_direct_json_parse(self, raw_text: str) -> Optional[dict]:
+        try:
+            text_clean = raw_text.strip()
+            
+            if text_clean.startswith('```json'):
+                text_clean = text_clean[7:]
+            elif text_clean.startswith('```'):
+                text_clean = text_clean[3:]
+            if text_clean.endswith('```'):
+                text_clean = text_clean[:-3]
+            
+            text_clean = text_clean.strip()
+            
+            # First attempt: direct parse
+            try:
+                result = json.loads(text_clean)
+                if isinstance(result, dict):
+                    return result
+            except json.JSONDecodeError:
+                pass
+            
+            # Second attempt: fix common issues (unescaped newlines in strings)
+            # Replace newlines that appear between quotes
+            import re
+            
+            def escape_newlines_in_strings(match):
+                content = match.group(1)
+                # Escape newlines, carriage returns, tabs
+                content = content.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+                return '"' + content + '"'
+            
+            # Match strings: "..." (non-greedy, handles most cases)
+            # This is a simplified approach - handles most LLM outputs
+            fixed_text = re.sub(r'"((?:[^"\\]|\\.)*?)"', escape_newlines_in_strings, text_clean, flags=re.DOTALL)
+            
+            result = json.loads(fixed_text)
+            if isinstance(result, dict):
+                return result
+            return None
+            
+        except json.JSONDecodeError:
+            return None
+    
+    def _try_extract_json_from_code_blocks(self, raw_text: str) -> Optional[dict]:
+        """Extract JSON from markdown code blocks."""
+        patterns = [
+            r'```json\s*\n?([\s\S]*?)\n?```',
+            r'```\s*\n?(\{[\s\S]*?\})\n?```'
+        ]
         
-        return result_json, error_dict
+        for pattern in patterns:
+            matches = re.findall(pattern, raw_text, re.DOTALL)
+            for match in matches:
+                try:
+                    result = json.loads(match.strip())
+                    if isinstance(result, dict) and len(result) > 0:
+                        return result
+                except json.JSONDecodeError:
+                    continue
+        
+        return None
+    
+    def _try_extract_json_from_text(self, raw_text: str) -> Optional[dict]:
+        """Extract JSON objects from anywhere in the text."""
+        start_idx = None
+        brace_count = 0
+        
+        for i, char in enumerate(raw_text):
+            if char == '{':
+                if brace_count == 0:
+                    start_idx = i
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0 and start_idx is not None:
+                    potential_json = raw_text[start_idx:i+1]
+                    try:
+                        result = json.loads(potential_json)
+                        if isinstance(result, dict) and len(result) > 0:
+                            return result
+                    except json.JSONDecodeError:
+                        pass
+                    start_idx = None
+        
+        return None
+    
+    def _try_extract_python_script(self, raw_text: str) -> Optional[dict]:
+        """Extract Python code blocks and wrap in synthetic JSON structure."""
+        python_block_pattern = r'```python\s*([\s\S]*?)\s*```'
+        matches = re.findall(python_block_pattern, raw_text, re.DOTALL)
+        
+        if matches:
+            script = matches[0].strip()
+            if script:
+                return {
+                    "script": script,
+                    "analysis_approach": "extracted_from_code_block",
+                    "key_metrics_to_track": [],
+                    "_extraction_method": "python_code_block_fallback"
+                }
+        
+        return None
+
+    # =========================================================================
+    # UTILITY METHODS
+    # =========================================================================
+    
+    def _handle_system_info(self, system_info: Dict[str, Any] | str | None) -> Dict[str, Any]:
+        """Handle system_info input (can be dict, file path, or None)."""
+        if isinstance(system_info, str):
+            try:
+                with open(system_info, 'r') as f:
+                    system_info = json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError) as e:
+                self.logger.error(f"Error loading system_info from {system_info}: {e}")
+                system_info = {}
+        elif system_info is None:
+            system_info = {}
+        
+        return system_info
+
+    def _build_system_info_prompt_section(self, system_info: Dict[str, Any]) -> str:
+        """Build the system information section for LLM prompts."""
+        if not system_info:
+            return ""
+        
+        return f"\n\n## System Information\n{json.dumps(system_info, indent=2)}"
 
     def _generate_json_from_text_parts(self, prompt_parts: list) -> tuple[dict | None, dict | None]:
         """
         Internal helper to generate JSON from a list of textual prompt parts.
-        Shared implementation used by multiple agents.
         """
         try:
             self.logger.debug(f"Sending text-only prompt to LLM. Total parts: {len(prompt_parts)}")
@@ -152,221 +290,737 @@ class BaseAnalysisAgent:
             self.logger.exception(f"An unexpected error occurred during text-based LLM call: {e}")
             return None, {"error": "An unexpected error occurred during text-based LLM call", "details": str(e)}
 
-    def _handle_system_info(self, system_info: dict | str | None) -> dict:
-        """
-        Handle system_info input (can be dict, file path, or None).
-        Converts to dict format for consistent processing.
-        """
-        if isinstance(system_info, str):
-            try:
-                with open(system_info, 'r') as f:
-                    system_info = json.load(f)
-            except (FileNotFoundError, json.JSONDecodeError) as e:
-                self.logger.error(f"Error loading system_info from {system_info}: {e}")
-                system_info = {} # Proceed without system info if loading fails
-        elif system_info is None:
-            system_info = {} # Ensure it's a dict for easier access later
-        
-        return system_info
 
-    def _find_spatial_info(self, data: dict) -> dict | None:
+# =============================================================================
+# TYPE ALIAS for analyze() data parameter
+# =============================================================================
+
+# Data can be: single path, list of paths, or numpy array
+AnalysisInput = Union[str, List[str], np.ndarray]
+
+
+# =============================================================================
+# BASE UTILITY AGENT (for preprocessing/helper agents)
+# =============================================================================
+
+class BaseUtilityAgent(LLMAgentMixin):
+    """
+    Base class for utility/preprocessing agents.
+    
+    These agents provide helper functionality (preprocessing, parameter estimation, etc.)
+    but don't implement the full analyze() -> recommend_measurements() workflow.
+    
+    Use this base class for:
+        - Preprocessing agents (HyperspectralPreprocessingAgent, CurvePreprocessingAgent)
+        - Parameter estimation agents
+        - Other helper/utility agents
+    
+    This class provides:
+        - LLM model initialization
+        - Response parsing utilities
+        - Basic state management
+        - Common utility methods
+    """
+    
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model_name: str = "gemini-3-pro-preview",
+        base_url: str | None = None,
+        output_dir: str = ".",
+        # Deprecated arguments
+        google_api_key: str | None = None,
+        local_model: str | None = None,
+        **kwargs
+    ):
+        self.logger = logging.getLogger(self.__class__.__name__)
+        
+        # Output directory setup
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Agent identification
+        self.agent_type = "utility"  # Subclasses should override
+        
+        # Normalize parameters
+        self.api_key, self.base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source=self.__class__.__name__
+        )
+        
+        self.model_name = model_name
+        self.generation_config = None
+        self.safety_settings = None
+        
+        # Initialize LLM model
+        self._initialize_model()
+        
+        # Basic state for utility agents
+        self.state: Dict[str, Any] = {}
+
+    def _get_initial_state_fields(self) -> Dict[str, Any]:
+        """Override in subclasses to add agent-specific state fields."""
+        return {}
+    
+    def _init_state(self, **context) -> None:
+        """Initialize state for a new session."""
+        if self.state.get("session_id") is None:
+            self.state = {
+                "session_id": str(uuid.uuid4()),
+                "start_time": datetime.now().isoformat(),
+                "agent_type": self.agent_type,
+                "status": "initialized"
+            }
+            self.state.update(self._get_initial_state_fields())
+        
+        for key, value in context.items():
+            self.state[key] = value
+        
+        self.state["status"] = "active"
+
+
+# =============================================================================
+# BASE ANALYSIS AGENT (for full analysis agents)
+# =============================================================================
+
+class BaseAnalysisAgent(LLMAgentMixin, ABC):
+    """
+    Base class for full analysis agents.
+    
+    Analysis agents follow a consistent pattern:
+    
+    1. Primary analysis via `analyze()` method
+       - Accepts flexible input: str (path), List[str] (batch), or np.ndarray
+       - Returns detailed_analysis, scientific_claims, and agent-specific fields
+       - Standardized return format with "status" field
+    
+    2. Optional measurement recommendations via `recommend_measurements()`
+       - Can be called after analyze() with the results
+       - Or called directly (will run analyze() internally)
+    
+    Subclasses must implement:
+        - analyze(): Primary analysis logic
+        - _get_claims_instruction_prompt(): Instruction prompt for analysis
+        - _get_measurement_recommendations_prompt(): Instruction prompt for recommendations
+    
+    Use BaseUtilityAgent instead for preprocessing/helper agents that don't need
+    the full analyze() workflow.
+    """
+    
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model_name: str = "gemini-3-pro-preview",
+        base_url: str | None = None,
+        output_dir: str = ".",
+        enable_human_feedback: bool = False,
+        # Deprecated arguments
+        google_api_key: str | None = None,
+        local_model: str | None = None,
+        **kwargs
+    ):
+        self.logger = logging.getLogger(self.__class__.__name__)
+
+        # State management
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.agent_type = "base_analysis"  # Subclasses should override
+        self.state: Dict[str, Any] = {}
+        self.enable_human_feedback = enable_human_feedback
+        
+        # Normalize parameters
+        self.api_key, self.base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source=self.__class__.__name__
+        )
+        
+        self.model_name = model_name
+        self.generation_config = None
+        self.safety_settings = None
+        
+        # Initialize LLM model
+        self._initialize_model()
+
+        # Storage for analysis artifacts
+        self._stored_analysis_images: List[Dict[str, Any]] = []
+        self._stored_analysis_metadata: Dict[str, Any] = {}
+
+    # =========================================================================
+    # PRIMARY ENTRY POINTS
+    # =========================================================================
+    
+    @abstractmethod
+    def analyze(
+        self,
+        data: AnalysisInput,
+        system_info: Dict[str, Any] | str | None = None,
+        **kwargs
+    ) -> Dict[str, Any]:
         """
-        Recursively search for spatial_info in a nested dictionary structure.
+        Primary analysis entry point.
+        
+        All agents must implement this method with a consistent return format.
         
         Args:
-            data: Dictionary to search through
-            
+            data: Input data. Can be:
+                - str: Path to single data file
+                - List[str]: List of paths for batch processing
+                - np.ndarray: Direct array input
+            system_info: Metadata dictionary or path to metadata file
+            **kwargs: Agent-specific options
+        
         Returns:
-            The spatial_info dictionary if found, None otherwise
+            dict containing at minimum:
+                - "status": "success" | "error" | "cancelled"
+                - "detailed_analysis": str (when successful)
+                - "scientific_claims": list[dict] (when successful)
+                - "output_directory": str
+                - "error": dict (when status="error")
+        
+        Examples:
+            # Single file
+            result = agent.analyze("spectrum.csv")
+            
+            # Multiple files (batch)
+            result = agent.analyze(["img1.tif", "img2.tif"])
+            
+            # Numpy array
+            result = agent.analyze(my_array)
+            
+            # With metadata
+            result = agent.analyze("data.npy", system_info={"sample": "TiO2"})
         """
-        if not isinstance(data, dict):
-            return None
-        
-        # Check if spatial_info exists at current level
-        if 'spatial_info' in data and isinstance(data['spatial_info'], dict):
-            return data['spatial_info']
-        
-        # Recursively search through all nested dictionaries
-        for key, value in data.items():
-            if isinstance(value, dict):
-                result = self._find_spatial_info(value)
-                if result is not None:
-                    return result
-        
-        return None
-
-    def _calculate_spatial_scale(self, system_info: dict, image_shape: tuple) -> tuple[float | None, float | None]:
+        raise NotImplementedError
+    
+    def _parse_data_input(
+        self,
+        data: AnalysisInput
+    ) -> Tuple[Optional[str], Optional[List[str]], Optional[np.ndarray], Optional[Dict[str, Any]]]:
         """
-        Calculate nm/pixel and field of view from system metadata.
+        Parse the flexible data input into specific types.
         
         Args:
-            system_info: Dictionary containing spatial metadata (can be nested anywhere)
-            image_shape: (height, width) of the loaded image
-            
+            data: Input data (str, List[str], or np.ndarray)
+        
         Returns:
-            tuple: (nm_per_pixel, fov_in_nm) or (None, None) if calculation fails
+            Tuple of (data_path, data_paths, data_array, error_dict)
+            - Only one of the first three will be non-None
+            - error_dict is non-None if input is invalid
         """
-        # Determine physical scale (nm/pixel) from metadata, mirroring spectroscopy agent's approach
-        nm_per_pixel = None
-        fov_in_nm = None
+        if data is None:
+            return None, None, None, {
+                "error": "No input provided",
+                "details": "data parameter is required"
+            }
         
-        # Search for spatial_info anywhere in the nested structure
-        spatial = self._find_spatial_info(system_info)
+        if isinstance(data, str):
+            # Single file path
+            return data, None, None, None
         
-        if spatial is not None:
-            fov_x = spatial.get("field_of_view_x")
-            units = spatial.get("field_of_view_units", "nm")  # Default to nm
-
-            if fov_x is not None and isinstance(fov_x, (int, float)) and fov_x > 0:
-                h, w = image_shape[:2]
-                
-                # Convert provided units to nm for consistent calculations
-                scale_to_nm = 1.0
-                if units.lower() in ['um', 'micrometer', 'micrometers']:
-                    scale_to_nm = 1000.0
-                elif units.lower() in ['a', 'angstrom', 'angstroms']:
-                    scale_to_nm = 0.1
-                
-                fov_in_nm = fov_x * scale_to_nm
-                
-                if w > 0:
-                    nm_per_pixel = fov_in_nm / w
-                    self.logger.info(f"Found spatial_info and calculated nm/pixel: {fov_x} {units} / {w} px = {nm_per_pixel:.4f} nm/pixel")
-                else:
-                    self.logger.warning("Cannot calculate scale from FOV because image width is 0.")
-            else:
-                self.logger.warning(f"Invalid or missing 'field_of_view_x' in spatial_info: {fov_x}. Physical scale not applied.")
+        elif isinstance(data, list):
+            # List of file paths
+            if not data:
+                return None, None, None, {
+                    "error": "Empty input",
+                    "details": "data list is empty"
+                }
+            if not all(isinstance(p, str) for p in data):
+                return None, None, None, {
+                    "error": "Invalid input",
+                    "details": "All items in data list must be strings (file paths)"
+                }
+            return None, data, None, None
+        
+        elif isinstance(data, np.ndarray):
+            # Numpy array
+            return None, None, data, None
+        
         else:
-            self.logger.info("No spatial_info found in system metadata. Physical scale not applied.")
+            return None, None, None, {
+                "error": "Invalid input type",
+                "details": f"Expected str, List[str], or np.ndarray, got {type(data).__name__}"
+            }
+    
+    def recommend_measurements(
+        self,
+        analysis_result: Dict[str, Any] | None = None,
+        data: AnalysisInput | None = None,
+        system_info: Dict[str, Any] | str | None = None,
+        novelty_context: str | None = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Generate measurement recommendations based on analysis.
         
-        return nm_per_pixel, fov_in_nm
+        This is an optional post-processing step that builds on analyze() results.
+        If no analysis_result is provided, runs analyze() first.
+        
+        Args:
+            analysis_result: Output from analyze(). If None, runs analyze() first.
+            data: Input data (required if analysis_result is None)
+            system_info: Metadata (passed to analyze() if running it)
+            novelty_context: Optional context from literature review
+            **kwargs: Additional arguments passed to analyze() if needed
+        
+        Returns:
+            dict containing:
+                - "status": "success" | "error"
+                - "analysis_integration": str (how analysis informed recommendations)
+                - "measurement_recommendations": list[dict]
+        """
+        # If no analysis provided, run it first
+        if analysis_result is None:
+            if data is None:
+                return {
+                    "status": "error",
+                    "error": {
+                        "error": "No input provided",
+                        "details": "Must provide either analysis_result or data"
+                    }
+                }
+            
+            self.logger.info("No analysis_result provided, running analyze() first...")
+            analysis_result = self.analyze(
+                data=data,
+                system_info=system_info,
+                **kwargs
+            )
+            
+            if analysis_result.get("status") == "error":
+                return {
+                    "status": "error",
+                    "error": analysis_result.get("error", {"error": "Analysis failed"})
+                }
+        
+        # Generate recommendations from analysis
+        return self._generate_recommendations(analysis_result, system_info, novelty_context)
 
-    def _validate_scientific_claims(self, scientific_claims: list) -> list:
+    # =========================================================================
+    # BACKWARD COMPATIBLE ALIASES
+    # =========================================================================
+    
+    def analyze_for_claims(
+        self,
+        data_path: str,
+        system_info: Dict[str, Any] | str | None = None,
+        **kwargs
+    ) -> Dict[str, Any]:
         """
-        Validate scientific claims structure and content.
-        Shared validation logic used by all agents that generate claims.
+        Analyze data to generate scientific claims.
+        
+        BACKWARD COMPATIBLE: Delegates to analyze().
         """
+        result = self.analyze(data=data_path, system_info=system_info, **kwargs)
+        
+        if result.get("status") == "success":
+            return {
+                "detailed_analysis": result.get("detailed_analysis", ""),
+                "scientific_claims": result.get("scientific_claims", [])
+            }
+        else:
+            return result.get("error", result)
+    
+    def generate_measurement_recommendations(
+        self,
+        analysis_result: Dict[str, Any],
+        system_info: Dict[str, Any] | None = None,
+        novelty_context: str | None = None
+    ) -> Dict[str, Any]:
+        """
+        DEPRECATED: Use recommend_measurements() instead.
+        """
+        self.logger.warning(
+            "generate_measurement_recommendations() is deprecated. "
+            "Use recommend_measurements(analysis_result=...) instead."
+        )
+        result = self._generate_recommendations(analysis_result, system_info, novelty_context)
+        
+        if result.get("status") == "success":
+            return {
+                "analysis_integration": result.get("analysis_integration", ""),
+                "measurement_recommendations": result.get("measurement_recommendations", []),
+                "total_recommendations": len(result.get("measurement_recommendations", []))
+            }
+        else:
+            return {"error": result.get("error", "Recommendation generation failed")}
+
+    # =========================================================================
+    # ABSTRACT METHODS
+    # =========================================================================
+    
+    @abstractmethod
+    def _get_claims_instruction_prompt(self) -> str:
+        """Return the instruction prompt for claims generation."""
+        raise NotImplementedError
+    
+    @abstractmethod
+    def _get_measurement_recommendations_prompt(self) -> str:
+        """Return the instruction prompt for measurement recommendations."""
+        raise NotImplementedError
+
+    # =========================================================================
+    # INTERNAL RECOMMENDATION GENERATION
+    # =========================================================================
+    
+    def _generate_recommendations(
+        self,
+        analysis_result: Dict[str, Any],
+        system_info: Dict[str, Any] | str | None = None,
+        novelty_context: str | None = None
+    ) -> Dict[str, Any]:
+        """Internal method to generate recommendations from analysis results."""
+        system_info = self._handle_system_info(system_info)
+        
+        if analysis_result.get("status") == "error" or "error" in analysis_result:
+            return {
+                "status": "error",
+                "error": {
+                    "error": "Cannot generate recommendations from failed analysis",
+                    "details": analysis_result.get("error", {})
+                }
+            }
+        
+        try:
+            instruction_prompt = self._get_measurement_recommendations_prompt()
+            
+            prompt_parts = [instruction_prompt]
+            prompt_parts.append("\n\n## Analysis Results")
+            
+            detailed_analysis = analysis_result.get("detailed_analysis", "")
+            if detailed_analysis:
+                prompt_parts.append(f"\n**Detailed Analysis:**\n{detailed_analysis}")
+            
+            scientific_claims = analysis_result.get("scientific_claims", [])
+            if scientific_claims:
+                prompt_parts.append(f"\n\n**Scientific Claims:**\n{json.dumps(scientific_claims, indent=2)}")
+            
+            stored_images = self._get_stored_analysis_images()
+            if stored_images:
+                prompt_parts.append("\n\n## Analysis Images")
+                for img_data in stored_images[:5]:
+                    if isinstance(img_data, dict) and 'label' in img_data and 'data' in img_data:
+                        prompt_parts.append(f"\n**{img_data['label']}:**")
+                        prompt_parts.append({"mime_type": "image/jpeg", "data": img_data['data']})
+            
+            if novelty_context:
+                prompt_parts.append(f"\n\n## Novelty Context\n{novelty_context}")
+            
+            if system_info:
+                prompt_parts.append(f"\n\n## System Information\n{json.dumps(system_info, indent=2)}")
+            
+            prompt_parts.append("\n\nProvide measurement recommendations in JSON format.")
+            
+            self.logger.info("📋 Generating measurement recommendations...")
+            response = self.model.generate_content(
+                contents=prompt_parts,
+                generation_config=self.generation_config,
+                safety_settings=self.safety_settings,
+            )
+            
+            result_json, error_dict = self._parse_llm_response(response)
+            
+            if error_dict:
+                return {"status": "error", "error": error_dict}
+            
+            recommendations = result_json.get("measurement_recommendations", [])
+            valid_recommendations = self._validate_measurement_recommendations(recommendations)
+            
+            self.logger.info(f"✅ Generated {len(valid_recommendations)} measurement recommendations")
+            
+            return {
+                "status": "success",
+                "analysis_integration": result_json.get("analysis_integration", ""),
+                "measurement_recommendations": valid_recommendations
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Recommendation generation failed: {e}")
+            return {
+                "status": "error",
+                "error": {"error": "Recommendation generation failed", "details": str(e)}
+            }
+
+    # =========================================================================
+    # STATE MANAGEMENT
+    # =========================================================================
+    
+    def _get_initial_state_fields(self) -> Dict[str, Any]:
+        """Override in subclasses to add agent-specific state fields."""
+        return {}
+    
+    def _init_state(self, **context) -> None:
+        """Initialize state for a new session."""
+        if self.state.get("session_id") is None:
+            self.state = {
+                "session_id": str(uuid.uuid4()),
+                "start_time": datetime.now().isoformat(),
+                "agent_type": self.agent_type,
+                "action_history": [],
+                "status": "initialized"
+            }
+            self.state.update(self._get_initial_state_fields())
+        
+        for key, value in context.items():
+            self.state[key] = value
+        
+        self.state["status"] = "active"
+        self._save_state()
+
+    def _log_action(
+        self,
+        action: str,
+        input_ctx: Dict[str, Any],
+        result: Dict[str, Any],
+        rationale: Optional[str] = None,
+        feedback: Optional[str] = None
+    ) -> None:
+        """Record an atomic action to state history and save."""
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "action": action,
+            "input": input_ctx,
+            "rationale": rationale,
+            "result": self._normalize_result(result),
+            "feedback": feedback
+        }
+        
+        if "action_history" not in self.state:
+            self.state["action_history"] = []
+        
+        self.state["action_history"].append(entry)
+        self._save_state()
+
+    def _normalize_result(self, result: Any) -> Dict[str, Any]:
+        """Normalize result for JSON serialization."""
+        if isinstance(result, dict):
+            return result.copy()
+        return {"raw_result": str(result)}
+    
+    def _get_state_filename(self) -> str:
+        return f"{self.agent_type}_state.json"
+
+    def _save_state(self) -> None:
+        """Persist state to disk."""
+        state_file = self.output_dir / self._get_state_filename()
+        try:
+            with open(state_file, 'w') as f:
+                json.dump(self.state, f, indent=2, default=str)
+        except Exception as e:
+            self.logger.warning(f"Failed to save {self.agent_type} state: {e}")
+
+    def load_state(self, state_path: str) -> bool:
+        """Restore state from disk."""
+        path = Path(state_path)
+        if not path.exists():
+            self.logger.warning(f"State file not found: {state_path}")
+            return False
+        
+        try:
+            with open(path, 'r') as f:
+                self.state = json.load(f)
+            
+            if "action_history" not in self.state:
+                self.state["action_history"] = []
+            
+            self.logger.info(f"Restored {self.agent_type} state: session {self.state.get('session_id')}")
+            return True
+        except Exception as e:
+            self.logger.warning(f"Failed to load {self.agent_type} state: {e}")
+            return False
+
+    # =========================================================================
+    # IMAGE STORAGE
+    # =========================================================================
+    
+    def _store_analysis_images(self, images: List[Dict[str, Any]], metadata: Dict[str, Any] = None) -> None:
+        """Store analysis images for potential reuse in recommendations."""
+        self._stored_analysis_images = images.copy() if images else []
+        self._stored_analysis_metadata = metadata or {}
+        self.logger.debug(f"Stored {len(self._stored_analysis_images)} analysis images")
+
+    def _get_stored_analysis_images(self) -> List[Dict[str, Any]]:
+        """Retrieve stored analysis images."""
+        return self._stored_analysis_images.copy()
+
+    def _clear_stored_images(self) -> None:
+        """Clear stored images to free memory."""
+        self._stored_analysis_images = []
+        self._stored_analysis_metadata = {}
+
+    # =========================================================================
+    # VALIDATION METHODS
+    # =========================================================================
+    
+    def _validate_scientific_claims(self, scientific_claims: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Validate scientific claims structure and content."""
         valid_claims = []
 
         if not isinstance(scientific_claims, list):
-            self.logger.warning(f"'scientific_claims' from LLM was not a list: {scientific_claims}")
+            self.logger.warning(f"'scientific_claims' was not a list: {type(scientific_claims)}")
             return valid_claims
 
+        required_keys = ["claim", "scientific_impact", "has_anyone_question", "keywords"]
+        
         for claim in scientific_claims:
-            if isinstance(claim, dict) and all(k in claim for k in ["claim", "scientific_impact", "has_anyone_question", "keywords"]):
+            if isinstance(claim, dict) and all(k in claim for k in required_keys):
                 if isinstance(claim.get("keywords"), list):
                     valid_claims.append(claim)
                 else:
-                    self.logger.warning(f"Claim skipped due to 'keywords' not being a list: {claim}")
+                    self.logger.warning("Claim skipped: 'keywords' not a list")
             else:
-                self.logger.warning(f"Claim skipped due to missing keys or incorrect dict format: {claim}")
+                self.logger.warning("Claim skipped: missing required keys")
         
         return valid_claims
 
-    def _validate_structure_recommendations(self, recommendations: list) -> list:
-        """
-        Validate and sort structure recommendations.
-        Shared validation logic used by all agents that generate recommendations.
-        """
+    def _validate_measurement_recommendations(
+        self,
+        recommendations: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Validate measurement recommendations structure."""
         valid_recommendations = []
         
         if not isinstance(recommendations, list):
-            self.logger.warning(f"'structure_recommendations' from LLM was not a list: {recommendations}")
+            return valid_recommendations
+        
+        required_keys = ["description", "scientific_justification", "priority"]
+        
+        for rec in recommendations:
+            if isinstance(rec, dict) and all(k in rec for k in required_keys):
+                priority = rec.get("priority")
+                if isinstance(priority, int) and 1 <= priority <= 5:
+                    valid_recommendations.append(rec)
+        
+        return sorted(valid_recommendations, key=lambda x: x.get("priority", 5))
+
+    def _validate_structure_recommendations(self, recommendations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Validate and sort structure recommendations."""
+        valid_recommendations = []
+        
+        if not isinstance(recommendations, list):
+            self.logger.warning(f"'structure_recommendations' was not a list")
             return valid_recommendations
 
         for rec in recommendations:
             if isinstance(rec, dict) and all(k in rec for k in ["description", "scientific_interest", "priority"]):
                 if isinstance(rec.get("priority"), int):
                     valid_recommendations.append(rec)
-                else:
-                    self.logger.warning(f"Recommendation skipped due to invalid priority type (expected int): {rec.get('priority')}. Recommendation: {rec}")
-            else:
-                self.logger.warning(f"Recommendation skipped due to missing keys or incorrect dict format: {rec}")
         
-        # Sort by priority (1 = highest priority)
-        sorted_recommendations = sorted(valid_recommendations, key=lambda x: x.get("priority", 99))
-        return sorted_recommendations
+        return sorted(valid_recommendations, key=lambda x: x.get("priority", 99))
 
-    def _build_system_info_prompt_section(self, system_info: dict) -> str:
-        """
-        Build the system information section for LLM prompts.
-        """
+    # =========================================================================
+    # SPATIAL SCALE CALCULATION
+    # =========================================================================
+    
+    def _calculate_spatial_scale(
+        self,
+        system_info: Dict[str, Any],
+        image_shape: tuple
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """Calculate spatial scale from system metadata."""
         if not system_info:
-            return ""
-            
-        system_info_text = "\n\nAdditional System Information (Metadata):\n"
-        if isinstance(system_info, dict):
-            system_info_text += json.dumps(system_info, indent=2)
-        else:
-            system_info_text += str(system_info)
+            self.logger.info("No system_info provided. Physical scale not applied.")
+            return None, None
         
-        return system_info_text
-    
-    def _store_analysis_images(self, images: list, metadata: dict = None):
-        """Store analysis images for potential reuse in refinement."""
-        self._stored_analysis_images = images.copy() if images else []
-        self._stored_analysis_metadata = metadata or {}
-        self.logger.debug(f"Stored {len(self._stored_analysis_images)} analysis images for potential refinement")
-    
-    def _get_stored_analysis_images(self) -> list:
-        """Retrieve stored analysis images."""
-        return self._stored_analysis_images.copy()
-    
-    def _clear_stored_images(self):
-        """Clear stored images to free memory."""
-        self._stored_analysis_images = []
-        self._stored_analysis_metadata = {}
+        pixel_size = None
+        
+        if 'spatial_info' in system_info:
+            spatial = system_info['spatial_info']
+            if isinstance(spatial, dict):
+                pixel_size = spatial.get('nm_per_pixel') or spatial.get('pixel_size_nm')
+        
+        if pixel_size is None:
+            key_candidates = [
+                'pixel_size_nm', 'nm_per_pixel', 'scale_nm_per_pixel',
+                'pixel_size', 'pixelSize', 'pixel_scale', 'scale', 'resolution_nm'
+            ]
+            for key in key_candidates:
+                if key in system_info and system_info[key] is not None:
+                    pixel_size = system_info[key]
+                    break
+        
+        if pixel_size is None:
+            self.logger.info("No spatial calibration found in system metadata.")
+            return None, None
+        
+        try:
+            pixel_size = float(pixel_size)
+        except (TypeError, ValueError):
+            self.logger.warning(f"Invalid pixel_size value: {pixel_size}")
+            return None, None
+        
+        if pixel_size <= 0:
+            self.logger.warning(f"Invalid pixel_size value: {pixel_size}. Must be positive.")
+            return None, None
+        
+        unit = system_info.get('pixel_size_unit', 'nm').lower()
+        if unit in ['um', 'µm', 'micron', 'microns', 'micrometer']:
+            pixel_size *= 1000
+        elif unit in ['pm', 'picometer']:
+            pixel_size /= 1000
+        elif unit in ['a', 'angstrom', 'å']:
+            pixel_size /= 10
+        
+        h, w = image_shape[:2]
+        fov = max(h, w) * pixel_size
+        
+        self.logger.info(f"Spatial calibration: {pixel_size:.3f} nm/pixel, FOV: {fov:.1f} nm")
+        
+        return pixel_size, fov
 
-    def _refine_analysis_with_feedback(self, original_analysis: str, 
-                                     original_claims: list, 
-                                     user_feedback: str,
-                                     instruction_prompt: str,
-                                     stored_images: list = None,
-                                     system_info: dict = None) -> dict:
+    # =========================================================================
+    # REFINEMENT WITH FEEDBACK
+    # =========================================================================
+    
+    def _refine_analysis_with_feedback(
+        self,
+        original_analysis: str,
+        original_claims: List[Dict[str, Any]],
+        user_feedback: str,
+        instruction_prompt: str,
+        stored_images: List[Dict[str, Any]] = None,
+        system_info: Dict[str, Any] = None
+    ) -> Dict[str, Any]:
         """Use LLM to refine analysis and claims based on user feedback."""
         try:
-            # Create refinement prompt
             refinement_prompt = f"""
-    {instruction_prompt}
+{instruction_prompt}
 
-    ## REFINEMENT TASK
-    You previously generated this analysis and claims:
+## REFINEMENT TASK
+You previously generated this analysis and claims:
 
-    ORIGINAL DETAILED ANALYSIS:
-    {original_analysis}
+ORIGINAL DETAILED ANALYSIS:
+{original_analysis}
 
-    ORIGINAL CLAIMS:
-    {json.dumps(original_claims, indent=2)}
+ORIGINAL CLAIMS:
+{json.dumps(original_claims, indent=2)}
 
-    A human expert provided this feedback:
-    "{user_feedback}"
+A human expert provided this feedback:
+"{user_feedback}"
 
-    Use this feedback *thoughtfully* to refine both the detailed analysis and scientific claims. 
-    Maintain the same JSON output format with "detailed_analysis" and "scientific_claims" keys.
-    """
+Use this feedback *thoughtfully* to refine both the detailed analysis and scientific claims. 
+Maintain the same JSON output format with "detailed_analysis" and "scientific_claims" keys.
+"""
             
             prompt_parts = [refinement_prompt]
             
-            # Add stored images
             if stored_images:
                 for img_data in stored_images:
                     if isinstance(img_data, dict) and 'label' in img_data and 'data' in img_data:
                         prompt_parts.append(f"\n{img_data['label']}:")
                         prompt_parts.append({"mime_type": "image/jpeg", "data": img_data['data']})
-                    elif isinstance(img_data, dict) and img_data.get("mime_type") == "image/jpeg":
-                        prompt_parts.append("\nAnalysis image:")
-                        prompt_parts.append(img_data)
             
-            # Add system info
             if system_info:
-                system_info_section = self._build_system_info_prompt_section(system_info)
-                if system_info_section:
-                    prompt_parts.append(system_info_section)
+                prompt_parts.append(self._build_system_info_prompt_section(system_info))
             
             prompt_parts.append("\nProvide the refined analysis in JSON format.")
             
-            # Query LLM for refinement
-            self.logger.info("🔄 Refining analysis using stored images...")
+            self.logger.info("🔄 Refining analysis based on feedback...")
             response = self.model.generate_content(
                 contents=prompt_parts,
                 generation_config=self.generation_config,
@@ -378,11 +1032,10 @@ class BaseAnalysisAgent:
             if error_dict:
                 return {"error": "Refinement failed", "details": error_dict}
             
-            # Validate refined claims
             refined_claims = result_json.get("scientific_claims", [])
             validated_claims = self._validate_scientific_claims(refined_claims)
             
-            self.logger.info(f"Refinement complete: {len(validated_claims)} validated claims")
+            self.logger.info(f"✅ Refinement complete: {len(validated_claims)} validated claims")
             
             return {
                 "detailed_analysis": result_json.get("detailed_analysis", original_analysis),
@@ -392,98 +1045,3 @@ class BaseAnalysisAgent:
         except Exception as e:
             self.logger.error(f"Analysis refinement failed: {e}")
             return {"error": "Refinement failed", "details": str(e)}
-        
-    def _validate_measurement_recommendations(self, recommendations: list) -> list:
-        """Simple validation of measurement recommendations."""
-        valid_recommendations = []
-        
-        if not isinstance(recommendations, list):
-            return valid_recommendations
-        
-        required_keys = ["description", "scientific_justification", "priority"]
-        
-        for rec in recommendations:
-            if isinstance(rec, dict) and all(k in rec for k in required_keys):
-                # Simple validation
-                if isinstance(rec.get("priority"), int) and 1 <= rec.get("priority") <= 5:
-                    valid_recommendations.append(rec)
-        
-        # Sort by priority
-        return sorted(valid_recommendations, key=lambda x: x.get("priority", 5))
-    
-    def generate_measurement_recommendations(self, analysis_result: dict, 
-                                           system_info: dict = None,
-                                           novelty_context: str = None) -> dict:
-        """
-        Generate measurement recommendations using existing analysis results and stored images.
-        """
-        if "error" in analysis_result:
-            return {"error": "Cannot generate recommendations from failed analysis"}
-        
-        try:
-            # Get agent-specific prompt
-            instruction_prompt = self._get_measurement_recommendations_prompt()
-            
-            # Build simple prompt using existing data
-            prompt_parts = [instruction_prompt]
-            
-            # Add analysis results (what's already available)
-            prompt_parts.append("\n\n--- Analysis Results ---")
-            
-            if "detailed_analysis" in analysis_result:
-                prompt_parts.append(f"Detailed Analysis:\n{analysis_result['detailed_analysis']}")
-            
-            if "scientific_claims" in analysis_result:
-                prompt_parts.append(f"\nScientific Claims:")
-                for i, claim in enumerate(analysis_result["scientific_claims"], 1):
-                    prompt_parts.append(f"{i}. {claim.get('claim', 'N/A')}")
-            
-            # Add stored images (what's already available from the analysis)
-            stored_images = self._get_stored_analysis_images()
-            if stored_images:
-                prompt_parts.append(f"\n\nAnalysis Images:")
-                for img_data in stored_images[:3]:  # Limit to 3 images
-                    if isinstance(img_data, dict) and 'label' in img_data and 'data' in img_data:
-                        prompt_parts.append(f"\n{img_data['label']}:")
-                        prompt_parts.append({"mime_type": "image/jpeg", "data": img_data['data']})
-            
-            # Add optional context
-            if novelty_context:
-                prompt_parts.append(f"\n\nNovelty Context: {novelty_context}")
-            
-            if system_info:
-                system_info_section = self._build_system_info_prompt_section(system_info)
-                if system_info_section:
-                    prompt_parts.append(system_info_section)
-            
-            prompt_parts.append("\n\nProvide measurement recommendations in JSON format.")
-            
-            # Query LLM
-            response = self.model.generate_content(
-                contents=prompt_parts,
-                generation_config=self.generation_config,
-                safety_settings=self.safety_settings,
-            )
-            
-            result_json, error_dict = self._parse_llm_response(response)
-            
-            if error_dict:
-                return {"error": "Recommendation generation failed", "details": error_dict}
-            
-            # Validate recommendations
-            recommendations = result_json.get("measurement_recommendations", [])
-            valid_recommendations = self._validate_measurement_recommendations(recommendations)
-            
-            return {
-                "analysis_integration": result_json.get("analysis_integration", ""),
-                "measurement_recommendations": valid_recommendations,
-                "total_recommendations": len(valid_recommendations)
-            }
-            
-        except Exception as e:
-            self.logger.error(f"Recommendation generation failed: {e}")
-            return {"error": "Recommendation generation failed", "details": str(e)}
-
-    def _get_measurement_recommendations_prompt(self) -> str:
-        """Must be implemented by each agent."""
-        raise NotImplementedError("Each agent must implement this method")
