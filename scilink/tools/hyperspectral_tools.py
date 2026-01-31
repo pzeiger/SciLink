@@ -29,6 +29,60 @@ AGENT_METADATA_KEYS_TO_STRIP = [
 ]
 
 
+# =============================================================================
+# IMAGE RESIZE UTILITY
+# =============================================================================
+
+def resize_image_bytes(image_bytes: bytes, max_dim: int = 1500) -> bytes:
+    """
+    Resize image if any dimension exceeds max_dim.
+    
+    This is required for LLM APIs (especially Claude via Bedrock) which have
+    a 2000px limit for multi-image requests. We use 1500px as a safe default.
+    
+    Args:
+        image_bytes: JPEG/PNG image as bytes
+        max_dim: Maximum allowed dimension (width or height). Default 1500.
+    
+    Returns:
+        Resized image bytes (or original if already small enough)
+    """
+    if not image_bytes:
+        return image_bytes
+        
+    try:
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if img is None:
+            return image_bytes
+        
+        h, w = img.shape[:2]
+        
+        # Check if resize is needed
+        if max(h, w) <= max_dim:
+            return image_bytes
+        
+        # Calculate new size maintaining aspect ratio
+        scale = max_dim / max(h, w)
+        new_w, new_h = int(w * scale), int(h * scale)
+        
+        # Resize using INTER_AREA for downscaling (best quality)
+        img_resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        
+        # Re-encode as JPEG
+        _, buf = cv2.imencode('.jpg', img_resized, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        return buf.tobytes()
+        
+    except Exception:
+        # If anything fails, return original
+        return image_bytes
+
+
+# =============================================================================
+# SPECTRAL UNMIXING
+# =============================================================================
+
 def run_spectral_unmixing(
     hspy_data: np.ndarray,
     n_components: int,
@@ -74,6 +128,11 @@ def run_spectral_unmixing(
         logger.error(f"  (Tool Error: Spectral unmixing failed: {e})", exc_info=True)
         raise
 
+
+# =============================================================================
+# ENERGY AXIS UTILITIES
+# =============================================================================
+
 def create_energy_axis(n_channels: int, system_info: dict = None) -> tuple[np.ndarray, str, bool]:
     """
     Create energy axis from system_info if available, otherwise use channel indices.
@@ -96,6 +155,35 @@ def create_energy_axis(n_channels: int, system_info: dict = None) -> tuple[np.nd
     xlabel = "Channel"
     has_energy_info = False
     return energy_axis, xlabel, has_energy_info
+
+
+def convert_energy_to_indices(
+    energy_axis: np.ndarray, 
+    target_start: float, 
+    target_end: float, 
+    min_channels: int = 10
+) -> tuple[int, int]:
+    """
+    Calculates array indices from physical energy values.
+    """
+    start_idx = (np.abs(energy_axis - target_start)).argmin()
+    end_idx = (np.abs(energy_axis - target_end)).argmin()
+    
+    if start_idx > end_idx:
+        start_idx, end_idx = end_idx, start_idx
+        
+    # Guardrail: Padding
+    if end_idx - start_idx < min_channels:
+        padding = min_channels // 2
+        start_idx = max(0, start_idx - padding)
+        end_idx = min(len(energy_axis), end_idx + padding)
+        
+    return start_idx, end_idx
+
+
+# =============================================================================
+# PLOTTING FUNCTIONS (All return resized images)
+# =============================================================================
 
 def create_nmf_summary_plot(
     components: np.ndarray, 
@@ -143,11 +231,12 @@ def create_nmf_summary_plot(
         image_bytes = buf.getvalue()
         plt.close()
         
-        return image_bytes
+        return resize_image_bytes(image_bytes)
         
     except Exception as e:
         logger.error(f"  (Tool Error: Failed to create summary plot for {n_comp} components: {e})")
         return None
+
 
 def create_elbow_plot(component_range: list[int], errors: list[float], logger: logging.Logger) -> bytes | None:
     """Create an elbow plot of reconstruction error vs. number of components."""
@@ -170,10 +259,11 @@ def create_elbow_plot(component_range: list[int], errors: list[float], logger: l
         image_bytes = buf.getvalue()
         plt.close(fig)
         logger.info("  (Tool Info: Successfully created NMF elbow plot.)")
-        return image_bytes
+        return resize_image_bytes(image_bytes)
     except Exception as e:
         logger.error(f"  (Tool Error: Failed to create elbow plot: {e})", exc_info=True)
         return None
+
 
 def create_component_abundance_pairs(
     components: np.ndarray, 
@@ -222,9 +312,10 @@ def create_component_abundance_pairs(
             buf = BytesIO()
             plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
             buf.seek(0)
+            image_bytes = resize_image_bytes(buf.getvalue())
             pair_images_list.append({
                 "label": f"Component {i+1} Pair (Spectrum + Abundance Map)",
-                "bytes": buf.getvalue()
+                "bytes": image_bytes
             })
             plt.close()
             
@@ -233,6 +324,7 @@ def create_component_abundance_pairs(
     except Exception as e:
         logger.error(f"  (Tool Error: Failed to create component-abundance pairs: {e})")
         return []
+
 
 def create_structure_overlays(
     structure_img_gray: np.ndarray,
@@ -252,88 +344,10 @@ def create_structure_overlays(
             alpha=0.5,
             use_simple_colors=True
         )
-        return overlay_bytes
+        return resize_image_bytes(overlay_bytes)
     except Exception as e:
         logger.warning(f"  (Tool Warning: Failed to create abundance overlays: {e})")
         return None
-
-
-def apply_spatial_mask(
-    current_hspy_data: np.ndarray, 
-    abundance_maps: np.ndarray, 
-    component_index: int, 
-    percentile: float = 85.0
-) -> np.ndarray:
-    """
-    Masks hyperspectral data based on an abundance map.
-    Uses the *current* iteration's data as the base.
-    """
-    if abundance_maps is None:
-        raise ValueError("Abundance maps are None, cannot apply spatial mask.")
-    
-    mask_map = abundance_maps[..., component_index]
-    
-    if mask_map.ndim != 2:
-        raise ValueError(f"Abundance map must be 2D, but got shape {mask_map.shape}")
-        
-    # Resize mask map to match data if needed
-    if mask_map.shape != current_hspy_data.shape[:2]:
-        # Use cv2.resize, ensuring cv2 is imported
-        mask_map = cv2.resize(mask_map, (current_hspy_data.shape[1], current_hspy_data.shape[0]),
-                              interpolation=cv2.INTER_NEAREST)
-
-    # Threshold non-zero pixels to find the mask
-    positive_pixels = mask_map[mask_map > 1e-6]
-    if positive_pixels.size == 0:
-        # No positive pixels found, return original data
-        return current_hspy_data 
-
-    threshold_val = np.percentile(positive_pixels, percentile)
-    mask_2d = mask_map >= threshold_val
-    
-    if np.sum(mask_2d) == 0:
-        # Mask is empty, return original data
-        return current_hspy_data 
-
-    # Apply mask
-    masked_data = current_hspy_data.copy()
-    masked_data[~mask_2d] = 0 # Zero out pixels *not* in the mask
-    return masked_data
-
-def apply_spectral_slice(
-    original_hspy_data: np.ndarray, 
-    system_info: dict, 
-    energy_range: list
-) -> tuple[np.ndarray, dict]:
-    """
-    Slices hyperspectral data based on an energy range.
-    Uses the *original* data as the base and returns an updated system_info.
-    """
-    energy_axis, _, has_info = create_energy_axis(original_hspy_data.shape[2], system_info)
-    if not has_info:
-        raise ValueError("Cannot apply spectral slice: No energy axis information found in metadata.")
-        
-    if energy_range is None or len(energy_range) != 2:
-        raise ValueError(f"Invalid energy_range: {energy_range}")
-        
-    start_e, end_e = min(energy_range), max(energy_range)
-    
-    slice_indices = np.where((energy_axis >= start_e) & (energy_axis <= end_e))[0]
-    
-    if len(slice_indices) == 0:
-        raise ValueError(f"No data found in energy range {energy_range}.")
-        
-    sliced_data = original_hspy_data[..., slice_indices]
-    
-    # We must also update the system_info to reflect this slice
-    new_system_info = system_info.copy()
-    new_system_info["energy_range"] = {
-        "start": float(energy_axis[slice_indices[0]]),
-        "end": float(energy_axis[slice_indices[-1]]),
-        "units": system_info.get("energy_range", {}).get("units", "unknown")
-    }
-    
-    return sliced_data, new_system_info
 
 
 def compare_component_with_weighted_raw(
@@ -347,9 +361,6 @@ def compare_component_with_weighted_raw(
     Calculates the Abundance-Weighted Average Spectrum of the raw data
     and plots it against the NMF component for validation.
     """
-    import matplotlib.pyplot as plt
-    from io import BytesIO
-    
     try:
         h, w, e = hspy_data.shape
         
@@ -384,7 +395,7 @@ def compare_component_with_weighted_raw(
         plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
         plt.close()
         buf.seek(0)
-        return buf.getvalue()
+        return resize_image_bytes(buf.getvalue())
 
     except Exception as e:
         logger.error(f"Failed to create weighted comparison plot: {e}")
@@ -475,89 +486,12 @@ def create_validated_component_pair(
         plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
         plt.close()
         buf.seek(0)
-        return buf.getvalue()
+        return resize_image_bytes(buf.getvalue())
 
     except Exception as e:
         logger.error(f"Failed to create validated pair: {e}")
         return None
-    
 
-def save_image_bytes(image_bytes: bytes, output_dir: str, filename: str, logger: logging.Logger = None) -> str:
-    """
-    Helper to save image bytes to disk. Returns the full filepath.
-    """
-    if not image_bytes:
-        return None
-    try:
-        os.makedirs(output_dir, exist_ok=True)
-        filepath = os.path.join(output_dir, filename)
-        with open(filepath, 'wb') as f:
-            f.write(image_bytes)
-        if logger:
-            logger.info(f"📸 Saved image to: {filepath}")
-        return filepath
-    except Exception as e:
-        if logger:
-            logger.error(f"Failed to save image {filename}: {e}")
-        return None
-
-def create_image_grid(image_bytes_list: list, logger: logging.Logger = None) -> bytes:
-    """
-    Stitches a list of JPEG bytes into a single grid image using OpenCV.
-    """
-    if not image_bytes_list:
-        return None
-        
-    try:
-        # Decode all images
-        images = []
-        for b in image_bytes_list:
-            nparr = np.frombuffer(b, np.uint8)
-            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            if img is not None:
-                images.append(img)
-        
-        if not images:
-            return None
-
-        n_imgs = len(images)
-        
-        # If only one, return it directly (re-encoded to ensure consistency)
-        if n_imgs == 1:
-            return image_bytes_list[0]
-
-        # Determine grid size (target ~2 columns)
-        cols = 2
-        rows = (n_imgs + cols - 1) // cols
-        
-        # Find max dimensions to standardize cells
-        max_h = max(img.shape[0] for img in images)
-        max_w = max(img.shape[1] for img in images)
-        
-        # Create blank canvas (White background)
-        grid_h = rows * max_h
-        grid_w = cols * max_w
-        grid_img = np.zeros((grid_h, grid_w, 3), dtype=np.uint8) + 255 
-        
-        for idx, img in enumerate(images):
-            r = idx // cols
-            c = idx % cols
-            
-            # Resize current img to fit cell (centering logic)
-            h, w = img.shape[:2]
-            y_offset = r * max_h + (max_h - h) // 2
-            x_offset = c * max_w + (max_w - w) // 2
-            
-            grid_img[y_offset:y_offset+h, x_offset:x_offset+w] = img
-            
-        # Encode back to jpeg
-        retval, buf = cv2.imencode('.jpg', grid_img, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        return buf.tobytes()
-
-    except Exception as e:
-        if logger:
-            logger.warning(f"Failed to stitch validation grid: {e}")
-        return None
 
 def create_annotated_heatmap(data_map: np.ndarray, title: str, units: str) -> bytes:
     """
@@ -594,30 +528,7 @@ def create_annotated_heatmap(data_map: np.ndarray, title: str, units: str) -> by
     buf = BytesIO()
     plt.savefig(buf, format='jpeg', bbox_inches='tight', dpi=150)
     plt.close()
-    return buf.getvalue()
-
-def convert_energy_to_indices(
-    energy_axis: np.ndarray, 
-    target_start: float, 
-    target_end: float, 
-    min_channels: int = 10
-) -> tuple[int, int]:
-    """
-    Calculates array indices from physical energy values.
-    """
-    start_idx = (np.abs(energy_axis - target_start)).argmin()
-    end_idx = (np.abs(energy_axis - target_end)).argmin()
-    
-    if start_idx > end_idx:
-        start_idx, end_idx = end_idx, start_idx
-        
-    # Guardrail: Padding
-    if end_idx - start_idx < min_channels:
-        padding = min_channels // 2
-        start_idx = max(0, start_idx - padding)
-        end_idx = min(len(energy_axis), end_idx + padding)
-        
-    return start_idx, end_idx
+    return resize_image_bytes(buf.getvalue())
 
 
 def create_feature_dashboard(data_map: np.ndarray, feature_name: str, units: str) -> bytes:
@@ -679,8 +590,177 @@ def create_feature_dashboard(data_map: np.ndarray, feature_name: str, units: str
     buf = BytesIO()
     plt.savefig(buf, format='jpeg', bbox_inches='tight', dpi=150)
     plt.close()
-    return buf.getvalue()
+    return resize_image_bytes(buf.getvalue())
 
+
+def create_image_grid(image_bytes_list: list, logger: logging.Logger = None) -> bytes:
+    """
+    Stitches a list of JPEG bytes into a single grid image using OpenCV.
+    """
+    if not image_bytes_list:
+        return None
+        
+    try:
+        # Decode all images
+        images = []
+        for b in image_bytes_list:
+            nparr = np.frombuffer(b, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if img is not None:
+                images.append(img)
+        
+        if not images:
+            return None
+
+        n_imgs = len(images)
+        
+        # If only one, return it directly (re-encoded to ensure consistency)
+        if n_imgs == 1:
+            return resize_image_bytes(image_bytes_list[0])
+
+        # Determine grid size (target ~2 columns)
+        cols = 2
+        rows = (n_imgs + cols - 1) // cols
+        
+        # Find max dimensions to standardize cells
+        max_h = max(img.shape[0] for img in images)
+        max_w = max(img.shape[1] for img in images)
+        
+        # Create blank canvas (White background)
+        grid_h = rows * max_h
+        grid_w = cols * max_w
+        grid_img = np.zeros((grid_h, grid_w, 3), dtype=np.uint8) + 255 
+        
+        for idx, img in enumerate(images):
+            r = idx // cols
+            c = idx % cols
+            
+            # Resize current img to fit cell (centering logic)
+            h, w = img.shape[:2]
+            y_offset = r * max_h + (max_h - h) // 2
+            x_offset = c * max_w + (max_w - w) // 2
+            
+            grid_img[y_offset:y_offset+h, x_offset:x_offset+w] = img
+            
+        # Encode back to jpeg
+        retval, buf = cv2.imencode('.jpg', grid_img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        return resize_image_bytes(buf.tobytes())
+
+    except Exception as e:
+        if logger:
+            logger.warning(f"Failed to stitch validation grid: {e}")
+        return None
+
+
+# =============================================================================
+# SPATIAL/SPECTRAL MASKING
+# =============================================================================
+
+def apply_spatial_mask(
+    current_hspy_data: np.ndarray, 
+    abundance_maps: np.ndarray, 
+    component_index: int, 
+    percentile: float = 85.0
+) -> np.ndarray:
+    """
+    Masks hyperspectral data based on an abundance map.
+    Uses the *current* iteration's data as the base.
+    """
+    if abundance_maps is None:
+        raise ValueError("Abundance maps are None, cannot apply spatial mask.")
+    
+    mask_map = abundance_maps[..., component_index]
+    
+    if mask_map.ndim != 2:
+        raise ValueError(f"Abundance map must be 2D, but got shape {mask_map.shape}")
+        
+    # Resize mask map to match data if needed
+    if mask_map.shape != current_hspy_data.shape[:2]:
+        mask_map = cv2.resize(mask_map, (current_hspy_data.shape[1], current_hspy_data.shape[0]),
+                              interpolation=cv2.INTER_NEAREST)
+
+    # Threshold non-zero pixels to find the mask
+    positive_pixels = mask_map[mask_map > 1e-6]
+    if positive_pixels.size == 0:
+        # No positive pixels found, return original data
+        return current_hspy_data 
+
+    threshold_val = np.percentile(positive_pixels, percentile)
+    mask_2d = mask_map >= threshold_val
+    
+    if np.sum(mask_2d) == 0:
+        # Mask is empty, return original data
+        return current_hspy_data 
+
+    # Apply mask
+    masked_data = current_hspy_data.copy()
+    masked_data[~mask_2d] = 0 # Zero out pixels *not* in the mask
+    return masked_data
+
+
+def apply_spectral_slice(
+    original_hspy_data: np.ndarray, 
+    system_info: dict, 
+    energy_range: list
+) -> tuple[np.ndarray, dict]:
+    """
+    Slices hyperspectral data based on an energy range.
+    Uses the *original* data as the base and returns an updated system_info.
+    """
+    energy_axis, _, has_info = create_energy_axis(original_hspy_data.shape[2], system_info)
+    if not has_info:
+        raise ValueError("Cannot apply spectral slice: No energy axis information found in metadata.")
+        
+    if energy_range is None or len(energy_range) != 2:
+        raise ValueError(f"Invalid energy_range: {energy_range}")
+        
+    start_e, end_e = min(energy_range), max(energy_range)
+    
+    slice_indices = np.where((energy_axis >= start_e) & (energy_axis <= end_e))[0]
+    
+    if len(slice_indices) == 0:
+        raise ValueError(f"No data found in energy range {energy_range}.")
+        
+    sliced_data = original_hspy_data[..., slice_indices]
+    
+    # We must also update the system_info to reflect this slice
+    new_system_info = system_info.copy()
+    new_system_info["energy_range"] = {
+        "start": float(energy_axis[slice_indices[0]]),
+        "end": float(energy_axis[slice_indices[-1]]),
+        "units": system_info.get("energy_range", {}).get("units", "unknown")
+    }
+    
+    return sliced_data, new_system_info
+
+
+# =============================================================================
+# FILE I/O
+# =============================================================================
+
+def save_image_bytes(image_bytes: bytes, output_dir: str, filename: str, logger: logging.Logger = None) -> str:
+    """
+    Helper to save image bytes to disk. Returns the full filepath.
+    """
+    if not image_bytes:
+        return None
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        filepath = os.path.join(output_dir, filename)
+        with open(filepath, 'wb') as f:
+            f.write(image_bytes)
+        if logger:
+            logger.info(f"📸 Saved image to: {filepath}")
+        return filepath
+    except Exception as e:
+        if logger:
+            logger.error(f"Failed to save image {filename}: {e}")
+        return None
+
+
+# =============================================================================
+# SNR ESTIMATION & DATA PREPROCESSING
+# =============================================================================
 
 def estimate_global_snr(hspy_data: np.ndarray) -> float:
     """
@@ -692,17 +772,16 @@ def estimate_global_snr(hspy_data: np.ndarray) -> float:
     flat_data = hspy_data.reshape(-1, c)
     
     # 1. Estimate Signal Strength (Mean of global average spectrum)
-    # We take the mean of the data (simple approximation)
     signal_mean = np.mean(flat_data)
     if signal_mean <= 0: return 0.0
 
     # 2. Estimate Noise (Std Dev of the derivative)
-    # diff(axis=1) removes slow-moving signal, leaving mostly high-freq noise
     noise_est = np.std(np.diff(flat_data, axis=1)) / np.sqrt(2)
     
     if noise_est <= 0: return 100.0 # Perfect signal
 
     return float(signal_mean / noise_est)
+
 
 def get_optimal_analysis_data(hspy_data: np.ndarray) -> tuple[np.ndarray, str]:
     """
@@ -711,26 +790,20 @@ def get_optimal_analysis_data(hspy_data: np.ndarray) -> tuple[np.ndarray, str]:
     snr = estimate_global_snr(hspy_data)
     
     # 1. PRISTINE DATA (SNR > 50)
-    # If the signal is 50x stronger than noise, curve_fit usually works fine on Raw.
-    # We trust the physics here.
     if snr >= 50.0:
         return hspy_data, f"Raw Data (High Quality, SNR={snr:.1f})"
         
     # 2. THE MIDDLE GROUND (SNR 15 - 50) 
-    # Data is good, but has 'shot noise' (jitter). 
-    # We keep 99.9% variance. This deletes the "fuzz" but keeps all signal shapes.
     elif snr >= 15.0:
         threshold = 0.999 
         method = "PCA (Gentle)"
         
     # 3. STANDARD NOISE (SNR 5 - 15)
-    # Needs standard cleaning to prevent fit failures.
     elif snr >= 5.0:
         threshold = 0.99
         method = "PCA (Standard)"
 
     # 4. HIGH NOISE (SNR < 5)
-    # Garbage in, garbage out. We must scrub hard to get anything useful.
     else:
         threshold = 0.90
         method = "PCA (Aggressive)"
