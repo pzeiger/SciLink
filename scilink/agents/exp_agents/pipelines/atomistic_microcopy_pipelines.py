@@ -1,4 +1,4 @@
-from ..controllers.atomistic_controllers import (
+from ..controllers.atomistic_microscopy_controllers import (
     RunAtomDetectionController,
     RunIntensityAnalysisController,
     GetIntensityGMMParamsController,

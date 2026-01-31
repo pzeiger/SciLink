@@ -18,7 +18,7 @@ from .instruct import (
     MICROSCOPY_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS
 )
 
-from .pipelines.microscopy_pipelines import create_unified_microscopy_pipeline
+from .pipelines.fft_microscopy_pipelines import create_unified_microscopy_pipeline
 from ._deprecation import normalize_params
 
 from ...tools.image_processor import (
@@ -28,14 +28,10 @@ from ...tools.image_processor import (
 )
 
 
-class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
+class FFTMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
-    Unified Microscopy Analysis Agent.
-    
-    ALL analysis follows the batch processing pattern:
-    - Single image analysis = batch of 1
-    - Multiple images = standard batch processing
-    - Numpy array stack = batch processing
+    Microscopy Analysis Agent based on sliding FFT and NMF decomposition.
+    Utilizes LLMs to select appropriate FFT/NMF parameters and interpret results.
     
     Example:
         agent = MicroscopyAnalysisAgent(api_key="...")
@@ -69,7 +65,7 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Normalize Params
         self.api_key, self.base_url = normalize_params(
             api_key, google_api_key, base_url, local_model, 
-            source="MicroscopyAnalysisAgent"
+            source="FFTMicroscopyAnalysisAgent"
         )
         
         super().__init__(

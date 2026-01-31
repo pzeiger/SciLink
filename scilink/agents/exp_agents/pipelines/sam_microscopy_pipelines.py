@@ -9,7 +9,7 @@ single images (n=1) and batches (n>1) identically.
 import logging
 from typing import Callable, List
 
-from ..controllers.sam_controllers import (
+from ..controllers.sam_microscopy_controllers import (
     # Unified pipeline controllers
     HumanFeedbackRefinementController,
     UnifiedBatchProcessingController,

@@ -17,7 +17,7 @@ from .instruct import (
     SAM_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS
 )
 
-from .pipelines.sam_pipelines import create_unified_sam_pipeline
+from .pipelines.sam_microscopy_pipelines import create_unified_sam_pipeline
 from ._deprecation import normalize_params
 
 from ...tools.image_processor import (

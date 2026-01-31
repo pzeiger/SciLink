@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .analyzers import MicroscopyAnalyzer, SpectroscopyAnalyzer, BaseExperimentAnalyzer, CurveAnalyzer
 from ..workflows.dft_recommendation_workflow import DFTRecommendationsWorkflow
-from ..agents.exp_agents.microscopy_agent import MicroscopyAnalysisAgent
+from ..agents.exp_agents.fft_microscopy_agent import FFTMicroscopyAnalysisAgent
 from ..agents.lit_agents.literature_agent import OwlLiteratureAgent
 from ..agents.lit_agents.novelty_scorer import NoveltyScorer, enhanced_novelty_assessment
 

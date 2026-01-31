@@ -16,7 +16,7 @@ from ...tools.image_processor import (
     preprocess_image, 
     convert_numpy_to_jpeg_bytes
 )
-from .pipelines.atomistic_pipelines import create_atomistic_pipeline
+from .pipelines.atomistic_microcopy_pipelines import create_atomistic_pipeline
 from ._deprecation import normalize_params
 
 

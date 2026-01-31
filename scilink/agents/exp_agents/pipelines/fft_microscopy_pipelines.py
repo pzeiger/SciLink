@@ -9,7 +9,7 @@ single images (n=1) and batches (n>1) identically.
 import logging
 from typing import Callable, List, Optional
 
-from ..controllers.microscopy_controllers import (
+from ..controllers.fft_microscopy_controllers import (
     # Unified pipeline controllers
     InitialFFTAnalysisController,
     HumanFeedbackRefinementController,

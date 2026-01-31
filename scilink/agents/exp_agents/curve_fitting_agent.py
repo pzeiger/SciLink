@@ -1,12 +1,10 @@
 # agents/curve_fitting_agent_unified.py
 
 """
-CurveFittingAgent - Unified Architecture for Single and Series Analysis
+CurveFittingAgent: Curve Fitting Agent for Spectroscopic Analysis
 
 This module provides a curve fitting agent that handles both single spectrum
 analysis and spectral series analysis using the same unified architecture.
-
-Key principle: Single spectrum = Series of 1
 
 Quality control features:
 - Automatic model retry when R² is inadequate (configurable threshold)

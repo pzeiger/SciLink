@@ -1,5 +1,5 @@
 """
-SAM Analysis Controllers - Unified Architecture
+SAM Microscopy Analysis Controllers
 
 This module contains unified controllers that handle both single image (n=1)
 and batch (n>1) analysis identically. The key principle is:
@@ -24,7 +24,7 @@ from ..instruct import (
     SAM_BATCH_REFINEMENT_INSTRUCTIONS,
     SAM_BATCH_SYNTHESIS_INSTRUCTIONS,
     SAM_BATCH_CUSTOM_ANALYSIS_INSTRUCTIONS,
-    SAM_SINGLE_IMAGE_SYNTHESIS_INSTRUCTIONS,  # New instruction for single images
+    SAM_SINGLE_IMAGE_SYNTHESIS_INSTRUCTIONS,
 )
 
 from ....tools.image_processor import (
@@ -340,6 +340,7 @@ class UnifiedBatchProcessingController:
     - Loads SAM model ONCE and reuses for all images
     - Works identically for n=1 or n>1
     - Supports both file paths and numpy array stack inputs
+    - OPTIMIZATION: Skips re-analysis for single images when params unchanged
     """
     
     def __init__(self, logger: logging.Logger, settings: dict):
@@ -365,6 +366,83 @@ class UnifiedBatchProcessingController:
         else:
             raise ValueError("No image data found in state")
     
+    def _can_skip_single_image_reanalysis(self, state: dict) -> bool:
+        """
+        Check if we can skip re-analysis for a single image.
+        
+        Conditions:
+        1. Single image mode (n=1)
+        2. We have existing SAM results from initial analysis
+        3. Parameters were not changed during feedback refinement
+        """
+        is_single = state.get("is_single_image", False)
+        if not is_single:
+            return False
+        
+        # Check if we have existing results
+        existing_result = state.get("sam_result")
+        existing_stats = state.get("summary_stats")
+        if not existing_result or not existing_stats:
+            return False
+        
+        # Check if parameters changed
+        initial_params = state.get("current_params", {})
+        final_params = state.get("final_params_for_batch", {})
+        
+        # Compare relevant parameters (exclude non-analysis params)
+        analysis_keys = [
+            'use_clahe', 'sam_parameters', 'min_area', 
+            'max_area', 'use_pruning', 'pruning_iou_threshold'
+        ]
+        
+        for key in analysis_keys:
+            if initial_params.get(key) != final_params.get(key):
+                self.logger.info(f"   Parameter '{key}' changed: {initial_params.get(key)} → {final_params.get(key)}")
+                return False
+        
+        return True
+    
+    def _build_result_from_cached(self, state: dict) -> dict:
+        """
+        Build a batch_results entry from cached initial analysis.
+        Also saves visualization if configured.
+        """
+        sam_result = state["sam_result"]
+        summary_stats = state["summary_stats"]
+        image_paths = state.get("image_paths")
+        first_image_name = state.get("first_image_name", "frame_0000")
+        
+        viz_path = None
+        if self.save_visualizations:
+            # Generate and save visualization from cached result
+            preprocessed_img = state.get("preprocessed_image_array")
+            overlay_img = visualize_sam_results(sam_result, preprocessed_img)
+            
+            viz_dir = self.output_dir / "visualizations"
+            viz_dir.mkdir(parents=True, exist_ok=True)
+            viz_path = viz_dir / f"overlay_0000_{first_image_name}.png"
+            
+            save_sam_visualization(
+                overlay_img, 
+                str(viz_path), 
+                0,
+                sam_result['total_count'], 
+                state.get("final_params_for_batch", {}), 
+                self.logger
+            )
+        
+        return {
+            "index": 0,
+            "image_path": str(image_paths[0]) if image_paths else None,
+            "image_name": first_image_name,
+            "visualization_path": str(viz_path) if viz_path else None,
+            "particle_count": sam_result['total_count'],
+            "statistics": summary_stats,
+            "success": True,
+            "error": None,
+            "cached": True  # Flag indicating this used cached results
+        }
+    
     def execute(self, state: dict) -> dict:
         """Process all images using refined parameters."""
         num_images = state.get("num_images", 1)
@@ -377,6 +455,43 @@ class UnifiedBatchProcessingController:
         if num_images == 0:
             state["batch_results"] = []
             return state
+        
+        # =====================================================================
+        # OPTIMIZATION: Skip re-analysis for single image if params unchanged
+        # =====================================================================
+        if self._can_skip_single_image_reanalysis(state):
+            self.logger.info("⏭️  Skipping re-analysis (single image, parameters unchanged)")
+            self.logger.info("   Using cached results from initial analysis.\n")
+            
+            cached_result = self._build_result_from_cached(state)
+            
+            # Save batch results JSON (maintains consistency with full processing)
+            results_path = self.output_dir / "batch_results.json"
+            results_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            with open(results_path, 'w') as f:
+                json.dump({
+                    "timestamp": datetime.now().isoformat(),
+                    "total_images": 1,
+                    "is_single_image": True,
+                    "successful": 1,
+                    "parameters_used": state.get("final_params_for_batch", {}),
+                    "input_type": input_type,
+                    "used_cached_result": True,
+                    "results": [cached_result]
+                }, f, indent=2, default=str)
+            
+            state["batch_results"] = [cached_result]
+            state["batch_results_path"] = str(results_path)
+            
+            self.logger.info(f"   ✅ {cached_result['particle_count']} particles (from cache)")
+            self.logger.info(f"\n✅ Processing complete: 1/1 successful (cached).")
+            
+            return state
+        
+        # =====================================================================
+        # FULL PROCESSING: Either batch mode OR single image with changed params
+        # =====================================================================
         
         # Get refined parameters
         batch_params = state.get("final_params_for_batch", state.get("current_params", {}))
@@ -449,7 +564,8 @@ class UnifiedBatchProcessingController:
                     "particle_count": sam_result['total_count'],
                     "statistics": summary_stats,
                     "success": True,
-                    "error": None
+                    "error": None,
+                    "cached": False
                 }
                 
                 batch_results.append(result_entry)
@@ -465,7 +581,8 @@ class UnifiedBatchProcessingController:
                     "particle_count": 0,
                     "statistics": {},
                     "success": False,
-                    "error": str(e)
+                    "error": str(e),
+                    "cached": False
                 })
         
         # Save batch results JSON
@@ -480,6 +597,7 @@ class UnifiedBatchProcessingController:
                 "successful": sum(1 for r in batch_results if r["success"]),
                 "parameters_used": batch_params,
                 "input_type": input_type,
+                "used_cached_result": False,
                 "results": batch_results
             }, f, indent=2, default=str)
         
@@ -490,7 +608,6 @@ class UnifiedBatchProcessingController:
         self.logger.info(f"\n✅ Processing complete: {successful}/{num_images} successful.")
         
         return state
-
 
 # ============================================================================
 # CONDITIONAL CUSTOM ANALYSIS CONTROLLER
@@ -930,7 +1047,7 @@ class UnifiedReportGenerationController:
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>SAM Analysis Report - Single Image</title>
+    <title>SAM Microscopy Analysis Report - Single Image</title>
     <style>
         body {{ font-family: 'Segoe UI', sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background: #f4f4f9; }}
         .container {{ background: #fff; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
@@ -947,7 +1064,7 @@ class UnifiedReportGenerationController:
 </head>
 <body>
 <div class="container">
-    <h1>🔬 SAM Analysis Report</h1>
+    <h1>🔬 SAM Microscopy Analysis Report</h1>
     
     <div class="metadata-box">
         <p><strong>Date:</strong> {timestamp}</p>
@@ -991,7 +1108,7 @@ class UnifiedReportGenerationController:
                 html += "    </div>\n"
         
         html += """
-    <div class="footer">Generated by SAM Analysis Agent (Unified Architecture)</div>
+    <div class="footer">Generated by SAM Microscopy Analysis Agent</div>
 </div>
 </body>
 </html>"""
@@ -1037,7 +1154,7 @@ class UnifiedReportGenerationController:
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>SAM Batch Analysis Report</title>
+    <title>SAM Microscopy Analysis Report</title>
     <style>
         body {{ font-family: 'Segoe UI', sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background: #f4f4f9; }}
         .container {{ background: #fff; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
@@ -1054,7 +1171,7 @@ class UnifiedReportGenerationController:
 </head>
 <body>
 <div class="container">
-    <h1>🔬 SAM Batch Analysis Report</h1>
+    <h1>🔬 SAM Microscopy Analysis Report</h1>
     
     <div class="metadata-box">
         <p><strong>Date:</strong> {timestamp}</p>
@@ -1110,7 +1227,7 @@ class UnifiedReportGenerationController:
                 html += "    </div>\n"
         
         html += """
-    <div class="footer">Generated by SAM Batch Analysis Agent (Unified Architecture)</div>
+    <div class="footer">Generated by SAM Microscopy Analysis Agent</div>
 </div>
 </body>
 </html>"""
