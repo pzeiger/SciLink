@@ -18,9 +18,9 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from enum import Enum
 
-from ..auth import get_internal_proxy_key
-from ..wrappers.openai_wrapper import OpenAIAsGenerativeModel
-from ..wrappers.litellm_wrapper import LiteLLMGenerativeModel
+from ...auth import get_internal_proxy_key
+from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .analysis_orchestrator_tools import AnalysisOrchestratorTools
 from ._deprecation import normalize_params
 
