@@ -755,6 +755,8 @@ class AnalysisOrchestratorTools:
         ) -> str:
             """
             Execute analysis with the selected or specified agent.
+            For directories, automatically filters out metadata files and passes
+            a list of data file paths to the agent.
             """
             print(f"  ⚡ Tool: Running analysis...")
             
@@ -791,16 +793,64 @@ class AnalysisOrchestratorTools:
                 print(f"    Using agent: {type(agent).__name__}")
                 print(f"    Data: {data_path}")
                 
+                # Handle directory input - filter out metadata files
+                path = Path(data_path)
+                actual_data_input = data_path  # Default: pass as-is
+                
+                if path.is_dir():
+                    # Get all files excluding metadata
+                    all_files = [f for f in path.iterdir() if f.is_file() and not f.name.startswith('.')]
+                    
+                    # Filter out metadata files
+                    data_files = []
+                    for f in all_files:
+                        is_metadata = (
+                            f.suffix.lower() == '.json' or
+                            'metadata' in f.name.lower() or
+                            f.name.lower() in ['info.txt', 'description.txt', 'readme.txt', 'readme.md']
+                        )
+                        if not is_metadata:
+                            data_files.append(f)
+                    
+                    if not data_files:
+                        return json.dumps({
+                            "status": "error",
+                            "message": f"No data files found in directory (only metadata files present)"
+                        })
+                    
+                    # Sort for consistent ordering
+                    data_files = sorted(data_files, key=lambda x: x.name)
+                    
+                    print(f"    Found {len(data_files)} data files (excluded metadata)")
+                    
+                    # Pass as list of file paths for series analysis
+                    # The CurveFittingAgent expects either:
+                    # - A single file path (string) for single spectrum
+                    # - A list of file paths for series
+                    # - A directory path (but this may include metadata files)
+                    actual_data_input = [str(f) for f in data_files]
+                    
+                    # If only one file, pass as string (single spectrum mode)
+                    if len(actual_data_input) == 1:
+                        actual_data_input = actual_data_input[0]
+                        print(f"    Single file in directory, using single spectrum mode")
+                    else:
+                        print(f"    Series mode: passing {len(actual_data_input)} files")
+                        for i, fp in enumerate(actual_data_input[:3]):
+                            print(f"      [{i}] {Path(fp).name}")
+                        if len(actual_data_input) > 3:
+                            print(f"      ... and {len(actual_data_input) - 3} more")
+                
                 # Run analysis
                 result = agent.analyze(
-                    data=data_path,
+                    data=actual_data_input,
                     system_info=self.orch.current_metadata
                 )
                 
                 # Store result (including full result for get_recommendations)
                 analysis_record = {
                     "timestamp": datetime.now().isoformat(),
-                    "data_path": data_path,
+                    "data_path": data_path,  # Store original path
                     "agent_id": agent_id,
                     "agent_name": self.AGENT_NAMES.get(agent_id),
                     "status": result.get("status"),
