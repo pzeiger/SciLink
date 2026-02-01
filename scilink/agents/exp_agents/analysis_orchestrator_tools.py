@@ -328,6 +328,9 @@ class AnalysisOrchestratorTools:
                 with open(path, 'r') as f:
                     metadata = json.load(f)
                 
+                # Always store metadata first
+                self.orch.current_metadata = metadata
+                
                 # Validate basic structure
                 required_fields = ["experiment_type", "experiment", "sample"]
                 missing = [f for f in required_fields if f not in metadata]
@@ -336,10 +339,11 @@ class AnalysisOrchestratorTools:
                     return json.dumps({
                         "status": "warning",
                         "message": f"Metadata loaded but missing recommended fields: {missing}",
-                        "metadata": metadata
+                        "metadata": metadata,
+                        "experiment_type": metadata.get("experiment_type"),
+                        "technique": metadata.get("experiment", {}).get("technique") if isinstance(metadata.get("experiment"), dict) else metadata.get("technique"),
+                        "material": metadata.get("sample", {}).get("material") if isinstance(metadata.get("sample"), dict) else metadata.get("material")
                     })
-                
-                self.orch.current_metadata = metadata
                 
                 return json.dumps({
                     "status": "success",
