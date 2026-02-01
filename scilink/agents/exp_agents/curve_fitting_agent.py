@@ -1,5 +1,3 @@
-# agents/curve_fitting_agent_unified.py
-
 """
 CurveFittingAgent: Curve Fitting Agent for Spectroscopic Analysis
 
