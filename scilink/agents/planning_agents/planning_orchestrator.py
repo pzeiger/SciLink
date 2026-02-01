@@ -394,10 +394,10 @@ class PlanningOrchestratorAgent:
                 model=model_name,
                 api_key=api_key,
                 system_instruction=system_prompt,
-                tools=self.tools.gemini_functions
+                tools=self._convert_tools_to_litellm_format()
             )
             self.use_openai = False
-            self.tools_for_model = self.tools.gemini_functions
+            self.tools_for_model = self._convert_tools_to_litellm_format()
         
         # Store system prompt for OpenAI mode
         self._system_prompt = system_prompt
@@ -411,10 +411,19 @@ class PlanningOrchestratorAgent:
                 recent_history = self._trim_history(history, max_messages=100)
                 self.messages.extend(recent_history)
         else:
-            self.chat_session = self.model.start_chat(
-                history=history,
-                enable_automatic_function_calling=True
-            )
+            # LiteLLM: Initialize messages list similar to OpenAI mode
+            # We'll handle tool calls manually instead of using chat_session with AFC
+            self.messages = [{"role": "system", "content": system_prompt}]
+            if history:
+                recent_history = self._trim_history(history, max_messages=100)
+                self.messages.extend(recent_history)
+
+    def _convert_tools_to_litellm_format(self) -> List[Dict]:
+        """
+        Convert OpenAI tool schemas to LiteLLM format.
+        LiteLLM uses the same format as OpenAI for tools.
+        """
+        return self.tools.openai_schemas
 
     def _build_workspace_context(self) -> str:
         """Build workspace context string for system prompt."""
@@ -455,10 +464,9 @@ class PlanningOrchestratorAgent:
         new_system_prompt = get_system_prompt(level)
         self._system_prompt = new_system_prompt
         
-        if self.use_openai:
-            # Update system message in OpenAI format
-            if self.messages and self.messages[0]["role"] == "system":
-                self.messages[0]["content"] = new_system_prompt
+        # Update system message in messages list (works for both OpenAI and LiteLLM now)
+        if self.messages and self.messages[0]["role"] == "system":
+            self.messages[0]["content"] = new_system_prompt
         
         logging.info(f"🔄 Autonomy level changed: {old_level.value} → {level.value}")
         logging.info(f"   Human feedback enabled: {self._enable_human_feedback}")
@@ -543,8 +551,8 @@ class PlanningOrchestratorAgent:
             if self.use_openai:
                 response_text = self._handle_openai_chat(user_input)
             else:
-                response = self.chat_session.send_message(user_input)
-                response_text = self._extract_response_text(response)
+                # Use the same manual tool handling approach for LiteLLM
+                response_text = self._handle_litellm_chat(user_input)
             
             print(f"🤖 Agent: {response_text}")
             self._save_history()
@@ -660,6 +668,82 @@ class PlanningOrchestratorAgent:
         
         return "⚠️ Maximum tool iterations reached. Please simplify your request."
 
+    def _handle_litellm_chat(self, user_input: str) -> str:
+        """Handle chat with LiteLLM models with manual function calling loop."""
+        import litellm
+        
+        self.messages.append({"role": "user", "content": user_input})
+        
+        if len(self.messages) > 120:
+            print("  ⚠️  Context window getting full - trimming history...")
+            system_msg = self.messages[0]
+            recent_msgs = self._trim_history(self.messages[1:], max_messages=100)
+            self.messages = [system_msg] + recent_msgs
+        
+        max_iterations = 20
+        iteration = 0
+        
+        while iteration < max_iterations:
+            iteration += 1
+            
+            response = litellm.completion(
+                model=self.model.model,
+                messages=self.messages,
+                tools=self.tools_for_model,
+                tool_choice="auto",
+                api_key=self.model.api_key,
+                api_base=self.model.base_url
+            )
+            
+            message = response.choices[0].message
+            tool_calls = getattr(message, "tool_calls", None)
+            content = getattr(message, "content", None)
+            
+            if not tool_calls:
+                # No tool calls - return the text response
+                self.messages.append({
+                    "role": "assistant",
+                    "content": content or ""
+                })
+                return content or ""
+            
+            # Has tool calls - add assistant message with tool calls
+            assistant_msg = {
+                "role": "assistant",
+                "content": content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments
+                        }
+                    } for tc in tool_calls
+                ]
+            }
+            self.messages.append(assistant_msg)
+            
+            # Execute each tool call
+            for tool_call in tool_calls:
+                func_name = tool_call.function.name
+                try:
+                    args = json.loads(tool_call.function.arguments)
+                except json.JSONDecodeError:
+                    args = {}
+                
+                print(f"  🔧 Calling tool: {func_name}")
+                
+                result = self.tools.execute_tool(func_name, **args)
+                
+                self.messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": result
+                })
+        
+        return "⚠️ Maximum tool iterations reached. Please simplify your request."
+
     def _extract_response_text(self, response) -> str:
         """Robustly extract text from different response formats."""
         if hasattr(response, 'text'):
@@ -681,37 +765,18 @@ class PlanningOrchestratorAgent:
             with open(self.history_path, 'r') as f: 
                 saved = json.load(f)
             
-            if self.use_openai:
-                return saved
-            else:
-                return [{"role": t["role"], "parts": [t["text"]]} for t in saved]
+            # Both OpenAI and LiteLLM now use the same message format
+            return saved
+            
         except Exception as e:
             logging.warning(f"Failed to load history: {e}")
             return []
 
     def _save_history(self):
         """Save conversation history to disk."""
-        history_data = []
-        
         try:
-            if self.use_openai:
-                history_data = [m for m in self.messages if m["role"] != "system"]
-            else:
-                if not hasattr(self.chat_session, 'history'):
-                    return
-                
-                for content in self.chat_session.history:
-                    role = content.role if hasattr(content, 'role') else content.get('role', 'user')
-                    text_parts = []
-                    if hasattr(content, 'parts'):
-                        text_parts = [p.text for p in content.parts if hasattr(p, 'text') and p.text]
-                    elif hasattr(content, 'content'):
-                        text_parts = [content.content]
-                    elif isinstance(content, dict) and 'content' in content:
-                        text_parts = [content['content']]
-                    
-                    if text_parts: 
-                        history_data.append({"role": role, "text": " ".join(text_parts)})
+            # Filter out system messages for saved history
+            history_data = [m for m in self.messages if m["role"] != "system"]
             
             with open(self.history_path, 'w') as f: 
                 json.dump(history_data, f, indent=2)
