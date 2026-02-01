@@ -8,8 +8,8 @@ from .experimental_orchestrator import (
     ExperimentalAnalysisOrchestrator,
     AgentType,
     AGENT_REGISTRY,
-    MicroscopyAgentSelector
 )
+from .experimental_orchestrator_tools import ExperimentalOrchestratorTools
 
 
 __all__ = [
@@ -24,7 +24,7 @@ __all__ = [
     'AGENT_MAP',
     # New experimental orchestrator (unified analysis interface)
     'ExperimentalAnalysisOrchestrator',
+    'ExperimentalOrchestratorTools',
     'AgentType',
     'AGENT_REGISTRY',
-    'MicroscopyAgentSelector',
 ]
