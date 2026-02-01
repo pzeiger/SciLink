@@ -596,14 +596,15 @@ class AnalysisOrchestratorTools:
                     system_info=self.orch.current_metadata
                 )
                 
-                # Store result
+                # Store result (including full result for get_recommendations)
                 analysis_record = {
                     "timestamp": datetime.now().isoformat(),
                     "data_path": data_path,
                     "agent_id": agent_id,
                     "agent_name": self.AGENT_NAMES.get(agent_id),
                     "status": result.get("status"),
-                    "output_directory": result.get("output_directory")
+                    "output_directory": result.get("output_directory"),
+                    "full_result": result  # Store full result for recommendations
                 }
                 self.orch.analysis_results.append(analysis_record)
                 
@@ -840,13 +841,22 @@ class AnalysisOrchestratorTools:
                         "message": "Analysis record missing agent_id"
                     })
                 
+                # Get the stored analysis result
+                full_result = record.get("full_result")
+                if full_result is None:
+                    return json.dumps({
+                        "status": "error",
+                        "message": "Analysis result not stored. Please run the analysis again."
+                    })
+                
                 # Get the agent
                 agent = self.orch.get_agent(agent_id)
                 
-                # Call recommend_measurements
+                # Call recommend_measurements with the stored result
                 result = agent.recommend_measurements(
                     data=record.get("data_path"),
-                    system_info=self.orch.current_metadata
+                    system_info=self.orch.current_metadata,
+                    analysis_result=full_result  # Pass the stored result
                 )
                 
                 return json.dumps({
