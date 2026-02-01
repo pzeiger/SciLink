@@ -1,0 +1,686 @@
+"""
+Analysis Orchestrator Agent for Experimental Data Analysis
+
+Coordinates multi-modal experimental analysis using specialized sub-agents:
+- FFTMicroscopyAnalysisAgent: For microstructure analysis via FFT/NMF
+- SAMMicroscopyAnalysisAgent: For particle/object segmentation and statistics
+- HyperspectralAnalysisAgent: For spectroscopic data analysis
+- CurveFittingAgent: For 1D curve/spectrum fitting
+
+Follows the same design patterns as PlanningOrchestratorAgent for consistent UX.
+"""
+
+import json
+import logging
+import os
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+from datetime import datetime
+from enum import Enum
+
+from ..auth import get_internal_proxy_key
+from ..wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ..wrappers.litellm_wrapper import LiteLLMGenerativeModel
+from .analysis_orchestrator_tools import AnalysisOrchestratorTools
+from ._deprecation import normalize_params
+
+
+class AnalysisMode(Enum):
+    """
+    Defines the level of autonomy for the analysis orchestrator.
+    Matches the autonomy levels in PlanningOrchestratorAgent for consistent UX.
+    
+    CO_PILOT: Human leads, AI assists (default). Human reviews every step.
+    SUPERVISED: AI leads, human supervises. AI proceeds with reasonable defaults.
+    AUTONOMOUS: Full autonomy. AI executes complete workflows without confirmation.
+    """
+    CO_PILOT = "co-pilot"        # Human leads, AI assists (default)
+    SUPERVISED = "supervised"    # AI leads, human supervises
+    AUTONOMOUS = "autonomous"    # Full autonomy
+
+
+# Mode-specific directives (matching planning orchestrator patterns)
+_CO_PILOT_DIRECTIVE = """
+**CRITICAL OPERATING MODE: CO-PILOT (Human Leads, AI Assists)**
+- You are assisting the human researcher. They are in control.
+- ALWAYS wait for human approval before running analysis.
+- After examining data/metadata, summarize findings and wait for direction.
+- Do NOT chain multiple tool calls without human confirmation.
+- Ask clarifying questions when data type or analysis goal is ambiguous.
+
+**SINGLE-TOOL EXECUTION RULE:**
+1. **EXECUTE ONE TOOL**: Call only ONE tool per response.
+2. **OBSERVE OUTPUT**: Wait for results before suggesting next steps.
+
+**METADATA REQUIREMENT:**
+- ALWAYS ensure metadata is available before analysis
+- If no metadata provided, ask user to provide it or use convert_metadata tool
+
+**RESPONSE STYLE:**
+- After each tool call, summarize the result and wait for user direction.
+- Do NOT end responses with generic menus like "Would you like me to..."
+- Instead say "Ready for your input." or "Let me know how to proceed."
+"""
+
+_SUPERVISED_DIRECTIVE = """
+**CRITICAL OPERATING MODE: SUPERVISED (AI Leads, Human Supervises)**
+- You lead the analysis workflow. Human supervises and can intervene.
+- Suggest the most appropriate agent based on data type and metadata.
+- Proceed with reasonable defaults without asking for every detail.
+- Human will still review agent selection before execution.
+- If analysis returns unexpected results, pause and report to human.
+
+**RESPONSE STYLE:**
+- After examining data, recommend an analysis approach and proceed if logical.
+- Briefly summarize progress but don't wait for response on obvious next steps.
+- Only pause to report errors or request human input on ambiguous decisions.
+"""
+
+_AUTONOMOUS_DIRECTIVE = """
+**CRITICAL OPERATING MODE: AUTONOMOUS (Full Autonomy)**
+- Execute the complete analysis workflow independently.
+- Chain tool calls as needed to achieve the objective.
+- Only pause for human input if you encounter unrecoverable errors.
+- Make decisions based on data characteristics and metadata.
+- Report final results and key decision points at the end.
+
+**AUTONOMOUS WORKFLOW - EXECUTE WITHOUT ASKING:**
+1. `examine_data` - Determine data type and characteristics
+2. `convert_metadata` - If needed, convert natural language to structured metadata
+3. `select_agent` - Choose appropriate analysis agent
+4. `run_analysis` - Execute the analysis
+5. `save_results` - Preserve outputs
+
+**RESPONSE STYLE:**
+- Do NOT stop to summarize between tool calls.
+- Do NOT ask "Would you like me to..." - just do it.
+- Chain ALL tools needed to complete the workflow in a single turn.
+- Only provide a summary AFTER the entire pipeline is complete.
+"""
+
+_SYSTEM_PROMPT_BODY = """
+You are the **Analysis Agent**. Your goal is to coordinate experimental data analysis.
+
+**RESPONSE GUIDELINES (STRICT):**
+- **NO REDUNDANCY**: Do NOT repeat the tool's output. Summarize insights only.
+
+**TOOLCHAIN & WORKFLOWS:**
+
+**DATA EXAMINATION:**
+1. `examine_data`: Examine data file(s) to determine type and characteristics.
+   - Supports: images (.tif, .png, .jpg), spectra (.npy, .csv), curves (.csv, .txt)
+   - Returns: data_type, shape, suggested_agent, preview
+
+**METADATA HANDLING:**
+2. `convert_metadata`: Convert natural language description to structured JSON metadata.
+   - Input: text file path OR direct text string
+   - Output: structured metadata JSON following the schema
+   - Use when: user provides .txt description or verbal description
+
+3. `load_metadata`: Load existing JSON metadata file.
+   - Input: path to .json file
+   - Output: validated metadata dict
+
+**AGENT SELECTION:**
+4. `select_agent`: Use LLM to select the most appropriate analysis agent.
+   - Considers: data_type, metadata, analysis_goal
+   - Returns: agent_id, reasoning
+   - Available agents:
+     * FFTMicroscopyAnalysisAgent (ID: 0) - Microstructure via FFT/NMF (including atomic-resolution)
+     * SAMMicroscopyAnalysisAgent (ID: 1) - Particle segmentation
+     * HyperspectralAnalysisAgent (ID: 2) - Spectroscopic data
+     * CurveFittingAgent (ID: 3) - 1D curve/spectrum fitting
+
+**ANALYSIS EXECUTION:**
+5. `run_analysis`: Execute analysis with the selected agent.
+   - Requires: data_path, metadata, agent_id (or auto-select)
+   - Returns: detailed_analysis, scientific_claims, output_paths
+
+**RESULTS MANAGEMENT:**
+6. `list_results`: List analysis results in the session directory.
+7. `save_checkpoint`: Save session state for later resumption.
+8. `generate_report`: Generate HTML report from analysis results.
+
+**WORKFLOW RULES:**
+
+**Standard Analysis Workflow:**
+1. User provides data file(s)
+2. Examine data to determine type
+3. Ensure metadata is available (load or convert)
+4. Select appropriate agent (or let user choose)
+5. Run analysis
+6. Present results and offer follow-up options
+
+**Metadata Requirements:**
+- ALWAYS require metadata before analysis
+- Accept: JSON file, text file (convert), or direct text input (convert)
+- Key metadata fields: experiment_type, technique, sample.material
+
+**Agent Selection Logic:**
+- Microscopy images (all types including atomic-resolution) → FFTMicroscopyAnalysisAgent
+- Images with distinct particles/objects to count → SAMMicroscopyAnalysisAgent
+- Spectroscopy/hyperspectral → HyperspectralAnalysisAgent
+- 1D curves/spectra → CurveFittingAgent
+
+**If user indicates wrong agent was selected:**
+- Ask for clarification on analysis goal
+- Re-run select_agent with updated context
+- Proceed with corrected agent
+
+**LONG SESSION MANAGEMENT:**
+- Call `save_checkpoint` after completing each analysis
+- If conversation becomes very long (>50 messages), suggest user restart with checkpoint
+
+**BEHAVIOR:**
+- Extract data paths from user messages
+- Parse tool JSON responses before calling dependent tools
+- If status="error", stop and report to user
+- Save checkpoint periodically during long sessions
+"""
+
+
+def get_system_prompt(analysis_mode: AnalysisMode) -> str:
+    """Returns the appropriate system prompt for the given analysis mode."""
+    directives = {
+        AnalysisMode.CO_PILOT: _CO_PILOT_DIRECTIVE,
+        AnalysisMode.SUPERVISED: _SUPERVISED_DIRECTIVE,
+        AnalysisMode.AUTONOMOUS: _AUTONOMOUS_DIRECTIVE,
+    }
+    return directives[analysis_mode] + _SYSTEM_PROMPT_BODY
+
+
+class AnalysisOrchestratorAgent:
+    """
+    Orchestrator agent for coordinating experimental data analysis.
+    
+    Manages the analysis workflow with configurable autonomy levels
+    (matching PlanningOrchestratorAgent for consistent UX):
+    
+    1. Data examination and type detection
+    2. Metadata handling (loading or conversion)
+    3. Agent selection based on data type and goals
+    4. Analysis execution via specialized sub-agents
+    5. Results compilation and reporting
+    
+    Args:
+        base_dir: Base directory for session outputs.
+        api_key: API key for the LLM provider.
+        model_name: Model name.
+        base_url: Base URL for internal proxy endpoint.
+        embedding_model: Embedding model name.
+        embedding_api_key: API key for the embedding LLM provider.
+        restore_checkpoint: Whether to restore from previous checkpoint.
+        analysis_mode: Level of autonomy (CO_PILOT, SUPERVISED, or AUTONOMOUS).
+        
+        google_api_key: DEPRECATED. Use 'api_key' instead.
+        local_model: DEPRECATED. Use 'base_url' instead.
+    """
+    
+    def __init__(
+        self,
+        base_dir: str = "./analysis_session",
+        api_key: Optional[str] = None,
+        model_name: str = "gemini-3-pro-preview",
+        base_url: Optional[str] = None,
+        embedding_model: str = "gemini-embedding-001",
+        embedding_api_key: Optional[str] = None,
+        restore_checkpoint: bool = False,
+        analysis_mode: AnalysisMode = AnalysisMode.CO_PILOT,
+        # Deprecated
+        google_api_key: Optional[str] = None,
+        local_model: Optional[str] = None,
+    ):
+        self.logger = logging.getLogger(self.__class__.__name__)
+        
+        # Handle deprecated parameters
+        api_key, base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source="AnalysisOrchestratorAgent"
+        )
+        
+        if base_url:
+            if api_key is None:
+                api_key = get_internal_proxy_key()
+            
+            if not api_key:
+                raise ValueError(
+                    "API key required for internal proxy.\n"
+                    "Set SCILINK_API_KEY environment variable or pass api_key parameter."
+                )
+            
+            if embedding_api_key is not None:
+                logging.warning(
+                    "⚠️ embedding_api_key is ignored for internal proxy. "
+                    "Using api_key for all requests."
+                )
+            
+            embedding_api_key = api_key
+        else:
+            if embedding_api_key is None:
+                embedding_api_key = api_key
+        
+        # Store configuration
+        self.api_key = api_key
+        self.model_name = model_name
+        self.base_url = base_url
+        self.embedding_model = embedding_model
+        self.embedding_api_key = embedding_api_key
+        
+        # Store analysis mode
+        self.analysis_mode = analysis_mode
+        self._enable_human_feedback = self._should_enable_human_feedback()
+        logging.info(f"🎛️  Analysis Mode: {analysis_mode.value.upper()}")
+        
+        # Setup directories
+        self.base_dir = Path(base_dir)
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.history_path = self.base_dir / "chat_history.json"
+        self.checkpoint_path = self.base_dir / "checkpoint.json"
+        self.results_dir = self.base_dir / "results"
+        self.results_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Session state
+        self.current_metadata: Optional[Dict[str, Any]] = None
+        self.current_data_path: Optional[str] = None
+        self.current_data_type: Optional[str] = None
+        self.selected_agent_id: Optional[int] = None
+        self.analysis_results: List[Dict[str, Any]] = []
+        
+        self.message_count = 0
+        self.last_checkpoint_message_count = 0
+        
+        # Restore from checkpoint if requested
+        if restore_checkpoint and self.checkpoint_path.exists():
+            self._restore_checkpoint()
+        
+        # Initialize sub-agents (lazy loading)
+        self._agents: Dict[int, Any] = {}
+        
+        # Initialize tools registry
+        self.tools = AnalysisOrchestratorTools(self)
+        
+        # Get appropriate system prompt
+        system_prompt = get_system_prompt(self.analysis_mode)
+        
+        # Initialize LLM
+        if base_url:
+            logging.info(f"🏛️ Orchestrator using internal proxy: {base_url}")
+            self.model = OpenAIAsGenerativeModel(
+                model=model_name,
+                api_key=api_key,
+                base_url=base_url
+            )
+            self.use_openai = True
+            self.tools_for_model = self.tools.openai_schemas
+        else:
+            logging.info(f"🌐 Orchestrator using LiteLLM: {model_name}")
+            self.model = LiteLLMGenerativeModel(
+                model=model_name,
+                api_key=api_key,
+                system_instruction=system_prompt,
+                tools=self._convert_tools_to_litellm_format()
+            )
+            self.use_openai = False
+            self.tools_for_model = self._convert_tools_to_litellm_format()
+        
+        # Store system prompt
+        self._system_prompt = system_prompt
+        
+        # Initialize message history
+        history = self._load_history()
+        
+        self.messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            recent_history = self._trim_history(history, max_messages=100)
+            self.messages.extend(recent_history)
+        
+        logging.info(f"✅ AnalysisOrchestratorAgent initialized. Session: {self.base_dir}")
+
+    def _convert_tools_to_litellm_format(self) -> List[Dict]:
+        """Convert OpenAI tool schemas to LiteLLM format."""
+        return self.tools.openai_schemas
+
+    def _should_enable_human_feedback(self) -> bool:
+        """Determines if human feedback should be enabled based on analysis mode."""
+        return self.analysis_mode != AnalysisMode.AUTOMATIC
+
+    def set_analysis_mode(self, mode: AnalysisMode) -> None:
+        """Change the analysis mode at runtime."""
+        old_mode = self.analysis_mode
+        self.analysis_mode = mode
+        self._enable_human_feedback = self._should_enable_human_feedback()
+        
+        # Update system prompt
+        new_system_prompt = get_system_prompt(mode)
+        self._system_prompt = new_system_prompt
+        
+        if self.messages and self.messages[0]["role"] == "system":
+            self.messages[0]["content"] = new_system_prompt
+        
+        logging.info(f"🔄 Analysis mode changed: {old_mode.value} → {mode.value}")
+        logging.info(f"   Human feedback enabled: {self._enable_human_feedback}")
+
+    def get_human_feedback_setting(self) -> bool:
+        """Returns current human feedback setting for sub-agents."""
+        return self._enable_human_feedback
+
+    def get_agent(self, agent_id: int) -> Any:
+        """
+        Get or create a sub-agent by ID (lazy loading).
+        
+        Agent IDs:
+            0: FFTMicroscopyAnalysisAgent (including atomic-resolution)
+            1: SAMMicroscopyAnalysisAgent
+            2: HyperspectralAnalysisAgent
+            3: CurveFittingAgent
+        """
+        if agent_id not in self._agents:
+            agent_output_dir = str(self.results_dir / f"agent_{agent_id}")
+            
+            common_kwargs = {
+                "api_key": self.api_key,
+                "model_name": self.model_name,
+                "base_url": self.base_url,
+                "output_dir": agent_output_dir,
+                "enable_human_feedback": self._enable_human_feedback,
+            }
+            
+            if agent_id == 0:
+                from .fft_microscopy_agent import FFTMicroscopyAnalysisAgent
+                self._agents[agent_id] = FFTMicroscopyAnalysisAgent(**common_kwargs)
+            elif agent_id == 1:
+                from .sam_microscopy_agent import SAMMicroscopyAnalysisAgent
+                self._agents[agent_id] = SAMMicroscopyAnalysisAgent(**common_kwargs)
+            elif agent_id == 2:
+                from .hyperspectral_analysis_agent import HyperspectralAnalysisAgent
+                self._agents[agent_id] = HyperspectralAnalysisAgent(**common_kwargs)
+            elif agent_id == 3:
+                from .curve_fitting_agent import CurveFittingAgent
+                self._agents[agent_id] = CurveFittingAgent(**common_kwargs)
+            else:
+                raise ValueError(f"Unknown agent ID: {agent_id}. Valid IDs: 0-3")
+            
+            logging.info(f"   Initialized agent {agent_id}: {type(self._agents[agent_id]).__name__}")
+        
+        return self._agents[agent_id]
+
+    def _restore_checkpoint(self):
+        """Restore session state from checkpoint."""
+        print(f"  📂 Restoring checkpoint from: {self.checkpoint_path}")
+        
+        try:
+            with open(self.checkpoint_path, 'r') as f:
+                state = json.load(f)
+            
+            self.current_metadata = state.get("current_metadata")
+            self.current_data_path = state.get("current_data_path")
+            self.current_data_type = state.get("current_data_type")
+            self.selected_agent_id = state.get("selected_agent_id")
+            self.analysis_results = state.get("analysis_results", [])
+            
+            # Restore analysis mode if saved
+            if "analysis_mode" in state:
+                try:
+                    self.analysis_mode = AnalysisMode(state["analysis_mode"])
+                    self._enable_human_feedback = self._should_enable_human_feedback()
+                except ValueError:
+                    pass
+            
+            print(f"    ✅ Restored state:")
+            print(f"       - Data path: {self.current_data_path}")
+            print(f"       - Data type: {self.current_data_type}")
+            print(f"       - Selected agent: {self.selected_agent_id}")
+            print(f"       - Analysis count: {len(self.analysis_results)}")
+            print(f"       - Analysis mode: {self.analysis_mode.value}")
+            
+        except Exception as e:
+            logging.warning(f"Failed to restore checkpoint: {e}")
+
+    def _trim_history(self, history: List[Dict], max_messages: int = 100) -> List[Dict]:
+        """Keep only recent messages to avoid context window overflow."""
+        if len(history) <= max_messages:
+            return history
+        
+        print(f"  ⚠️  Trimming history: {len(history)} → {max_messages} messages")
+        
+        context_window = 10
+        recent_window = max_messages - context_window
+        
+        trimmed = history[:context_window] + history[-recent_window:]
+        
+        summary_marker = {
+            "role": "system",
+            "content": f"[{len(history) - max_messages} messages omitted for context management]"
+        }
+        trimmed.insert(context_window, summary_marker)
+        
+        return trimmed
+
+    def chat(self, user_input: str) -> str:
+        """Main chat interface with robust function calling support."""
+        self.message_count += 1
+        
+        # AUTO-CHECKPOINT: Every 10 messages
+        if self.message_count - self.last_checkpoint_message_count >= 10:
+            print("  💾 Auto-checkpoint triggered (every 10 messages)...")
+            self._auto_checkpoint()
+            self.last_checkpoint_message_count = self.message_count
+        
+        try:
+            if self.use_openai:
+                response_text = self._handle_openai_chat(user_input)
+            else:
+                response_text = self._handle_litellm_chat(user_input)
+            
+            print(f"🤖 Agent: {response_text}")
+            self._save_history()
+            
+            if self.message_count > 80:
+                warning = "\n\n⚠️ Note: Conversation is getting long. Consider calling save_checkpoint and restarting."
+                response_text += warning
+            
+            return response_text
+            
+        except Exception as e:
+            logging.error(f"Chat Error: {e}", exc_info=True)
+            
+            print("  💾 Error detected - saving emergency checkpoint...")
+            self._auto_checkpoint()
+            
+            return f"❌ Error: {e}\n\n(Emergency checkpoint saved to {self.checkpoint_path})"
+
+    def _auto_checkpoint(self):
+        """Internal auto-checkpoint without LLM interaction."""
+        try:
+            checkpoint_data = {
+                "timestamp": datetime.now().isoformat(),
+                "current_metadata": self.current_metadata,
+                "current_data_path": self.current_data_path,
+                "current_data_type": self.current_data_type,
+                "selected_agent_id": self.selected_agent_id,
+                "analysis_results": self.analysis_results,
+                "message_count": self.message_count,
+                "analysis_mode": self.analysis_mode.value,
+            }
+            
+            with open(self.checkpoint_path, 'w') as f:
+                json.dump(checkpoint_data, f, indent=2)
+            
+            print(f"    ✅ Auto-checkpoint saved")
+            
+        except Exception as e:
+            logging.warning(f"Auto-checkpoint failed: {e}")
+
+    def _handle_openai_chat(self, user_input: str) -> str:
+        """Handle chat with OpenAI-compatible models with manual function calling loop."""
+        from openai import OpenAI
+        
+        client = OpenAI(
+            api_key=self.model.api_key,
+            base_url=self.model.base_url
+        )
+        
+        self.messages.append({"role": "user", "content": user_input})
+        
+        if len(self.messages) > 120:
+            print("  ⚠️  Context window getting full - trimming history...")
+            system_msg = self.messages[0]
+            recent_msgs = self._trim_history(self.messages[1:], max_messages=100)
+            self.messages = [system_msg] + recent_msgs
+        
+        max_iterations = 20
+        iteration = 0
+        
+        while iteration < max_iterations:
+            iteration += 1
+            
+            response = client.chat.completions.create(
+                model=self.model.model,
+                messages=self.messages,
+                tools=self.tools_for_model,
+                tool_choice="auto"
+            )
+            
+            message = response.choices[0].message
+            
+            if not message.tool_calls:
+                self.messages.append({
+                    "role": "assistant",
+                    "content": message.content
+                })
+                return message.content
+            
+            self.messages.append({
+                "role": "assistant",
+                "content": message.content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments
+                        }
+                    } for tc in message.tool_calls
+                ]
+            })
+            
+            for tool_call in message.tool_calls:
+                func_name = tool_call.function.name
+                args = json.loads(tool_call.function.arguments)
+                
+                print(f"  🔧 Calling tool: {func_name}")
+                
+                result = self.tools.execute_tool(func_name, **args)
+                
+                self.messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": result
+                })
+        
+        return "⚠️ Maximum tool iterations reached. Please simplify your request."
+
+    def _handle_litellm_chat(self, user_input: str) -> str:
+        """Handle chat with LiteLLM models with manual function calling loop."""
+        import litellm
+        
+        self.messages.append({"role": "user", "content": user_input})
+        
+        if len(self.messages) > 120:
+            print("  ⚠️  Context window getting full - trimming history...")
+            system_msg = self.messages[0]
+            recent_msgs = self._trim_history(self.messages[1:], max_messages=100)
+            self.messages = [system_msg] + recent_msgs
+        
+        max_iterations = 20
+        iteration = 0
+        
+        while iteration < max_iterations:
+            iteration += 1
+            
+            response = litellm.completion(
+                model=self.model.model,
+                messages=self.messages,
+                tools=self.tools_for_model,
+                tool_choice="auto",
+                api_key=self.model.api_key,
+                api_base=self.model.base_url
+            )
+            
+            message = response.choices[0].message
+            tool_calls = getattr(message, "tool_calls", None)
+            content = getattr(message, "content", None)
+            
+            if not tool_calls:
+                self.messages.append({
+                    "role": "assistant",
+                    "content": content or ""
+                })
+                return content or ""
+            
+            assistant_msg = {
+                "role": "assistant",
+                "content": content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments
+                        }
+                    } for tc in tool_calls
+                ]
+            }
+            self.messages.append(assistant_msg)
+            
+            for tool_call in tool_calls:
+                func_name = tool_call.function.name
+                try:
+                    args = json.loads(tool_call.function.arguments)
+                except json.JSONDecodeError:
+                    args = {}
+                
+                print(f"  🔧 Calling tool: {func_name}")
+                
+                result = self.tools.execute_tool(func_name, **args)
+                
+                self.messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": result
+                })
+        
+        return "⚠️ Maximum tool iterations reached. Please simplify your request."
+
+    def _load_history(self) -> List[Dict]:
+        """Load conversation history from disk."""
+        if not self.history_path.exists():
+            return []
+        print("  🧠 Memory: Loading previous conversation...")
+        try:
+            with open(self.history_path, 'r') as f:
+                saved = json.load(f)
+            return saved
+        except Exception as e:
+            logging.warning(f"Failed to load history: {e}")
+            return []
+
+    def _save_history(self):
+        """Save conversation history to disk."""
+        try:
+            history_data = [m for m in self.messages if m["role"] != "system"]
+            with open(self.history_path, 'w') as f:
+                json.dump(history_data, f, indent=2)
+        except Exception as e:
+            logging.warning(f"Failed to save history: {e}")
+
+    @classmethod
+    def restore_from_checkpoint(cls, base_dir: str, **kwargs):
+        """Factory method to create an AnalysisOrchestratorAgent from a checkpoint."""
+        return cls(base_dir=base_dir, restore_checkpoint=True, **kwargs)

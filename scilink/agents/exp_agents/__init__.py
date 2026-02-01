@@ -4,12 +4,8 @@ from .atomistic_microscopy_agent import AtomisticMicroscopyAnalysisAgent
 from .hyperspectral_analysis_agent import HyperspectralAnalysisAgent
 from .orchestrator_agent import OrchestratorAgent, AGENT_MAP
 from .curve_fitting_agent import CurveFittingAgent
-from .experimental_orchestrator import (
-    ExperimentalAnalysisOrchestrator,
-    AgentType,
-    AGENT_REGISTRY,
-)
-from .experimental_orchestrator_tools import ExperimentalOrchestratorTools
+from .analysis_orchestrator import AnalysisOrchestratorAgent, AnalysisMode
+from .metadata_converter import generate_metadata_json_from_text
 
 
 __all__ = [
@@ -19,12 +15,12 @@ __all__ = [
     'AtomisticMicroscopyAnalysisAgent',
     'HyperspectralAnalysisAgent',
     'CurveFittingAgent',
-    # Original orchestrator (for agent selection only)
+    # Agent selection orchestrator (internal)
     'OrchestratorAgent',
     'AGENT_MAP',
-    # New experimental orchestrator (unified analysis interface)
-    'ExperimentalAnalysisOrchestrator',
-    'ExperimentalOrchestratorTools',
-    'AgentType',
-    'AGENT_REGISTRY',
+    # Main analysis orchestrator (user-facing)
+    'AnalysisOrchestratorAgent',
+    'AnalysisMode',
+    # Metadata utilities
+    'generate_metadata_json_from_text',
 ]
