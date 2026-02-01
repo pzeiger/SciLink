@@ -13,6 +13,44 @@ from pathlib import Path
 from datetime import datetime
 
 
+def _infer_provider(model_name: str) -> tuple:
+    """
+    Infer provider info from model name.
+    
+    Returns:
+        (provider_name, env_var_hint, env_vars_to_check)
+    """
+    model_lower = model_name.lower()
+    
+    if 'claude' in model_lower:
+        return (
+            "Anthropic",
+            "ANTHROPIC_API_KEY or CLAUDE_API_KEY",
+            ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"]
+        )
+    elif model_lower.startswith(('gpt-', 'o1-', 'o3-', 'text-embedding')):
+        return (
+            "OpenAI",
+            "OPENAI_API_KEY",
+            ["OPENAI_API_KEY"]
+        )
+    else:
+        return (
+            "Google Gemini",
+            "GEMINI_API_KEY or GOOGLE_API_KEY",
+            ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
+        )
+
+
+def _get_api_key_from_env(env_vars: list) -> str:
+    """Get API key from list of environment variables."""
+    for var in env_vars:
+        key = os.getenv(var)
+        if key:
+            return key
+    return None
+
+
 def main():
     """Main entry point for 'scilink analyze' command."""
     
@@ -207,14 +245,33 @@ Environment Variables:
         metadata_path = None
         metadata_text = None
     
-    # Resolve API key
+    # === API KEY RESOLUTION ===
     api_key = args.api_key
+    model_name = args.model
+    base_url = args.base_url
+    
     if not api_key:
-        for env_var in ['SCILINK_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 
-                        'OPENAI_API_KEY', 'ANTHROPIC_API_KEY']:
-            api_key = os.getenv(env_var)
-            if api_key:
-                break
+        if base_url:
+            # Internal proxy - check for SCILINK_API_KEY
+            api_key = os.getenv("SCILINK_API_KEY")
+            if not api_key:
+                print(f"\n⚠️  No SCILINK_API_KEY found in environment.")
+                print(f"   When using --base-url, set SCILINK_API_KEY for authentication.")
+                api_key = input(f"Enter your proxy API key (SCILINK_API_KEY): ").strip()
+                if not api_key:
+                    print("❌ Cannot proceed without API key for internal proxy.")
+                    return 1
+        else:
+            # Public deployment - check provider-specific keys
+            provider_name, env_var_hint, env_vars = _infer_provider(model_name)
+            api_key = _get_api_key_from_env(env_vars)
+            
+            if not api_key:
+                print(f"\n⚠️  No {env_var_hint} found in environment.")
+                print(f"   LiteLLM will attempt to auto-detect credentials.")
+                user_key = input(f"Enter your {provider_name} API key (or Enter to auto-detect): ").strip()
+                if user_key:
+                    api_key = user_key
     
     # Create orchestrator
     print("\n" + "="*60)
@@ -225,6 +282,15 @@ Environment Variables:
     else:
         print(f"\nData: (provide in chat)")
     print(f"Output: {args.output_dir}")
+    
+    # Show model info
+    provider_name, _, _ = _infer_provider(model_name)
+    if base_url:
+        print(f"Model: {model_name}")
+        print(f"Endpoint: {base_url}")
+    else:
+        print(f"Model: {model_name} ({provider_name})")
+    
     if args.agent:
         print(f"Agent: {args.agent} (user-specified)")
     print()
