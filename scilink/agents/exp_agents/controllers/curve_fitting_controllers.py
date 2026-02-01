@@ -1730,6 +1730,7 @@ Return JSON with:
         
         series_results = []
         base_script = None
+        locked_preprocessing_strategy = None  # Track locked preprocessing strategy
         
         for idx in range(num_spectra):
             if spectrum_stack is not None:
@@ -1741,11 +1742,28 @@ Return JSON with:
                 spectrum_name = Path(data_path).stem
                 curve_data = self._load_curve_data(data_path)
 
+            # Apply preprocessing with locking support for series consistency
             if self.preprocessor is not None:
                 try:
-                    curve_data, _ = self.preprocessor.run_preprocessing(
-                        curve_data, state.get("system_info", {})
-                    )
+                    if idx == 0:
+                        # First spectrum: let preprocessor decide strategy, then lock it
+                        curve_data, preprocess_quality = self.preprocessor.run_preprocessing(
+                            curve_data, state.get("system_info", {})
+                        )
+                        # Lock the strategy for subsequent spectra
+                        locked_preprocessing_strategy = preprocess_quality.get("strategy")
+                        if locked_preprocessing_strategy:
+                            state["locked_preprocessing_strategy"] = locked_preprocessing_strategy
+                            self.logger.info(f"      📝 Preprocessing strategy locked: {locked_preprocessing_strategy.get('reasoning', 'N/A')[:60]}")
+                        else:
+                            self.logger.info(f"      Preprocessed (no lockable strategy returned)")
+                    else:
+                        # Subsequent spectra: use locked strategy for consistency
+                        curve_data, _ = self.preprocessor.run_preprocessing(
+                            curve_data, 
+                            state.get("system_info", {}),
+                            locked_strategy=locked_preprocessing_strategy
+                        )
                     self.logger.info(f"      Preprocessed: {spectrum_name}")
                 except Exception as e:
                     self.logger.warning(f"      Preprocessing failed for {spectrum_name}: {e}, using raw data")
@@ -1858,6 +1876,7 @@ Return JSON with:
                     "outlier_sigma": self.outlier_sigma,
                 },
                 "locked_config": state.get("locked_fitting_config"),
+                "locked_preprocessing_strategy": state.get("locked_preprocessing_strategy"),
                 "results": serializable_results
             }, f, indent=2, default=str)
         
