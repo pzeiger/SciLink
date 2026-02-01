@@ -541,12 +541,19 @@ class AnalysisOrchestratorAgent:
             
             print(f"  ⏳ Waiting for LLM response (iteration {iteration})...")
             
-            response = client.chat.completions.create(
-                model=self.model.model,
-                messages=self.messages,
-                tools=self.tools_for_model,
-                tool_choice="auto"
-            )
+            try:
+                response = client.chat.completions.create(
+                    model=self.model.model,
+                    messages=self.messages,
+                    tools=self.tools_for_model,
+                    tool_choice="auto"
+                )
+            except Exception as e:
+                if "timeout" in str(e).lower() or "timed out" in str(e).lower():
+                    print(f"  ⚠️ API timeout on iteration {iteration}. Retrying...")
+                    if iteration < 3:  # Retry up to 3 times on timeout
+                        continue
+                raise
             
             message = response.choices[0].message
             
@@ -608,15 +615,23 @@ class AnalysisOrchestratorAgent:
             
             print(f"  ⏳ Waiting for LLM response (iteration {iteration})...")
             
-            response = litellm.completion(
-                model=self.model.model,
-                messages=self.messages,
-                tools=self.tools_for_model,
-                tool_choice="auto",
-                api_key=self.model.api_key,
-                api_base=self.model.base_url,
-                timeout=120.0  # 2 minute timeout
-            )
+            try:
+                response = litellm.completion(
+                    model=self.model.model,
+                    messages=self.messages,
+                    tools=self.tools_for_model,
+                    tool_choice="auto",
+                    api_key=self.model.api_key,
+                    api_base=self.model.base_url,
+                    timeout=120,  # Connection timeout in seconds
+                    request_timeout=120,  # Alternative timeout parameter
+                )
+            except Exception as e:
+                if "timeout" in str(e).lower() or "timed out" in str(e).lower():
+                    print(f"  ⚠️ API timeout on iteration {iteration}. Retrying...")
+                    if iteration < 3:  # Retry up to 3 times on timeout
+                        continue
+                raise
             
             message = response.choices[0].message
             tool_calls = getattr(message, "tool_calls", None)
