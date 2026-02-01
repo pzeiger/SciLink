@@ -254,17 +254,52 @@ class LLMAgentMixin:
     # =========================================================================
     
     def _handle_system_info(self, system_info: Dict[str, Any] | str | None) -> Dict[str, Any]:
-        """Handle system_info input (can be dict, file path, or None)."""
+        """
+        Handle system_info input (can be dict, file path, or None).
+        
+        Supports multiple input formats for backward compatibility:
+        - None -> empty dict
+        - dict with top-level keys (e.g., {"sample": "...", "technique": "..."}) -> returned as-is
+        - dict with nested "system_info" key -> extracts the nested dict
+        - str (file path to JSON) -> loads and processes as above
+        
+        This allows users to pass either:
+        - A flat system_info dict directly
+        - A full metadata file that contains a "system_info" key
+        - A path to either type of JSON file
+        """
+        if system_info is None:
+            return {}
+        
+        # Load from file if string path provided
         if isinstance(system_info, str):
             try:
                 with open(system_info, 'r') as f:
                     system_info = json.load(f)
-            except (FileNotFoundError, json.JSONDecodeError) as e:
+            except FileNotFoundError:
+                self.logger.error(f"system_info file not found: {system_info}")
+                return {}
+            except json.JSONDecodeError as e:
+                self.logger.error(f"Invalid JSON in system_info file {system_info}: {e}")
+                return {}
+            except Exception as e:
                 self.logger.error(f"Error loading system_info from {system_info}: {e}")
-                system_info = {}
-        elif system_info is None:
-            system_info = {}
+                return {}
         
+        # Ensure we have a dict at this point
+        if not isinstance(system_info, dict):
+            self.logger.warning(f"system_info is not a dict: {type(system_info)}. Returning empty dict.")
+            return {}
+        
+        # Handle nested "system_info" key (common in full metadata files)
+        # Only extract if the nested value is a dict and contains typical system_info keys
+        if "system_info" in system_info:
+            nested = system_info["system_info"]
+            if isinstance(nested, dict) and len(nested) > 0:
+                self.logger.debug("Extracted nested 'system_info' from metadata structure")
+                return nested
+        
+        # Return as-is for flat structures or if no valid nested system_info found
         return system_info
 
     def _build_system_info_prompt_section(self, system_info: Dict[str, Any]) -> str:
