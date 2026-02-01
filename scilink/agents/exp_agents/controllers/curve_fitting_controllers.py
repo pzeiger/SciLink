@@ -1369,11 +1369,40 @@ Return JSON with:
                         
                         # LLM found issues - try to fix
                         issues_count = len(verification.get("issues_found", []))
-                        self.logger.info(f"      ⚠️ Found {issues_count} issue(s): {verification.get('overall_assessment', '')[:100]}")
-                        
-                        # Log specific issues
-                        for issue in verification.get("issues_found", [])[:3]:  # Show up to 3 issues
-                            self.logger.info(f"         - {issue.get('location', '?')}: {issue.get('problem', '?')[:60]}")
+                        overall_assessment = verification.get('overall_assessment', 'No assessment provided')
+
+                        self.logger.info(f"      ⚠️ Found {issues_count} issue(s)")
+                        self.logger.info(f"      📋 Assessment: {overall_assessment}")
+
+                        # Log specific issues with full details
+                        if verification.get("issues_found"):
+                            self.logger.info(f"      Issues identified:")
+                            for i, issue in enumerate(verification.get("issues_found", []), 1):
+                                location = issue.get('location', 'Unknown location')
+                                problem = issue.get('problem', 'No problem description')
+                                evidence = issue.get('evidence', '')
+                                suggested_fix = issue.get('suggested_fix', '')
+                                
+                                self.logger.info(f"         {i}. [{location}]")
+                                self.logger.info(f"            Problem: {problem}")
+                                if evidence:
+                                    self.logger.info(f"            Evidence: {evidence}")
+                                if suggested_fix:
+                                    self.logger.info(f"            Suggested fix: {suggested_fix}")
+
+                        # Log spurious components and missing features if present
+                        spurious = verification.get("spurious_components", [])
+                        if spurious:
+                            self.logger.info(f"      🚫 Spurious components: {', '.join(spurious)}")
+
+                        missing = verification.get("missing_features", [])
+                        if missing:
+                            self.logger.info(f"      ❓ Missing features: {', '.join(missing)}")
+
+                        # Log recommended action
+                        recommended = verification.get("recommended_action", "")
+                        if recommended and recommended.lower() != "none":
+                            self.logger.info(f"      🔧 Recommended action: {recommended}")
                         
                         # Apply LLM's recommended fixes
                         refined_config = self._apply_llm_verification_feedback(state, verification)

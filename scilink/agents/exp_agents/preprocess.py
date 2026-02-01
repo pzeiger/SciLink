@@ -563,10 +563,7 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
         Applies the simple 1D processing strategy chosen by the LLM.
         """
         #self.logger.info("\n\n🤖 --- DATA AGENT STEP: Applying Standard 1D Strategy --- 🤖")
-        
-        # Log the reasoning before taking action.
-        self.logger.info(f"LLM Strategy: {strategy.get('reasoning', 'No reasoning provided.')}\n")
-        
+                
         processed_data = curve_data.copy()
         y_data = processed_data[:, 1] # Extract Y-data
         
