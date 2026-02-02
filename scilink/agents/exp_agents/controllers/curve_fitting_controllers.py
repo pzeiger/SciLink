@@ -1564,6 +1564,16 @@ Return JSON with:
                     self.logger.info(f"✅ R² = {alt_r2:.4f} (meets threshold with alternative model)")
                     if spectrum_idx == 0:
                         state["locked_fitting_config"] = temp_config
+                        
+                        # Offer human review for alternative model before locking
+                        if self.enable_human_feedback and alt_result.get("visualization_bytes"):
+                            user_feedback = self._get_user_feedback_on_fit(state, alt_result, alt_r2)
+                            if user_feedback:
+                                alt_result, alt_r2 = self._apply_user_feedback(
+                                    state, user_feedback, alt_result, alt_r2,
+                                    curve_data, data_path, spectrum_name, spectrum_idx, all_attempts
+                                )
+                    
                     return alt_result
                 else:
                     self.logger.warning(f"   R² = {alt_r2:.4f} (still below threshold)")
