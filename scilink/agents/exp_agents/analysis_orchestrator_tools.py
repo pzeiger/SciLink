@@ -1,6 +1,9 @@
 """
 Tool definitions and schemas for the AnalysisOrchestratorAgent.
 Supports both OpenAI (JSON schemas) and LiteLLM formats.
+
+Each analysis run creates a unique output directory to ensure traceability
+and prevent output collisions when analyzing multiple datasets.
 """
 
 import json
@@ -755,8 +758,14 @@ class AnalysisOrchestratorTools:
         ) -> str:
             """
             Execute analysis with the selected or specified agent.
-            For directories, automatically filters out metadata files and passes
-            a list of data file paths to the agent.
+            
+            Each analysis run creates a unique output directory under results/
+            to ensure traceability and prevent output collisions when analyzing
+            multiple datasets with the same agent. Note that "dataset" refers to
+            the data file/collection - the same physical sample may produce
+            multiple datasets (different conditions, time points, etc.).
+            
+            Output directory format: results/analysis_{dataset_name}_{timestamp}_{counter}/
             """
             print(f"  ⚡ Tool: Running analysis...")
             
@@ -787,8 +796,29 @@ class AnalysisOrchestratorTools:
                 })
             
             try:
-                # Get or create the agent
-                agent = self.orch.get_agent(agent_id)
+                # === Generate unique analysis output directory ===
+                analysis_id = self.orch.generate_analysis_id(data_path, agent_id)
+                analysis_output_dir = self.orch.results_dir / f"analysis_{analysis_id}"
+                analysis_output_dir.mkdir(parents=True, exist_ok=True)
+                
+                print(f"    Analysis ID: {analysis_id}")
+                print(f"    Output directory: {analysis_output_dir}")
+                
+                # === Save metadata copy for traceability ===
+                metadata_copy_path = analysis_output_dir / "metadata_used.json"
+                with open(metadata_copy_path, 'w') as f:
+                    json.dump({
+                        "analysis_id": analysis_id,
+                        "data_path": data_path,
+                        "agent_id": agent_id,
+                        "agent_name": self.AGENT_NAMES.get(agent_id),
+                        "analysis_goal": analysis_goal,
+                        "timestamp": datetime.now().isoformat(),
+                        "metadata": self.orch.current_metadata
+                    }, f, indent=2)
+                
+                # === Create agent with unique output directory ===
+                agent = self.orch.create_agent_for_analysis(agent_id, str(analysis_output_dir))
                 
                 print(f"    Using agent: {type(agent).__name__}")
                 print(f"    Data: {data_path}")
@@ -824,10 +854,6 @@ class AnalysisOrchestratorTools:
                     print(f"    Found {len(data_files)} data files (excluded metadata)")
                     
                     # Pass as list of file paths for series analysis
-                    # The CurveFittingAgent expects either:
-                    # - A single file path (string) for single spectrum
-                    # - A list of file paths for series
-                    # - A directory path (but this may include metadata files)
                     actual_data_input = [str(f) for f in data_files]
                     
                     # If only one file, pass as string (single spectrum mode)
@@ -849,12 +875,13 @@ class AnalysisOrchestratorTools:
                 
                 # Store result (including full result for get_recommendations)
                 analysis_record = {
+                    "analysis_id": analysis_id,
                     "timestamp": datetime.now().isoformat(),
                     "data_path": data_path,  # Store original path
                     "agent_id": agent_id,
                     "agent_name": self.AGENT_NAMES.get(agent_id),
                     "status": result.get("status"),
-                    "output_directory": result.get("output_directory"),
+                    "output_directory": str(analysis_output_dir),
                     "full_result": result  # Store full result for recommendations
                 }
                 self.orch.analysis_results.append(analysis_record)
@@ -863,17 +890,21 @@ class AnalysisOrchestratorTools:
                 if result.get("status") == "success":
                     return json.dumps({
                         "status": "success",
+                        "analysis_id": analysis_id,
                         "agent_used": self.AGENT_NAMES.get(agent_id),
+                        "output_directory": str(analysis_output_dir),
                         "detailed_analysis": result.get("detailed_analysis", "")[:2000],  # Truncate for chat
                         "claims_count": len(result.get("scientific_claims", [])),
-                        "output_directory": result.get("output_directory"),
-                        "full_result_available": True
+                        "full_result_available": True,
+                        "note": f"All outputs saved to: {analysis_output_dir}"
                     })
                 else:
                     return json.dumps({
                         "status": "error",
+                        "analysis_id": analysis_id,
                         "error": result.get("error", {}),
-                        "agent_used": self.AGENT_NAMES.get(agent_id)
+                        "agent_used": self.AGENT_NAMES.get(agent_id),
+                        "output_directory": str(analysis_output_dir)
                     })
                     
             except Exception as e:
@@ -888,8 +919,9 @@ class AnalysisOrchestratorTools:
             name="run_analysis",
             description=(
                 "Execute analysis with the selected or specified agent. "
-                "Requires data path and metadata to be set. "
-                "Returns detailed analysis and scientific claims."
+                "Each run creates a unique output directory (analysis_{dataset_name}_{timestamp}) "
+                "for traceability. Requires data path and metadata to be set. "
+                "Returns analysis_id and output_directory for reference."
             ),
             parameters={
                 "data_path": {
@@ -898,11 +930,11 @@ class AnalysisOrchestratorTools:
                 },
                 "agent_id": {
                     "type": "integer",
-                    "description": "Agent ID to use (0-4, uses selected if not specified)"
+                    "description": "Agent ID to use (0-3, uses selected if not specified)"
                 },
                 "analysis_goal": {
                     "type": "string",
-                    "description": "Specific analysis objective"
+                    "description": "Specific analysis objective (saved with results for traceability)"
                 }
             },
             required=[]
@@ -914,45 +946,75 @@ class AnalysisOrchestratorTools:
         def list_results() -> str:
             """
             List analysis results in the session directory.
+            Shows all analysis runs with their IDs and output directories.
             """
             print(f"  ⚡ Tool: Listing results...")
             
             results = []
             
-            # List files in results directory
+            # List analysis directories in results folder
             results_dir = self.orch.results_dir
             if results_dir.exists():
-                for item in results_dir.iterdir():
-                    if item.is_dir():
-                        # Agent output directory
-                        agent_results = {
-                            "name": item.name,
-                            "type": "agent_output",
-                            "files": []
-                        }
-                        for f in item.rglob("*"):
-                            if f.is_file():
-                                agent_results["files"].append(str(f.relative_to(results_dir)))
-                        results.append(agent_results)
-                    elif item.is_file():
-                        results.append({
-                            "name": item.name,
-                            "type": "file",
-                            "size": item.stat().st_size
-                        })
+                # Find all analysis directories
+                analysis_dirs = sorted(
+                    [d for d in results_dir.iterdir() if d.is_dir() and d.name.startswith("analysis_")],
+                    key=lambda x: x.stat().st_mtime,
+                    reverse=True  # Most recent first
+                )
+                
+                for analysis_dir in analysis_dirs:
+                    analysis_info = {
+                        "directory": analysis_dir.name,
+                        "path": str(analysis_dir),
+                        "files": []
+                    }
+                    
+                    # Check for metadata_used.json to get analysis details
+                    metadata_file = analysis_dir / "metadata_used.json"
+                    if metadata_file.exists():
+                        try:
+                            with open(metadata_file, 'r') as f:
+                                meta = json.load(f)
+                            analysis_info["analysis_id"] = meta.get("analysis_id")
+                            analysis_info["data_path"] = meta.get("data_path")
+                            analysis_info["agent_name"] = meta.get("agent_name")
+                            analysis_info["timestamp"] = meta.get("timestamp")
+                        except Exception:
+                            pass
+                    
+                    # List files in directory
+                    for f in analysis_dir.iterdir():
+                        if f.is_file():
+                            analysis_info["files"].append(f.name)
+                    
+                    results.append(analysis_info)
             
+            # Also include in-memory analysis history
             return json.dumps({
                 "status": "success",
                 "session_directory": str(self.orch.base_dir),
                 "results_directory": str(results_dir),
-                "analysis_history": self.orch.analysis_results,
-                "files": results
+                "total_analyses": len(results),
+                "analyses": results,
+                "in_memory_history": [
+                    {
+                        "analysis_id": r.get("analysis_id"),
+                        "data_path": r.get("data_path"),
+                        "agent_name": r.get("agent_name"),
+                        "status": r.get("status"),
+                        "output_directory": r.get("output_directory")
+                    }
+                    for r in self.orch.analysis_results
+                ]
             })
         
         self._register_tool(
             func=list_results,
             name="list_results",
-            description="List analysis results and files in the session directory.",
+            description=(
+                "List all analysis results in the session. "
+                "Shows analysis IDs, data paths, agents used, and output directories."
+            ),
             parameters={},
             required=[]
         )
@@ -974,6 +1036,7 @@ class AnalysisOrchestratorTools:
                     "current_data_type": self.orch.current_data_type,
                     "selected_agent_id": self.orch.selected_agent_id,
                     "analysis_results": self.orch.analysis_results,
+                    "analysis_run_counter": self.orch._analysis_run_counter,
                     "message_count": self.orch.message_count,
                     "analysis_mode": self.orch.analysis_mode.value,
                 }
@@ -1066,9 +1129,10 @@ class AnalysisOrchestratorTools:
         # =====================================================================
         # 10. GET MEASUREMENT RECOMMENDATIONS
         # =====================================================================
-        def get_recommendations(analysis_index: int = -1) -> str:
+        def get_recommendations(analysis_id: str = None, analysis_index: int = -1) -> str:
             """
             Get measurement recommendations from a completed analysis.
+            Can specify by analysis_id or by index in the history.
             """
             print(f"  ⚡ Tool: Getting measurement recommendations...")
             
@@ -1079,10 +1143,22 @@ class AnalysisOrchestratorTools:
                 })
             
             try:
-                # Get the analysis record
-                if analysis_index == -1:
-                    record = self.orch.analysis_results[-1]
+                # Find the analysis record
+                record = None
+                
+                if analysis_id:
+                    # Search by analysis_id
+                    for r in self.orch.analysis_results:
+                        if r.get("analysis_id") == analysis_id:
+                            record = r
+                            break
+                    if record is None:
+                        return json.dumps({
+                            "status": "error",
+                            "message": f"Analysis not found: {analysis_id}"
+                        })
                 else:
+                    # Use index
                     record = self.orch.analysis_results[analysis_index]
                 
                 agent_id = record.get("agent_id")
@@ -1100,8 +1176,9 @@ class AnalysisOrchestratorTools:
                         "message": "Analysis result not stored. Please run the analysis again."
                     })
                 
-                # Get the agent
-                agent = self.orch.get_agent(agent_id)
+                # Create agent for recommendations (uses same output dir)
+                output_dir = record.get("output_directory", str(self.orch.results_dir / "temp"))
+                agent = self.orch.create_agent_for_analysis(agent_id, output_dir)
                 
                 # Call recommend_measurements with the stored result
                 result = agent.recommend_measurements(
@@ -1112,6 +1189,7 @@ class AnalysisOrchestratorTools:
                 
                 return json.dumps({
                     "status": result.get("status", "success"),
+                    "analysis_id": record.get("analysis_id"),
                     "recommendations": result.get("measurement_recommendations", []),
                     "analysis_integration": result.get("analysis_integration", "")
                 })
@@ -1128,12 +1206,17 @@ class AnalysisOrchestratorTools:
             name="get_recommendations",
             description=(
                 "Get measurement recommendations based on a completed analysis. "
+                "Specify by analysis_id or use analysis_index (-1 for most recent). "
                 "Returns suggested follow-up experiments and measurements."
             ),
             parameters={
+                "analysis_id": {
+                    "type": "string",
+                    "description": "Specific analysis ID to get recommendations for"
+                },
                 "analysis_index": {
                     "type": "integer",
-                    "description": "Index of analysis to get recommendations for (-1 for most recent)"
+                    "description": "Index of analysis in history (-1 for most recent)"
                 }
             },
             required=[]

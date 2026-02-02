@@ -132,6 +132,8 @@ You are the **Analysis Agent**. Your goal is to coordinate experimental data ana
 
 **ANALYSIS EXECUTION:**
 6. `run_analysis`: Execute analysis. Handles single files AND series automatically.
+   - Each analysis run creates a unique output directory for traceability.
+   - Output directory format: results/analysis_{data_name}_{timestamp}/
 
 **RESULTS:**
 7-11. `list_results`, `save_checkpoint`, `get_recommendations`, `show_available_agents`, `get_metadata_schema`
@@ -200,6 +202,10 @@ class AnalysisOrchestratorAgent:
     4. Analysis execution via specialized sub-agents
     5. Results compilation and reporting
     
+    Each analysis run creates a unique output directory under results/
+    to ensure traceability and prevent output collisions when analyzing
+    multiple datasets.
+    
     Args:
         base_dir: Base directory for session outputs.
         api_key: API key for the LLM provider.
@@ -213,6 +219,11 @@ class AnalysisOrchestratorAgent:
         google_api_key: DEPRECATED. Use 'api_key' instead.
         local_model: DEPRECATED. Use 'base_url' instead.
     """
+    
+    # Configuration constants
+    MAX_TOOL_ITERATIONS = 20
+    MAX_HISTORY_MESSAGES = 100
+    CHECKPOINT_INTERVAL = 10
     
     def __init__(
         self,
@@ -288,15 +299,15 @@ class AnalysisOrchestratorAgent:
         self.selected_agent_id: Optional[int] = None
         self.analysis_results: List[Dict[str, Any]] = []
         
+        # Analysis run counter for unique IDs within same second
+        self._analysis_run_counter = 0
+        
         self.message_count = 0
         self.last_checkpoint_message_count = 0
         
         # Restore from checkpoint if requested
         if restore_checkpoint and self.checkpoint_path.exists():
             self._restore_checkpoint()
-        
-        # Initialize sub-agents (lazy loading)
-        self._agents: Dict[int, Any] = {}
         
         # Initialize tools registry
         self.tools = AnalysisOrchestratorTools(self)
@@ -333,7 +344,7 @@ class AnalysisOrchestratorAgent:
         
         self.messages = [{"role": "system", "content": system_prompt}]
         if history:
-            recent_history = self._trim_history(history, max_messages=100)
+            recent_history = self._trim_history(history, max_messages=self.MAX_HISTORY_MESSAGES)
             self.messages.extend(recent_history)
         
         logging.info(f"✅ AnalysisOrchestratorAgent initialized. Session: {self.base_dir}")
@@ -366,45 +377,99 @@ class AnalysisOrchestratorAgent:
         """Returns current human feedback setting for sub-agents."""
         return self._enable_human_feedback
 
-    def get_agent(self, agent_id: int) -> Any:
+    def create_agent_for_analysis(self, agent_id: int, output_dir: str) -> Any:
         """
-        Get or create a sub-agent by ID (lazy loading).
+        Create an agent instance configured for a specific analysis run.
         
-        Agent IDs:
-            0: FFTMicroscopyAnalysisAgent (including atomic-resolution)
-            1: SAMMicroscopyAnalysisAgent
-            2: HyperspectralAnalysisAgent
-            3: CurveFittingAgent
+        Each analysis run gets a fresh agent instance with its own output
+        directory, ensuring outputs from different analyses don't collide.
+        
+        Args:
+            agent_id: The agent type ID (0-3)
+            output_dir: Unique output directory for this analysis run
+            
+        Returns:
+            Configured agent instance
+            
+        Raises:
+            ValueError: If agent_id is invalid
         """
-        if agent_id not in self._agents:
-            agent_output_dir = str(self.results_dir / f"agent_{agent_id}")
-            
-            common_kwargs = {
-                "api_key": self.api_key,
-                "model_name": self.model_name,
-                "base_url": self.base_url,
-                "output_dir": agent_output_dir,
-                "enable_human_feedback": self._enable_human_feedback,
-            }
-            
-            if agent_id == 0:
-                from .fft_microscopy_agent import FFTMicroscopyAnalysisAgent
-                self._agents[agent_id] = FFTMicroscopyAnalysisAgent(**common_kwargs)
-            elif agent_id == 1:
-                from .sam_microscopy_agent import SAMMicroscopyAnalysisAgent
-                self._agents[agent_id] = SAMMicroscopyAnalysisAgent(**common_kwargs)
-            elif agent_id == 2:
-                from .hyperspectral_analysis_agent import HyperspectralAnalysisAgent
-                self._agents[agent_id] = HyperspectralAnalysisAgent(**common_kwargs)
-            elif agent_id == 3:
-                from .curve_fitting_agent import CurveFittingAgent
-                self._agents[agent_id] = CurveFittingAgent(**common_kwargs)
-            else:
-                raise ValueError(f"Unknown agent ID: {agent_id}. Valid IDs: 0-3")
-            
-            logging.info(f"   Initialized agent {agent_id}: {type(self._agents[agent_id]).__name__}")
+        common_kwargs = {
+            "api_key": self.api_key,
+            "model_name": self.model_name,
+            "base_url": self.base_url,
+            "output_dir": output_dir,
+            "enable_human_feedback": self._enable_human_feedback,
+        }
         
-        return self._agents[agent_id]
+        if agent_id == 0:
+            from .fft_microscopy_agent import FFTMicroscopyAnalysisAgent
+            agent = FFTMicroscopyAnalysisAgent(**common_kwargs)
+        elif agent_id == 1:
+            from .sam_microscopy_agent import SAMMicroscopyAnalysisAgent
+            agent = SAMMicroscopyAnalysisAgent(**common_kwargs)
+        elif agent_id == 2:
+            from .hyperspectral_analysis_agent import HyperspectralAnalysisAgent
+            agent = HyperspectralAnalysisAgent(**common_kwargs)
+        elif agent_id == 3:
+            from .curve_fitting_agent import CurveFittingAgent
+            agent = CurveFittingAgent(**common_kwargs)
+        else:
+            raise ValueError(f"Unknown agent ID: {agent_id}. Valid IDs: 0-3")
+        
+        logging.info(f"   Created agent {agent_id}: {type(agent).__name__}")
+        logging.info(f"   Output directory: {output_dir}")
+        
+        return agent
+
+    def generate_analysis_id(self, data_path: str, agent_id: int) -> str:
+        """
+        Generate a unique analysis ID based on dataset path, agent, and timestamp.
+        
+        Format: {dataset_name}_{agent_short_name}_{timestamp}_{counter}
+        
+        Note: We use "dataset" rather than "sample" because the same physical
+        sample may produce multiple datasets (different imaging conditions,
+        time points, techniques, etc.).
+        
+        Args:
+            data_path: Path to the dataset being analyzed
+            agent_id: ID of the agent performing the analysis
+            
+        Returns:
+            Unique analysis ID string
+        """
+        # Extract meaningful name from dataset path
+        data_path_obj = Path(data_path)
+        if data_path_obj.is_dir():
+            dataset_name = data_path_obj.name
+        else:
+            dataset_name = data_path_obj.stem
+        
+        # Sanitize the name (remove special characters)
+        import re
+        dataset_name = re.sub(r'[^\w\-]', '_', dataset_name)
+        
+        # Truncate if too long
+        if len(dataset_name) > 30:
+            dataset_name = dataset_name[:30]
+        
+        # Get short agent name
+        agent_short_names = {
+            0: "FFT",
+            1: "SAM",
+            2: "Hyperspectral",
+            3: "CurveFit"
+        }
+        agent_short = agent_short_names.get(agent_id, f"agent{agent_id}")
+        
+        # Generate timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        
+        # Increment counter for uniqueness within same second
+        self._analysis_run_counter += 1
+        
+        return f"{dataset_name}_{agent_short}_{timestamp}_{self._analysis_run_counter:03d}"
 
     def _restore_checkpoint(self):
         """Restore session state from checkpoint."""
@@ -419,6 +484,7 @@ class AnalysisOrchestratorAgent:
             self.current_data_type = state.get("current_data_type")
             self.selected_agent_id = state.get("selected_agent_id")
             self.analysis_results = state.get("analysis_results", [])
+            self._analysis_run_counter = state.get("analysis_run_counter", 0)
             
             # Restore analysis mode if saved
             if "analysis_mode" in state:
@@ -438,8 +504,11 @@ class AnalysisOrchestratorAgent:
         except Exception as e:
             logging.warning(f"Failed to restore checkpoint: {e}")
 
-    def _trim_history(self, history: List[Dict], max_messages: int = 100) -> List[Dict]:
+    def _trim_history(self, history: List[Dict], max_messages: int = None) -> List[Dict]:
         """Keep only recent messages to avoid context window overflow."""
+        if max_messages is None:
+            max_messages = self.MAX_HISTORY_MESSAGES
+            
         if len(history) <= max_messages:
             return history
         
@@ -462,9 +531,9 @@ class AnalysisOrchestratorAgent:
         """Main chat interface with robust function calling support."""
         self.message_count += 1
         
-        # AUTO-CHECKPOINT: Every 10 messages
-        if self.message_count - self.last_checkpoint_message_count >= 10:
-            print("  💾 Auto-checkpoint triggered (every 10 messages)...")
+        # AUTO-CHECKPOINT: Every N messages
+        if self.message_count - self.last_checkpoint_message_count >= self.CHECKPOINT_INTERVAL:
+            print(f"  💾 Auto-checkpoint triggered (every {self.CHECKPOINT_INTERVAL} messages)...")
             self._auto_checkpoint()
             self.last_checkpoint_message_count = self.message_count
         
@@ -501,6 +570,7 @@ class AnalysisOrchestratorAgent:
                 "current_data_type": self.current_data_type,
                 "selected_agent_id": self.selected_agent_id,
                 "analysis_results": self.analysis_results,
+                "analysis_run_counter": self._analysis_run_counter,
                 "message_count": self.message_count,
                 "analysis_mode": self.analysis_mode.value,
             }
@@ -528,13 +598,12 @@ class AnalysisOrchestratorAgent:
         if len(self.messages) > 120:
             print("  ⚠️  Context window getting full - trimming history...")
             system_msg = self.messages[0]
-            recent_msgs = self._trim_history(self.messages[1:], max_messages=100)
+            recent_msgs = self._trim_history(self.messages[1:], max_messages=self.MAX_HISTORY_MESSAGES)
             self.messages = [system_msg] + recent_msgs
         
-        max_iterations = 20
         iteration = 0
         
-        while iteration < max_iterations:
+        while iteration < self.MAX_TOOL_ITERATIONS:
             iteration += 1
             
             print(f"  ⏳ Waiting for LLM response (iteration {iteration})...")
@@ -602,13 +671,12 @@ class AnalysisOrchestratorAgent:
         if len(self.messages) > 120:
             print("  ⚠️  Context window getting full - trimming history...")
             system_msg = self.messages[0]
-            recent_msgs = self._trim_history(self.messages[1:], max_messages=100)
+            recent_msgs = self._trim_history(self.messages[1:], max_messages=self.MAX_HISTORY_MESSAGES)
             self.messages = [system_msg] + recent_msgs
         
-        max_iterations = 20
         iteration = 0
         
-        while iteration < max_iterations:
+        while iteration < self.MAX_TOOL_ITERATIONS:
             iteration += 1
             
             print(f"  ⏳ Waiting for LLM response (iteration {iteration})...")
