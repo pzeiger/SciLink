@@ -1163,10 +1163,17 @@ Remember: Rejecting a good fit (R² > 0.98) to chase marginal improvements often
             "\n\n**FIT VISUALIZATION (examine carefully, especially the residual plot):**",
         ]
         
+        # Add the actual fit visualization
+        prompt_parts.append({
+            "mime_type": "image/png", 
+            "data": fit_result["visualization_bytes"]
+        })
+        
         # Also include original data if available for comparison
         if state.get("original_plot_bytes"):
             prompt_parts.append("\n\n**ORIGINAL DATA (for reference):**")
             prompt_parts.append({"mime_type": "image/png", "data": state["original_plot_bytes"]})
+
         
         try:
             response = self.model.generate_content(
@@ -1548,19 +1555,40 @@ Return JSON with:
                         if not fit_was_approved and len(verification_attempts) > 1:
                             judge_result = self._judge_select_best_fit(verification_attempts)
                             
-                            if judge_result.get("acceptable") and judge_result.get("selected_index") is not None:
-                                idx = judge_result["selected_index"]
+                            selected_index = judge_result.get("selected_index")
+                            is_acceptable = judge_result.get("acceptable", False)
+                            
+                            if selected_index is not None:
+                                # Judge selected a best attempt - use it regardless of acceptable flag
+                                idx = selected_index
                                 selected_attempt = verification_attempts[idx]
                                 best_result = selected_attempt["result"]
                                 best_r2 = selected_attempt["r2"]
                                 state["locked_fitting_config"] = selected_attempt["config"]
                                 
-                                if judge_result.get("issues_with_selected"):
-                                    best_result["judge_note"] = judge_result["issues_with_selected"]
+                                if is_acceptable:
+                                    # Judge approved the fit
+                                    if judge_result.get("issues_with_selected"):
+                                        best_result["judge_note"] = judge_result["issues_with_selected"]
+                                    self.logger.info(f"   ✅ Using judge-selected fit (Attempt {idx + 1}, R² = {best_r2:.4f})")
+                                else:
+                                    # Judge selected best available but flagged it as below standards
+                                    best_result["judge_warning"] = (
+                                        f"Judge selected this as best available (R² = {best_r2:.4f}) "
+                                        f"but noted it does not meet acceptance criteria. "
+                                        f"Reason: {judge_result.get('reasoning', 'No reason provided')[:200]}"
+                                    )
+                                    self.logger.warning(
+                                        f"   ⚠️ Using judge-selected fit (Attempt {idx + 1}, R² = {best_r2:.4f}) "
+                                        f"despite not meeting acceptance criteria"
+                                    )
                             else:
-                                # Judge rejected all - flag it
-                                best_result["judge_warning"] = judge_result.get("reasoning", "All fits rejected by judge")
-                                self.logger.warning(f"   Proceeding with best R² fit despite judge rejection")
+                                # Judge couldn't select any attempt (selected_index is None)
+                                best_result["judge_warning"] = (
+                                    f"Judge could not select any acceptable fit. "
+                                    f"Reason: {judge_result.get('reasoning', 'No reason provided')[:200]}"
+                                )
+                                self.logger.warning(f"   ⚠️ Judge could not select any fit - keeping current best (R² = {best_r2:.4f})")
                     
                     # Human feedback opportunity (if enabled and we have a fit to show)
                     if self.enable_human_feedback and best_result and best_result.get("visualization_bytes"):
