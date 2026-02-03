@@ -536,14 +536,6 @@ metadata = generate_metadata_json_from_text("./experiment_notes.txt")
 
 ---
 
-## Supported Models
-
-| Provider | Models | Environment Variable |
-|----------|--------|---------------------|
-| Google | `gemini-2.0-flash`, `gemini-1.5-pro`, `gemini-3-pro-preview` | `GEMINI_API_KEY` |
-| OpenAI | `gpt-4o`, `gpt-4-turbo`, `o1-preview` | `OPENAI_API_KEY` |
-| Anthropic | `claude-sonnet-4-20250514`, `claude-opus-4-20250514` | `ANTHROPIC_API_KEY` |
-
 ```bash
 # Use with any provider
 scilink plan --model gpt-4o
