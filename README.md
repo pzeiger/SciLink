@@ -77,7 +77,7 @@ from scilink.agents.planning_agents import PlanningAgent, BOAgent
 from scilink.agents.exp_agents import AnalysisOrchestratorAgent, AnalysisMode
 
 # Generate an experimental plan
-planner = PlanningAgent(model_name="gemini-2.0-flash")
+planner = PlanningAgent(model_name="gemini-3-pro-preview")
 plan = planner.propose_experiments(
     objective="Optimize lithium extraction yield",
     knowledge_paths=["./literature/"],
@@ -135,8 +135,7 @@ scilink plan --autonomy supervised \
   --code-dir ./opentrons_api
 
 # Use a specific model
-scilink plan --model gpt-4o
-scilink plan --model claude-sonnet-4-20250514
+scilink plan --model claude-opus4-5
 ```
 
 ### Interactive Session Example
@@ -240,7 +239,7 @@ response = orchestrator.chat("Generate initial plan and analyze batch_001.csv")
 ```python
 from scilink.agents.planning_agents import PlanningAgent
 
-agent = PlanningAgent(model_name="gemini-2.0-flash")
+agent = PlanningAgent(model_name="gemini-3-pro-preview")
 
 plan = agent.propose_experiments(
     objective="Screen precipitation conditions for magnesium recovery",
@@ -261,7 +260,7 @@ updated_state = agent.update_plan_with_results(
 ```python
 from scilink.agents.planning_agents import ScalarizerAgent
 
-scalarizer = ScalarizerAgent(model_name="gemini-2.0-flash")
+scalarizer = ScalarizerAgent(model_name="gemini-3-pro-preview")
 
 result = scalarizer.scalarize(
     data_path="./data/hplc_run_001.csv",
@@ -278,7 +277,7 @@ print(f"Metrics: {result['metrics']}")
 ```python
 from scilink.agents.planning_agents import BOAgent
 
-bo = BOAgent(model_name="gemini-2.0-flash")
+bo = BOAgent(model_name="gemini-3-pro-preview")
 
 result = bo.run_optimization_loop(
     data_path="./optimization_data.csv",
@@ -538,8 +537,7 @@ metadata = generate_metadata_json_from_text("./experiment_notes.txt")
 
 ```bash
 # Use with any provider
-scilink plan --model gpt-4o
-scilink analyze --model claude-sonnet-4-20250514
+scilink analyze --model claude-opus-4-5
 
 # Custom endpoint
 scilink plan --base-url https://my-proxy.example.com/v1 --model my-model
