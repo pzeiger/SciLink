@@ -173,7 +173,7 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
         Asks an LLM to choose the best pre-processing steps based on data stats.
         Returns ONLY the strategy dictionary.
         """
-        self.logger.info("\n\n🤖 -------------------- DATA AGENT STEP: PRE-PROCESSING STRATEGY SELECTION -------------------- 🤖\n")
+        #self.logger.info("\n\n🤖 --- DATA AGENT STEP: PRE-PROCESSING STRATEGY SELECTION --- 🤖")
         try:
             prompt_parts = [
                 PRE_PROCESSING_STRATEGY_INSTRUCTIONS,
@@ -227,7 +227,7 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
         Applies a robust pre-processing pipeline.
         
         """
-        self.logger.info("\n\n🤖 -------------------- DATA AGENT STEP: APPLYING PRE-PROCESSING -------------------- 🤖\n")
+        #self.logger.info("\n\n🤖 --- DATA AGENT STEP: APPLYING PRE-PROCESSING --- 🤖")
         data_to_process = hspy_data.copy()
         mask_2d = None
 
@@ -440,10 +440,25 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
             "custom_scripts": []
         }
 
-    def run_preprocessing(self, curve_data: np.ndarray, system_info: Dict[str, Any]) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def run_preprocessing(
+        self, 
+        curve_data: np.ndarray, 
+        system_info: Dict[str, Any],
+        locked_strategy: Dict[str, Any] | None = None
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         Runs the full 1D pre-processing pipeline.
         
+        Args:
+            curve_data: Input curve data shape (N, 2) with columns [x, y]
+            system_info: System/sample metadata dictionary
+            locked_strategy: If provided, use this strategy instead of asking LLM.
+                            Used to ensure consistent preprocessing across a series.
+        
+        Returns:
+            Tuple of (processed_data, data_quality_dict)
+            data_quality_dict includes 'strategy' key with the strategy used,
+            which can be passed as locked_strategy for subsequent spectra.
         """
         if curve_data.ndim != 2 or curve_data.shape[1] != 2:
             self.logger.error(f"Input data must be 2D (N, 2), but got {curve_data.shape}. Skipping processing.")
@@ -454,7 +469,7 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
         # Check for a custom, overriding instruction
         custom_instruction = system_info.get("custom_processing_instruction")
         
-        if custom_instruction: # custom script path
+        if custom_instruction:  # Custom script path
             self.logger.info(f"Detected custom 1D processing instruction. Diverting to script executor.")
             self.logger.info(f"Instruction: {custom_instruction}")
             
@@ -470,18 +485,26 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
                 processed_data = curve_data
                 data_quality["reasoning"] = f"CUSTOM 1D SCRIPT FAILED: {e}"
 
-        else: # Standard path
-            self.logger.info("No custom instruction. Running LLM-guided standard 1D processing.")
+        else:  # Standard LLM-guided path
+            self.logger.info("Running LLM-guided standard 1D processing.")
             
-            # 1. Calculate stats (needed for the LLM)
+            # 1. Calculate stats (needed for the LLM if no locked strategy)
             stats = self._calculate_statistics_1d(curve_data)
             
-            # 2. Get strategy from LLM
-            strategy = self._llm_select_1d_strategy(stats, system_info)
+            # 2. Use locked strategy if provided, otherwise ask LLM
+            if locked_strategy is not None:
+                self.logger.info("Using locked preprocessing strategy for series consistency.")
+                strategy = locked_strategy
+            else:
+                self.logger.info("No locked strategy - asking LLM for preprocessing strategy.")
+                strategy = self._llm_select_1d_strategy(stats, system_info)
             
             # 3. Apply the strategy
             processed_data = self._apply_1d_strategy(curve_data, strategy)
+            
+            # 4. Return strategy in data_quality so it can be locked for series
             data_quality["reasoning"] = strategy.get('reasoning', 'LLM-guided standard processing applied.')
+            data_quality["strategy"] = strategy
 
         return processed_data, data_quality
 
@@ -539,11 +562,8 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
         """
         Applies the simple 1D processing strategy chosen by the LLM.
         """
-        self.logger.info("\n\n🤖 -------------------- DATA AGENT STEP: Applying Standard 1D Strategy -------------------- 🤖\n")
-        
-        # Log the reasoning before taking action.
-        self.logger.info(f"LLM Strategy: {strategy.get('reasoning', 'No reasoning provided.')}")
-        
+        #self.logger.info("\n\n🤖 --- DATA AGENT STEP: Applying Standard 1D Strategy --- 🤖")
+                
         processed_data = curve_data.copy()
         y_data = processed_data[:, 1] # Extract Y-data
         

@@ -3,26 +3,109 @@ import json
 
 from .fft_microscopy_agent import FFTMicroscopyAnalysisAgent
 from .sam_microscopy_agent import SAMMicroscopyAnalysisAgent
-from .atomistic_microscopy_agent import AtomisticMicroscopyAnalysisAgent
 from .hyperspectral_analysis_agent import HyperspectralAnalysisAgent
-from .instruct import ORCHESTRATOR_INSTRUCTIONS
+from .curve_fitting_agent import CurveFittingAgent
 
 from ...auth import get_internal_proxy_key
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from ._deprecation import normalize_params
 
-# Mapping from integer ID to the corresponding agent class
-AGENT_MAP = {
-    0: FFTMicroscopyAnalysisAgent,
-    1: SAMMicroscopyAnalysisAgent,
-    2: AtomisticMicroscopyAnalysisAgent,
-    3: HyperspectralAnalysisAgent
+
+# =============================================================================
+# ORCHESTRATOR INSTRUCTIONS
+# =============================================================================
+ORCHESTRATOR_INSTRUCTIONS = """
+You are an AI orchestrator that selects the most appropriate analysis agent for experimental data.
+
+## Available Agents
+
+| ID | Agent | Use Case |
+|----|-------|----------|
+| 0 | FFTMicroscopyAnalysisAgent | Microstructure analysis via FFT/NMF - grains, phases, domains, periodic structures, AND atomic-resolution images (STEM, TEM, AFM at atomic scale) |
+| 1 | SAMMicroscopyAnalysisAgent | Particle/object segmentation - counting particles, size distributions, object detection |
+| 2 | HyperspectralAnalysisAgent | Spectroscopic and hyperspectral data - 3D datacubes with spatial + spectral dimensions |
+| 3 | CurveFittingAgent | 1D curve/spectrum fitting - peaks, band gaps, kinetics, DSC, XRD patterns, any x-y data |
+
+## Selection Guidelines
+
+**FFTMicroscopyAnalysisAgent (ID: 0)** - Choose when:
+- Analyzing microstructure (grains, grain boundaries, phases, domains)
+- Looking for periodic patterns or crystallographic features
+- Working with atomic-resolution images (HAADF-STEM, ABF-STEM, HRTEM, atomic AFM)
+- Performing Fourier analysis or NMF decomposition
+- General microscopy image analysis
+
+**SAMMicroscopyAnalysisAgent (ID: 1)** - Choose when:
+- Need to count or segment discrete particles/objects
+- Measuring particle size distributions
+- Detecting and outlining distinct features (nanoparticles, cells, defects as objects)
+- The image contains clearly separable objects to be counted
+
+**HyperspectralAnalysisAgent (ID: 2)** - Choose when:
+- Data is 3D with spatial (x,y) and spectral (wavelength/energy) dimensions
+- EELS spectrum imaging, EDS mapping, Raman imaging
+- Need spectral unmixing or component analysis across spatial regions
+
+**CurveFittingAgent (ID: 3)** - Choose when:
+- Data is 1D (x-y pairs): spectra, curves, time series
+- DSC, TGA, XRD, UV-Vis, PL, Raman spectra (single point)
+- Need to fit peaks, extract parameters, find transitions
+- Any tabular data with independent and dependent variables
+
+## Response Format
+
+You MUST respond with valid JSON only, no other text:
+
+```json
+{
+  "agent_id": <integer 0-3>,
+  "reasoning": "<brief explanation of why this agent is appropriate>"
 }
+```
+
+## Examples
+
+User: data_type: microscopy, system_info: {"technique": "HAADF-STEM", "material": "MoS2 monolayer"}
+Response: {"agent_id": 0, "reasoning": "HAADF-STEM of 2D material requires FFTMicroscopyAnalysisAgent for atomic-resolution microstructure analysis."}
+
+User: data_type: microscopy, system_info: {"technique": "SEM", "goal": "count nanoparticles"}
+Response: {"agent_id": 1, "reasoning": "Particle counting task requires SAMMicroscopyAnalysisAgent for segmentation."}
+
+User: data_type: spectroscopy, system_info: {"technique": "EELS-SI", "material": "oxide interface"}
+Response: {"agent_id": 2, "reasoning": "EELS spectrum imaging is hyperspectral data requiring HyperspectralAnalysisAgent."}
+
+User: data_type: curve, system_info: {"technique": "DSC", "material": "metal alloy"}
+Response: {"agent_id": 3, "reasoning": "DSC is 1D thermal analysis data requiring CurveFittingAgent for peak fitting."}
+"""
+
+# Mapping from integer ID to the corresponding agent class
+# Updated: Removed AtomisticMicroscopyAnalysisAgent, added CurveFittingAgent
+AGENT_MAP = {
+    0: FFTMicroscopyAnalysisAgent,      # Microstructure via FFT/NMF (including atomic-resolution)
+    1: SAMMicroscopyAnalysisAgent,       # Particle/object segmentation
+    2: HyperspectralAnalysisAgent,       # Spectroscopic/hyperspectral data
+    3: CurveFittingAgent                 # 1D curve/spectrum fitting
+}
+
+# Human-readable descriptions for logging
+AGENT_DESCRIPTIONS = {
+    0: "FFTMicroscopyAnalysisAgent - Microstructure analysis (grains, phases, domains, atomic-resolution)",
+    1: "SAMMicroscopyAnalysisAgent - Particle/object segmentation and counting",
+    2: "HyperspectralAnalysisAgent - Spectroscopic and hyperspectral data analysis",
+    3: "CurveFittingAgent - 1D curve and spectrum fitting"
+}
+
 
 class OrchestratorAgent:
     """
     An LLM-powered agent that selects the most appropriate experimental analysis agent.
+    
+    Agent IDs:
+        0: FFTMicroscopyAnalysisAgent - For microstructure analysis including atomic-resolution
+        1: SAMMicroscopyAnalysisAgent - For particle/object segmentation
+        2: HyperspectralAnalysisAgent - For spectroscopic/hyperspectral data
+        3: CurveFittingAgent - For 1D curve/spectrum fitting
     """
     def __init__(self, 
                  api_key: str | None = None, 
@@ -88,9 +171,9 @@ class OrchestratorAgent:
         Selects the appropriate experimental agent by asking the LLM.
 
         Args:
-            data_type: The primary type of data, e.g., 'microscopy' or 'spectroscopy'.
-            system_info: Additional information about the system or analysis goal.
-            image_path: Optional path to an image for visual context.
+            data_type: The primary type of data, e.g., 'microscopy', 'spectroscopy', 'curve', '1D curve'.
+            system_info: Additional information about the system or analysis goal (metadata).
+            image_path: Optional path to an image for visual context (only for image data types).
 
         Returns:
             A tuple containing the integer key for the selected agent and the reasoning string.
@@ -100,45 +183,49 @@ class OrchestratorAgent:
 
         # Require system_info to be provided for an informed decision.
         if not system_info or not str(system_info).strip():
-            error_msg = "system_info must be provided for the orchestrator to select an agent."
+            error_msg = "system_info (metadata) must be provided for the orchestrator to select an agent."
             self.logger.error(error_msg)
             return -1, error_msg
 
-        # If the data type is spectroscopy, the choice is clear.
-        if data_type.lower() == 'spectroscopy':
-            self.logger.info("Data type is 'spectroscopy'. Selecting Spectroscopy agent directly.")
-            return 3, "Data type is 'spectroscopy'. Selecting Spectroscopy agent directly."
-
         prompt_parts = [ORCHESTRATOR_INSTRUCTIONS]
         
-        # Add image analysis if available
+        # Add image analysis if available (for microscopy/image data)
         if image_path:
             try:
                 from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes
                 
                 # Load and preprocess image (resize to a max dimension to save tokens)
                 image = load_image(image_path)
-                resized_image, _ = preprocess_image(image, max_dim=512) # Downsample for the orchestrator
+                resized_image, _ = preprocess_image(image, max_dim=512)  # Downsample for the orchestrator
                 image_bytes = convert_numpy_to_jpeg_bytes(resized_image, quality=80)
                 
-                prompt_parts.append("\n--- Image for Context ---")
-                prompt_parts.append("This is a downsampled version of the input image used to provide visual context. It may be lower resolution than the original.")
+                prompt_parts.append("\n--- Image for Analysis ---")
+                prompt_parts.append(
+                    "Analyze this image to help determine the appropriate agent. "
+                    "Consider: Is this atomic-resolution? Are there discrete particles to count? "
+                    "Is it a microstructure with grains/domains? What analysis would be most appropriate?"
+                )
                 prompt_parts.append({"mime_type": "image/jpeg", "data": image_bytes})
                 
             except Exception as e:
-                self.logger.warning(f"Failed to load or analyze image for orchestrator: {e}")
-                prompt_parts.append("\n(Image loading/analysis failed, proceeding without image data)")
+                self.logger.warning(f"Failed to load image for orchestrator: {e}")
+                prompt_parts.append("\n(Image could not be loaded - selecting based on metadata only)")
         
-        # Add system info and data type
-        prompt_parts.append("\n--- User Request ---")
+        # Add metadata and data type
+        prompt_parts.append("\n--- Metadata & Data Type ---")
         prompt_parts.append(f"data_type: {data_type}")
-        prompt_parts.append(f"system_info: {str(system_info)}")
+        prompt_parts.append(f"metadata/system_info: {json.dumps(system_info) if isinstance(system_info, dict) else str(system_info)}")
+        
+        prompt_parts.append("\n--- Your Task ---")
+        prompt_parts.append(
+            "Based on the metadata (and image if provided), select the most appropriate agent. "
+            "Respond with JSON only: {\"agent_id\": <0-3>, \"reasoning\": \"<explanation>\"}"
+        )
 
         try:
             response = self.model.generate_content(
                 contents=prompt_parts,
                 generation_config=self.generation_config,
-                safety_settings=self.safety_settings,
             )
             result_json, error_dict = self._parse_llm_response(response)
 
@@ -150,11 +237,10 @@ class OrchestratorAgent:
             reasoning = result_json.get('reasoning', 'No reasoning provided.')
             self.logger.info(f"\n\n🧠 Orchestrator Reasoning: {reasoning}\n")
 
-
             if isinstance(agent_id, int) and agent_id in AGENT_MAP:
                 return agent_id, reasoning
             else:
-                error_msg = f"LLM returned an invalid agent ID: {agent_id}."
+                error_msg = f"LLM returned an invalid agent ID: {agent_id}. Valid IDs: {list(AGENT_MAP.keys())}"
                 self.logger.warning(error_msg)
                 return -1, error_msg
 

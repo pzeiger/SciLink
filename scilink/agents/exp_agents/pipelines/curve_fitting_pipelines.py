@@ -170,6 +170,7 @@ def create_unified_curve_fitting_pipeline(
             enable_human_feedback=enable_human_feedback,
             outlier_sigma=outlier_sigma,
             max_verification_iterations=max_verification_iterations,
+            preprocessor=preprocessor
         )
     )
 
