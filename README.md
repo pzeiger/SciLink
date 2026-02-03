@@ -2,6 +2,8 @@
 
 **AI-Powered Scientific Research Automation Platform**
 
+![SciLink Logo](misc/scilink_logo_v3_dark.svg)
+
 SciLink employs a system of intelligent agents to automate experimental design, data analysis, and iterative optimization workflows. Built around large language models with domain-specific tools, these agents act as AI research partners that can plan experiments, analyze results across multiple modalities, and suggest optimal next steps.
 
 ---
