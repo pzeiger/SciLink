@@ -16,6 +16,9 @@ from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from ._deprecation import normalize_params
 
+HIGH_NOVELTY_THRESHOLD = 4   # Score 4-5: Highly novel, needs validation
+MEDIUM_NOVELTY_THRESHOLD = 3  # Score 3: Somewhat novel, needs differentiation
+
 
 # =============================================================================
 # MIXIN: Shared LLM functionality
@@ -588,6 +591,7 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
         data: AnalysisInput | None = None,
         system_info: Dict[str, Any] | str | None = None,
         novelty_context: str | None = None,
+        novelty_assessment: Dict[str, Any] | None = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -634,7 +638,7 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
                 }
         
         # Generate recommendations from analysis
-        return self._generate_recommendations(analysis_result, system_info, novelty_context)
+        return self._generate_recommendations(analysis_result, system_info, novelty_context, novelty_assessment)
 
     # =========================================================================
     # BACKWARD COMPATIBLE ALIASES
@@ -707,7 +711,8 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
         self,
         analysis_result: Dict[str, Any],
         system_info: Dict[str, Any] | str | None = None,
-        novelty_context: str | None = None
+        novelty_context: str | None = None,
+        novelty_assessment: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """Internal method to generate recommendations from analysis results."""
         system_info = self._handle_system_info(system_info)
@@ -745,6 +750,10 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
             
             if novelty_context:
                 prompt_parts.append(f"\n\n## Novelty Context\n{novelty_context}")
+
+            if novelty_assessment:
+                novelty_section = self._build_novelty_prompt_section(novelty_assessment)
+                prompt_parts.append(novelty_section)
             
             if system_info:
                 prompt_parts.append(f"\n\n## System Information\n{json.dumps(system_info, indent=2)}")
@@ -768,11 +777,15 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
             
             self.logger.info(f"✅ Generated {len(valid_recommendations)} measurement recommendations")
             
-            return {
-                "status": "success",
-                "analysis_integration": result_json.get("analysis_integration", ""),
-                "measurement_recommendations": valid_recommendations
-            }
+            return self._enhance_with_novelty(
+                base_result={
+                    "status": "success",
+                    "analysis_integration": result_json.get("analysis_integration", ""),
+                    "measurement_recommendations": valid_recommendations
+                },
+                novelty_assessment=novelty_assessment,
+                analysis_result=analysis_result
+            )
             
         except Exception as e:
             self.logger.error(f"Recommendation generation failed: {e}")
@@ -780,6 +793,239 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
                 "status": "error",
                 "error": {"error": "Recommendation generation failed", "details": str(e)}
             }
+        
+
+    def _build_novelty_prompt_section(self, novelty_assessment: Dict[str, Any]) -> str:
+        """Build prompt section from novelty assessment for LLM context."""
+        assessments = novelty_assessment.get("assessments", [])
+        high_novelty = novelty_assessment.get("high_novelty_claims", [])
+        summary_stats = novelty_assessment.get("summary_stats", {})
+        
+        section = "\n\n## Novelty Assessment Results\n"
+        
+        section += f"**Summary:** {len(assessments)} claims assessed, "
+        section += f"average novelty score: {summary_stats.get('average_score', 0):.1f}/5\n\n"
+        
+        if high_novelty:
+            section += "**HIGH-NOVELTY FINDINGS (Score 4-5) - Prioritize validation:**\n"
+            for claim in high_novelty[:5]:
+                section += f"- [Score {claim.get('novelty_score', '?')}] {claim.get('original_claim', '')[:150]}...\n"
+                section += f"  Literature gap: {claim.get('novelty_explanation', '')[:100]}...\n"
+            section += "\n"
+        
+        medium_novelty = [a for a in assessments if a.get("novelty_score") == MEDIUM_NOVELTY_THRESHOLD]
+        if medium_novelty:
+            section += "**MEDIUM-NOVELTY FINDINGS (Score 3) - Consider differentiation:**\n"
+            for claim in medium_novelty[:3]:
+                section += f"- {claim.get('original_claim', '')[:100]}...\n"
+            section += "\n"
+        
+        section += """
+    **Recommendation Guidance Based on Novelty:**
+    - For HIGH-NOVELTY claims: Suggest validation experiments (replication, complementary techniques)
+    - For MEDIUM-NOVELTY claims: Suggest differentiation experiments (what makes this unique?)
+    - For LOW-NOVELTY claims: Lower priority, suggest only if scientifically valuable
+    """
+        
+        return section
+
+
+    def _enhance_with_novelty(
+        self,
+        base_result: Dict[str, Any],
+        novelty_assessment: Optional[Dict[str, Any]],
+        analysis_result: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Enhance base recommendations with novelty-informed prioritization."""
+        if novelty_assessment is None:
+            base_result["novelty_informed"] = False
+            base_result["novelty_recommendations"] = []
+            return base_result
+        
+        self.logger.info("🔬 Enhancing recommendations with novelty assessment...")
+        
+        assessments = novelty_assessment.get("assessments", [])
+        high_novelty_claims = novelty_assessment.get("high_novelty_claims", [])
+        summary_stats = novelty_assessment.get("summary_stats", {})
+        
+        novelty_recommendations = []
+        
+        # High-novelty claims → Validation experiments
+        for claim in high_novelty_claims:
+            novelty_recommendations.append(
+                self._generate_validation_recommendation(claim)
+            )
+        
+        # Medium-novelty claims → Differentiation experiments
+        medium_novelty_claims = [
+            a for a in assessments 
+            if a.get("novelty_score") == MEDIUM_NOVELTY_THRESHOLD
+        ]
+        for claim in medium_novelty_claims:
+            novelty_recommendations.append(
+                self._generate_differentiation_recommendation(claim)
+            )
+        
+        # Prioritize base recommendations by novelty relevance
+        base_recommendations = base_result.get("measurement_recommendations", [])
+        prioritized_recommendations = self._prioritize_by_novelty(
+            base_recommendations, assessments
+        )
+        
+        # Build integration summary
+        integration_summary = self._build_novelty_integration_summary(
+            base_result.get("analysis_integration", ""),
+            summary_stats,
+            len(high_novelty_claims),
+            len(medium_novelty_claims),
+            len(assessments)
+        )
+        
+        self.logger.info(
+            f"✅ Added {len(novelty_recommendations)} novelty-specific recommendations"
+        )
+        
+        return {
+            "status": "success",
+            "analysis_integration": integration_summary,
+            "measurement_recommendations": prioritized_recommendations,
+            "novelty_recommendations": novelty_recommendations,
+            "novelty_informed": True,
+            "novelty_summary": {
+                "total_claims_assessed": len(assessments),
+                "high_novelty_count": len(high_novelty_claims),
+                "medium_novelty_count": len(medium_novelty_claims),
+                "average_score": summary_stats.get("average_score", 0)
+            }
+        }
+
+
+    def _generate_validation_recommendation(self, claim: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate validation experiment recommendation for high-novelty claim."""
+        return {
+            "type": "validation",
+            "priority": 1,
+            "description": f"Validate high-novelty finding: {claim.get('original_claim', '')[:150]}",
+            "scientific_justification": (
+                f"Novelty score {claim.get('novelty_score', '?')}/5. "
+                f"{claim.get('novelty_explanation', 'Novel finding requires independent validation.')}"
+            ),
+            "suggested_approaches": [
+                "Replicate measurement with different sample preparation",
+                "Use complementary technique to confirm finding",
+                "Perform statistical analysis across multiple samples",
+                "Compare with reference materials or standards"
+            ],
+            "novelty_context": {
+                "original_claim": claim.get("original_claim"),
+                "novelty_score": claim.get("novelty_score"),
+                "literature_gap": claim.get("search_answer", "")[:300] if claim.get("search_answer") else None
+            }
+        }
+
+
+    def _generate_differentiation_recommendation(self, claim: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate differentiation experiment for medium-novelty claim."""
+        return {
+            "type": "differentiation", 
+            "priority": 2,
+            "description": f"Differentiate finding from prior work: {claim.get('original_claim', '')[:150]}",
+            "scientific_justification": (
+                f"Novelty score {claim.get('novelty_score', '?')}/5. "
+                "Finding has partial overlap with existing literature. "
+                "Differentiation experiments needed to establish uniqueness."
+            ),
+            "suggested_approaches": [
+                "Identify specific conditions/parameters that differ from prior work",
+                "Quantify improvements or differences systematically",
+                "Explore edge cases or boundary conditions",
+                "Document unique aspects of sample or methodology"
+            ],
+            "novelty_context": {
+                "original_claim": claim.get("original_claim"),
+                "novelty_score": claim.get("novelty_score"),
+                "existing_work": claim.get("search_answer", "")[:200] if claim.get("search_answer") else None
+            }
+        }
+
+
+    def _prioritize_by_novelty(
+        self,
+        recommendations: List[Dict[str, Any]],
+        novelty_assessments: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Re-prioritize recommendations based on novelty relevance."""
+        if not novelty_assessments:
+            return recommendations
+        
+        high_novelty_keywords = set()
+        for assessment in novelty_assessments:
+            if assessment.get("novelty_score", 0) >= HIGH_NOVELTY_THRESHOLD:
+                claim = assessment.get("original_claim", "").lower()
+                words = claim.split()
+                high_novelty_keywords.update(
+                    w for w in words if len(w) > 4 and w.isalpha()
+                )
+        
+        if not high_novelty_keywords:
+            return recommendations
+        
+        scored = []
+        for rec in recommendations:
+            rec_text = str(rec).lower()
+            match_count = sum(1 for kw in high_novelty_keywords if kw in rec_text)
+            
+            enhanced_rec = rec.copy()
+            if match_count > 0:
+                enhanced_rec["novelty_relevance"] = f"Related to {match_count} high-novelty finding(s)"
+                if "priority" in enhanced_rec:
+                    enhanced_rec["priority"] = max(1, enhanced_rec["priority"] - 1)
+            
+            scored.append((match_count, enhanced_rec))
+        
+        scored.sort(key=lambda x: (-x[0], x[1].get("priority", 99)))
+        
+        return [rec for _, rec in scored]
+
+
+    def _build_novelty_integration_summary(
+        self,
+        base_integration: str,
+        summary_stats: Dict[str, Any],
+        high_count: int,
+        medium_count: int,
+        total_count: int
+    ) -> str:
+        """Build summary of how novelty assessment informed recommendations."""
+        avg_score = summary_stats.get("average_score", 0)
+        
+        if high_count > 0:
+            novelty_msg = (
+                f"🌟 {high_count} HIGH-NOVELTY finding(s) identified! "
+                f"Validation experiments have been prioritized."
+            )
+        elif medium_count > 0:
+            novelty_msg = (
+                f"🤔 {medium_count} finding(s) with partial novelty. "
+                f"Differentiation experiments suggested."
+            )
+        else:
+            novelty_msg = (
+                "📚 Findings largely align with existing literature. "
+                "Recommendations focus on incremental improvements."
+            )
+        
+        summary = base_integration + "\n\n" if base_integration else ""
+        summary += (
+            f"**Novelty-Informed Prioritization:**\n"
+            f"- Claims assessed: {total_count}\n"
+            f"- Average novelty score: {avg_score:.1f}/5\n"
+            f"- High novelty (4-5): {high_count}\n"
+            f"- Medium novelty (3): {medium_count}\n\n"
+            f"{novelty_msg}"
+        )
+        
+        return summary
 
     # =========================================================================
     # STATE MANAGEMENT

@@ -4,17 +4,21 @@ Supports both OpenAI (JSON schemas) and LiteLLM formats.
 
 Each analysis run creates a unique output directory to ensure traceability
 and prevent output collisions when analyzing multiple datasets.
+
+UPDATED: Novelty assessment results are now stored in analysis records
+and passed to get_recommendations for informed follow-up suggestions.
 """
 
 import json
 import logging
-import os
+import time
 import numpy as np
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Callable, Optional, List
+from typing import Dict, Any, Callable
 
 from .metadata_converter import generate_metadata_json_from_text, METADATA_SCHEMA_DICT
+from ..lit_agents import OwlLiteratureAgent, NoveltyScorer
 
 
 class AnalysisOrchestratorTools:
@@ -882,7 +886,8 @@ class AnalysisOrchestratorTools:
                     "agent_name": self.AGENT_NAMES.get(agent_id),
                     "status": result.get("status"),
                     "output_directory": str(analysis_output_dir),
-                    "full_result": result  # Store full result for recommendations
+                    "full_result": result,  # Store full result for recommendations
+                    "novelty_assessment": None  # Placeholder for novelty assessment
                 }
                 self.orch.analysis_results.append(analysis_record)
                 
@@ -896,7 +901,8 @@ class AnalysisOrchestratorTools:
                         "detailed_analysis": result.get("detailed_analysis", "")[:2000],  # Truncate for chat
                         "claims_count": len(result.get("scientific_claims", [])),
                         "full_result_available": True,
-                        "note": f"All outputs saved to: {analysis_output_dir}"
+                        "note": f"All outputs saved to: {analysis_output_dir}",
+                        "next_steps": "Use assess_novelty to check literature for these claims, or get_recommendations for follow-up experiments."
                     })
                 else:
                     return json.dumps({
@@ -966,7 +972,8 @@ class AnalysisOrchestratorTools:
                     analysis_info = {
                         "directory": analysis_dir.name,
                         "path": str(analysis_dir),
-                        "files": []
+                        "files": [],
+                        "has_novelty_assessment": False
                     }
                     
                     # Check for metadata_used.json to get analysis details
@@ -981,6 +988,11 @@ class AnalysisOrchestratorTools:
                             analysis_info["timestamp"] = meta.get("timestamp")
                         except Exception:
                             pass
+                    
+                    # Check for novelty assessment
+                    novelty_file = analysis_dir / "literature_assessment" / "novelty_report.json"
+                    if novelty_file.exists():
+                        analysis_info["has_novelty_assessment"] = True
                     
                     # List files in directory
                     for f in analysis_dir.iterdir():
@@ -1002,7 +1014,8 @@ class AnalysisOrchestratorTools:
                         "data_path": r.get("data_path"),
                         "agent_name": r.get("agent_name"),
                         "status": r.get("status"),
-                        "output_directory": r.get("output_directory")
+                        "output_directory": r.get("output_directory"),
+                        "has_novelty_assessment": r.get("novelty_assessment") is not None
                     }
                     for r in self.orch.analysis_results
                 ]
@@ -1127,12 +1140,15 @@ class AnalysisOrchestratorTools:
         )
         
         # =====================================================================
-        # 10. GET MEASUREMENT RECOMMENDATIONS
+        # 10. GET MEASUREMENT RECOMMENDATIONS (UPDATED)
         # =====================================================================
         def get_recommendations(analysis_id: str = None, analysis_index: int = -1) -> str:
             """
             Get measurement recommendations from a completed analysis.
             Can specify by analysis_id or by index in the history.
+            
+            UPDATED: Now incorporates novelty assessment results to prioritize
+            recommendations based on scientific novelty.
             """
             print(f"  ⚡ Tool: Getting measurement recommendations...")
             
@@ -1176,23 +1192,38 @@ class AnalysisOrchestratorTools:
                         "message": "Analysis result not stored. Please run the analysis again."
                     })
                 
+                # Get novelty assessment if available
+                novelty_assessment = record.get("novelty_assessment")
+                
                 # Create agent for recommendations (uses same output dir)
                 output_dir = record.get("output_directory", str(self.orch.results_dir / "temp"))
                 agent = self.orch.create_agent_for_analysis(agent_id, output_dir)
                 
-                # Call recommend_measurements with the stored result
+                # Call recommend_measurements with the stored result AND novelty assessment
                 result = agent.recommend_measurements(
                     data=record.get("data_path"),
                     system_info=self.orch.current_metadata,
-                    analysis_result=full_result  # Pass the stored result
+                    analysis_result=full_result,
+                    novelty_assessment=novelty_assessment  # NEW: Pass novelty data
                 )
                 
-                return json.dumps({
+                response = {
                     "status": result.get("status", "success"),
                     "analysis_id": record.get("analysis_id"),
                     "recommendations": result.get("measurement_recommendations", []),
-                    "analysis_integration": result.get("analysis_integration", "")
-                })
+                    "analysis_integration": result.get("analysis_integration", ""),
+                    "novelty_informed": novelty_assessment is not None
+                }
+                
+                # Add novelty-specific recommendations if available
+                if novelty_assessment:
+                    response["novelty_summary"] = {
+                        "total_claims_assessed": len(novelty_assessment.get("assessments", [])),
+                        "high_novelty_claims": len(novelty_assessment.get("high_novelty_claims", [])),
+                        "novelty_driven_recommendations": result.get("novelty_recommendations", [])
+                    }
+                
+                return json.dumps(response)
                 
             except Exception as e:
                 self.logger.error(f"Recommendations error: {e}", exc_info=True)
@@ -1207,7 +1238,9 @@ class AnalysisOrchestratorTools:
             description=(
                 "Get measurement recommendations based on a completed analysis. "
                 "Specify by analysis_id or use analysis_index (-1 for most recent). "
-                "Returns suggested follow-up experiments and measurements."
+                "Returns suggested follow-up experiments and measurements. "
+                "If assess_novelty was run first, recommendations are prioritized "
+                "based on scientific novelty (high-novelty claims get validation experiments)."
             ),
             parameters={
                 "analysis_id": {
@@ -1217,6 +1250,194 @@ class AnalysisOrchestratorTools:
                 "analysis_index": {
                     "type": "integer",
                     "description": "Index of analysis in history (-1 for most recent)"
+                }
+            },
+            required=[]
+        )
+
+        # =====================================================================
+        # 11. ASSESS NOVELTY (UPDATED)
+        # =====================================================================
+        def assess_novelty(analysis_id: str = None, analysis_index: int = -1) -> str:
+            """
+            Perform a literature search and novelty assessment on claims generated 
+            by a previous analysis run.
+            
+            UPDATED: Now stores results in the analysis record for use by
+            get_recommendations.
+            """
+            print(f"  ⚡ Tool: Assessing novelty for analysis...")
+
+            if not self.orch.futurehouse_api_key:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No FutureHouse/Edison API Key provided in Orchestrator initialization."
+                })
+
+            # 1. Retrieve the analysis record
+            record = None
+            record_index = None
+            
+            if analysis_id:
+                for i, r in enumerate(self.orch.analysis_results):
+                    if r.get("analysis_id") == analysis_id:
+                        record = r
+                        record_index = i
+                        break
+                if record is None:
+                    return json.dumps({"status": "error", "message": f"Analysis ID not found: {analysis_id}"})
+            else:
+                if not self.orch.analysis_results:
+                    return json.dumps({"status": "error", "message": "No analysis history available."})
+                record_index = analysis_index if analysis_index >= 0 else len(self.orch.analysis_results) + analysis_index
+                record = self.orch.analysis_results[record_index]
+
+            # 2. Extract Claims
+            full_result = record.get("full_result", {})
+            claims = full_result.get("scientific_claims", [])
+            
+            if not claims:
+                return json.dumps({
+                    "status": "warning",
+                    "message": "No scientific claims found in this analysis to assess."
+                })
+
+            print(f"    Found {len(claims)} claims to assess from {record.get('analysis_id')}")
+
+            # 3. Initialize Lit Agents
+            try:
+                owl_agent = OwlLiteratureAgent(api_key=self.orch.futurehouse_api_key, max_wait_time=600)
+                
+                # Use orchestrator's generic LLM config for the Scorer
+                scorer = NoveltyScorer(
+                    api_key=self.orch.api_key,
+                    model_name=self.orch.model_name,
+                    base_url=self.orch.base_url
+                )
+            except Exception as e:
+                return json.dumps({"status": "error", "message": f"Failed to init Lit Agents: {e}"})
+
+            # 4. Process Claims
+            scored_results = []
+            high_novelty_claims = []
+            
+            # Create a dedicated directory for lit results inside the analysis folder
+            analysis_dir = Path(record.get("output_directory", self.orch.results_dir))
+            lit_output_dir = analysis_dir / "literature_assessment"
+            lit_output_dir.mkdir(exist_ok=True)
+
+            print(f"    Output directory: {lit_output_dir}")
+
+            for i, claim_obj in enumerate(claims):
+                question = claim_obj.get("has_anyone_question")
+                claim_text = claim_obj.get("claim")
+                
+                if not question:
+                    continue
+
+                print(f"    🔍 Searching claim {i+1}/{len(claims)}: {question[:60]}...")
+                
+                # Search (Owl)
+                search_res = owl_agent.query_literature(question)
+                
+                if search_res.get("status") != "success":
+                    print(f"       ⚠️ Search failed for claim {i+1}")
+                    continue
+
+                formatted_answer = search_res.get("formatted_answer", "")
+
+                # Score (Scorer)
+                print(f"       ⚖️ Scoring novelty...")
+                score_res = scorer.score_novelty(question, formatted_answer)
+                
+                novelty_score = score_res.get("novelty_score", 0)
+                
+                result_entry = {
+                    "claim_index": i,
+                    "original_claim": claim_text,
+                    "question": question,
+                    "search_answer": formatted_answer,
+                    "novelty_score": novelty_score,
+                    "novelty_explanation": score_res.get("explanation"),
+                    "sources": [s.url for s in getattr(search_res, 'sources', []) if hasattr(s, 'url')]
+                }
+                scored_results.append(result_entry)
+                
+                # Track high-novelty claims for recommendations
+                if novelty_score >= 4:
+                    high_novelty_claims.append(result_entry)
+                
+                # Pause briefly to be polite to APIs
+                time.sleep(1)
+
+            # 5. Build novelty assessment object
+            novelty_assessment = {
+                "timestamp": datetime.now().isoformat(),
+                "assessments": scored_results,
+                "high_novelty_claims": high_novelty_claims,
+                "summary_stats": {
+                    "total_assessed": len(scored_results),
+                    "high_novelty_count": len(high_novelty_claims),
+                    "average_score": sum(r.get("novelty_score", 0) for r in scored_results) / len(scored_results) if scored_results else 0
+                }
+            }
+            
+            # 6. Store in the analysis record (KEY CHANGE)
+            self.orch.analysis_results[record_index]["novelty_assessment"] = novelty_assessment
+            
+            # 7. Save Results to file
+            output_file = lit_output_dir / "novelty_report.json"
+            with open(output_file, "w") as f:
+                json.dump({
+                    "analysis_id": record.get("analysis_id"),
+                    **novelty_assessment
+                }, f, indent=2)
+
+            # 8. Summarize for Chat
+            summary_lines = []
+            
+            for res in scored_results:
+                score = res['novelty_score']
+                if score >= 4:
+                    icon = "🌟"
+                elif score == 3:
+                    icon = "🤔"
+                else:
+                    icon = "📚"
+                
+                summary_lines.append(
+                    f"{icon} [Score {score}/5] {res['original_claim'][:50]}... "
+                    f"-> {res['novelty_explanation'][:80]}..."
+                )
+
+            return json.dumps({
+                "status": "success",
+                "total_assessed": len(scored_results),
+                "high_novelty_count": len(high_novelty_claims),
+                "average_novelty_score": novelty_assessment["summary_stats"]["average_score"],
+                "summary_text": "\n".join(summary_lines),
+                "report_path": str(output_file),
+                "stored_for_recommendations": True,
+                "note": "Novelty assessment stored. Use get_recommendations to get novelty-informed follow-up suggestions."
+            })
+
+        self._register_tool(
+            func=assess_novelty,
+            name="assess_novelty",
+            description=(
+                "Perform a literature search to assess the novelty of scientific claims "
+                "generated by a previous analysis. Requires an analysis_id (from run_analysis). "
+                "Returns novelty scores (1-5) and checks for prior art. "
+                "Results are stored and used by get_recommendations for prioritized suggestions."
+            ),
+            parameters={
+                "analysis_id": {
+                    "type": "string",
+                    "description": "The ID of the analysis run to assess (e.g. 'sample1_FFT_2023...')"
+                },
+                "analysis_index": {
+                    "type": "integer",
+                    "description": "Alternatively, use the index of the analysis in memory (-1 for most recent)"
                 }
             },
             required=[]

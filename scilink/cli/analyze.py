@@ -53,6 +53,7 @@ Environment Variables:
   OPENAI_API_KEY           OpenAI API key
   ANTHROPIC_API_KEY        Anthropic API key
   CLAUDE_API_KEY           Anthropic API key (alias)
+  FUTUREHOUSE_API_KEY      FutureHouse API key for literature search (optional)
 
 Supported Data Types:
   Microscopy:    .tif, .tiff, .png, .jpg, .jpeg, .bmp
@@ -279,6 +280,7 @@ This agent helps you analyze experimental data by:
 2. Managing metadata (loading or converting from text)
 3. Selecting the best analysis agent for your data
 4. Running analysis and generating scientific insights
+5. Assessing novelty of findings against literature (New!)
 
 Supported data types:
   • Microscopy images (.tif, .png, .jpg)
@@ -306,6 +308,18 @@ Supported data types:
                     user_key = input(f"Enter your {provider_name} API key (or Enter to auto-detect): ").strip()
                     if user_key:
                         api_key = user_key
+
+        # === FUTUREHOUSE API KEY (Optional) ===
+        futurehouse_key = os.getenv("FUTUREHOUSE_API_KEY")
+        if not futurehouse_key:
+            print("\n📚 FutureHouse API Key (Optional - for novelty assessment)")
+            print("   Enables literature search to check if findings are novel.")
+            futurehouse_key = input("   FutureHouse API key (or Enter to skip): ").strip()
+            if futurehouse_key:
+                print("   ✅ Novelty assessment enabled")
+            else:
+                futurehouse_key = None
+                print("   ℹ️  Novelty assessment disabled")
         
         # === SESSION DIRECTORY ===
         if session_dir:
@@ -339,6 +353,7 @@ Supported data types:
                 base_url=base_url,
                 analysis_mode=analysis_mode,
                 restore_checkpoint=restore,
+                futurehouse_api_key=futurehouse_key  # Pass the lit key
             )
             print("✅ Agent ready!")
             
@@ -355,6 +370,7 @@ Supported data types:
         print(f"Session Directory: {self.session_dir}")
         print(f"Analysis Mode: {analysis_mode.value}")
         print(f"Human Feedback: {'Enabled' if self.agent._enable_human_feedback else 'Disabled'}")
+        print(f"Novelty Assessment: {'Enabled' if futurehouse_key else 'Disabled'}")
         
         provider_name, _, _ = self._infer_provider(model_name)
         if base_url:
