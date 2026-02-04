@@ -280,7 +280,7 @@ class ScriptExecutor:
     """
     
     def __init__(self, timeout: int = DEFAULT_TIMEOUT, mp_api_key: str = None,
-                 enforce_sandbox: bool = False, allow_unsafe_override: bool = False,
+                 enforce_sandbox: bool = True, allow_unsafe_override: bool = False,
                  interactive_sandbox: bool = True, show_llm_description: bool = True):
         self.timeout = timeout
         self.mp_api_key = mp_api_key or get_api_key('materials_project') or os.getenv("MP_API_KEY")
