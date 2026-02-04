@@ -18,7 +18,7 @@ SciLink provides three complementary agent systems that cover the full scientifi
 | **Analysis Agents** | Multi-modal data analysis | Microscopy, spectroscopy, particle segmentation, curve fitting |
 | **Simulation Agents** | Computational modeling | DFT calculations, classical MD (LAMMPS), structure recommendations |
 
-All systems support configurable autonomy levels—from co-pilot mode where humans lead and AI assists, to fully autonomous operation where the agent chains all tools independently.
+All systems support configurable autonomy levels: from co-pilot mode where humans lead and AI assists, to fully autonomous operation where the agent chains all tools independently.
 
 ---
 
@@ -513,35 +513,64 @@ metadata = generate_metadata_json_from_text("./experiment_notes.txt")
 
 ---
 
-## Agent Selection Guide
+## Novelty Assessment: From Data to Discovery
 
-### Planning Agents
+One of SciLink's key features is automated novelty assessment - instantly checking your experimental findings against the scientific literature to identify what's genuinely new.
 
-| Scenario | Agent/Tool |
-|----------|------------|
-| Generate experimental strategy | `PlanningAgent.propose_experiments()` |
-| Extract metrics from raw data | `ScalarizerAgent.scalarize()` |
-| Optimize experimental parameters | `BOAgent.run_optimization_loop()` |
-| Full interactive workflow | `PlanningOrchestratorAgent.chat()` |
+This is powered by integration with [FutureHouse](https://www.futurehouse.org/) AI agents, which provide deep literature search and scientific reasoning capabilities. The integration enables SciLink to search across thousands of scientific papers and assess whether your findings have been previously reported.
 
-### Analysis Agents
+### Interactive Example
 
-| Data Type | Agent | When to Use |
-|-----------|-------|-------------|
-| Microscopy (atomic) | FFT (0) | Grains, phases, lattices, domains |
-| Microscopy (particles) | SAM (1) | Counting, sizing, segmentation |
-| Hyperspectral | Hyperspectral (2) | EELS-SI, EDS maps, Raman imaging |
-| 1D curves | CurveFitting (3) | XRD, PL, DSC, any x-y fitting |
-
----
-
-```bash
-# Use with any provider
-scilink analyze --model claude-opus-4-5
-
-# Custom endpoint
-scilink plan --base-url https://my-proxy.example.com/v1 --model my-model
 ```
+👤 You: Analyze the STEM images and generate scientific claims
+
+🤖 Agent: 
+  ⚡ Running analysis...
+     → Analysis ID: stem_MoS2_FFT_20250203_001
+
+  **Scientific Claims Generated:** 3
+  • MoS2 exhibits mixed 2H/1T phase coexistence at room temperature
+  • Sulfur vacancy density at grain boundaries is 3.2 × 10¹³ cm⁻²
+  • 1T phase domains are localized within 5nm of grain boundaries
+
+👤 You: Assess novelty of these claims
+
+🤖 Agent:
+  ⚡ Searching literature via FutureHouse...
+
+  📚 [Score 2/5] Mixed 2H/1T phase coexistence
+     → Well-documented (Li et al. 2018, Wang et al. 2020)
+
+  🤔 [Score 3/5] Sulfur vacancy density of 3.2 × 10¹³ cm⁻²
+     → Similar measurements exist at different conditions
+
+  🌟 [Score 4/5] 1T phase localized within 5nm of grain boundaries
+     → Limited prior reports; spatial correlation not established
+
+  Summary: 1 HIGH-NOVELTY finding identified
+
+👤 You: What experiments should I run next?
+
+🤖 Agent:
+  ⚡ Generating novelty-informed recommendations...
+
+  [Priority 1] Confirm 1T localization near grain boundaries (Score 4/5)
+     → Statistical analysis across n>20 boundaries, EELS mapping
+
+  [Priority 2] Differentiate vacancy density from prior work (Score 3/5)
+     → Document methodology differences vs. Zhou et al. 2021
+
+  💡 High-novelty findings prioritized for validation experiments
+```
+
+### The Discovery Acceleration Loop
+
+1. **Analysis Agent** processes data → generates scientific claims with searchable keywords
+2. **Novelty Assessment** searches literature → scores each claim (1-5)
+3. **Recommendations** prioritized by novelty → validation experiments for novel findings
+
+**Without SciLink:** Days of manual analysis and literature searching  
+**With SciLink:** Know what's novel in minutes - while your experiment is still running
 
 ---
 
@@ -571,30 +600,6 @@ analysis_session/
 ├── chat_history.json
 └── checkpoint.json
 ```
-
----
-
-## Key Features
-
-### Planning Agents
-- **Dual Knowledge Base**: Separate retrieval for scientific literature and implementation code
-- **Human-in-the-Loop**: Configurable review points for plans and generated code
-- **Self-Correction**: Automatic plan verification and refinement loops
-- **Bayesian Optimization**: Single and multi-objective parameter optimization
-- **Script Consistency**: Locked analysis scripts ensure reproducible metrics
-
-### Analysis Agents
-- **Automatic Agent Selection**: Examines data and routes to appropriate pipeline
-- **Quality Control**: Fit quality assessment with automatic retry (CurveFitting)
-- **Scientific Claims**: Generates literature-searchable claims with keywords
-- **Measurement Recommendations**: Suggests follow-up experiments
-- **Series Analysis**: Built-in support for time series, temperature sweeps
-
-### Shared Features
-- **Multi-Provider Support**: OpenAI, Gemini, Anthropic via LiteLLM
-- **Session Persistence**: Checkpoint/restore for long-running workflows
-- **Multimodal Support**: Images, PDFs, Excel, CSV, numpy arrays
-- **Flexible Input**: Single files, batch processing, or directories
 
 ---
 
