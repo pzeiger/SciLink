@@ -624,6 +624,8 @@ class PlanningOrchestratorAgent:
         
         while iteration < max_iterations:
             iteration += 1
+
+            print(f"  ⏳ Waiting for LLM response ...") 
             
             response = client.chat.completions.create(
                 model=self.model.model,
@@ -689,6 +691,8 @@ class PlanningOrchestratorAgent:
         
         while iteration < max_iterations:
             iteration += 1
+
+            print(f"  ⏳ Waiting for LLM response ...") 
             
             response = litellm.completion(
                 model=self.model.model,
