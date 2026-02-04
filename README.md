@@ -135,7 +135,7 @@ scilink plan --autonomy supervised \
   --code-dir ./opentrons_api
 
 # Use a specific model
-scilink plan --model claude-opus4-5
+scilink plan --model claude-opus-4-5
 ```
 
 ### Interactive Session Example
