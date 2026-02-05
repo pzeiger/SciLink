@@ -70,6 +70,12 @@ scilink analyze
 scilink analyze --data ./sample.tif --metadata ./metadata.json
 ```
 
+---
+
+![SciLink Reports](misc/report_snapshots.jpg)
+
+---
+
 ### Python API
 
 ```python
