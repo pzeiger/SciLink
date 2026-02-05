@@ -29,7 +29,7 @@ Examples:
   # Use supervised mode (AI leads, human approves)
   scilink analyze --mode supervised --data ./data/
   
-  # Full autonomous mode
+  # Full autonomous mode (runs entire pipeline automatically)
   scilink analyze --mode autonomous --data ./sample.npy --metadata ./description.txt
   
   # Use a different model
@@ -214,6 +214,10 @@ class AnalysisPlayground:
         self.session_dir = None
         self.config = config or {}
         
+        # Store initial paths explicitly
+        self._initial_data_path = None
+        self._initial_metadata_path = None
+        
     def _infer_provider(self, model_name: str) -> tuple:
         """Infer provider info from model name."""
         model_lower = model_name.lower()
@@ -256,11 +260,15 @@ class AnalysisPlayground:
         model_name = self.config.get('model_name', 'gemini-3-pro-preview')
         base_url = self.config.get('base_url')
         api_key = self.config.get('api_key')
-        analysis_mode_str = self.config.get('analysis_mode', 'interactive')
+        analysis_mode_str = self.config.get('analysis_mode', 'co-pilot')
         data_path = self.config.get('data_path')
         metadata_path = self.config.get('metadata_path')
         session_dir = self.config.get('session_dir')
         restore = self.config.get('restore', False)
+        
+        # Store initial paths for later use in run()
+        self._initial_data_path = data_path
+        self._initial_metadata_path = metadata_path
         
         # Convert mode string to enum
         mode_map = {
@@ -353,7 +361,7 @@ Supported data types:
                 base_url=base_url,
                 analysis_mode=analysis_mode,
                 restore_checkpoint=restore,
-                futurehouse_api_key=futurehouse_key  # Pass the lit key
+                futurehouse_api_key=futurehouse_key
             )
             print("✅ Agent ready!")
             
@@ -383,17 +391,12 @@ Supported data types:
         tool_names = list(self.agent.tools.functions_map.keys())
         print(f"  {', '.join(tool_names[:5])}...")
         
-        # === HANDLE INITIAL DATA/METADATA ===
-        if data_path:
-            print(f"\n📊 Initial data: {data_path}")
-            self.agent.current_data_path = str(Path(data_path).absolute())
+        # Show initial inputs (if any)
+        if self._initial_data_path:
+            print(f"\n📊 Initial data: {self._initial_data_path}")
         
-        if metadata_path:
-            print(f"📋 Initial metadata: {metadata_path}")
-            # Will be processed during first chat interaction
-            self._initial_metadata_path = metadata_path
-        else:
-            self._initial_metadata_path = None
+        if self._initial_metadata_path:
+            print(f"📋 Initial metadata: {self._initial_metadata_path}")
         
     def print_help(self):
         """Print available commands."""
@@ -413,7 +416,7 @@ Supported data types:
         print("="*60)
     
     def handle_command(self, user_input: str) -> bool:
-        """Handle special commands."""
+        """Handle special commands. Returns True if handled, 'QUIT' to exit, False otherwise."""
         cmd = user_input.lower().strip()
         
         if cmd == "/help":
@@ -496,6 +499,102 @@ Supported data types:
         
         return False
     
+    def _process_initial_inputs(self):
+        """
+        Process initial --data and --metadata inputs.
+        Handles different modes appropriately:
+        - co-pilot: Examine data, load metadata, then wait for user
+        - supervised: Examine, load metadata, suggest agent, wait for approval
+        - autonomous: Run the entire pipeline automatically
+        """
+        has_data = self._initial_data_path is not None
+        has_metadata = self._initial_metadata_path is not None
+        
+        if not has_data and not has_metadata:
+            return  # Nothing to auto-process
+        
+        mode = self.agent.analysis_mode.value
+        
+        print("\n" + "-"*60)
+        print("🚀 AUTO-PROCESSING INITIAL INPUTS")
+        print("-"*60)
+        
+        # === AUTONOMOUS MODE: Full pipeline ===
+        if mode == 'autonomous':
+            if has_data and has_metadata:
+                print(f"🤖 AUTONOMOUS MODE: Running complete analysis pipeline...")
+                print(f"   Data: {self._initial_data_path}")
+                print(f"   Metadata: {self._initial_metadata_path}")
+                print("-"*60 + "\n")
+                
+                # Determine metadata type
+                meta_ext = Path(self._initial_metadata_path).suffix.lower()
+                if meta_ext == '.json':
+                    meta_instruction = f"load the metadata from {self._initial_metadata_path}"
+                else:
+                    meta_instruction = f"convert the metadata from {self._initial_metadata_path}"
+                
+                # Single comprehensive instruction for autonomous execution
+                self.agent.chat(
+                    f"Analyze the data at {self._initial_data_path}. "
+                    f"First examine the data, then {meta_instruction}, "
+                    f"then select the appropriate agent based on the data type and metadata, "
+                    f"and finally run the analysis. Execute the complete workflow."
+                )
+                
+                print("\n" + "-"*60)
+                print("✅ Autonomous analysis complete.")
+                print("   Entering interactive mode for follow-up questions.")
+                print("-"*60)
+                return
+            
+            elif has_data and not has_metadata:
+                print("⚠️  AUTONOMOUS MODE requires both --data and --metadata")
+                print("   Reason: Cannot auto-select agent without metadata context.")
+                print("   Falling back to examining data only...\n")
+                # Fall through to examine data
+            
+            elif has_metadata and not has_data:
+                print("⚠️  AUTONOMOUS MODE requires both --data and --metadata")
+                print("   Reason: No data to analyze.")
+                print("   Falling back to loading metadata only...\n")
+                # Fall through to load metadata
+        
+        # === CO-PILOT / SUPERVISED / Fallback: Step-by-step ===
+        
+        # Step 1: Examine data (if provided)
+        if has_data:
+            data_path = str(Path(self._initial_data_path).absolute())
+            print(f"📊 Examining data: {self._initial_data_path}")
+            self.agent.chat(f"Examine the data at {data_path}")
+            print()
+        
+        # Step 2: Load/convert metadata (if provided)
+        if has_metadata:
+            meta_path = str(Path(self._initial_metadata_path).absolute())
+            meta_ext = Path(self._initial_metadata_path).suffix.lower()
+            
+            if meta_ext == '.json':
+                print(f"📋 Loading metadata: {self._initial_metadata_path}")
+                self.agent.chat(f"Load the metadata from {meta_path}")
+            else:
+                print(f"📋 Converting metadata: {self._initial_metadata_path}")
+                self.agent.chat(f"Convert the text description to metadata from {meta_path}")
+            print()
+        
+        # Step 3: In supervised mode with both inputs, suggest next step
+        if mode == 'supervised' and has_data and has_metadata:
+            print("🔄 SUPERVISED MODE: Suggesting agent selection...")
+            self.agent.chat(
+                "Based on the data type and metadata, recommend the appropriate "
+                "analysis agent and explain your reasoning."
+            )
+            print()
+        
+        print("-"*60)
+        print("✅ Initial processing complete. Ready for your input.")
+        print("-"*60)
+    
     def run(self):
         """Main interactive loop."""
         self.setup()
@@ -506,18 +605,10 @@ Supported data types:
         print("="*60)
         print("Type /help for commands, or just chat naturally!\n")
         
-        # Handle initial metadata if provided
-        if hasattr(self, '_initial_metadata_path') and self._initial_metadata_path:
-            metadata_path = self._initial_metadata_path
-            ext = Path(metadata_path).suffix.lower()
-            
-            if ext == '.json':
-                print(f"📋 Loading metadata from {metadata_path}...")
-                response = self.agent.chat(f"Load the metadata from {metadata_path}")
-            else:
-                print(f"📋 Converting metadata from {metadata_path}...")
-                response = self.agent.chat(f"Convert the metadata from {metadata_path}")
+        # === NEW: Process initial --data and --metadata inputs ===
+        self._process_initial_inputs()
         
+        # === Main chat loop ===
         while True:
             try:
                 user_input = input("\n👤 You: ").strip()
