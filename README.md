@@ -101,6 +101,8 @@ result = analyzer.chat("Analyze ./stem_image.tif and generate scientific claims"
 
 # Planning Agents
 
+<img src="misc/scilink_plan.png" alt="SciLink Planning Agent" width="50%">
+
 The Planning Agents module provides an AI-powered research orchestration system that automates experimental design, data analysis, and iterative optimization workflows.
 
 ## Architecture
@@ -301,6 +303,8 @@ print(f"Next parameters: {result['next_parameters']}")
 ---
 
 # Experimental Analysis Agents
+
+<img src="misc/scilink_analyze.png" alt="SciLink Planning Agent" width="50%">
 
 The Analysis Agents module provides automated scientific data analysis across multiple modalities—microscopy, spectroscopy, particle segmentation, and curve fitting.
 
