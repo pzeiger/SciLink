@@ -10,7 +10,6 @@ All controllers adapt their behavior based on state["is_single_image"]
 and state["num_images"], but use the same code paths.
 """
 
-import subprocess
 import json
 import logging
 from pathlib import Path
@@ -631,7 +630,8 @@ class ConditionalCustomAnalysisController:
         generation_config, 
         safety_settings, 
         parse_fn: Callable, 
-        settings: dict
+        settings: dict,
+        executor
     ):
         self.model = model
         self.logger = logger
@@ -641,6 +641,7 @@ class ConditionalCustomAnalysisController:
         self.settings = settings
         self.output_dir = Path(settings.get('output_dir', 'sam_output'))
         self.max_correction_attempts = settings.get('max_script_corrections', 3)
+        self.executor = executor
     
     def execute(self, state: dict) -> dict:
         """Execute custom analysis - conditional on batch size."""
@@ -765,26 +766,17 @@ class ConditionalCustomAnalysisController:
             return None
     
     def _execute_script(self, script: str) -> tuple:
-        """Execute the generated Python script."""
+        # Save script for debugging
         script_path = self.output_dir / "custom_analysis.py"
-        script_path.parent.mkdir(parents=True, exist_ok=True)
-        
         with open(script_path, 'w') as f:
             f.write(script)
         
-        try:
-            result = subprocess.run(
-                ['python', str(script_path)],
-                cwd=str(self.output_dir),
-                capture_output=True,
-                text=True,
-                timeout=300
-            )
-            return (result.returncode == 0), result.stdout, result.stderr
-        except subprocess.TimeoutExpired:
-            return False, "", "Script execution timed out"
-        except Exception as e:
-            return False, "", str(e)
+        result = self.executor.execute_script(script, working_dir=str(self.output_dir))
+        
+        if result["status"] == "success":
+            return True, result["stdout"], result["stderr"]
+        else:
+            return False, "", result["message"]
     
     def _correct_script(self, original_script: str, error_message: str, attempt: int) -> Optional[str]:
         """Use LLM to correct a failed script."""
