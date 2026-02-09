@@ -5,6 +5,7 @@ import re
 import uuid
 import tempfile
 import logging
+import signal
 
 from .auth import get_api_key
 
@@ -282,3 +283,41 @@ class ScriptExecutor:
             os.chdir(original_cwd)
             if temp_script_file and os.path.exists(temp_script_file):
                 os.remove(temp_script_file)
+
+
+class ExecutionTimeout:
+    """
+    Context manager that raises TimeoutError if exec() exceeds a time limit.
+
+    Uses SIGALRM (Unix only). On Windows this is a no-op.
+    """
+
+    def __init__(self, seconds: int = 120):
+        self.seconds = seconds
+        self._old_handler = None
+
+    def _handler(self, signum, frame):
+        raise TimeoutError(
+            f"Code execution timed out after {self.seconds}s. "
+            "Consider vectorized operations or reducing iteration count."
+        )
+
+    def __enter__(self):
+        if hasattr(signal, 'SIGALRM'):
+            self._old_handler = signal.signal(signal.SIGALRM, self._handler)
+            signal.alarm(self.seconds)
+        else:
+            import logging
+            logging.warning(
+                "ExecutionTimeout: SIGALRM not available on this platform. "
+                "No timeout protection for in-process code execution. "
+                "An infinite loop in generated code will hang the process."
+            )
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if hasattr(signal, 'SIGALRM'):
+            signal.alarm(0)
+            if self._old_handler is not None:
+                signal.signal(signal.SIGALRM, self._old_handler)
+        return False

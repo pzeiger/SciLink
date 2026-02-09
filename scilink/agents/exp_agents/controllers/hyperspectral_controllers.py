@@ -25,6 +25,7 @@ from ..instruct import (
 )
 
 from ....tools.hyperspectral_tools import AGENT_METADATA_KEYS_TO_STRIP
+from ....executors import ExecutionTimeout
 
 
 def build_code_generation_prompt(
@@ -1262,6 +1263,15 @@ class RunDynamicAnalysisController:
     """
     [🧠 + 💻] The 'Code Interpreter' / 'Dynamic Analyst'.
     Generates, executes, and validates Python code to model spectral features.
+
+    Unlike for other agents, we use in-process exec() because:
+
+    - Hyperspectral cubes are large (100MB+). Serializing to disk for a
+      subprocess to reload would add significant I/O overhead.
+    - The generated code is a pure function (data in → arrays out), not a
+      standalone program that needs matplotlib or file I/O.
+    - Results are numpy arrays that would be painful to serialize via stdout.
+
     """
     MAX_RETRIES = 5
     SUCCESS_THRESHOLD = 0.5  # If >50% of maps in a script pass QC, accept the run.
@@ -1370,15 +1380,16 @@ class RunDynamicAnalysisController:
                     }
                     
                     # Execute Code
-                    exec(code_str, global_scope, local_scope)
+                    with ExecutionTimeout(seconds=120):
+                        exec(code_str, global_scope, local_scope)
                     
-                    if "analyze_feature" not in local_scope:
-                        raise ValueError("Function 'analyze_feature' was not found in generated code.")
-                    
-                    # --- D. RUN ON DATA ---
-                    self.logger.info("    Executing generated code...")
-                    func = local_scope["analyze_feature"]
-                    result_dict = func(optimal_data, state["energy_axis"])
+                        if "analyze_feature" not in local_scope:
+                            raise ValueError("Function 'analyze_feature' was not found in generated code.")
+                        
+                        # --- D. RUN ON DATA ---
+                        self.logger.info("    Executing generated code...")
+                        func = local_scope["analyze_feature"]
+                        result_dict = func(optimal_data, state["energy_axis"])
                     
                     # Validation
                     if not isinstance(result_dict, dict): raise ValueError("Function return must be a dict.")
