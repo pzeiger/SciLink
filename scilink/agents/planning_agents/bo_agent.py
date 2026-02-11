@@ -144,17 +144,40 @@ class BOAgent(BaseAgent):
         clean = config.copy()
         m_conf = clean.get("model_config", {})
         if m_conf.get("kernel") not in ["matern_2.5", "matern_1.5", "rbf"]:
-            m_conf["kernel"] = "matern_2.5" # need warning
+            logging.warning(f"Invalid kernel '{m_conf.get('kernel')}', defaulting to 'matern_2.5'")
+            m_conf["kernel"] = "matern_2.5"
         if m_conf.get("noise") not in ["fixed_low", "learnable", "high_noise"]:
-            m_conf["noise"] = "fixed_low" # need warning
+            logging.warning(f"Invalid noise '{m_conf.get('noise')}', defaulting to 'fixed_low'")
+            m_conf["noise"] = "fixed_low"
         clean["model_config"] = m_conf
         return clean
 
     def run_optimization_loop(self, data_path: str, objective_text: str, 
                              input_cols: List[str], input_bounds: List[List[float]], 
                              target_cols: List[str], output_dir: str = "./bo_artifacts",
-                             batch_size: int = 1) -> Dict[str, Any]:
+                             batch_size: int = 1,
+                             save_acq: bool = True,
+                             plot_acq: bool = True) -> Dict[str, Any]:
+        """
+        Run one iteration of the Bayesian Optimization loop.
         
+        Args:
+            data_path: Path to the data file (.xlsx or .csv).
+            objective_text: Natural language description of the optimization goal.
+            input_cols: List of input column names.
+            input_bounds: List of [min, max] bounds for each input.
+            target_cols: List of target/objective column names.
+            output_dir: Directory for saving artifacts.
+            batch_size: Number of candidates to recommend.
+            save_acq: If True, saves acquisition function landscape data to .npz file.
+                Supported for single-objective only; ignored for multi-objective.
+            plot_acq: If True, generates and saves a plot of the acquisition function.
+                Supported for single-objective only; ignored for multi-objective.
+            
+        Returns:
+            Dict with status, recommendations, strategy, plot paths, and optionally
+            acquisition function plot/data paths (single-objective only).
+        """
         if output_dir is None:
             output_dir = str(self.output_dir)
         
@@ -226,11 +249,43 @@ class BOAgent(BaseAgent):
         )
 
         # 5. Diagnostics
-        plot_path = f"{output_dir}/step_{len(history)+1}.png"
+        step_num = len(history) + 1
+        plot_path = f"{output_dir}/step_{step_num}.png"
         if is_moo:
             optimizer.generate_diagnostics(save_path=plot_path)
         else:
             optimizer.generate_diagnostics(next_x_batch, df[target_cols[0]].values.tolist(), save_path=plot_path)
+
+        # 5b. Acquisition Function Plot & Data (SOO only)
+        acq_plot_path = None
+        acq_data_path = None
+        
+        if not is_moo and plot_acq:
+            print("  - 📊 BO Agent: Plotting acquisition function...")
+            try:
+                acq_plot_path = f"{output_dir}/acq_step_{step_num}.png"
+                optimizer.plot_acquisition(
+                    candidate_x=next_x_batch,
+                    save_path=acq_plot_path
+                )
+                print(f"  - 💾 Acquisition plot saved: {acq_plot_path}")
+            except RuntimeError as e:
+                logging.warning(f"Could not plot acquisition function: {e}")
+                acq_plot_path = None
+        
+        if not is_moo and save_acq:
+            print("  - 💾 BO Agent: Saving acquisition function data...")
+            try:
+                acq_data_path = f"{output_dir}/acq_data_step_{step_num}.npz"
+                acq_meta = optimizer.save_acquisition_data(
+                    candidate_x=next_x_batch,
+                    save_path=acq_data_path
+                )
+                print(f"  - 💾 Acquisition data saved: {acq_data_path} "
+                      f"(keys: {len(acq_meta['keys'])})")
+            except RuntimeError as e:
+                logging.warning(f"Could not save acquisition data: {e}")
+                acq_data_path = None
 
         # 6. Inspection
         print("  - 👀 BO Agent: Inspecting visuals...")
@@ -242,22 +297,29 @@ class BOAgent(BaseAgent):
         except Exception as e:
             inspection = {"status": "skipped", "reason": str(e)}
 
-        # 7. Save History (existing mechanism)
+        # 7. Save History
         recommendations = []
         for row in next_x_batch:
             recommendations.append({k: float(v) for k, v in zip(input_cols, row)})
             
         log_entry = {
-            "step": len(history) + 1, 
+            "step": step_num, 
             "config": valid_config, 
             "recommendation_batch": recommendations, 
-            "inspection": inspection
+            "inspection": inspection,
         }
+        # Include acquisition paths in history when available
+        if acq_plot_path or acq_data_path:
+            log_entry["acquisition"] = {
+                "strategy": strategy_name,
+                "plot_path": acq_plot_path,
+                "data_path": acq_data_path,
+            }
         self._save_history(log_entry)
 
         # 8. Output
         if batch_size > 1:
-            batch_csv = f"{output_dir}/batch_step_{len(history)+1}.csv"
+            batch_csv = f"{output_dir}/batch_step_{step_num}.csv"
             pd.DataFrame(recommendations).to_csv(batch_csv, index=False)
             print(f"  - 💾 Batch saved: {batch_csv}")
 
@@ -265,8 +327,12 @@ class BOAgent(BaseAgent):
             "status": "success",
             "next_parameters": recommendations[0] if batch_size == 1 else recommendations,
             "strategy": valid_config,
-            "plot_path": plot_path
+            "plot_path": plot_path,
         }
+        if acq_plot_path:
+            result["acq_plot_path"] = acq_plot_path
+        if acq_data_path:
+            result["acq_data_path"] = acq_data_path
         
         # Log this action to state
         self._log_action(
@@ -275,7 +341,9 @@ class BOAgent(BaseAgent):
                 "data_path": data_path,
                 "input_cols": input_cols,
                 "target_cols": target_cols,
-                "batch_size": batch_size
+                "batch_size": batch_size,
+                "save_acq": save_acq,
+                "plot_acq": plot_acq,
             },
             result=result,
             rationale=valid_config.get("rationale")

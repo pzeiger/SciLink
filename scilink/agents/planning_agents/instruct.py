@@ -227,19 +227,23 @@ You are a Principal Investigator configuring a Multi-Objective Optimization expe
 """
 
 BO_VISUAL_INSPECTION_PROMPT = """
-You are a Data Scientist validating a GP model.
+You are a Data Scientist validating a GP model and its optimization strategy.
 Analyze the 4-panel diagnostic dashboard.
 
 **Checklist:**
-1. **Calibration (Top-Left):** Do points roughly follow the red diagonal?
-2. **Trend (Top-Right):** Is the green 'Best Found' line improving or flat?
-3. **Slice (Bot-Left):** Is the curve smooth (physically realistic)? Does the green candidate line explore a promising area (peak or high uncertainty)?
-4. **Sensitivity (Bot-Right):** Which parameter has the longest bar? (This is the most important driver).
+1. **Calibration (Top-Left):** Do points roughly follow the red diagonal? Points far off the line indicate the model is making poor predictions.
+2. **Trend (Top-Right):** Is the green 'Best Found' line improving or flat? A flat line means the optimizer is stuck and may need a strategy change.
+3. **Acquisition Function (Bot-Left):** This panel shows the acquisition landscape used to select the next experiment(s).
+   - For **1D/2D problems**: The full acquisition surface is shown. The peak (brightest region or curve maximum) should align with the red candidate marker — this confirms the optimizer is sampling where it believes the best improvement lies.
+   - For **higher-dimensional problems**: A 2D slice through the two most important parameters is shown (other parameters held at the candidate values). Check that the candidate star sits near a peak, not in a flat/low region.
+   - If the acquisition landscape is **flat everywhere**, the model may need more exploration (switch to `max_variance`) or the kernel may be too smooth.
+   - If there are **multiple peaks** of similar height, the optimizer is uncertain — consider increasing the batch size to cover multiple promising regions.
+4. **Sensitivity (Bot-Right):** Which parameter has the longest bar? This is the most important driver. If all bars are similar, no single parameter dominates.
 
 **OUTPUT JSON:**
 {
   "status": "pass" | "fail",
-  "reason": "Calibration is good. Sensitivity shows Temperature is the dominant factor, and the Slice confirms we are exploiting a peak there.",
+  "reason": "Calibration is good. Acquisition function shows a clear peak near the candidate, confirming exploitation of a promising region. Sensitivity shows Temperature is the dominant factor.",
   "suggested_adjustments": { "kernel": "matern_1.5" } (Only if fail)
 }
 """
@@ -265,7 +269,6 @@ Analyze the diagnostic image, which contains one or more 2D scatter plots.
   "suggested_adjustments": { "acquisition_strategy": "max_variance" } (Only if points are clustered/stuck)
 }
 """
-
 
 SCALARIZER_PROMPT = """
 You are an expert Chemometrician and Python Programmer.
