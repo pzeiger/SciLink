@@ -1216,13 +1216,20 @@ class OrchestratorTools:
         )
         
         # 8. RUN OPTIMIZATION
-        def run_optimization(parallel_capable: bool = False, batch_size: int = None):
+        def run_optimization(
+            parallel_capable: bool = False, 
+            batch_size: int = None,
+            physical_constraints: str = None,
+            experimental_budget: int = None
+        ):
             """
             Runs Bayesian Optimization to suggest next parameters.
+            Supports optional physical constraints for realizable batch design
+            and optional experimental budget for exploration/exploitation control.
             """
             print(f"  ⚡ Tool: Running Bayesian Optimization...")
             
-            # --- PRE-FLIGHT CHECKS ---
+            # --- PRE-FLIGHT CHECKS --- 
             if not self.orch.active_scalarizer_script:
                 return json.dumps({
                     "status": "error",
@@ -1255,7 +1262,6 @@ class OrchestratorTools:
                     "current_data_count": len(df)
                 })
             
-            # Check for plural target columns list
             if not self.orch.expected_target_columns or not self.orch.expected_input_columns:
                 return json.dumps({
                     "status": "error", 
@@ -1263,7 +1269,7 @@ class OrchestratorTools:
                     "hint": "This shouldn't happen. Try reset_analysis_logic."
                 })
             
-            # SCHEMA VALIDATION
+            # SCHEMA VALIDATION 
             missing_targets = [t for t in self.orch.expected_target_columns if t not in df.columns]
             if missing_targets:
                 return json.dumps({
@@ -1280,7 +1286,6 @@ class OrchestratorTools:
                     "available_columns": list(df.columns)
                 })
             
-            #  Add list of targets to critical columns
             critical_cols = self.orch.expected_input_columns + self.orch.expected_target_columns
             
             if df[critical_cols].isnull().any().any():
@@ -1292,10 +1297,8 @@ class OrchestratorTools:
                 })
             
             # ============================================
-            # BOUNDS & CONSTRAINTS CALCULATION (Unchanged)
+            # BOUNDS & CONSTRAINTS CALCULATION 
             # ============================================
-
-            # 1. Fetch Scientific Constraints from Planner State
             scientific_bounds = {}
             current_plan = self.orch.planner.state.get("current_plan", {})
             
@@ -1310,7 +1313,6 @@ class OrchestratorTools:
                             scientific_bounds[name] = (float(min_v), float(max_v))
                             print(f"  🔬 Scientific Constraint Found: {name} must be between {min_v} and {max_v}")
 
-            # 2. Identify numeric inputs
             numeric_inputs = []
             for col in self.orch.expected_input_columns:
                 if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
@@ -1321,13 +1323,11 @@ class OrchestratorTools:
             if not numeric_inputs:
                 return json.dumps({
                     "status": "error", 
-                    "message": "No numeric input parameters found. Optimization requires at least one numeric parameter (float/int)."
+                    "message": "No numeric input parameters found."
                 })
 
-            # Update state to only track numeric inputs for optimization
             self.orch.expected_input_columns = numeric_inputs
 
-            # 3. Calculate Final Bounds
             input_bounds = []
             for col in numeric_inputs:
                 if col in scientific_bounds:
@@ -1347,12 +1347,11 @@ class OrchestratorTools:
                     safe_max = data_max + margin
                     
                     input_bounds.append([safe_min, safe_max])
-                    print(f"     -> Bound for '{col}': [{safe_min:.2f}, {safe_max:.2f}] (Source: DATA STATISTICS)")
+                    print(f"     -> Bound for '{col}': [{safe_min:.2f}, {safe_max:.2f}] (Source: DATA)")
             
             # ============================================
-            # BATCH SIZE DETERMINATION (Unchanged)
+            # BATCH SIZE DETERMINATION
             # ============================================
-            
             if not parallel_capable:
                 final_batch_size = 1
                 mode_desc = "sequential (single experiment)"
@@ -1379,15 +1378,30 @@ class OrchestratorTools:
                 mode_desc = f"parallel (batch of {batch_size})"
                 print(f"    ℹ️  Using batch_size: {batch_size}")
             
+            # ============================================
+            # CONSTRAINT-AWARE & BUDGET-AWARE LOGGING
+            # ============================================
+            if physical_constraints:
+                mode_desc += " + constraint-aware"
+                print(f"    📐 Physical constraints provided — will use LLM-guided batch design")
+            
+            if experimental_budget is not None:
+                mode_desc += f" + budget={experimental_budget}"
+                print(f"    💰 Experimental budget: {experimental_budget} iteration(s) remaining")
+            
             print(f"    📊 Optimization Setup:")
             print(f"       Mode: {mode_desc}")
             print(f"       Data points: {len(df)}")
             print(f"       Inputs: {self.orch.expected_input_columns}")
-            print(f"       Targets: {self.orch.expected_target_columns}") # Log targets list
+            print(f"       Targets: {self.orch.expected_target_columns}")
             print(f"       Bounds: {input_bounds}")
+            if physical_constraints:
+                print(f"       Constraints: {physical_constraints[:100]}...")
             
             try:
-                # Pass list of targets directly
+                # ============================================
+                # CALL BO
+                # ============================================
                 res = self.orch.bo.run_optimization_loop(
                     data_path=str(self.orch.bo_data_path),
                     objective_text=self.orch.objective,
@@ -1395,7 +1409,11 @@ class OrchestratorTools:
                     input_bounds=input_bounds,                    
                     target_cols=self.orch.expected_target_columns,
                     output_dir=str(self.orch.base_dir / "bo_artifacts"),
-                    batch_size=int(final_batch_size)
+                    batch_size=int(final_batch_size),
+                    physical_constraints=physical_constraints,
+                    experimental_budget=experimental_budget,
+                    plot_acq=True,
+                    save_acq=True,
                 )
                 
                 if res.get("status") != "success":
@@ -1415,7 +1433,7 @@ class OrchestratorTools:
                     hint = "Run this experiment, then use analyze_file on the result to continue."
                     params_summary = "Generated next experiment parameters"
                 
-                return json.dumps({
+                response = {
                     "status": "success",
                     "mode": "parallel" if parallel_capable else "sequential",
                     "batch_size": final_batch_size,
@@ -1424,7 +1442,26 @@ class OrchestratorTools:
                     "strategy_used": res.get('strategy', {}).get('acquisition_strategy', {}).get('type'),
                     "plot_path": res.get('plot_path'),
                     "hint": hint
-                })
+                }
+                if res.get("acq_plot_path"):
+                    response["acq_plot_path"] = res["acq_plot_path"]
+                if res.get("acq_data_path"):
+                    response["acq_data_path"] = res["acq_data_path"]
+                
+                # Include constrained planning metadata
+                if res.get("constrained_planning"):
+                    cp = res["constrained_planning"]
+                    response["constraint_aware"] = True
+                    response["coverage_summary"] = cp.get("coverage_summary", "")
+                    response["trade_offs"] = cp.get("trade_offs", "")
+                    if cp.get("validation_errors"):
+                        response["constraint_warnings"] = cp["validation_errors"]
+                
+                # Include budget context
+                if res.get("budget"):
+                    response["budget"] = res["budget"]
+                
+                return json.dumps(response)
                 
             except Exception as e:
                 logging.error(f"Optimization error: {e}")
@@ -1439,7 +1476,15 @@ class OrchestratorTools:
             description=(
                 "Runs Bayesian Optimization to suggest next experimental parameters. "
                 "Requires at least 3 data points from analyze_file. "
-                "For parallel mode, batch_size must be specified."
+                "For parallel mode, batch_size must be specified. "
+                "Supports optional physical_constraints for constraint-aware batch design — "
+                "when provided, the agent evaluates the acquisition landscape and uses LLM "
+                "reasoning to design a batch that maximizes information gain while respecting "
+                "physical experimental limitations (e.g., plate layouts, discrete reagent stocks, "
+                "shared equipment channels). "
+                "Supports optional experimental_budget for exploration/exploitation control — "
+                "pass the number of remaining optimization iterations to shift strategy from "
+                "exploration (high budget) to exploitation (low budget)."
             ),
             parameters={
                 "parallel_capable": {
@@ -1452,10 +1497,39 @@ class OrchestratorTools:
                         "Number of parallel experiments (required if parallel_capable=True). "
                         "Infer from experimental plan (e.g., plate format, grid size, equipment capacity)."
                     )
+                },
+                "physical_constraints": {
+                    "type": "string",
+                    "description": (
+                        "Natural language description of physical experimental constraints that "
+                        "prevent arbitrary parameter combinations. When provided, the optimizer "
+                        "evaluates the full acquisition landscape and uses LLM reasoning to design "
+                        "a realizable batch. Examples:\n"
+                        "- '96-well plate: rows share temperature (8 values), columns share pH (12 values)'\n"
+                        "- 'Only 5 catalyst concentrations available: 0.1, 0.5, 1.0, 2.0, 5.0 mM'\n"
+                        "- 'Reactor has 4 zones with independent temp but shared pressure'\n"
+                        "- 'Gradient limited to linear ramp: min at well A1, max at well H12'\n"
+                        "If not provided, standard unconstrained BO is used."
+                    )
+                },
+                "experimental_budget": {
+                    "type": "integer",
+                    "description": (
+                        "Number of remaining optimization iterations (including this one). "
+                        "Controls exploration-vs-exploitation balance:\n"
+                        "- 1 = final shot (pure exploitation, no exploration)\n"
+                        "- 2-3 = critical budget (strongly favor exploitation)\n"
+                        "- Higher values = scaled based on campaign progress\n"
+                        "- Omit for no budget constraint (default behavior).\n"
+                        "Pass when user mentions remaining experiments, budget, 'last round', "
+                        "or 'N more tries'. This counts iterations (calls to run_optimization), "
+                        "not individual experiments within a batch."
+                    )
                 }
             },
             required=[]
         )
+
 
         # 9. SAVE CHECKPOINT
         def save_checkpoint():

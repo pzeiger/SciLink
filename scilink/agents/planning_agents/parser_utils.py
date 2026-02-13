@@ -82,13 +82,22 @@ def table_to_markdown(table: List[List[str]]) -> str:
     return md
 
 
-def parse_json_from_response(resp) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+def parse_json_from_response(resp) -> "Tuple[Optional[Dict[str, Any]], Optional[str]]":
     """
     Robustly extracts and parses JSON from an LLM response object.
+    
+    Handles:
+    - Gemini: resp.text or resp.parts[0].text
+    - OpenAI/Anthropic wrapper: resp.text (via SimpleNamespace)
+    - Raw strings
+    - Markdown code fences (```json ... ```)
+    - Preamble/postamble text around JSON (common with Anthropic models)
     """
+    import json
+    
     json_text = ""
     
-    # 1. Extract Text (Protected against Safety Filter blocks)
+    # 1. Extract raw text from response object
     try:
         if hasattr(resp, 'text'): 
             json_text = resp.text.strip()
@@ -100,12 +109,14 @@ def parse_json_from_response(resp) -> Tuple[Optional[Dict[str, Any]], Optional[s
             return None, f"LLM response format unexpected: {type(resp)}"
             
     except ValueError as e:
-        # Google GenAI raises ValueError on .text access if response was blocked
         return None, f"Response blocked or empty (Safety Filter): {e}"
     except Exception as e:
         return None, f"Error extracting text from response: {e}"
 
-    # 2. Strip Markdown Code Blocks
+    if not json_text:
+        return None, "Empty response from LLM"
+
+    # 2. Strip Markdown code fences
     if json_text.startswith("```json"):
         json_text = json_text[len("```json"):].strip()
     elif json_text.startswith("```"):
@@ -114,11 +125,68 @@ def parse_json_from_response(resp) -> Tuple[Optional[Dict[str, Any]], Optional[s
     if json_text.endswith("```"):
         json_text = json_text[:-len("```")].strip()
 
-    # 3. Parse
+    # 3. Try direct parse first (fast path — works for Gemini and clean responses)
     try:
         return json.loads(json_text), None
+    except json.JSONDecodeError:
+        pass  # Fall through to extraction logic
+    
+    # 4. Extract JSON object from surrounding text (handles Anthropic preamble)
+    #    Find the outermost { ... } by brace matching
+    first_brace = json_text.find('{')
+    if first_brace == -1:
+        return None, (
+            f"No JSON object found in response. "
+            f"First 300 chars: {json_text[:300]}"
+        )
+    
+    # Match braces to find the complete JSON object
+    depth = 0
+    in_string = False
+    escape_next = False
+    last_brace = -1
+    
+    for i in range(first_brace, len(json_text)):
+        ch = json_text[i]
+        
+        if escape_next:
+            escape_next = False
+            continue
+        
+        if ch == '\\' and in_string:
+            escape_next = True
+            continue
+        
+        if ch == '"' and not escape_next:
+            in_string = not in_string
+            continue
+        
+        if in_string:
+            continue
+            
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                last_brace = i
+                break
+    
+    if last_brace == -1:
+        return None, (
+            f"Unbalanced braces in response. "
+            f"First 300 chars: {json_text[:300]}"
+        )
+    
+    extracted = json_text[first_brace:last_brace + 1]
+    
+    try:
+        return json.loads(extracted), None
     except json.JSONDecodeError as e:
-        return None, f"Failed to decode JSON: {str(e)}"
+        return None, (
+            f"Failed to decode JSON: {e}. "
+            f"Extracted text (first 500 chars): {extracted[:500]}"
+        )
 
 def append_experiment_result(file_path: str, parameters: Dict[str, float], results: Dict[str, float]):
     """
