@@ -58,7 +58,7 @@ def plot_curve_to_bytes(curve_data: np.ndarray, system_info: dict, title_suffix:
     plt.tight_layout()
     
     buf = BytesIO()
-    plt.savefig(buf, format='jpeg', dpi=150)
+    plt.savefig(buf, format='png', dpi=150)
     buf.seek(0)
     image_bytes = buf.getvalue()
     plt.close(fig)
