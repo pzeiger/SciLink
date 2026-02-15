@@ -685,9 +685,27 @@ Ensure the final output is ONLY the JSON object.
 
 COMPONENT_INITIAL_ESTIMATION_INSTRUCTIONS = """You are an expert in hyperspectral data analysis and materials characterization.
 
-Based on the system description and data characteristics provided, estimate the optimal number of spectral components for spectral unmixing decomposition.
+Based on the system description and data characteristics provided, you must:
+1. Choose the decomposition method (NMF or PCA)
+2. Estimate the optimal number of spectral components
 
-**Key Considerations:**
+**Method Selection:**
+
+- **NMF** (Non-negative Matrix Factorization): Best for well-understood systems where components should be physically interpretable (non-negative spectra and abundances). Supports detailed per-component validation and spatial/spectral refinement. Slower but produces directly meaningful results.
+- **PCA** (Principal Component Analysis): Faster, better for noisy data or initial exploration. Components may have negative values and require more interpretation. When PCA is chosen, refinement will primarily use custom code (dynamic analysis) to model specific spectral features rather than spatial/spectral zoom.
+
+**When to choose PCA over NMF:**
+- Low signal-to-noise ratio data (noisy spectra where NMF may overfit)
+- Very large datasets where speed matters
+- Exploratory analysis focused on identifying features for custom code modeling
+- When negative spectral features are physically meaningful (e.g., difference spectra)
+
+**When to choose NMF (default):**
+- Well-characterized systems with known phases
+- When physically interpretable, non-negative components are needed
+- When spatial/spectral refinement of individual components is desired
+
+**Component Count Considerations:**
 
 **System Complexity:**
 - Simple systems (pure materials, single phases): Fewer components (2-4)
@@ -707,9 +725,10 @@ Based on the system description and data characteristics provided, estimate the 
 You MUST output a valid JSON object:
 
 {
+  "method": "<nmf or pca>",
   "estimated_components": <integer between 2 and 15>,
   "confidence": "<high/medium/low>",
-  "reasoning": "<explain your estimate based on the provided information>",
+  "reasoning": "<explain your method choice AND component estimate based on the provided information>",
   "expected_components": "<briefly describe what the components might represent>"
 }
 
@@ -717,7 +736,7 @@ Focus on providing a reasonable estimate based on the available information abou
 """
 
 
-COMPONENT_VISUAL_COMPARISON_INSTRUCTIONS = """You are an expert in hyperspectral data analysis comparing NMF decomposition results.
+COMPONENT_VISUAL_COMPARISON_INSTRUCTIONS = """You are an expert in hyperspectral data analysis comparing spectral decomposition results.
 
 You will see visual results from under-sampling and over-sampling relative to an initial estimate. Your task is to decide which approach gives the most meaningful and interpretable results.
 
@@ -763,18 +782,18 @@ You MUST output a valid JSON object:
 Focus on visual pattern recognition and physical interpretability.
 """
 
-COMPONENT_SELECTION_WITH_ELBOW_INSTRUCTIONS = """You are an expert in hyperspectral data analysis selecting the optimal number of components for NMF decomposition.
+COMPONENT_SELECTION_WITH_ELBOW_INSTRUCTIONS = """You are an expert in hyperspectral data analysis selecting the optimal number of components for spectral decomposition.
 
 You will receive:
-1.  **Context**: Initial estimate, tested range, system info.
-2.  **Quantitative Analysis**: An "Elbow Plot" showing NMF reconstruction error vs. number of components, and the raw error values.
+1.  **Context**: Initial estimate, tested range, system info, decomposition method (NMF or PCA).
+2.  **Quantitative Analysis**: An "Elbow Plot" showing reconstruction error vs. number of components, and the raw error values.
 3.  **Qualitative Analysis**: Visual summaries (spectra + abundance maps) for key component numbers (e.g., minimum tested, maximum tested, initial estimate).
 
 Your task is to integrate the quantitative trend (elbow plot) with the qualitative assessment (visual examples) to determine the most scientifically meaningful number of components.
 
 **Interpretation Guide:**
 
-* **Elbow Plot**: Look for the "elbow" point – where adding more components provides diminishing returns in reducing the reconstruction error. This often suggests a good balance between model complexity and data representation.
+* **Elbow Plot**: Look for the "elbow" point – where adding more components provides diminishing returns in reducing the reconstruction error. For PCA, the error represents unexplained variance (1 - cumulative explained variance). This often suggests a good balance between model complexity and data representation.
 * **Visual Examples**:
     * Assess if components look physically meaningful (distinct spectra, coherent spatial maps).
     * Check for signs of **underfitting** (fewer components than the elbow suggests): Are distinct spectral features or spatial regions merged into single components in the visual examples?
@@ -1173,11 +1192,14 @@ Output ONLY the JSON object.
 
 SPECTROSCOPY_REFINEMENT_INSTRUCTIONS = """You are an expert spectroscopist steering an automated analysis pipeline.
 
-**Goal:** Analyze results to determine if a focused refinement is scientifically justified and **select the correct tool** (Standard NMF or Dynamic Analysis).
+**Goal:** Analyze results to determine if a focused refinement is scientifically justified and **select the correct tool** (Standard Decomposition or Dynamic Analysis).
 
 **Crucial Constraint:**
-* Standard Refinement uses **NMF** on a subset of data. It works well for separating mixed spatial phases.
-* Dynamic Analysis (Custom Code) uses **Python/Math** (e.g., curve fitting). It works well when NMF fails to model the physical shape (e.g., peak shifts, specific background shapes).
+* Standard Refinement uses **the current decomposition method (NMF or PCA)** on a subset of data. It works well for separating mixed spatial phases. This is most effective when NMF was used.
+* Dynamic Analysis (Custom Code) uses **Python/Math** (e.g., curve fitting). It works well when the decomposition fails to model the physical shape (e.g., peak shifts, specific background shapes).
+
+**IMPORTANT — If PCA was used as the decomposition method:**
+PCA components are exploratory — they capture variance directions, not physical phases. Spatial/spectral zoom refinement of PCA components rarely adds value because PCA loadings are not physically interpretable in the same way as NMF components. When PCA is the method, **strongly prefer `custom_code` targets** to mathematically model the specific spectral features identified by PCA (e.g., peak positions, edge onsets, intensity ratios). Only use `spatial` or `spectral` refinement with PCA in exceptional cases where a specific spatial region clearly needs isolation.
 
 ---
 
@@ -1185,7 +1207,7 @@ SPECTROSCOPY_REFINEMENT_INSTRUCTIONS = """You are an expert spectroscopist steer
 
 Depending on the analysis method used in the current iteration, you will receive different types of plots:
 
-### A. Standard NMF Results
+### A. Standard Decomposition Results (NMF/PCA)
 
 **Validation Plots (one per component):**
 - **LEFT Panel:** Spatial abundance map with red contour marking high-purity region (top 10%)
@@ -1221,11 +1243,11 @@ Depending on the analysis method used in the current iteration, you will receive
 
 1. **Artifact Check (STOP):**
    
-   **For NMF Results:**
+   **For Decomposition Results (NMF/PCA):**
    * Does the spectrum look like random noise (jagged spikes)?
    * Does the spatial map look like "salt-and-pepper" static?
-   * Does **Orange show peaks that are NOT present in Black** AND the high-purity region is tiny (<2% of pixels)?
-   * Does Red diverge from Black by >2σ outside the Blue Band?
+   * (NMF only) Does **Orange show peaks that are NOT present in Black** AND the high-purity region is tiny (<2% of pixels)?
+   * (NMF only) Does Red diverge from Black by >2σ outside the Blue Band?
    
    **For Dynamic Analysis Results:**
    * Does the spatial map show salt-and-pepper noise?
@@ -1236,11 +1258,11 @@ Depending on the analysis method used in the current iteration, you will receive
    
 2. **Success Check (STOP):**
    
-   **For NMF Results:**
+   **For Decomposition Results (NMF/PCA):**
    * Are components chemically distinct and clean?
    * Are spatial domains well-defined?
-   * Is **Black ≈ Red** (within Blue Band)?
-   * Is the Residual (Bottom Panel) flat/featureless?
+   * (NMF only) Is **Black ≈ Red** (within Blue Band)?
+   * (NMF only) Is the Residual (Bottom Panel) flat/featureless?
    
    **For Dynamic Analysis Results:**
    * Do the custom features show clear spatial structure?
@@ -1253,19 +1275,20 @@ Depending on the analysis method used in the current iteration, you will receive
    
    If the signal is **real but complex**, identify the specific *type* of complexity to choose the tool:
 
-   **Scenario A: Spatial/Spectral Mixing (Use Standard NMF)**
-   * *Observation:* In NMF results, Black ≈ Red (good reconstruction), but Orange differs from Black/Red (mixing present). The component is valid but represents a mixed phase.
+   **Scenario A: Spatial/Spectral Mixing (Use Standard Decomposition — best with NMF)**
+   * *Observation:* In decomposition results, Black ≈ Red (good reconstruction), but Orange differs from Black/Red (mixing present). The component is valid but represents a mixed phase.
    * *Observation:* The spectrum looks real but "blended" (e.g., two phases mixed in one component).
-   * *Action:* Target a standard `spatial` or `spectral` zoom.
+   * *Action:* Target a standard `spatial` or `spectral` zoom. **Note:** If PCA was used, prefer `custom_code` instead — PCA spatial refinement is rarely effective.
 
    **IMPORTANT: When NOT to use spatial refinement:**
-   If multiple NMF components show the SAME spectral feature (e.g., same peak) at slightly different energy positions, spatial zoom will NOT help — it will just reduce the visible shift range within the subregion. This pattern indicates a continuous physical variation (peak shift, edge shift) that requires `custom_code` (dynamic analysis) to quantify. Similarly, if residual autocorrelation is high (>0.3) across multiple components sharing similar spectral features, this is strong evidence of a continuous shift that NMF cannot model regardless of spatial subsetting.
+   If multiple components show the SAME spectral feature (e.g., same peak) at slightly different energy positions, spatial zoom will NOT help — it will just reduce the visible shift range within the subregion. This pattern indicates a continuous physical variation (peak shift, edge shift) that requires `custom_code` (dynamic analysis) to quantify. Similarly, if residual autocorrelation is high (>0.3) across multiple components sharing similar spectral features, this is strong evidence of a continuous shift that the decomposition cannot model regardless of spatial subsetting.
 
 
    **Scenario B: Missed Physics / Model Failure (Use Custom Code)**
-   * *Observation:* In NMF results, **Black and Red diverge** (poor reconstruction).
-   * *Observation:* The Residual Plot shows a **Structured Shape** (e.g., a "Hill", a "Sine Wave", or a "Step") indicating NMF missed a specific feature.
+   * *Observation:* In decomposition results, **Black and Red diverge** (poor reconstruction).
+   * *Observation:* The Residual Plot shows a **Structured Shape** (e.g., a "Hill", a "Sine Wave", or a "Step") indicating the decomposition missed a specific feature.
    * *Observation:* Evidence of a **Peak Shift** (Derivative shape in residual) or **Specific Shape** (e.g., Edge onset, Power-law tail).
+   * *Observation (PCA-specific):* PCA components show interesting variance patterns that need mathematical modeling to extract physical quantities.
    * *Action:* Define a target with `type: "custom_code"`. You must describe the *math* needed (e.g., "Fit a Gaussian to model the peak shift around 0.6eV").
 
 ---
@@ -1278,7 +1301,7 @@ You MUST output a valid JSON object.
 * For "spectral" targets: 'value' = List of two Numbers [start, end].
 * For "custom_code" targets: 'value' = null (The description field is what matters).
 
-**Example 1: STOP (NMF Artifact)**
+**Example 1: STOP (Decomposition Artifact)**
 {
   "refinement_needed": false,
   "reasoning": "Component 4 is a hallucination. The Orange line (Basis Component) shows peaks at 0.5 and 0.8 eV that are NOT present in the Black line (Measured Spectrum). Additionally, the high-purity region comprises only 1.2% of pixels. This is a mathematical artifact from NMF overfitting."
@@ -1326,22 +1349,28 @@ Translate validation terminology (Black/Red/Orange lines, RMSE) into plain langu
 
 **What You Will See:**
 
-### 1. Standard NMF Results
-**Validation Plots (one per component):**
+### 1. Standard Decomposition Results (NMF or PCA)
+
+**If NMF was used — Validation Plots (one per component):**
 - **LEFT Panel:** Spatial abundance map with red contour (high-purity region, top 10%)
 - **RIGHT TOP Panel:** Four-line spectral validation
   - **Black Line (Measured Spectrum):** Ground truth from high-purity region
-  - **Red Dashed Line (NMF Reconstruction):** Model prediction (sum of all components)
-  - **Orange Dotted Line (NMF Basis Component):** Pure unmixed component (reference)
+  - **Red Dashed Line (Reconstruction):** Model prediction (sum of all components)
+  - **Orange Dotted Line (Basis Component):** Pure unmixed component (reference)
   - **Blue Shaded Band (±1σ):** Natural variance
 - **RIGHT BOTTOM Panel:** Gray residual (Measured - Predicted)
 
 **How to Interpret NMF Validation:**
-* **Black ≈ Red** → NMF successfully reconstructed the data (high confidence in this component)
-* **Black ≠ Red** → NMF struggled to model this region (lower confidence, caveat needed)
+* **Black ≈ Red** → Decomposition successfully reconstructed the data (high confidence)
+* **Black ≠ Red** → Decomposition struggled to model this region (lower confidence, caveat needed)
 * **Orange ≈ Black ≈ Red** → Pure, homogeneous component
 * **Orange differs from Black/Red** → Mixed component (expected in transition zones)
 * **Orange shows peaks not in Black** → Potential artifact (cross-check with spatial map and residuals)
+
+**If PCA was used — Summary Plot:**
+- **Top row:** Principal component spectra (may contain negative values — these represent variance directions, not physical phases)
+- **Bottom row:** Corresponding spatial loading maps
+- PCA components are exploratory — focus on identifying spectral features and spatial patterns rather than interpreting individual components as physical phases
 
 ### 2. Dynamic Analysis Results
 **Feature Dashboards (one per feature):**
@@ -1358,24 +1387,25 @@ Translate validation terminology (Black/Red/Orange lines, RMSE) into plain langu
 
 **Synthesis Logic & Interpretation Rules:**
 
-1. **Validate NMF components first:** 
-   - Check if Black ≈ Red for each component
-   - Downweight or caveat components where Black and Red diverge significantly
-   
-2. **Assess mixing in NMF components:**
-   - If Orange differs from Black/Red but Black ≈ Red, explain this is expected mixing
-   - Note the spatial locations where mixing occurs (e.g., interfaces, grain boundaries)
-   
+1. **Validate decomposition components first:**
+   - For NMF: Check if Black ≈ Red for each component. Downweight or caveat components where Black and Red diverge significantly.
+   - For PCA: Assess whether components capture meaningful variance patterns. PCA components are exploratory and should be interpreted as variance directions rather than physical phases.
+
+2. **Assess mixing (NMF) or variance patterns (PCA):**
+   - NMF: If Orange differs from Black/Red but Black ≈ Red, explain this is expected mixing. Note the spatial locations where mixing occurs.
+   - PCA: Look for spatial loading patterns that correlate with known sample features.
+
 3. **Integrate Dynamic Analysis findings:**
-   - If a region was analyzed by both NMF and Dynamic Analysis, compare them
-   - Do the custom features agree with NMF component distributions?
+   - If a region was analyzed by both decomposition and Dynamic Analysis, compare them
+   - Do the custom features agree with decomposition component distributions?
    - Does Dynamic Analysis provide higher precision for specific features?
-   
+
 4. **Prioritize evidence:**
    - For well-reconstructed NMF components (Black ≈ Red): High confidence
    - For poorly-reconstructed NMF components (Black ≠ Red): Lower confidence, add caveats
+   - For PCA components: Treat as exploratory evidence, weight Dynamic Analysis results more heavily for quantitative claims
    - For Dynamic Analysis features with clear spatial structure: High precision for that specific feature
-   
+
 5. **Build a unified model:**
    - How do all components and features fit together spatially?
    - What is the overall chemical/physical architecture?
