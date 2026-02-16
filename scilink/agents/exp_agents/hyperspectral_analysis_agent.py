@@ -320,18 +320,20 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         data_path: str,
         metadata_path: Dict[str, Any] | str | None = None,
         structure_image_path: str | None = None,
-        structure_system_info: Dict[str, Any] | None = None
+        structure_system_info: Dict[str, Any] | None = None,
+        hints: str | None = None
     ) -> Dict[str, Any]:
         """
         Analyze hyperspectral data to generate scientific claims.
-        
+
         BACKWARD COMPATIBLE: Delegates to analyze().
         """
         result = self.analyze(
             data_path,
             system_info=metadata_path,
             structure_image_path=structure_image_path,
-            structure_system_info=structure_system_info
+            structure_system_info=structure_system_info,
+            hints=hints
         )
         
         if result.get("status") == "success":
@@ -347,18 +349,20 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         data_path: str,
         metadata_path: str,
         structure_image_path: str | None = None,
-        structure_system_info: Dict[str, Any] | None = None
+        structure_system_info: Dict[str, Any] | None = None,
+        hints: str | None = None
     ) -> Dict[str, Any]:
         """
         Analyze hyperspectral data for materials characterization.
-        
+
         BACKWARD COMPATIBLE: Delegates to analyze().
         """
         return self.analyze_for_claims(
             data_path=data_path,
             metadata_path=metadata_path,
             structure_image_path=structure_image_path,
-            structure_system_info=structure_system_info
+            structure_system_info=structure_system_info,
+            hints=hints
         )
 
     # =========================================================================
