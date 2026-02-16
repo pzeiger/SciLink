@@ -34,8 +34,17 @@ def build_code_generation_prompt(
     axis_units: str,
     axis_start: float,
     axis_end: float,
-    processing_note: str
+    processing_note: str,
+    hints: str | None = None
 ) -> str:
+    hints_section = ""
+    if hints:
+        hints_section = f"""
+
+### 5. USER GUIDANCE
+The user has indicated interest in: {hints}
+Prioritize this guidance in your analysis, but also capture any other significant features present in the data.
+"""
     return f"""
 You are a Python Data Scientist specialized in Spectroscopy. 
 The standard NMF tool failed to model a spectral feature described as: "{target_desc}".
@@ -55,12 +64,15 @@ Your code will run in a restricted `exec()` sandbox.
 - `np`: The full NumPy library.
 - `scipy`: The top-level SciPy module.
 - `sklearn`: The top-level Scikit-Learn module.
+- `lmfit`: Model-based curve fitting library (Parameters, Model, built-in models like GaussianModel, LorentzianModel, VoigtModel).
 
 **PRE-IMPORTED FUNCTIONS (Direct Shortcuts):**
 - `curve_fit`, `nnls` (from scipy.optimize)
 - `linregress` (from scipy.stats)
 - `find_peaks` (from scipy.signal)
 - `gaussian_filter` (from scipy.ndimage)
+
+**Performance Note:** `lmfit` adds per-fit setup overhead (~0.1-0.5ms) that can accumulate over thousands of pixels. For simple single-peak fits on large datasets, prefer raw `curve_fit` for speed. Use `lmfit` when you need its advantages: multi-peak composite models, parameter constraints/bounds, or built-in line shapes.
 
 ### 3. CODING CONSTRAINTS
 1. **NO External Imports:** Do not import `os`, `sys`, `matplotlib`, or `warnings`. The sandbox does not support them.
@@ -79,7 +91,7 @@ The variable `hspy_data` passed to your function contains: **{processing_note}**
 However, even with pre-processing, experimental data often contains high-frequency shot noise (jitter).
 If you are performing derivative-based operations (like `find_peaks` or `curve_fit`), it is advisable to apply a light smoothing filter
 (e.g., `gaussian_filter(..., sigma=1-2)`) to ensure convergence.
-
+{hints_section}
 ### REQUIRED RETURN FORMAT
 {{
     "maps": {{
@@ -166,8 +178,10 @@ class RunPreprocessingController:
 class GetInitialComponentParamsController:
     """
     [🧠 LLM Step]
-    Asks LLM for initial n_components.
+    Asks LLM for initial n_components and decomposition method (NMF or PCA).
     """
+    VALID_METHODS = ("nmf", "pca")
+
     def __init__(self, model, logger, generation_config, safety_settings, parse_fn: Callable):
         self.model = model
         self.logger = logger
@@ -178,24 +192,32 @@ class GetInitialComponentParamsController:
 
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"): return state
-        self.logger.info("\n\n🧠 --- LLM STEP: ESTIMATE INITIAL N_COMPONENTS --- 🧠\n")
-        
+        self.logger.info("\n\n🧠 --- LLM STEP: ESTIMATE INITIAL N_COMPONENTS & METHOD --- 🧠\n")
+
         h, w, e = state["hspy_data"].shape
         data_quality = state.get("data_quality", {})
-        
+
         prompt_parts = [self.instructions]
         prompt_parts.append(f"\n\n--- Hyperspectral Data Information ---")
         prompt_parts.append(f"Data dimensions: {h}x{w} spatial pixels, {e} spectral channels")
         prompt_parts.append(f"\n--- Data Quality Assessment (from Preprocessor) ---")
         prompt_parts.append(f"- Robust SNR Estimate: {data_quality.get('snr_estimate', 'N/A')}")
         prompt_parts.append(f"- Assessment: {data_quality.get('reasoning', 'N/A')}")
-        
+
         if state.get("system_info"):
             sys_info_str = json.dumps(state["system_info"], indent=2)
             prompt_parts.append(f"\n\n--- System Information ---\n{sys_info_str}")
-        
-        prompt_parts.append("\n\nBased on the system description and data characteristics, estimate the optimal number of spectral components.")
-        
+
+        if state.get("analysis_hints"):
+            prompt_parts.append(
+                f"\n\n--- User Guidance ---\n"
+                f"The user has provided the following guidance for this analysis. "
+                f"Prioritize these suggestions but also report any other significant features you discover.\n"
+                f"{state['analysis_hints']}"
+            )
+
+        prompt_parts.append("\n\nBased on the system description and data characteristics, choose the decomposition method and estimate the optimal number of spectral components.")
+
         param_gen_config = None#GenerationConfig(response_mime_type="application/json")
         try:
             response = self.model.generate_content(
@@ -204,32 +226,43 @@ class GetInitialComponentParamsController:
                 safety_settings=self.safety_settings,
             )
             result_json, error_dict = self._parse_llm_response(response)
-            
+
             if error_dict:
-                self.logger.warning(f"LLM initial estimation failed: {error_dict}. Using default.")
-                n_components = 4 
+                self.logger.warning(f"LLM initial estimation failed: {error_dict}. Using defaults.")
+                n_components = 4
+                selected_method = "nmf"
             else:
                 n_components = result_json.get('estimated_components', 4)
+                selected_method = result_json.get('method', 'nmf').lower().strip()
                 reasoning = result_json.get('reasoning', 'No reasoning provided.')
-                self.logger.info(f"LLM initial estimate: {n_components} components. Reasoning: {reasoning}")
-                
+                self.logger.info(f"LLM initial estimate: method={selected_method}, {n_components} components. Reasoning: {reasoning}")
+
                 print("\n" + "="*80)
                 print("🧠 LLM REASONING (GetInitialComponentParamsController)")
+                print(f"  Selected method: {selected_method.upper()}")
                 print(f"  Suggested n_components: {n_components}")
                 print(f"  Explanation: {reasoning}")
                 print("="*80 + "\n")
-                
+
                 if not (isinstance(n_components, int) and 2 <= n_components <= 15):
                     self.logger.warning(f"Invalid LLM estimate {n_components}, using default 4.")
                     n_components = 4
-                    
+
+                if selected_method not in self.VALID_METHODS:
+                    self.logger.warning(f"Invalid LLM method '{selected_method}', using default 'nmf'.")
+                    selected_method = "nmf"
+
             state["initial_n_components"] = n_components
-            self.logger.info(f"✅ LLM Step Complete: Initial component estimate = {n_components}.")
+            state["selected_method"] = selected_method
+            state["settings"]["method"] = selected_method
+            self.logger.info(f"✅ LLM Step Complete: method={selected_method.upper()}, initial components={n_components}.")
 
         except Exception as e:
             self.logger.error(f"❌ LLM Step Failed: Initial component estimation: {e}", exc_info=True)
-            state["initial_n_components"] = 4 
-            
+            state["initial_n_components"] = 4
+            state["selected_method"] = "nmf"
+            state["settings"]["method"] = "nmf"
+
         return state
 
 class RunComponentTestLoopController:
@@ -248,15 +281,16 @@ class RunComponentTestLoopController:
         tool_settings = self.settings.copy()
         for key in AGENT_METADATA_KEYS_TO_STRIP:
             tool_settings.pop(key, None)
-        
+
+        method_name = state.get("settings", {}).get("method", "nmf").upper()
         initial_estimate = state.get("initial_n_components", 4)
         min_c = self.settings.get('min_auto_components', 2)
         max_c = self.settings.get('max_auto_components', min(initial_estimate + 4, 12))
         component_range = list(range(min_c, max_c + 1))
-        
+
         errors = []
-        visual_examples = [] 
-        
+        visual_examples = []
+
         for n_comp in component_range:
             try:
                 components, abundance_maps, error = tools.run_spectral_unmixing(
@@ -267,7 +301,8 @@ class RunComponentTestLoopController:
 
                 if n_comp == min_c or n_comp == max_c or n_comp == initial_estimate:
                     summary_bytes = tools.create_nmf_summary_plot(
-                        components, abundance_maps, n_comp, state["system_info"], self.logger
+                        components, abundance_maps, n_comp, state["system_info"], self.logger,
+                        method_name=method_name
                     )
                     if summary_bytes:
                         visual_examples.append({
@@ -312,11 +347,13 @@ class CreateElbowPlotController:
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"): return state
         self.logger.info("\n\n🛠️ --- CALLING TOOL: CREATE ELBOW PLOT --- 🛠️\n")
-        
+
+        method_name = state.get("settings", {}).get("method", "nmf").upper()
         plot_bytes = tools.create_elbow_plot(
             state["component_test_range"],
             state["component_test_errors"],
-            self.logger
+            self.logger,
+            method_name=method_name
         )
         state["elbow_plot_bytes"] = plot_bytes
         if plot_bytes:
@@ -377,6 +414,14 @@ class GetFinalComponentSelectionController:
         for viz in state.get("component_test_visuals", []):
             prompt_parts.append(f"\n\n**{viz['label']}:**")
             prompt_parts.append({"mime_type": "image/jpeg", "data": viz['image']})
+
+        if state.get("analysis_hints"):
+            prompt_parts.append(
+                f"\n\n--- User Guidance ---\n"
+                f"The user has provided the following guidance for this analysis. "
+                f"Prioritize these suggestions but also report any other significant features you discover.\n"
+                f"{state['analysis_hints']}"
+            )
 
         prompt_parts.append(f"\n\nBased on the elbow plot AND the visual examples, decide the optimal number of components.")
         
@@ -465,14 +510,14 @@ class CreateAnalysisPlotsController:
         self.settings = settings
 
     def execute(self, state: dict) -> dict:
-        if state.get("error_dict"): 
+        if state.get("error_dict"):
             return state
-            
+
         self.logger.info("\n\n🛠️ --- CALLING TOOL: CREATE ANALYSIS PLOTS --- 🛠️\n")
-        
+
         components = state.get("final_components")
         abundance_maps = state.get("final_abundance_maps")
-        
+
         iter_title_raw = state.get("iteration_title", "Global_Analysis")
         iter_prefix = _sanitize_filename(iter_title_raw)
 
@@ -481,64 +526,87 @@ class CreateAnalysisPlotsController:
             return state
 
         output_dir = self.settings.get('output_dir', 'spectroscopy_output')
-        
+        method_name = state.get("settings", {}).get("method", "nmf").upper()
+
         final_plots = []
-        validated_bytes_list = [] 
-        
-        # --- 1. Generate Validated Reconstruction Plots ---
-        self.logger.info(
-            f"Generating High-Purity Reconstruction Validation Plots "
-            f"for {components.shape[0]} components..."
-        )
-        
-        for i in range(components.shape[0]):
-            result = tools.create_validated_component_pair_reconstruction(
-                state["hspy_data"],       # Raw data
-                components,               # ALL components (needed for reconstruction)
-                abundance_maps,           # ALL abundance maps
-                i,                        # Current component index
-                state["system_info"],
-                self.logger,
-                purity_percentile=90.0,   # Top 10% (adjustable)
-                show_basis_component=True # Show orange reference line
+        validated_bytes_list = []
+
+        if method_name == "PCA":
+            # --- PCA MODE: Summary-only (no per-component validation) ---
+            self.logger.info(
+                f"PCA mode: Generating summary plot for {components.shape[0]} components..."
             )
-
-            if result is not None:
-                plot_bytes, metrics = result
-            else:
-                plot_bytes, metrics = None, {}
-            
-            if plot_bytes:
-                label = f"Component {i+1} Analysis"
-                final_plots.append({'label': label, 'bytes': plot_bytes, 'metrics': metrics})
-                validated_bytes_list.append(plot_bytes)
-                
-                # Save using tool
-                label_safe = _sanitize_filename(label)
-                tools.save_image_bytes(
-                    plot_bytes, output_dir, 
-                    f"{iter_prefix}_{label_safe}.jpeg", self.logger
-                )
-
-        state["component_pair_plots"] = final_plots
-        for plot in final_plots:
-            state["analysis_images"].append({"label": plot['label'], "data": plot['bytes'], "metrics": plot.get('metrics', {})})
-        # --- 2. Create Summary Grid ---
-        try:
-            self.logger.info("  (Tool Info: Stitching validated plots into Summary Grid...)")
-            summary_bytes = tools.create_image_grid(validated_bytes_list, self.logger)
-
+            summary_bytes = tools.create_nmf_summary_plot(
+                components, abundance_maps, components.shape[0],
+                state["system_info"], self.logger, method_name=method_name
+            )
             if summary_bytes:
-                label = "NMF Summary Grid"
+                label = f"{method_name} Summary Grid"
+                final_plots.append({'label': label, 'bytes': summary_bytes, 'metrics': {}})
                 tools.save_image_bytes(
-                    summary_bytes, output_dir, 
+                    summary_bytes, output_dir,
                     f"{iter_prefix}_{_sanitize_filename(label)}.jpeg", self.logger
                 )
-                
                 state["analysis_images"].append({"label": label, "data": summary_bytes})
 
-        except Exception as e:
-            self.logger.warning(f"Failed to create/save NMF summary plot: {e}")
+        else:
+            # --- NMF MODE: Per-component validation plots + summary grid ---
+            self.logger.info(
+                f"Generating High-Purity Reconstruction Validation Plots "
+                f"for {components.shape[0]} components..."
+            )
+
+            for i in range(components.shape[0]):
+                result = tools.create_validated_component_pair_reconstruction(
+                    state["hspy_data"],       # Raw data
+                    components,               # ALL components (needed for reconstruction)
+                    abundance_maps,           # ALL abundance maps
+                    i,                        # Current component index
+                    state["system_info"],
+                    self.logger,
+                    purity_percentile=90.0,   # Top 10% (adjustable)
+                    show_basis_component=True, # Show orange reference line
+                    method_name=method_name
+                )
+
+                if result is not None:
+                    plot_bytes, metrics = result
+                else:
+                    plot_bytes, metrics = None, {}
+
+                if plot_bytes:
+                    label = f"Component {i+1} Analysis"
+                    final_plots.append({'label': label, 'bytes': plot_bytes, 'metrics': metrics})
+                    validated_bytes_list.append(plot_bytes)
+
+                    # Save using tool
+                    label_safe = _sanitize_filename(label)
+                    tools.save_image_bytes(
+                        plot_bytes, output_dir,
+                        f"{iter_prefix}_{label_safe}.jpeg", self.logger
+                    )
+
+            for plot in final_plots:
+                state["analysis_images"].append({"label": plot['label'], "data": plot['bytes'], "metrics": plot.get('metrics', {})})
+
+            # Create Summary Grid from validated plots
+            try:
+                self.logger.info("  (Tool Info: Stitching validated plots into Summary Grid...)")
+                summary_bytes = tools.create_image_grid(validated_bytes_list, self.logger)
+
+                if summary_bytes:
+                    label = f"{method_name} Summary Grid"
+                    tools.save_image_bytes(
+                        summary_bytes, output_dir,
+                        f"{iter_prefix}_{_sanitize_filename(label)}.jpeg", self.logger
+                    )
+
+                    state["analysis_images"].append({"label": label, "data": summary_bytes})
+
+            except Exception as e:
+                self.logger.warning(f"Failed to create/save {method_name} summary plot: {e}")
+
+        state["component_pair_plots"] = final_plots
 
         # --- 3. Structure Overlays (UNCHANGED) ---
         if state.get("structure_image_path"):
@@ -615,32 +683,46 @@ Hyperspectral Data Information:
         
         prompt_parts.append(metadata_info)
 
-        # 4. Component Analysis (Dynamic Instructions based on depth)
+        # 4. Component Analysis (Dynamic Instructions based on depth and method)
         current_depth = state.get("current_depth", 0)
-        
+        method_name = state.get("settings", {}).get("method", "nmf").upper()
+
         if state.get("component_pair_plots"):
             prompt_parts.append("\n\n**Spectral Component Analysis:**")
-            
-            if current_depth == 0:
-                # Standard Instructions for Global Analysis
-                prompt_parts.append("""
-Below are the NMF components extracted from the global dataset.
+
+            if method_name == "PCA":
+                # PCA mode: summary-only, exploratory framing
+                prompt_parts.append(f"""
+Below is a PCA decomposition summary of the dataset.
+Top row: Principal Component spectra. Bottom row: Corresponding spatial loading maps.
+PCA components are exploratory — they capture variance directions, not necessarily physical phases.
+Identify spectral features of interest (peaks, edges, shifts) for custom code modeling.
+""")
+                # Append only the summary image (no per-component metrics)
+                for plot in state["component_pair_plots"]:
+                    prompt_parts.append(f"\n{plot['label']}:")
+                    prompt_parts.append({"mime_type": "image/jpeg", "data": plot['bytes']})
+            else:
+                # NMF mode: per-component validation with metrics
+                if current_depth == 0:
+                    prompt_parts.append(f"""
+Below are the {method_name} components extracted from the global dataset.
 For each component, the LEFT image is the Spectral Signature and the RIGHT image is the Spatial Abundance.
 """)
-            else:
-                prompt_parts.append(SPECTROSCOPY_VALIDATION_INTERPRETATION_INSTRUCTIONS)
+                else:
+                    prompt_parts.append(SPECTROSCOPY_VALIDATION_INTERPRETATION_INSTRUCTIONS)
 
-            # Append the plots
-            for plot in state["component_pair_plots"]:
-                metrics = plot.get('metrics', {})
-                prompt_parts.append(f"\n{plot['label']}:")
-                if metrics:
-                    prompt_parts.append(f"  Reconstruction RMSE: {_fmt(metrics.get('rmse'))}")
-                    prompt_parts.append(f"  Cosine Similarity (Measured vs Reconstruction): {_fmt(metrics.get('cosine_similarity'))}")
-                    prompt_parts.append(f"  Cosine Similarity (Measured vs Basis): {_fmt(metrics.get('basis_cosine_similarity'))}")
-                    prompt_parts.append(f"  High-Purity Region: {_fmt(metrics.get('purity_pixel_percent'), '.1f')}% of pixels")
-                    prompt_parts.append(f"  Residual Autocorrelation: {_fmt(metrics.get('residual_autocorrelation'), '.3f')}")
-                prompt_parts.append({"mime_type": "image/jpeg", "data": plot['bytes']})
+                # Append the plots with per-component metrics
+                for plot in state["component_pair_plots"]:
+                    metrics = plot.get('metrics', {})
+                    prompt_parts.append(f"\n{plot['label']}:")
+                    if metrics:
+                        prompt_parts.append(f"  Reconstruction RMSE: {_fmt(metrics.get('rmse'))}")
+                        prompt_parts.append(f"  Cosine Similarity (Measured vs Reconstruction): {_fmt(metrics.get('cosine_similarity'))}")
+                        prompt_parts.append(f"  Cosine Similarity (Measured vs Basis): {_fmt(metrics.get('basis_cosine_similarity'))}")
+                        prompt_parts.append(f"  High-Purity Region: {_fmt(metrics.get('purity_pixel_percent'), '.1f')}% of pixels")
+                        prompt_parts.append(f"  Residual Autocorrelation: {_fmt(metrics.get('residual_autocorrelation'), '.3f')}")
+                    prompt_parts.append({"mime_type": "image/jpeg", "data": plot['bytes']})
 
         # 5. Structure Overlays (if available)
         if state.get("structure_overlay_bytes"):
@@ -718,6 +800,14 @@ class SelectRefinementTargetController:
                 prompt_parts.append({"mime_type": "image/jpeg", "data": image_bytes})
             else:
                 self.logger.warning(f"Could not find image bytes for plot: {img.get('label')}")
+
+        if state.get("analysis_hints"):
+            prompt_parts.append(
+                f"\n\n--- User Guidance ---\n"
+                f"The user has provided the following guidance for this analysis. "
+                f"Prioritize these suggestions but also report any other significant features you discover.\n"
+                f"{state['analysis_hints']}"
+            )
 
         prompt_parts.append("\n\nBased on these results, decide if a focused refinement is needed.")
 
@@ -922,6 +1012,14 @@ class BuildHolisticSynthesisPromptController:
             sys_info_str = json.dumps(state["system_info"], indent=2)
             prompt_parts.append(f"\n\n--- System Information ---\n{sys_info_str}")
 
+        if state.get("analysis_hints"):
+            prompt_parts.append(
+                f"\n\n--- User Guidance ---\n"
+                f"The user has provided the following guidance for this analysis. "
+                f"Prioritize these suggestions but also report any other significant features you discover.\n"
+                f"{state['analysis_hints']}"
+            )
+
         # 2. Build Context for Each Iteration
         all_images = []
 
@@ -1049,11 +1147,11 @@ class GenerateHTMLReportController:
                 continue
 
             # --- 2. Concept Triggers (The Safety Net) ---
-            
-            # TRIGGER: NMF / Spectral Unmixing
-            # If the plot is an NMF Grid and the text mentions "NMF" or "Components", show it.
-            if "nmf summary grid" in label_lower:
-                if "nmf" in lower_text or "component" in lower_text or "unmixing" in lower_text:
+
+            # TRIGGER: Decomposition Summary (NMF or PCA)
+            # If the plot is a summary grid and the text mentions the method or "Components", show it.
+            if "summary grid" in label_lower:
+                if "nmf" in lower_text or "pca" in lower_text or "component" in lower_text or "unmixing" in lower_text or "decomposition" in lower_text:
                     cited_images.append(img)
                     continue
 
@@ -1095,11 +1193,11 @@ class GenerateHTMLReportController:
                 seen.add(img['label'])
 
         # --- 4. Final Fail-Safe ---
-        # If the filter returned <= 1 image, force the Global NMF Summary to appear 
+        # If the filter returned <= 1 image, force the Global Summary to appear
         # to ensure the report always has context.
         if len(unique_images) <= 1:
             for img in all_images:
-                if "global" in img['label'].lower() and "nmf summary" in img['label'].lower():
+                if "global" in img['label'].lower() and "summary" in img['label'].lower():
                     if img['label'] not in seen:
                         unique_images.insert(0, img) # Insert at top
                         seen.add(img['label'])
@@ -1114,7 +1212,7 @@ class GenerateHTMLReportController:
         iterations_with_grid = set()
         for img in all_images:
             label = img.get('label', '')
-            if "NMF Summary Grid" in label:
+            if "Summary Grid" in label:
                 match = re.match(r"\[(.*?)\]", label)
                 if match: iterations_with_grid.add(match.group(1))
 
@@ -1344,7 +1442,8 @@ class RunDynamicAnalysisController:
                 axis_units=axis_units,
                 axis_start=state['energy_axis'][0],
                 axis_end=state['energy_axis'][-1],
-                processing_note=processing_note
+                processing_note=processing_note,
+                hints=state.get("analysis_hints")
             )
 
             current_prompt = base_prompt
@@ -1372,6 +1471,7 @@ class RunDynamicAnalysisController:
                         "np": np,
                         "scipy": __import__("scipy"),
                         "sklearn": __import__("sklearn"),
+                        "lmfit": __import__("lmfit"),
                         "curve_fit": __import__("scipy.optimize", fromlist=["curve_fit"]).curve_fit,
                         "nnls": __import__("scipy.optimize", fromlist=["nnls"]).nnls,
                         "linregress": __import__("scipy.stats", fromlist=["linregress"]).linregress,
@@ -1380,14 +1480,14 @@ class RunDynamicAnalysisController:
                     }
                     
                     # Execute Code
-                    with ExecutionTimeout(seconds=120):
+                    with ExecutionTimeout(seconds=300):
                         exec(code_str, global_scope, local_scope)
                     
                         if "analyze_feature" not in local_scope:
                             raise ValueError("Function 'analyze_feature' was not found in generated code.")
                         
                         # --- D. RUN ON DATA ---
-                        self.logger.info("    Executing generated code...")
+                        self.logger.info("    Executing generated code (timeout: 300s)...")
                         func = local_scope["analyze_feature"]
                         result_dict = func(optimal_data, state["energy_axis"])
                     

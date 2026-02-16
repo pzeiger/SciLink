@@ -7,9 +7,25 @@ import openai
 
 class OpenAIAsGenerativeModel:
     """
-    Pretends to be a Google GenerativeModel while using an OpenAI-compatible Chat Completions API.
-    - Accepts 'contents' as a list of Google-style prompt parts (strings or dicts with {mime_type, data})
-    - Returns an object with .text and .candidates (each candidate has .content and .finish_reason int)
+    Unified LLM interface backed by an OpenAI-compatible Chat Completions API.
+
+    All SciLink agents interact with LLMs through a single contract:
+        response = model.generate_content(prompt_parts)
+        text = response.text
+
+    This wrapper implements that contract for OpenAI and any OpenAI-compatible
+    endpoint (vLLM, Ollama, Azure, etc.), translating between the internal
+    prompt format and the Chat Completions API.
+
+    Input:  A flat list of mixed-content parts — strings and image dicts
+            ({mime_type, data}) — so callers never deal with provider-specific
+            message/role nesting.
+    Output: A SimpleNamespace with .text and .candidates, giving callers a
+            uniform accessor regardless of backend.
+
+    The interface originated from Google's Generative AI SDK but has become a
+    provider-agnostic abstraction in its own right. See LiteLLMGenerativeModel
+    for the multi-provider equivalent.
     """
 
     def __init__(self, model: str, api_key: str | None = None, base_url: str | None = None):
@@ -24,10 +40,21 @@ class OpenAIAsGenerativeModel:
     # ---------------------- public API ----------------------
     def generate_content(self, contents, generation_config=None, safety_settings=None):
         """
-        contents: list of prompt parts (e.g., ["hello", {"mime_type": "image/png", "data": b"..."}])
-        generation_config: optional dict; common keys mapped: temperature, top_p, max_output_tokens, stop,
-                           presence_penalty, frequency_penalty
-        safety_settings: ignored for OpenAI backends (kept for interface compatibility)
+        Generate a response from mixed-content prompt parts.
+
+        Args:
+            contents: List of prompt parts — strings and/or image dicts
+                ({mime_type: str, data: bytes}). This flat-list format keeps
+                call sites simple: controllers just append text and images
+                without worrying about provider-specific message structure.
+            generation_config: Optional config object. Attributes are mapped
+                to OpenAI parameters (e.g., max_output_tokens → max_tokens).
+            safety_settings: Accepted for interface compatibility; ignored.
+
+        Returns:
+            SimpleNamespace with:
+                .text — the model's text output (JSON fences stripped)
+                .candidates — list of candidate responses
         """
         messages = self._prompt_parser(contents)
         params = self._map_gen_config(generation_config)
@@ -53,7 +80,7 @@ class OpenAIAsGenerativeModel:
 
     # ---------------------- helpers ----------------------
     def _fix_json_format(self, response_text: str) -> str:
-        # Trim ``` and stray "json" tags for downstream JSON parsing convenience
+        """Strip markdown code fences so agents can parse raw JSON from .text."""
         if "```" in response_text:
             response_text = response_text.replace("```", "")
         # be conservative: only strip leading 'json' fences, not legitimate content
@@ -62,6 +89,7 @@ class OpenAIAsGenerativeModel:
         return response_text
 
     def _map_gen_config(self, cfg):
+        """Translate generation config attributes to OpenAI parameter names."""
         if not cfg:
             return {}
 
@@ -93,8 +121,12 @@ class OpenAIAsGenerativeModel:
 
     def _prompt_parser(self, genai_parts):
         """
-        Convert Google-style prompt parts to OpenAI chat format.
-        Uses simple string content for single text prompts (broader API compatibility).
+        Convert a flat list of prompt parts to OpenAI chat message format.
+
+        Handles strings, PIL Images, and {mime_type, data} image dicts.
+        When the prompt is text-only with a single part, emits a plain string
+        message for maximum API compatibility (some endpoints don't support
+        the structured content-block format).
         """
         # Handle case where a single string is passed directly
         if isinstance(genai_parts, str):

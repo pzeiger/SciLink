@@ -1,13 +1,28 @@
 """
-LiteLLM wrapper for public-facing deployments.
+Unified LLM gateway via LiteLLM.
 
-Provides the same interface as OpenAIAsGenerativeModel but routes through LiteLLM
-to support multiple providers (Google, OpenAI, Anthropic, Cohere, etc.)
+All SciLink agents interact with LLMs through a single contract:
 
-Replaces:
-- google_wrapper.py
-- google_wrapper_embeddings.py  
-- llama_wrapper.py
+    response = model.generate_content(prompt_parts)
+    text = response.text
+
+This module implements that contract for 100+ providers (Google, OpenAI,
+Anthropic, Cohere, Ollama, Azure, etc.) by routing through LiteLLM. Agent
+and controller code stays completely provider-agnostic — the only
+provider-specific logic lives here.
+
+The interface originated from Google's Generative AI SDK but has become
+a self-standing abstraction: a flat list of mixed-content parts in,
+a simple .text accessor out. See OpenAIAsGenerativeModel for the direct
+OpenAI-only equivalent.
+
+Classes:
+    LiteLLMGenerativeModel  — Text/vision generation (the primary wrapper)
+    LiteLLMChatSession      — Multi-turn chat with history management
+    LiteLLMEmbeddingModel   — Embedding generation with size-aware batching
+
+Replaces the earlier single-provider wrappers:
+    google_wrapper.py, google_wrapper_embeddings.py, llama_wrapper.py
 """
 
 import os
@@ -43,10 +58,12 @@ def _ensure_gemini_api_key():
 
 def _normalize_model_name(model: str) -> str:
     """
-    Add provider prefix if not present.
-    
-    LiteLLM requires prefixes like 'gemini/', 'openai/', etc. to route correctly.
-    This helper auto-detects common model patterns and adds the appropriate prefix.
+    Auto-detect and add the LiteLLM provider prefix if not already present.
+
+    LiteLLM uses prefixes (``gemini/``, ``openai/``, ``anthropic/``) to route
+    requests to the correct provider. This helper infers the prefix from
+    common model name patterns so callers can pass bare names like
+    ``"gemini-2.0-flash"`` or ``"claude-sonnet-4-20250514"``.
     """
     if not model:
         return model
@@ -92,35 +109,49 @@ def _check_litellm():
 
 class LiteLLMGenerativeModel:
     """
-    LiteLLM-based model that matches the OpenAIAsGenerativeModel interface.
-    
-    Supports 100+ LLM providers through LiteLLM's unified API.
-    
-    Usage:
+    Unified LLM interface backed by LiteLLM, supporting 100+ providers.
+
+    This is the primary model wrapper used throughout SciLink. Every agent
+    controller calls ``model.generate_content(prompt_parts)`` and reads
+    ``response.text`` — this class translates that contract into the
+    appropriate provider API call and back.
+
+    What it handles so callers don't have to:
+        - Provider routing via model name prefixes (auto-detected)
+        - Prompt format translation (flat parts list → chat messages)
+        - Image encoding (bytes/PIL → base64 data URLs)
+        - Generation config mapping (max_output_tokens → max_tokens, etc.)
+        - Response normalization (.text, .candidates, tool calls)
+        - JSON extraction from markdown fences and preamble text
+
+    Usage::
+
         # Google Gemini
         model = LiteLLMGenerativeModel("gemini/gemini-2.0-flash", api_key="...")
-        
+
         # OpenAI
         model = LiteLLMGenerativeModel("gpt-4o", api_key="...")
-        
+
         # Anthropic
         model = LiteLLMGenerativeModel("claude-sonnet-4-20250514", api_key="...")
-        
+
         # Local Ollama
         model = LiteLLMGenerativeModel("ollama/llama3")
-        
+
         # All use the same interface:
-        response = model.generate_content(["Hello!", image])
+        response = model.generate_content(["Hello!", image_dict])
         print(response.text)
-    
+
     Model Name Format:
-        LiteLLM uses provider prefixes for routing:
-        - Google: "gemini/gemini-2.0-flash"
-        - OpenAI: "gpt-4o" or "openai/gpt-4o"
-        - Anthropic: "claude-sonnet-4-20250514" or "anthropic/claude-sonnet-4-20250514"
-        - Azure: "azure/deployment-name"
-        - Ollama: "ollama/llama3"
-        
+        Provider prefixes are auto-detected from common model name patterns,
+        but can be specified explicitly:
+
+        - Google:    ``"gemini/gemini-2.0-flash"``
+        - OpenAI:    ``"gpt-4o"`` or ``"openai/gpt-4o"``
+        - Anthropic: ``"claude-sonnet-4-20250514"`` or ``"anthropic/claude-sonnet-4-20250514"``
+        - Azure:     ``"azure/deployment-name"``
+        - Ollama:    ``"ollama/llama3"``
+
         See: https://docs.litellm.ai/docs/providers
     """
     
@@ -159,17 +190,28 @@ class LiteLLMGenerativeModel:
         tools: Optional[List] = None,
     ):
         """
-        Generate content - matches OpenAIAsGenerativeModel interface.
-        
+        Generate a response from mixed-content prompt parts.
+
+        This is the single method all SciLink controllers call. It accepts
+        the internal prompt format (a flat list of strings and image dicts),
+        translates it to the provider's API, and returns a normalized response.
+
         Args:
-            contents: Prompt string or list of parts (text, images, dicts)
-            generation_config: Generation parameters (temperature, max_tokens, etc.)
-            safety_settings: Ignored (kept for interface compatibility)
-            stream: If True, return streaming iterator
-            tools: Tools for function calling (overrides default)
-        
+            contents: Prompt string or list of parts — strings, PIL Images,
+                and/or {mime_type, data} image dicts. The flat-list format
+                keeps call sites simple; provider-specific message nesting
+                is handled internally.
+            generation_config: Optional config object or dict. Attributes are
+                mapped to provider parameters (e.g., max_output_tokens → max_tokens).
+            safety_settings: Accepted for interface compatibility; ignored.
+            stream: If True, return a streaming iterator of partial responses.
+            tools: Tool definitions for function calling (overrides defaults).
+
         Returns:
-            Response object with .text and .candidates attributes
+            SimpleNamespace with:
+                .text — the model's text output (JSON fences stripped)
+                .candidates — list of candidates, each with .content and
+                    .finish_reason (int: 1=stop, 0=length, 2=tool_calls)
         """
         messages = self._build_messages(contents)
         params = self._build_params(generation_config, tools or self.tools)
@@ -237,7 +279,13 @@ class LiteLLMGenerativeModel:
         return messages
     
     def _convert_parts(self, parts: List) -> Union[str, List[Dict]]:
-        """Convert list of parts (text, images, dicts) to OpenAI content format."""
+        """
+        Convert a flat list of prompt parts to chat-API content format.
+
+        Handles strings, PIL Images, and {mime_type, data} image dicts.
+        When all parts are text-only, joins them into a single string
+        for maximum provider compatibility.
+        """
         converted = []
         
         for part in parts:
@@ -311,7 +359,7 @@ class LiteLLMGenerativeModel:
         return params
     
     def _to_legacy_response(self, response, is_stream: bool = False):
-        """Convert LiteLLM response to legacy format."""
+        """Normalize a LiteLLM/OpenAI response into the unified format (.text, .candidates)."""
         candidates = []
         
         choices = getattr(response, "choices", None) or []
@@ -376,7 +424,11 @@ class LiteLLMGenerativeModel:
     
     def _clean_text(self, text: str) -> str:
         """
-        Extract JSON from LLM response, handling preamble text and code fences.
+        Extract JSON from LLM response so agents can parse .text directly.
+
+        Many LLMs wrap JSON in markdown fences or preamble text. This method
+        strips that away, trying (in order): ```json``` blocks, generic
+        ``` blocks, and raw JSON objects embedded in prose.
         """
         if not text:
             return ""
@@ -409,9 +461,12 @@ class LiteLLMGenerativeModel:
 
 class LiteLLMChatSession:
     """
-    Chat session that maintains conversation history.
-    
-    Matches the interface of the legacy Google GenAI ChatSession.
+    Multi-turn chat session with automatic history management.
+
+    Wraps LiteLLMGenerativeModel to maintain a running message list,
+    appending user/assistant turns after each exchange. Provides the
+    same send_message() / history interface used by agents that need
+    conversational context (e.g., iterative refinement loops).
     """
     
     def __init__(
@@ -521,25 +576,22 @@ class LiteLLMChatSession:
 
 class LiteLLMEmbeddingModel:
     """
-    LiteLLM-based embeddings matching OpenAIAsEmbeddingModel interface.
-    
-    Features:
-    - Automatic provider prefix detection (gemini/, openai/, etc.)
-    - Size-aware batching to avoid payload limits
-    - Automatic retry with smaller batches on size errors
-    
-    Usage:
-        # Google
-        embedder = LiteLLMEmbeddingModel("gemini-embedding-001", api_key="...")
-        
-        # OpenAI
+    Unified embedding interface backed by LiteLLM.
+
+    Provides a single embed_content() method that works across providers
+    (Google, OpenAI, Cohere, etc.) with automatic handling of payload
+    size limits:
+
+    - Size-aware batching: splits inputs to stay under ~30 MB per request
+    - Count limiting: caps batches at 100 items
+    - Automatic retry: on payload-too-large errors, recursively halves
+      the batch and retries each half
+
+    Usage::
+
         embedder = LiteLLMEmbeddingModel("text-embedding-3-small", api_key="...")
-        
-        response = embedder.embed_content(
-            model="...",
-            content=["Hello", "World"]
-        )
-        print(response["embedding"])  # [[...], [...]]
+        response = embedder.embed_content(content=["Hello", "World"])
+        vectors = response["embedding"]  # [[...], [...]]
     """
     
     # Max payload size ~30MB to stay under 40MB limit with overhead

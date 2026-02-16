@@ -120,8 +120,16 @@ def run_spectral_unmixing(
         )
         
         components, abundance_maps = unmixer.fit(hspy_data)
-        error = getattr(unmixer.model, 'reconstruction_err_', 0.0)
-        
+
+        # Method-aware error metric
+        if method == 'nmf':
+            error = getattr(unmixer.model, 'reconstruction_err_', 0.0)
+        elif method == 'pca':
+            # Unexplained variance: 1 - cumulative explained variance ratio
+            error = 1.0 - sum(unmixer.model.explained_variance_ratio_)
+        else:
+            error = 0.0
+
         return components, abundance_maps, float(error)
         
     except Exception as e:
@@ -186,11 +194,12 @@ def convert_energy_to_indices(
 # =============================================================================
 
 def create_nmf_summary_plot(
-    components: np.ndarray, 
-    abundance_maps: np.ndarray, 
-    n_comp: int, 
+    components: np.ndarray,
+    abundance_maps: np.ndarray,
+    n_comp: int,
     system_info: dict,
-    logger: logging.Logger
+    logger: logging.Logger,
+    method_name: str = "NMF"
 ) -> bytes:
     """
     Create a single summary plot showing all components and abundance maps.
@@ -198,28 +207,28 @@ def create_nmf_summary_plot(
     try:
         n_channels = components.shape[1]
         energy_axis, xlabel, has_energy_info = create_energy_axis(n_channels, system_info)
-        
+
         fig, axes = plt.subplots(2, n_comp, figsize=(n_comp * 3, 6))
-        
+
         if n_comp == 1:
             axes = axes.reshape(2, 1)
-        
+
         for i in range(n_comp):
             # Top row: Component spectra
             axes[0, i].plot(energy_axis, components[i, :], 'b-', linewidth=1.5)
-            axes[0, i].set_title(f'NMF Component {i+1}', fontsize=10)
+            axes[0, i].set_title(f'{method_name} Component {i+1}', fontsize=10)
             axes[0, i].set_xlabel(xlabel)
             if i == 0:
                 axes[0, i].set_ylabel('Intensity')
             axes[0, i].grid(True, alpha=0.3)
-            
+
             # Bottom row: Abundance maps
             im = axes[1, i].imshow(abundance_maps[..., i], cmap='seismic', aspect='auto')
             axes[1, i].set_title(f'Abundance Map {i+1}', fontsize=10)
             axes[1, i].axis('off')
             plt.colorbar(im, ax=axes[1, i], fraction=0.046, pad=0.04)
-        
-        title = f'NMF Analysis: {n_comp} Components'
+
+        title = f'{method_name} Analysis: {n_comp} Components'
         if has_energy_info:
             title += " (Energy Calibrated)"
         plt.suptitle(title, fontsize=14, y=0.95)
@@ -238,17 +247,23 @@ def create_nmf_summary_plot(
         return None
 
 
-def create_elbow_plot(component_range: list[int], errors: list[float], logger: logging.Logger) -> bytes | None:
+def create_elbow_plot(component_range: list[int], errors: list[float], logger: logging.Logger, method_name: str = "NMF") -> bytes | None:
     """Create an elbow plot of reconstruction error vs. number of components."""
     if not component_range or not errors or len(component_range) != len(errors):
         logger.warning("  (Tool Info: Invalid input for creating elbow plot.)")
         return None
+
+    if method_name.upper() == "PCA":
+        ylabel = "Unexplained Variance (1 - Cumulative Explained)"
+    else:
+        ylabel = f"{method_name} Reconstruction Error (Frobenius Norm)"
+
     try:
         fig, ax = plt.subplots(figsize=(8, 5))
         ax.plot(component_range, errors, 'bo-', markersize=6)
         ax.set_xlabel('Number of Components')
-        ax.set_ylabel('NMF Reconstruction Error (Frobenius Norm)')
-        ax.set_title('NMF Reconstruction Error vs. Number of Components (Elbow Plot)')
+        ax.set_ylabel(ylabel)
+        ax.set_title(f'{method_name} Reconstruction Error vs. Number of Components (Elbow Plot)')
         ax.grid(True, linestyle='--', alpha=0.6)
         ax.set_xticks(component_range)
         plt.tight_layout()
@@ -258,7 +273,7 @@ def create_elbow_plot(component_range: list[int], errors: list[float], logger: l
         buf.seek(0)
         image_bytes = buf.getvalue()
         plt.close(fig)
-        logger.info("  (Tool Info: Successfully created NMF elbow plot.)")
+        logger.info(f"  (Tool Info: Successfully created {method_name} elbow plot.)")
         return resize_image_bytes(image_bytes)
     except Exception as e:
         logger.error(f"  (Tool Error: Failed to create elbow plot: {e})", exc_info=True)
@@ -494,33 +509,35 @@ def create_validated_component_pair(
     
 
 def create_validated_component_pair_reconstruction(
-    hspy_data: np.ndarray, 
-    components: np.ndarray,           
-    abundance_maps: np.ndarray,       
+    hspy_data: np.ndarray,
+    components: np.ndarray,
+    abundance_maps: np.ndarray,
     component_idx: int,
     system_info: dict,
     logger: logging.Logger,
     purity_percentile: float = 90.0,
-    show_basis_component: bool = True
+    show_basis_component: bool = True,
+    method_name: str = "NMF"
 ) -> tuple[bytes, dict] | None:
     """
-    Validates NMF by comparing raw data to NMF reconstruction in high-purity regions.
-    
+    Validates a decomposition by comparing raw data to reconstruction in high-purity regions.
+
     This addresses the "all components look the same" problem by:
     1. Masking to high-purity regions (adaptive or top 10% abundance by default)
-    2. Comparing raw data vs. full NMF reconstruction (apples-to-apples)
+    2. Comparing raw data vs. full reconstruction (apples-to-apples)
     3. Showing the basis component as reference
-    
+
     Args:
         hspy_data: Raw hyperspectral data (H, W, E)
-        components: ALL NMF components (n_components, E)
+        components: ALL decomposition components (n_components, E)
         abundance_maps: ALL abundance maps (H, W, n_components)
         component_idx: Which component to validate (0-indexed)
         system_info: Metadata for axis calibration
         logger: Logger instance
         purity_percentile: Threshold for high-purity masking (default 90 = top 10%)
         show_basis_component: Whether to show the orange reference line
-    
+        method_name: Name of the decomposition method for plot labels (default "NMF")
+
     Returns:
         Tuple of (JPEG bytes, metrics dict), or None if failed.
         Metrics dict contains: rmse, max_error, cosine_similarity,
@@ -744,7 +761,7 @@ def create_validated_component_pair_reconstruction(
                 linestyle=':', 
                 linewidth=4,
                 alpha=1.0,
-                label=f'NMF Basis Component {component_idx+1}',
+                label=f'{method_name} Basis Component {component_idx+1}',
                 zorder=2,
             )
 
@@ -757,7 +774,7 @@ def create_validated_component_pair_reconstruction(
             linewidth=4,
             dashes=(8, 4),
             alpha=1.0,
-            label='NMF Reconstruction',
+            label=f'{method_name} Reconstruction',
             zorder=4
         )
 
@@ -773,7 +790,7 @@ def create_validated_component_pair_reconstruction(
         )
 
         ax_spec.set_title(
-            "High-Purity Region: Measured vs. NMF Reconstruction", 
+            f"High-Purity Region: Measured vs. {method_name} Reconstruction", 
             fontsize=12, 
             fontweight='bold'
         )

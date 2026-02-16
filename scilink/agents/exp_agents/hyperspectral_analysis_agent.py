@@ -161,11 +161,12 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Hyperspectral-specific options
         structure_image_path: str | None = None,
         structure_system_info: Dict[str, Any] | None = None,
+        hints: str | None = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
         Primary analysis entry point for hyperspectral data.
-        
+
         Args:
             data: Input data. Can be:
                 - str: Path to .npy hyperspectral data file
@@ -174,6 +175,9 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             system_info: Metadata dictionary or path to metadata file
             structure_image_path: Optional path to structural reference image
             structure_system_info: Optional metadata for structure image
+            hints: Optional user guidance to steer analysis (e.g., "focus on
+                the Ti L-edge around 460 eV"). The agent will prioritize these
+                suggestions but still report other significant features.
             **kwargs: Additional options
         
         Returns:
@@ -241,7 +245,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             system_info=system_info,
             instruction_prompt=SPECTROSCOPY_CLAIMS_INSTRUCTIONS,
             structure_image_path=structure_image_path,
-            structure_system_info=structure_system_info
+            structure_system_info=structure_system_info,
+            hints=hints
         )
         
         # Handle Errors
@@ -315,18 +320,20 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         data_path: str,
         metadata_path: Dict[str, Any] | str | None = None,
         structure_image_path: str | None = None,
-        structure_system_info: Dict[str, Any] | None = None
+        structure_system_info: Dict[str, Any] | None = None,
+        hints: str | None = None
     ) -> Dict[str, Any]:
         """
         Analyze hyperspectral data to generate scientific claims.
-        
+
         BACKWARD COMPATIBLE: Delegates to analyze().
         """
         result = self.analyze(
             data_path,
             system_info=metadata_path,
             structure_image_path=structure_image_path,
-            structure_system_info=structure_system_info
+            structure_system_info=structure_system_info,
+            hints=hints
         )
         
         if result.get("status") == "success":
@@ -342,18 +349,20 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         data_path: str,
         metadata_path: str,
         structure_image_path: str | None = None,
-        structure_system_info: Dict[str, Any] | None = None
+        structure_system_info: Dict[str, Any] | None = None,
+        hints: str | None = None
     ) -> Dict[str, Any]:
         """
         Analyze hyperspectral data for materials characterization.
-        
+
         BACKWARD COMPATIBLE: Delegates to analyze().
         """
         return self.analyze_for_claims(
             data_path=data_path,
             metadata_path=metadata_path,
             structure_image_path=structure_image_path,
-            structure_system_info=structure_system_info
+            structure_system_info=structure_system_info,
+            hints=hints
         )
 
     # =========================================================================
@@ -419,7 +428,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         system_info: Dict[str, Any] | str | None,
         instruction_prompt: str,
         structure_image_path: str | None = None,
-        structure_system_info: Dict[str, Any] | None = None
+        structure_system_info: Dict[str, Any] | None = None,
+        hints: str | None = None
     ) -> tuple[Dict[str, Any] | None, Dict[str, Any] | None]:
         """
         Main execution engine using Queue-Based Branching architecture.
@@ -483,6 +493,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "structure_image_path": structure_image_path,
                     "structure_system_info": self._handle_system_info(structure_system_info),
                     "structure_image_blob": structure_image_blob,
+                    "analysis_hints": hints,
                     "analysis_images": [],
                     "error_dict": None
                 }
@@ -528,6 +539,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "all_iteration_results": all_completed_results,
                 "system_info": system_info,
                 "instruction_prompt": instruction_prompt,
+                "analysis_hints": hints,
                 "result_json": None,
                 "error_dict": None
             }
