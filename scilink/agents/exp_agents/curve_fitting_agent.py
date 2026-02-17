@@ -32,6 +32,7 @@ from .preprocess import CurvePreprocessingAgent
 from .pipelines.curve_fitting_pipelines import create_unified_curve_fitting_pipeline
 from ...tools.curve_fitting_tools import load_curve_data, plot_curve_to_bytes
 from ._deprecation import normalize_params
+from ...skills.loader import load_skill
 
 from .instruct import (
     FITTING_INTERPRETATION_INSTRUCTIONS,
@@ -233,6 +234,8 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         series_metadata: Optional[dict] = None,
         auxiliary_data: Optional[str] = None,
         auxiliary_label: Optional[str] = None,
+        # Domain skill
+        skill: Optional[str] = None,
         # Quality control overrides (optional)
         r2_threshold: Optional[float] = None,
         max_model_retries: Optional[int] = None,
@@ -266,6 +269,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             auxiliary_label: Description of the auxiliary data, e.g. "TGA curve
                 collected simultaneously during the DSC measurement" or
                 "SEM image of sample surface". Defaults to filename stem.
+            skill: Optional domain skill name or path to a .md skill file.
+                Built-in skills (e.g. "xps") are resolved from the package.
+                Custom skills: provide a path to a .md file with sections
+                ## planning, ## fitting, ## interpretation, ## validation.
+                The skill injects domain-specific guidance at each pipeline
+                stage.
             r2_threshold: Override default R² threshold for this analysis
             max_model_retries: Override default max retries for this analysis
             outlier_sigma: Override default outlier sigma for this analysis
@@ -302,6 +311,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 auxiliary_data="tga_curve.csv",
                 auxiliary_label="TGA curve collected simultaneously during DSC"
             )
+
+            # With domain skill
+            result = agent.analyze("xps_ti2p.csv", skill="xps")
+
+            # With custom skill file
+            result = agent.analyze("data.csv", skill="/path/to/my_skill.md")
         """
         # Use provided overrides or fall back to instance defaults
         effective_r2_threshold = r2_threshold if r2_threshold is not None else self.r2_threshold
@@ -411,6 +426,13 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             if aux_state.get("auxiliary_plot_bytes"):
                 self.logger.info(f"   Auxiliary data loaded: {aux_state['auxiliary_label']}")
 
+        # Load skill if provided
+        skill_state = {"skill_name": None, "skill_sections": None}
+        if skill:
+            parsed = load_skill(skill, domain="curve_fitting")
+            skill_state = {"skill_name": parsed["name"], "skill_sections": parsed}
+            self.logger.info(f"   Skill loaded: {parsed['name']}")
+
         # Build initial state
         state = {
             # Input data
@@ -427,6 +449,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
             # Auxiliary reference data
             **aux_state,
+
+            # Domain skill
+            **skill_state,
 
             # First spectrum (for planning)
             "data_path": spectrum_paths[0] if spectrum_paths else first_spectrum_name,

@@ -760,7 +760,8 @@ class AnalysisOrchestratorTools:
             agent_id: int = None,
             analysis_goal: str = None,
             auxiliary_data: str = None,
-            auxiliary_label: str = None
+            auxiliary_label: str = None,
+            skill: str = None
         ) -> str:
             """
             Execute analysis with the selected or specified agent.
@@ -919,6 +920,8 @@ class AnalysisOrchestratorTools:
                     analyze_kwargs["auxiliary_data"] = auxiliary_data
                 if auxiliary_label is not None:
                     analyze_kwargs["auxiliary_label"] = auxiliary_label
+                if skill is not None:
+                    analyze_kwargs["skill"] = skill
                 result = agent.analyze(**analyze_kwargs)
                 
                 # === Store result ===
@@ -973,6 +976,8 @@ class AnalysisOrchestratorTools:
                 "for traceability. Requires data path and metadata to be set. "
                 "For CurveFitting agent, optional auxiliary_data provides a complementary "
                 "dataset (e.g. TGA alongside DSC, or microscopy image) as context. "
+                "For CurveFitting agent, optional skill provides domain-specific knowledge "
+                "(e.g. 'xps', 'xrd') for improved fitting and interpretation. "
                 "Returns analysis_id and output_directory for reference."
             ),
             parameters={
@@ -995,6 +1000,10 @@ class AnalysisOrchestratorTools:
                 "auxiliary_label": {
                     "type": "string",
                     "description": "Description of auxiliary data, e.g. 'TGA curve collected simultaneously during DSC'"
+                },
+                "skill": {
+                    "type": "string",
+                    "description": "Domain skill name (e.g. 'xps', 'xrd') or path to .md skill file for CurveFitting agent"
                 }
             },
             required=[]

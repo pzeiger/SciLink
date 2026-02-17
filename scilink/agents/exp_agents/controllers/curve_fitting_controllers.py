@@ -89,6 +89,35 @@ def _append_auxiliary_context(prompt: list, state: dict) -> None:
     })
 
 
+def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
+    """Append domain skill knowledge to an LLM prompt for the given stage.
+
+    Args:
+        prompt: Mutable list of prompt parts to extend.
+        state: Pipeline state dict containing ``skill_sections`` and ``skill_name``.
+        stage: One of ``"planning"``, ``"fitting"``, ``"interpretation"``, ``"validation"``.
+    """
+    sections = state.get("skill_sections")
+    if not sections:
+        return
+
+    skill_name = state.get("skill_name", "domain skill")
+    content = sections.get(stage, "")
+    if not content:
+        return
+
+    prompt.append(f"\n## Domain Skill: {skill_name} ({stage})")
+    prompt.append(content)
+
+    # Include validation rules during planning and interpretation
+    # so the LLM knows quality criteria upfront
+    if stage in ("planning", "interpretation"):
+        validation = sections.get("validation", "")
+        if validation:
+            prompt.append(f"\n## Domain Validation Rules ({skill_name})")
+            prompt.append(validation)
+
+
 class AnalyzeDataController:
     """Compute data statistics and create initial visualization."""
 
@@ -523,6 +552,7 @@ class HumanFeedbackRefinementController:
             prompt.append(f"\n## User Guidance\n{state['analysis_hints']}")
 
         _append_auxiliary_context(prompt, state)
+        _append_skill_context(prompt, state, "planning")
 
         if not state.get("is_single_spectrum", True):
             prompt.append(f"\n## Series Context\nThis is the first spectrum in a series of {state.get('num_spectra', 1)}. "
@@ -566,6 +596,7 @@ class HumanFeedbackRefinementController:
             prompt.append(f"\n## Original Guidance\n{state['analysis_hints']}")
 
         _append_auxiliary_context(prompt, state)
+        _append_skill_context(prompt, state, "planning")
 
         response = self.model.generate_content(prompt, generation_config=self.generation_config)
         result, error = self._parse(response)
@@ -775,6 +806,12 @@ Your guidance: '''
         context_parts = []
         if state.get("literature_context"):
             context_parts.append(state["literature_context"])
+        skill_sections = state.get("skill_sections")
+        if skill_sections and skill_sections.get("fitting"):
+            context_parts.append(
+                f"## Domain Skill Guidance ({state.get('skill_name', 'skill')})\n"
+                + skill_sections["fitting"]
+            )
 
         prompt = self.script_instructions.format(
             analysis_approach=config.get("analysis_approach", "Fit the data"),
@@ -806,6 +843,12 @@ Your guidance: '''
             failed_script=script,
             error_message=error_msg,
         )
+        skill_sections = state.get("skill_sections")
+        if skill_sections and skill_sections.get("fitting"):
+            prompt += (
+                f"\n\n## Domain Fitting Guidance ({state.get('skill_name', 'skill')})\n"
+                + skill_sections["fitting"]
+            )
 
         response = self.model.generate_content(prompt)
         result, error = self._parse(response)
@@ -2622,6 +2665,7 @@ Return JSON with:
             prompt_parts.extend(["\n## Literature", state["literature_context"]])
 
         _append_auxiliary_context(prompt_parts, state)
+        _append_skill_context(prompt_parts, state, "interpretation")
 
         try:
             response = self.model.generate_content(contents=prompt_parts, generation_config=self.generation_config, safety_settings=self.safety_settings)
@@ -2695,11 +2739,12 @@ Return JSON with:
                         prompt_parts.append({"mime_type": "image/png", "data": f.read()})
 
         _append_auxiliary_context(prompt_parts, state)
+        _append_skill_context(prompt_parts, state, "interpretation")
 
         try:
             response = self.model.generate_content(contents=prompt_parts, generation_config=self.generation_config, safety_settings=self.safety_settings)
             result_json, error_dict = self._parse(response)
-            
+
             if error_dict:
                 self.logger.error(f"Series synthesis failed: {error_dict}")
                 state["synthesis_result"] = {"error": str(error_dict)}
