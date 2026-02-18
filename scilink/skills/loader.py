@@ -15,6 +15,21 @@ _SKILLS_DIR = Path(__file__).parent
 _KNOWN_SECTIONS = {"overview", "planning", "fitting", "interpretation", "validation"}
 
 
+def list_skills(domain: str = "curve_fitting") -> list:
+    """Return names of available built-in skills for a domain.
+
+    Args:
+        domain: Skill domain subdirectory (default: "curve_fitting").
+
+    Returns:
+        Sorted list of skill name strings (file stems).
+    """
+    skills_dir = _SKILLS_DIR / domain
+    if not skills_dir.is_dir():
+        return []
+    return sorted(p.stem for p in skills_dir.glob("*.md"))
+
+
 def load_skill(skill: str, domain: str = "curve_fitting") -> Dict[str, str]:
     """Load and parse a skill markdown file.
 

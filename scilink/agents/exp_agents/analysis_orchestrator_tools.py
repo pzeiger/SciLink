@@ -19,6 +19,7 @@ from typing import Dict, Any, Callable
 
 from .metadata_converter import generate_metadata_json_from_text, METADATA_SCHEMA_DICT
 from ..lit_agents import OwlLiteratureAgent, NoveltyScorer
+from ...skills.loader import list_skills
 
 
 class AnalysisOrchestratorTools:
@@ -1000,7 +1001,11 @@ class AnalysisOrchestratorTools:
                 },
                 "skill": {
                     "type": "string",
-                    "description": "Domain skill name (e.g. 'xps', 'xrd') or path to .md skill file for CurveFitting agent"
+                    "description": (
+                        "Domain skill name or path to .md skill file for CurveFitting agent. "
+                        f"Available built-in skills: {list_skills('curve_fitting')}. "
+                        "Use show_available_agents to check for updates."
+                    )
                 }
             },
             required=[]
@@ -1159,10 +1164,17 @@ class AnalysisOrchestratorTools:
                     "description": self.AGENT_DESCRIPTIONS[agent_id]
                 })
 
+            available_skills = {}
+            for domain in ["curve_fitting"]:
+                skills = list_skills(domain)
+                if skills:
+                    available_skills[domain] = skills
+
             result = {
                 "status": "success",
                 "agents": agents,
                 "current_selection": self.orch.selected_agent_id,
+                "available_skills": available_skills,
             }
 
             external_tools = getattr(self.orch, "_external_tools", [])
