@@ -28,6 +28,35 @@ from ....tools.hyperspectral_tools import AGENT_METADATA_KEYS_TO_STRIP
 from ....executors import ExecutionTimeout
 
 
+def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
+    """Append domain skill knowledge to an LLM prompt for the given stage.
+
+    Args:
+        prompt: Mutable list of prompt parts to extend.
+        state: Pipeline state dict containing ``skill_sections`` and ``skill_name``.
+        stage: One of ``"planning"``, ``"fitting"``, ``"interpretation"``, ``"validation"``.
+    """
+    sections = state.get("skill_sections")
+    if not sections:
+        return
+
+    skill_name = state.get("skill_name", "domain skill")
+    content = sections.get(stage, "")
+    if not content:
+        return
+
+    prompt.append(f"\n## Domain Skill: {skill_name} ({stage})")
+    prompt.append(content)
+
+    # Include validation rules during planning and interpretation
+    # so the LLM knows quality criteria upfront
+    if stage in ("planning", "interpretation"):
+        validation = sections.get("validation", "")
+        if validation:
+            prompt.append(f"\n## Domain Validation Rules ({skill_name})")
+            prompt.append(validation)
+
+
 def build_code_generation_prompt(
     target_desc: str,
     h: int, w: int, e: int,
@@ -215,6 +244,8 @@ class GetInitialComponentParamsController:
                 f"Prioritize these suggestions but also report any other significant features you discover.\n"
                 f"{state['analysis_hints']}"
             )
+
+        _append_skill_context(prompt_parts, state, "planning")
 
         prompt_parts.append("\n\nBased on the system description and data characteristics, choose the decomposition method and estimate the optimal number of spectral components.")
 
@@ -749,9 +780,12 @@ Overlays showing where components are concentrated on the structural image.
             sys_info_str = json.dumps(state["system_info"], indent=2)
             prompt_parts.append(f"\n\nAdditional System Information (Metadata):\n{sys_info_str}")
 
-        # 7. Final instructions
+        # 7. Domain skill context
+        _append_skill_context(prompt_parts, state, "interpretation")
+
+        # 8. Final instructions
         prompt_parts.append("\n\nProvide your analysis in the requested JSON format.")
-        
+
         state["final_prompt_parts"] = prompt_parts
         self.logger.info("✅ Prep Step Complete: Final prompt is ready.")
         return state
@@ -809,6 +843,8 @@ class SelectRefinementTargetController:
                 f"{state['analysis_hints']}"
             )
 
+        _append_skill_context(prompt_parts, state, "planning")
+
         prompt_parts.append("\n\nBased on these results, decide if a focused refinement is needed.")
 
         param_gen_config = None#GenerationConfig(response_mime_type="application/json")
@@ -819,7 +855,7 @@ class SelectRefinementTargetController:
                 safety_settings=self.safety_settings,
             )
             result_json, error_dict = self._parse_llm_response(response)
-            
+
             if error_dict:
                 self.logger.error(f"LLM refinement selection failed: {error_dict}. Stopping loop.")
                 state["refinement_decision"] = {"refinement_needed": False, "reasoning": "LLM selection failed."}
@@ -1087,7 +1123,10 @@ class BuildHolisticSynthesisPromptController:
                         img['label'] = unique_ref 
                         all_images.append(img)
 
-        # 3. EXPLICIT REPORTING INSTRUCTIONS
+        # 3. Domain skill context
+        _append_skill_context(prompt_parts, state, "interpretation")
+
+        # 4. EXPLICIT REPORTING INSTRUCTIONS
         prompt_parts.append("\n\n### 📝 CRITICAL REPORTING INSTRUCTIONS")
         prompt_parts.append("1. **AT THE END of your 'detailed_analysis' text**, you MUST append a section titled **'### Key Evidence'**.")
         prompt_parts.append("2. In that section, you MUST list the supporting figures using their **EXACT bolded titles** provided above.")

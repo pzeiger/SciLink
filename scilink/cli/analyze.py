@@ -668,7 +668,7 @@ Supported data types:
             print("🔬 Analysis Orchestrator - Session Resumed\n")
             return True
         
-        elif cmd in ["/quit", "/exit", "/q"]:
+        elif cmd in ["/quit", "/exit", "/q", "quit", "exit"]:
             return "QUIT"
         
         return False

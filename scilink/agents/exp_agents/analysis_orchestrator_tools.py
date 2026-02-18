@@ -1165,7 +1165,7 @@ class AnalysisOrchestratorTools:
                 })
 
             available_skills = {}
-            for domain in ["curve_fitting"]:
+            for domain in ["curve_fitting", "hyperspectral"]:
                 skills = list_skills(domain)
                 if skills:
                     available_skills[domain] = skills
