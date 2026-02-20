@@ -581,17 +581,45 @@ class HumanFeedbackRefinementController:
         
         print("-" * 80)
     
-    def _get_llm_assessment(self, state: dict) -> dict:
-        """Get LLM's assessment of the current segmentation quality."""
+    def _get_llm_assessment(self, state: dict, iteration_history: list = None) -> dict:
+        """
+        Get LLM's assessment of the current segmentation quality.
+
+        Args:
+            state: Current pipeline state
+            iteration_history: List of previous iteration records, so the LLM
+                               can see what has already been tried and avoid
+                               repeating failed strategies.
+        """
         self.logger.info("   🧠 Getting LLM assessment of segmentation quality...")
-        
+
         original_image_bytes = state["image_blob"]["data"]
         sam_result = state.get("sam_result")
         sam_stats = state.get("summary_stats", {})
-        
+
         overlay_img = visualize_sam_results(sam_result)
         overlay_bytes = convert_numpy_to_jpeg_bytes(overlay_img)
-        
+
+        # Build history context so LLM knows what was already tried
+        history_context = ""
+        if iteration_history:
+            history_lines = []
+            for record in iteration_history:
+                eval_info = record.get("evaluation", {})
+                history_lines.append(
+                    f"  - Iteration {record['iteration']}: "
+                    f"params={json.dumps(record['params_used'], indent=None)}, "
+                    f"particles={record.get('particle_count', '?')}, "
+                    f"coverage={eval_info.get('coverage_score', '?')}/10, "
+                    f"accuracy={eval_info.get('accuracy_score', '?')}/10, "
+                    f"quality={eval_info.get('overall_quality', '?')}, "
+                    f"decision={record.get('decision', '?')}"
+                )
+            history_context = (
+                "\n\n**PREVIOUS ITERATIONS (do NOT repeat parameters that already failed):**\n"
+                + "\n".join(history_lines)
+            )
+
         prompt_parts = [
             SAM_BATCH_REFINEMENT_INSTRUCTIONS,
             "\n\n**ORIGINAL MICROSCOPY IMAGE:**",
@@ -599,9 +627,10 @@ class HumanFeedbackRefinementController:
             "\n\n**CURRENT SEGMENTATION RESULT:**",
             {"mime_type": "image/jpeg", "data": overlay_bytes},
             f"\n\n**MORPHOLOGICAL STATISTICS:**\n{json.dumps(sam_stats, indent=2)}",
-            f"\n\n**CURRENT PARAMETERS:**\n{json.dumps(state.get('current_params', {}), indent=2)}"
+            f"\n\n**CURRENT PARAMETERS:**\n{json.dumps(state.get('current_params', {}), indent=2)}",
+            history_context,
         ]
-        
+
         try:
             response = self.model.generate_content(
                 contents=prompt_parts,
@@ -732,43 +761,63 @@ Return JSON with ONLY the parameters to change:
             return None
     
     def execute(self, state: dict) -> dict:
-        """Execute the human feedback refinement loop."""
+        """Execute the human feedback refinement loop with iteration tracking."""
         if not state.get('enable_human_feedback', False):
             self.logger.info("Human feedback disabled — skipping (automated LLM handles this).")
             return state
-        
+
         is_single = state.get("is_single_image", False)
         mode_str = "SINGLE IMAGE" if is_single else "BATCH"
         self.logger.info(f"\n\n👤 --- HUMAN FEEDBACK REFINEMENT ({mode_str}) --- 👤\n")
-        
+
+        iteration_history = []
         iteration = 0
         while iteration < self.max_refinement_iterations:
             iteration += 1
-            
+
+            # Snapshot current state before evaluation
+            current_sam_result = state.get("sam_result")
+            current_stats = state.get("summary_stats", {})
+            current_params = state.get("current_params", {}).copy()
+
             self._display_analysis_for_review(state, iteration)
-            llm_assessment = self._get_llm_assessment(state)
+            llm_assessment = self._get_llm_assessment(state, iteration_history)
+
+            # Record this iteration
+            quality = llm_assessment.get("evaluation", {})
+            iteration_record = {
+                "iteration": iteration,
+                "params_used": current_params,
+                "particle_count": current_sam_result.get("total_count", 0) if current_sam_result else 0,
+                "evaluation": quality,
+                "reasoning": llm_assessment.get("reasoning", ""),
+                "decision": "",  # filled below based on human choice
+            }
+
             feedback = self._collect_human_feedback(llm_assessment)
-            
+            iteration_record["decision"] = feedback["action"]
+            iteration_history.append(iteration_record)
+
             if feedback["action"] == "accept":
                 self.logger.info("✅ User accepted current results.")
                 state["refinement_complete"] = True
                 state["final_params_for_batch"] = state.get("current_params", {})
                 break
-            
+
             elif feedback["action"] in ["use_llm", "custom"]:
                 new_params = feedback["params"]
                 if new_params:
                     current_params = state.get("current_params", {})
                     current_params.update(new_params)
                     state["current_params"] = current_params
-                    
+
                     self.logger.info(f"🔄 Re-running SAM analysis with updated parameters...")
-                    
+
                     try:
                         image_array = state["preprocessed_image_array"]
                         sam_result = run_sam_analysis(image_array, params=current_params)
                         state["sam_result"] = sam_result
-                        
+
                         summary_stats = calculate_sam_statistics(
                             sam_result=sam_result,
                             image_path=state["image_path"],
@@ -776,17 +825,33 @@ Return JSON with ONLY the parameters to change:
                             nm_per_pixel=state.get("nm_per_pixel")
                         )
                         state["summary_stats"] = summary_stats
-                        
+
                         self.logger.info(f"✅ Re-analysis complete. {sam_result['total_count']} particles detected.")
-                        
+
                     except Exception as e:
                         self.logger.error(f"❌ Re-analysis failed: {e}")
                         break
-        
+
         if iteration >= self.max_refinement_iterations:
             self.logger.warning(f"⚠️ Max iterations reached. Using current parameters.")
             state["final_params_for_batch"] = state.get("current_params", {})
-        
+
+        # Store sanitized history for downstream controllers (synthesis, reporting)
+        state["refinement_history"] = [
+            {
+                "iteration": r["iteration"],
+                "params_used": r["params_used"],
+                "particle_count": r.get("particle_count", 0),
+                "evaluation": r.get("evaluation", {}),
+                "reasoning": r.get("reasoning", ""),
+                "decision": r.get("decision", ""),
+            }
+            for r in iteration_history
+        ]
+        state["llm_refinement_iterations"] = len(iteration_history)
+        if iteration_history:
+            state["llm_quality_evaluation"] = iteration_history[-1].get("evaluation", {})
+
         return state
 
 
