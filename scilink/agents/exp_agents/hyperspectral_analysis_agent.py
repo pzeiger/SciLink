@@ -162,8 +162,10 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Hyperspectral-specific options
         structure_image_path: str | None = None,
         structure_system_info: Dict[str, Any] | None = None,
+        objective: str | None = None,
         hints: str | None = None,
         skill: str | None = None,
+        prior_knowledge: list | None = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -177,12 +179,22 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             system_info: Metadata dictionary or path to metadata file
             structure_image_path: Optional path to structural reference image
             structure_system_info: Optional metadata for structure image
-            hints: Optional user guidance to steer analysis (e.g., "focus on
-                the Ti L-edge around 460 eV"). The agent will prioritize these
-                suggestions but still report other significant features.
+            objective: Optional high-level scientific objective that frames
+                the entire analysis (e.g., "Determine the oxidation state
+                of Ti from the L-edge fine structure", "Map the spatial
+                distribution of phase segregation"). Unlike hints which
+                guide *how* to analyze, objective specifies *why* you are
+                analyzing and *what question* to answer.
+            hints: Optional tactical guidance to steer analysis (e.g.,
+                "focus on the Ti L-edge around 460 eV"). The agent will
+                prioritize these suggestions but still report other
+                significant features.
             skill: Optional domain skill name (e.g., "eels") or path to a
                 custom ``.md`` skill file. Injects domain-specific knowledge
                 into LLM prompts for planning and interpretation stages.
+            prior_knowledge: Optional list of knowledge entries synthesized
+                from prior reference analyses. Automatically injected into
+                LLM prompts to guide analysis approach and interpretation.
             **kwargs: Additional options
         
         Returns:
@@ -259,7 +271,9 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             structure_image_path=structure_image_path,
             structure_system_info=structure_system_info,
             hints=hints,
-            skill_state=skill_state
+            objective=objective,
+            skill_state=skill_state,
+            prior_knowledge=prior_knowledge or []
         )
         
         # Handle Errors
@@ -334,6 +348,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         metadata_path: Dict[str, Any] | str | None = None,
         structure_image_path: str | None = None,
         structure_system_info: Dict[str, Any] | None = None,
+        objective: str | None = None,
         hints: str | None = None,
         skill: str | None = None
     ) -> Dict[str, Any]:
@@ -348,6 +363,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             structure_image_path=structure_image_path,
             structure_system_info=structure_system_info,
             hints=hints,
+            objective=objective,
             skill=skill
         )
         
@@ -365,6 +381,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         metadata_path: str,
         structure_image_path: str | None = None,
         structure_system_info: Dict[str, Any] | None = None,
+        objective: str | None = None,
         hints: str | None = None,
         skill: str | None = None
     ) -> Dict[str, Any]:
@@ -379,6 +396,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             structure_image_path=structure_image_path,
             structure_system_info=structure_system_info,
             hints=hints,
+            objective=objective,
             skill=skill
         )
 
@@ -446,8 +464,10 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         instruction_prompt: str,
         structure_image_path: str | None = None,
         structure_system_info: Dict[str, Any] | None = None,
+        objective: str | None = None,
         hints: str | None = None,
-        skill_state: Dict[str, Any] | None = None
+        skill_state: Dict[str, Any] | None = None,
+        prior_knowledge: list | None = None
     ) -> tuple[Dict[str, Any] | None, Dict[str, Any] | None]:
         """
         Main execution engine using Queue-Based Branching architecture.
@@ -515,6 +535,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "structure_system_info": self._handle_system_info(structure_system_info),
                     "structure_image_blob": structure_image_blob,
                     "analysis_hints": hints,
+                    "analysis_objective": objective,
+                    "prior_knowledge": prior_knowledge or [],
                     "analysis_images": [],
                     "error_dict": None,
                     **skill_state
@@ -562,6 +584,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "system_info": system_info,
                 "instruction_prompt": instruction_prompt,
                 "analysis_hints": hints,
+                "analysis_objective": objective,
+                "prior_knowledge": prior_knowledge or [],
                 "result_json": None,
                 "error_dict": None,
                 **skill_state

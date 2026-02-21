@@ -230,12 +230,15 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         data: AnalysisInput,
         system_info: Dict[str, Any] | str | None = None,
         # Curve fitting specific
+        objective: str | None = None,
         hints: str | None = None,
         series_metadata: Optional[dict] = None,
         auxiliary_data: Optional[str] = None,
         auxiliary_label: Optional[str] = None,
         # Domain skill
         skill: Optional[str] = None,
+        # Prior knowledge from reference analyses
+        prior_knowledge: Optional[List[Dict[str, Any]]] = None,
         # Quality control overrides (optional)
         r2_threshold: Optional[float] = None,
         max_model_retries: Optional[int] = None,
@@ -254,7 +257,14 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 - List[str]: Multiple spectrum paths (series)
                 - np.ndarray: 1D/2D (single) or 3D (series stack) array
             system_info: Sample/experiment metadata
-            hints: Optional guidance for the analysis
+            objective: Optional high-level scientific objective that frames
+                the entire analysis (e.g., "Determine whether the sample
+                underwent a phase transition", "Quantify the relative
+                concentration of anatase vs rutile"). Unlike hints which
+                guide *how* to analyze, objective specifies *why* you are
+                analyzing and *what question* to answer.
+            hints: Optional tactical guidance for the analysis (e.g.,
+                "Try a Voigt model", "Focus on the band gap region")
             series_metadata: Optional metadata about the series, e.g.:
                 {
                     "series_type": "temperature",  # or "time", "concentration", etc.
@@ -446,12 +456,16 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "system_info": self._handle_system_info(system_info),
             "series_metadata": series_metadata or {},
             "analysis_hints": hints,
+            "analysis_objective": objective,
 
             # Auxiliary reference data
             **aux_state,
 
             # Domain skill
             **skill_state,
+
+            # Prior knowledge from reference analyses
+            "prior_knowledge": prior_knowledge or [],
 
             # First spectrum (for planning)
             "data_path": spectrum_paths[0] if spectrum_paths else first_spectrum_name,
@@ -801,20 +815,22 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         spectrum_stack: Optional[np.ndarray] = None,
         system_info: Optional[Union[dict, str]] = None,
         series_metadata: Optional[dict] = None,
+        objective: str | None = None,
         hints: str | None = None,
     ) -> Dict[str, Any]:
         """
         Analyze a series of spectra.
-        
+
         BACKWARD COMPATIBLE: Delegates to unified analyze() method.
-        
+
         Args:
             spectrum_paths: List of file paths to spectra
             spectrum_stack: 3D numpy array (n_spectra x 2 x n_points)
             system_info: System/sample metadata
             series_metadata: Metadata about the series
+            objective: High-level scientific objective
             hints: Analysis guidance
-        
+
         Returns:
             Analysis results dictionary
         """
@@ -823,14 +839,16 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 spectrum_paths,
                 system_info=system_info,
                 series_metadata=series_metadata,
-                hints=hints
+                hints=hints,
+                objective=objective,
             )
         elif spectrum_stack is not None:
             return self.analyze(
                 spectrum_stack,
                 system_info=system_info,
                 series_metadata=series_metadata,
-                hints=hints
+                hints=hints,
+                objective=objective,
             )
         else:
             return {

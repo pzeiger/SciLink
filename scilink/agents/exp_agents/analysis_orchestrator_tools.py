@@ -757,6 +757,7 @@ class AnalysisOrchestratorTools:
             data_path: str = None,
             agent_id: int = None,
             analysis_goal: str = None,
+            objective: str = None,
             auxiliary_data: str = None,
             auxiliary_label: str = None,
             skill: str = None
@@ -914,12 +915,16 @@ class AnalysisOrchestratorTools:
                     "data": actual_data_input,
                     "system_info": self.orch.current_metadata,
                 }
+                if objective is not None:
+                    analyze_kwargs["objective"] = objective
                 if auxiliary_data is not None:
                     analyze_kwargs["auxiliary_data"] = auxiliary_data
                 if auxiliary_label is not None:
                     analyze_kwargs["auxiliary_label"] = auxiliary_label
                 if skill is not None:
                     analyze_kwargs["skill"] = skill
+                if self.orch.active_knowledge:
+                    analyze_kwargs["prior_knowledge"] = self.orch.active_knowledge
                 result = agent.analyze(**analyze_kwargs)
                 
                 # === Store result ===
@@ -972,9 +977,11 @@ class AnalysisOrchestratorTools:
                 "Execute analysis with the selected or specified agent. "
                 "Each run creates a unique output directory (analysis_{dataset_name}_{timestamp}) "
                 "for traceability. Requires data path and metadata to be set. "
+                "Optional objective provides a high-level scientific question to frame the analysis "
+                "(e.g. 'Determine the oxidation state of Ti'). "
                 "For CurveFitting agent, optional auxiliary_data provides a complementary "
                 "dataset (e.g. TGA alongside DSC, or microscopy image) as context. "
-                "For CurveFitting agent, optional skill provides domain-specific knowledge "
+                "Optional skill provides domain-specific knowledge "
                 "(e.g. 'xps', 'xrd') for improved fitting and interpretation. "
                 "Returns analysis_id and output_directory for reference."
             ),
@@ -990,6 +997,16 @@ class AnalysisOrchestratorTools:
                 "analysis_goal": {
                     "type": "string",
                     "description": "Specific analysis objective (saved with results for traceability)"
+                },
+                "objective": {
+                    "type": "string",
+                    "description": (
+                        "High-level scientific objective that frames the analysis "
+                        "(e.g. 'Determine whether the sample underwent a phase transition', "
+                        "'Quantify relative concentration of anatase vs rutile'). "
+                        "Unlike hints, this tells the agent *why* the analysis is being "
+                        "performed and *what question* to answer."
+                    )
                 },
                 "auxiliary_data": {
                     "type": "string",
@@ -1117,11 +1134,12 @@ class AnalysisOrchestratorTools:
                     "analysis_run_counter": self.orch._analysis_run_counter,
                     "message_count": self.orch.message_count,
                     "analysis_mode": self.orch.analysis_mode.value,
+                    "active_knowledge": self.orch.active_knowledge,
                 }
-                
+
                 with open(self.orch.checkpoint_path, 'w') as f:
                     json.dump(checkpoint_data, f, indent=2)
-                
+
                 return json.dumps({
                     "status": "success",
                     "checkpoint_path": str(self.orch.checkpoint_path),
@@ -1618,6 +1636,221 @@ class AnalysisOrchestratorTools:
                 }
             },
             required=["instruction"]
+        )
+
+        # =====================================================================
+        # 13. SYNTHESIZE KNOWLEDGE
+        # =====================================================================
+        def synthesize_knowledge(analysis_ids: list, focus: str) -> str:
+            """
+            Distill findings from completed analyses into reusable knowledge.
+            The synthesized knowledge is automatically injected into all
+            subsequent run_analysis calls.
+            """
+            print(f"  ⚡ Tool: Synthesizing knowledge from {len(analysis_ids)} analyses...")
+
+            # Collect detailed analysis texts
+            analysis_texts = []
+            missing_ids = []
+            for aid in analysis_ids:
+                found = False
+                for record in self.orch.analysis_results:
+                    if record.get("analysis_id") == aid:
+                        full_result = record.get("full_result", {})
+                        text = full_result.get("detailed_analysis", "")
+                        if text:
+                            analysis_texts.append(f"### Analysis: {aid}\n{text}")
+                        found = True
+                        break
+                if not found:
+                    missing_ids.append(aid)
+
+            if missing_ids:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Analysis IDs not found: {missing_ids}"
+                })
+
+            if not analysis_texts:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No detailed analysis text found in the specified analyses."
+                })
+
+            # Build LLM prompt
+            from .instruct import KNOWLEDGE_SYNTHESIS_INSTRUCTIONS
+            prompt_text = KNOWLEDGE_SYNTHESIS_INSTRUCTIONS.format(
+                focus=focus,
+                analysis_texts="\n\n".join(analysis_texts)
+            )
+
+            try:
+                response = self.orch.model.generate_content(
+                    contents=[prompt_text],
+                    generation_config=None,
+                    safety_settings=None,
+                )
+                # Parse response
+                response_text = response.text if hasattr(response, 'text') else str(response)
+                # Extract JSON from response
+                import re as _re
+                json_match = _re.search(r'\{[\s\S]*\}', response_text)
+                if json_match:
+                    llm_output = json.loads(json_match.group())
+                else:
+                    return json.dumps({
+                        "status": "error",
+                        "message": "LLM did not return valid JSON."
+                    })
+            except Exception as e:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Knowledge synthesis LLM call failed: {e}"
+                })
+
+            # Build knowledge entry
+            counter = len(self.orch.active_knowledge) + 1
+            entry = {
+                "id": f"knowledge_{counter:03d}",
+                "focus": focus,
+                "source_analyses": analysis_ids,
+                "summary": llm_output.get("summary", ""),
+                "key_findings": llm_output.get("key_findings", []),
+                "timestamp": datetime.now().isoformat()
+            }
+            self.orch.active_knowledge.append(entry)
+
+            # Save to disk
+            knowledge_dir = self.orch.base_dir / "knowledge"
+            knowledge_dir.mkdir(parents=True, exist_ok=True)
+            knowledge_file = knowledge_dir / f"{entry['id']}.json"
+            with open(knowledge_file, 'w') as f:
+                json.dump(entry, f, indent=2)
+
+            return json.dumps({
+                "status": "success",
+                "knowledge_id": entry["id"],
+                "focus": focus,
+                "summary": entry["summary"],
+                "key_findings": entry["key_findings"],
+                "saved_to": str(knowledge_file),
+                "note": "This knowledge will be automatically injected into all subsequent run_analysis calls."
+            })
+
+        self._register_tool(
+            func=synthesize_knowledge,
+            name="synthesize_knowledge",
+            description=(
+                "Distill findings from completed analyses into reusable knowledge. "
+                "Use when the user wants to learn from reference spectra, derive calibration, "
+                "build a reference model, etc. The synthesized knowledge is automatically "
+                "injected into all subsequent run_analysis calls as prior knowledge context."
+            ),
+            parameters={
+                "analysis_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of analysis IDs to synthesize knowledge from"
+                },
+                "focus": {
+                    "type": "string",
+                    "description": "What to extract/learn (e.g., 'peak assignments for Ti 2p XPS', 'baseline behavior in DSC curves')"
+                }
+            },
+            required=["analysis_ids", "focus"]
+        )
+
+        # =====================================================================
+        # 14. LIST KNOWLEDGE
+        # =====================================================================
+        def list_knowledge() -> str:
+            """List all active knowledge entries."""
+            print(f"  ⚡ Tool: Listing active knowledge...")
+
+            if not self.orch.active_knowledge:
+                return json.dumps({
+                    "status": "success",
+                    "message": "No active knowledge entries.",
+                    "entries": []
+                })
+
+            entries = []
+            for entry in self.orch.active_knowledge:
+                entries.append({
+                    "id": entry["id"],
+                    "focus": entry["focus"],
+                    "source_count": len(entry.get("source_analyses", [])),
+                    "findings_count": len(entry.get("key_findings", [])),
+                    "timestamp": entry.get("timestamp")
+                })
+
+            return json.dumps({
+                "status": "success",
+                "total_entries": len(entries),
+                "entries": entries
+            })
+
+        self._register_tool(
+            func=list_knowledge,
+            name="list_knowledge",
+            description="Show all active knowledge entries synthesized from previous analyses.",
+            parameters={},
+            required=[]
+        )
+
+        # =====================================================================
+        # 15. CLEAR KNOWLEDGE
+        # =====================================================================
+        def clear_knowledge(knowledge_id: str = None) -> str:
+            """Remove active knowledge entries. If knowledge_id is None, removes all."""
+            print(f"  ⚡ Tool: Clearing knowledge...")
+
+            knowledge_dir = self.orch.base_dir / "knowledge"
+
+            if knowledge_id is None:
+                count = len(self.orch.active_knowledge)
+                self.orch.active_knowledge.clear()
+                # Remove all files
+                if knowledge_dir.exists():
+                    for f in knowledge_dir.glob("knowledge_*.json"):
+                        f.unlink()
+                return json.dumps({
+                    "status": "success",
+                    "message": f"Cleared all {count} knowledge entries."
+                })
+
+            # Find and remove specific entry
+            for i, entry in enumerate(self.orch.active_knowledge):
+                if entry["id"] == knowledge_id:
+                    self.orch.active_knowledge.pop(i)
+                    # Remove disk file
+                    knowledge_file = knowledge_dir / f"{knowledge_id}.json"
+                    if knowledge_file.exists():
+                        knowledge_file.unlink()
+                    return json.dumps({
+                        "status": "success",
+                        "message": f"Removed knowledge entry: {knowledge_id}"
+                    })
+
+            return json.dumps({
+                "status": "error",
+                "message": f"Knowledge ID not found: {knowledge_id}"
+            })
+
+        self._register_tool(
+            func=clear_knowledge,
+            name="clear_knowledge",
+            description=(
+                "Remove active knowledge entries. Specify a knowledge_id to remove a "
+                "specific entry, or omit to clear all knowledge."
+            ),
+            parameters={
+                "knowledge_id": {
+                    "type": "string",
+                    "description": "ID of knowledge entry to remove (omit to clear all)"
+                }
+            },
+            required=[]
         )
 
     def _register_tool(

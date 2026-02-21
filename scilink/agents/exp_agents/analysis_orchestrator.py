@@ -175,7 +175,15 @@ _SYSTEM_PROMPT_BODY_POST = """
    - Use when: user says "divide by baseline", "subtract dark reference", "normalize to peak", etc.
    - Requires: metadata already loaded
    - Example flow: load_metadata → set_preprocessing_instruction → run_analysis
-   
+
+**KNOWLEDGE SYNTHESIS:**
+14. `synthesize_knowledge`: Distill findings from completed analyses into reusable knowledge.
+   - Use when: user wants to learn from reference spectra, derive calibration, build a reference model, etc.
+   - Input: analysis_ids (list), focus (what to extract/learn)
+   - The synthesized knowledge is automatically injected into all subsequent run_analysis calls.
+15. `list_knowledge`: Show all active knowledge entries.
+16. `clear_knowledge`: Remove active knowledge (specific ID or all).
+
 **AGENT SELECTION DECISION TREE:**
 
 ```
@@ -387,6 +395,7 @@ class AnalysisOrchestratorAgent:
         self.current_data_type: Optional[str] = None
         self.selected_agent_id: Optional[int] = None
         self.analysis_results: List[Dict[str, Any]] = []
+        self.active_knowledge: List[Dict[str, Any]] = []
         
         # Analysis run counter for unique IDs within same second
         self._analysis_run_counter = 0
@@ -800,6 +809,7 @@ class AnalysisOrchestratorAgent:
             self.current_data_type = state.get("current_data_type")
             self.selected_agent_id = state.get("selected_agent_id")
             self.analysis_results = state.get("analysis_results", [])
+            self.active_knowledge = state.get("active_knowledge", [])
             self._analysis_run_counter = state.get("analysis_run_counter", 0)
             
             # Restore analysis mode if saved
@@ -889,11 +899,12 @@ class AnalysisOrchestratorAgent:
                 "analysis_run_counter": self._analysis_run_counter,
                 "message_count": self.message_count,
                 "analysis_mode": self.analysis_mode.value,
+                "active_knowledge": self.active_knowledge,
             }
-            
+
             with open(self.checkpoint_path, 'w') as f:
                 json.dump(checkpoint_data, f, indent=2)
-            
+
             print(f"    ✅ Auto-checkpoint saved")
             
         except Exception as e:

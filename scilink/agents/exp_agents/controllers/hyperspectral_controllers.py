@@ -57,6 +57,55 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
             prompt.append(validation)
 
 
+def _append_prior_knowledge_context(prompt: list, state: dict) -> None:
+    """Append prior knowledge from reference analyses to an LLM prompt.
+
+    Args:
+        prompt: Mutable list of prompt parts to extend.
+        state: Pipeline state dict containing ``prior_knowledge`` list.
+    """
+    knowledge = state.get("prior_knowledge", [])
+    if not knowledge:
+        return
+    prompt.append("\n## Prior Knowledge from Reference Analyses")
+    prompt.append(
+        "The following knowledge was derived from prior reference analyses. "
+        "Use it to inform your analysis approach, model selection, and interpretation."
+    )
+    for entry in knowledge:
+        prompt.append(f"\n### {entry.get('focus', 'Reference findings')}")
+        prompt.append(entry.get("summary", ""))
+        findings = entry.get("key_findings", [])
+        if findings:
+            prompt.append("\nKey findings:")
+            for f in findings:
+                prompt.append(f"- {f}")
+
+
+def _append_objective_context(prompt: list, state: dict) -> None:
+    """Append high-level scientific objective to an LLM prompt.
+
+    The objective is injected as a top-level framing directive that tells the
+    LLM *why* the analysis is being performed and *what question* to answer.
+    It is distinct from ``analysis_hints`` which provide tactical guidance on
+    *how* to analyze.
+
+    Args:
+        prompt: Mutable list of prompt parts to extend.
+        state: Pipeline state dict containing ``analysis_objective``.
+    """
+    objective = state.get("analysis_objective")
+    if not objective:
+        return
+    prompt.append(
+        f"\n\n--- Analysis Objective ---\n"
+        f"The overarching scientific objective of this analysis is: {objective}\n"
+        f"Frame your analysis, model selection, and interpretation around "
+        f"answering this objective. All findings should be evaluated in terms "
+        f"of how they contribute to resolving this question."
+    )
+
+
 def build_code_generation_prompt(
     target_desc: str,
     h: int, w: int, e: int,
@@ -64,13 +113,21 @@ def build_code_generation_prompt(
     axis_start: float,
     axis_end: float,
     processing_note: str,
-    hints: str | None = None
+    hints: str | None = None,
+    objective: str | None = None,
 ) -> str:
     hints_section = ""
-    if hints:
-        hints_section = f"""
+    if objective:
+        hints_section += f"""
 
-### 5. USER GUIDANCE
+### 5. ANALYSIS OBJECTIVE
+The overarching scientific objective is: {objective}
+Frame your feature extraction around answering this objective. Prioritize extracting parameters that are directly relevant to resolving this question.
+"""
+    if hints:
+        hints_section += f"""
+
+### {'6' if objective else '5'}. USER GUIDANCE
 The user has indicated interest in: {hints}
 Prioritize this guidance in your analysis, but also capture any other significant features present in the data.
 """
@@ -237,6 +294,8 @@ class GetInitialComponentParamsController:
             sys_info_str = json.dumps(state["system_info"], indent=2)
             prompt_parts.append(f"\n\n--- System Information ---\n{sys_info_str}")
 
+        _append_objective_context(prompt_parts, state)
+
         if state.get("analysis_hints"):
             prompt_parts.append(
                 f"\n\n--- User Guidance ---\n"
@@ -246,6 +305,7 @@ class GetInitialComponentParamsController:
             )
 
         _append_skill_context(prompt_parts, state, "planning")
+        _append_prior_knowledge_context(prompt_parts, state)
 
         prompt_parts.append("\n\nBased on the system description and data characteristics, choose the decomposition method and estimate the optimal number of spectral components.")
 
@@ -446,6 +506,8 @@ class GetFinalComponentSelectionController:
             prompt_parts.append(f"\n\n**{viz['label']}:**")
             prompt_parts.append({"mime_type": "image/jpeg", "data": viz['image']})
 
+        _append_objective_context(prompt_parts, state)
+
         if state.get("analysis_hints"):
             prompt_parts.append(
                 f"\n\n--- User Guidance ---\n"
@@ -455,7 +517,7 @@ class GetFinalComponentSelectionController:
             )
 
         prompt_parts.append(f"\n\nBased on the elbow plot AND the visual examples, decide the optimal number of components.")
-        
+
         param_gen_config = None#GenerationConfig(response_mime_type="application/json")
         try:
             response = self.model.generate_content(
@@ -782,6 +844,7 @@ Overlays showing where components are concentrated on the structural image.
 
         # 7. Domain skill context
         _append_skill_context(prompt_parts, state, "interpretation")
+        _append_prior_knowledge_context(prompt_parts, state)
 
         # 8. Final instructions
         prompt_parts.append("\n\nProvide your analysis in the requested JSON format.")
@@ -835,6 +898,8 @@ class SelectRefinementTargetController:
             else:
                 self.logger.warning(f"Could not find image bytes for plot: {img.get('label')}")
 
+        _append_objective_context(prompt_parts, state)
+
         if state.get("analysis_hints"):
             prompt_parts.append(
                 f"\n\n--- User Guidance ---\n"
@@ -844,6 +909,7 @@ class SelectRefinementTargetController:
             )
 
         _append_skill_context(prompt_parts, state, "planning")
+        _append_prior_knowledge_context(prompt_parts, state)
 
         prompt_parts.append("\n\nBased on these results, decide if a focused refinement is needed.")
 
@@ -1048,6 +1114,8 @@ class BuildHolisticSynthesisPromptController:
             sys_info_str = json.dumps(state["system_info"], indent=2)
             prompt_parts.append(f"\n\n--- System Information ---\n{sys_info_str}")
 
+        _append_objective_context(prompt_parts, state)
+
         if state.get("analysis_hints"):
             prompt_parts.append(
                 f"\n\n--- User Guidance ---\n"
@@ -1125,6 +1193,7 @@ class BuildHolisticSynthesisPromptController:
 
         # 3. Domain skill context
         _append_skill_context(prompt_parts, state, "interpretation")
+        _append_prior_knowledge_context(prompt_parts, state)
 
         # 4. EXPLICIT REPORTING INSTRUCTIONS
         prompt_parts.append("\n\n### 📝 CRITICAL REPORTING INSTRUCTIONS")
@@ -1482,7 +1551,8 @@ class RunDynamicAnalysisController:
                 axis_start=state['energy_axis'][0],
                 axis_end=state['energy_axis'][-1],
                 processing_note=processing_note,
-                hints=state.get("analysis_hints")
+                hints=state.get("analysis_hints"),
+                objective=state.get("analysis_objective"),
             )
 
             current_prompt = base_prompt
