@@ -1647,19 +1647,20 @@ class AnalysisOrchestratorTools:
             The synthesized knowledge is automatically injected into all
             subsequent run_analysis calls.
             """
+            from scilink.knowledge import synthesize_knowledge as _synthesize
+
             print(f"  ⚡ Tool: Synthesizing knowledge from {len(analysis_ids)} analyses...")
 
-            # Collect detailed analysis texts
-            analysis_texts = []
+            # Collect result dicts by analysis ID
+            results = []
             missing_ids = []
             for aid in analysis_ids:
                 found = False
                 for record in self.orch.analysis_results:
                     if record.get("analysis_id") == aid:
                         full_result = record.get("full_result", {})
-                        text = full_result.get("detailed_analysis", "")
-                        if text:
-                            analysis_texts.append(f"### Analysis: {aid}\n{text}")
+                        full_result["analysis_id"] = aid
+                        results.append(full_result)
                         found = True
                         break
                 if not found:
@@ -1671,53 +1672,18 @@ class AnalysisOrchestratorTools:
                     "message": f"Analysis IDs not found: {missing_ids}"
                 })
 
-            if not analysis_texts:
-                return json.dumps({
-                    "status": "error",
-                    "message": "No detailed analysis text found in the specified analyses."
-                })
-
-            # Build LLM prompt
-            from .instruct import KNOWLEDGE_SYNTHESIS_INSTRUCTIONS
-            prompt_text = KNOWLEDGE_SYNTHESIS_INSTRUCTIONS.format(
-                focus=focus,
-                analysis_texts="\n\n".join(analysis_texts)
-            )
-
-            try:
-                response = self.orch.model.generate_content(
-                    contents=[prompt_text],
-                    generation_config=None,
-                    safety_settings=None,
-                )
-                # Parse response
-                response_text = response.text if hasattr(response, 'text') else str(response)
-                # Extract JSON from response
-                import re as _re
-                json_match = _re.search(r'\{[\s\S]*\}', response_text)
-                if json_match:
-                    llm_output = json.loads(json_match.group())
-                else:
-                    return json.dumps({
-                        "status": "error",
-                        "message": "LLM did not return valid JSON."
-                    })
-            except Exception as e:
-                return json.dumps({
-                    "status": "error",
-                    "message": f"Knowledge synthesis LLM call failed: {e}"
-                })
-
-            # Build knowledge entry
+            # Synthesize via the standalone function
             counter = len(self.orch.active_knowledge) + 1
-            entry = {
-                "id": f"knowledge_{counter:03d}",
-                "focus": focus,
-                "source_analyses": analysis_ids,
-                "summary": llm_output.get("summary", ""),
-                "key_findings": llm_output.get("key_findings", []),
-                "timestamp": datetime.now().isoformat()
-            }
+            try:
+                entry = _synthesize(
+                    results, focus,
+                    model=self.orch.model,
+                    knowledge_id=f"knowledge_{counter:03d}",
+                )
+            except (ValueError, RuntimeError) as e:
+                return json.dumps({"status": "error", "message": str(e)})
+
+            entry["source_analyses"] = analysis_ids
             self.orch.active_knowledge.append(entry)
 
             # Save to disk
