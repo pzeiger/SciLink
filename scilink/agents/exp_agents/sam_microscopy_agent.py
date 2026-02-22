@@ -298,6 +298,8 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         )
         
         # Build initial state dict
+        _sys_info = self._handle_system_info(system_info)
+        _sys_info, series_metadata = self._extract_series_metadata(_sys_info, series_metadata)
         state = {
             # Input data
             "image_paths": image_paths,
@@ -305,9 +307,9 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "input_type": input_type,
             "num_images": num_images,
             "is_single_image": is_single_image,
-            
+
             # System info
-            "system_info": self._handle_system_info(system_info),
+            "system_info": _sys_info,
             "series_metadata": series_metadata or {},
             
             # First image (preprocessed)

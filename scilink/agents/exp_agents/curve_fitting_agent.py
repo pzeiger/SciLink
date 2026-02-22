@@ -256,7 +256,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 - str: Single spectrum path (.npy, .csv, .txt)
                 - List[str]: Multiple spectrum paths (series)
                 - np.ndarray: 1D/2D (single) or 3D (series stack) array
-            system_info: Sample/experiment metadata
+            system_info: Sample/experiment metadata. May include a ``"series"``
+                key with series metadata (see below); it will be extracted
+                automatically.
             objective: Optional high-level scientific objective that frames
                 the entire analysis (e.g., "Determine whether the sample
                 underwent a phase transition", "Quantify the relative
@@ -265,12 +267,15 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 analyzing and *what question* to answer.
             hints: Optional tactical guidance for the analysis (e.g.,
                 "Try a Voigt model", "Focus on the band gap region")
-            series_metadata: Optional metadata about the series, e.g.:
-                {
-                    "series_type": "temperature",  # or "time", "concentration", etc.
-                    "values": [300, 350, 400],     # x-axis values
-                    "unit": "K"                     # unit for values
-                }
+            series_metadata: Optional metadata about the series. Can also
+                be provided inside ``system_info["series"]``. Explicit
+                ``series_metadata`` takes precedence. Expected structure::
+
+                    {
+                        "series_type": "temperature",   # or "time", "concentration", …
+                        "values": [300, 350, 400],      # one value per spectrum
+                        "unit": "K"                      # unit for values
+                    }
             auxiliary_data: Optional path to an auxiliary dataset (1D curve file
                 or 2D image) from the same sample/experiment. Not fitted or
                 analyzed in detail, but provided to the LLM as context for
@@ -298,8 +303,8 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         Examples:
             # Single spectrum
             result = agent.analyze("spectrum.csv")
-            
-            # Series of spectra
+
+            # Series with series metadata as a separate argument
             result = agent.analyze(
                 ["temp_300K.csv", "temp_350K.csv", "temp_400K.csv"],
                 series_metadata={
@@ -308,10 +313,24 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "unit": "K"
                 }
             )
-            
+
+            # Series with series metadata inside system_info
+            result = agent.analyze(
+                ["conc_01.csv", "conc_02.csv", "conc_03.csv"],
+                system_info={
+                    "sample": "Boron-doped silicon",
+                    "instrument": "Raman spectrometer, 532 nm",
+                    "series": {
+                        "series_type": "concentration",
+                        "values": [0.1, 0.2, 0.3],
+                        "unit": "mol/L"
+                    }
+                }
+            )
+
             # With relaxed quality threshold
             result = agent.analyze("noisy_spectrum.csv", r2_threshold=0.85)
-            
+
             # Numpy stack (3D array: n_spectra x 2 x n_points)
             result = agent.analyze(my_spectra_stack)
 
@@ -443,6 +462,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             skill_state = {"skill_name": parsed["name"], "skill_sections": parsed}
             self.logger.info(f"   Skill loaded: {parsed['name']}")
 
+        # Extract series metadata from system_info if not provided explicitly
+        handled_system_info = self._handle_system_info(system_info)
+        handled_system_info, series_metadata = self._extract_series_metadata(
+            handled_system_info, series_metadata
+        )
+
         # Build initial state
         state = {
             # Input data
@@ -453,7 +478,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "is_single_spectrum": is_single_spectrum,
 
             # System info
-            "system_info": self._handle_system_info(system_info),
+            "system_info": handled_system_info,
             "series_metadata": series_metadata or {},
             "analysis_hints": hints,
             "analysis_objective": objective,

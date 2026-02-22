@@ -305,6 +305,22 @@ class LLMAgentMixin:
         # Return as-is for flat structures or if no valid nested system_info found
         return system_info
 
+    @staticmethod
+    def _extract_series_metadata(
+        system_info: Dict[str, Any],
+        series_metadata: dict | None,
+    ) -> tuple[Dict[str, Any], dict | None]:
+        """Pop ``"series"`` from *system_info* when no explicit *series_metadata* is given.
+
+        Returns the (possibly modified) *system_info* and the resolved
+        *series_metadata*.  If *series_metadata* was already provided it
+        takes precedence and *system_info* is returned unchanged.
+        """
+        if not series_metadata and isinstance(system_info, dict) and "series" in system_info:
+            system_info = dict(system_info)          # shallow copy to avoid mutating caller's dict
+            series_metadata = system_info.pop("series")
+        return system_info, series_metadata
+
     def _build_system_info_prompt_section(self, system_info: Dict[str, Any]) -> str:
         """Build the system information section for LLM prompts."""
         if not system_info:

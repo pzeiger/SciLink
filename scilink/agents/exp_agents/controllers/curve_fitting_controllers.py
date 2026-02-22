@@ -2233,6 +2233,7 @@ Return JSON with:
                 "successful": successful,
                 "flagged_count": flagged_count,
                 "is_single_spectrum": is_single,
+                "series_metadata": state.get("series_metadata", {}),
                 "quality_settings": {
                     "r2_threshold": self.r2_threshold,
                     "max_model_retries": self.max_model_retries,
