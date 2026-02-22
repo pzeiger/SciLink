@@ -2146,6 +2146,8 @@ FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed script.
 
 **Available Libraries:** numpy, pandas, scipy, lmfit, matplotlib, json
 
+**CRITICAL:** Fix only the execution error. Do NOT change the fitting model, its parameters, or the overall analysis approach. The model is locked for series consistency.
+
 **Response:** Return only `{{"diagnosis": "...", "script": "..."}}`
 """
 
