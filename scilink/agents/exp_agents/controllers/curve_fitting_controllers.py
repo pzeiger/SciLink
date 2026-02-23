@@ -2428,6 +2428,8 @@ with open('series_fit_results.json', 'r') as f:
     data = json.load(f)
 
 results = data['results']
+series_metadata = data.get('series_metadata', {{}})
+# series_metadata has: series_type, values (one per spectrum), unit
 
 # Extract series variable and parameters...
 # Create figure with subplots...
