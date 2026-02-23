@@ -1019,9 +1019,10 @@ class AnalysisOrchestratorTools:
                 "skill": {
                     "type": "string",
                     "description": (
-                        "Domain skill name or path to .md skill file for CurveFitting agent. "
-                        f"Available built-in skills: {list_skills('curve_fitting')}. "
-                        "Use show_available_agents to check for updates."
+                        "Domain skill name or path to a custom .md skill file. "
+                        "Supported by CurveFitting and Hyperspectral agents. "
+                        f"Built-in curve_fitting skills: {list_skills('curve_fitting')}. "
+                        f"Built-in hyperspectral skills: {list_skills('hyperspectral')}."
                     )
                 }
             },
