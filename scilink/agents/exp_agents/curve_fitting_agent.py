@@ -23,6 +23,7 @@ import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 import numpy as np
+import pandas as pd
 
 from .base_agent import BaseAnalysisAgent, AnalysisInput
 from .human_feedback import SimpleFeedbackMixin
@@ -352,6 +353,18 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         effective_max_retries = max_model_retries if max_model_retries is not None else self.max_model_retries
         effective_outlier_sigma = outlier_sigma if outlier_sigma is not None else self.outlier_sigma
         
+        # Convert DataFrame to numpy array (first two numeric columns)
+        if isinstance(data, pd.DataFrame):
+            numeric_cols = data.select_dtypes(include="number")
+            if numeric_cols.shape[1] < 2:
+                return {
+                    "status": "error",
+                    "error": {"error": "Invalid DataFrame",
+                              "details": f"Expected at least 2 numeric columns, got {numeric_cols.shape[1]}"},
+                    "output_directory": str(self.output_dir)
+                }
+            data = numeric_cols.iloc[:, :2].to_numpy()
+
         # Parse input
         data_path, data_paths, data_array, error = self._parse_data_input(data)
         
