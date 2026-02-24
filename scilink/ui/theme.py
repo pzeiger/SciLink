@@ -6,20 +6,51 @@ _MATERIAL_CSS = """
 <style>
 /* ── Sidebar ────────────────────────────────────────── */
 section[data-testid="stSidebar"] {
-    background-color: #1E1E1E;
-    border-right: 1px solid #333333;
+    background-color: #1E2530;
+    border-right: 1px solid #3A4556;
+}
+section[data-testid="stSidebar"] > div:first-child {
+    padding-top: 0 !important;
+}
+section[data-testid="stSidebar"] > div:first-child > div:first-child {
+    padding-top: 0 !important;
+}
+/* Tighten sidebar vertical spacing */
+section[data-testid="stSidebar"] .block-container {
+    padding-top: 0 !important;
+}
+section[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+    padding-top: 0.5rem !important;
+}
+section[data-testid="stSidebar"] [data-testid="stVerticalBlock"] > div {
+    gap: 0.4rem;
+}
+section[data-testid="stSidebar"] h1 {
+    font-size: 1.4em !important;
+    margin: 0 0 0.25rem 0 !important;
+    padding: 0 !important;
+}
+section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 {
+    font-size: 0.95em !important;
+    margin: 0.25rem 0 0.15rem 0 !important;
+    padding: 0 !important;
+}
+/* Push the first element (logo/title) flush to top */
+section[data-testid="stSidebar"] [data-testid="stImage"] {
+    margin-top: 0 !important;
+    padding-top: 0 !important;
 }
 
 /* ── Sidebar section dividers ───────────────────────── */
 section[data-testid="stSidebar"] hr {
-    border-color: #333333;
-    margin: 0.75rem 0;
+    border-color: #3A4556;
+    margin: 0.4rem 0;
 }
 
 /* ── Sidebar metric styling ─────────────────────────── */
 section[data-testid="stSidebar"] [data-testid="stMetric"] {
-    background-color: #252525;
-    border: 1px solid #333333;
+    background-color: #2A3340;
+    border: 1px solid #3A4556;
     border-radius: 6px;
     padding: 0.5rem 0.75rem;
 }
@@ -65,7 +96,7 @@ button[kind="primary"],
 /* ── Chat messages ──────────────────────────────────── */
 .stChatMessage {
     border-radius: 8px;
-    border: 1px solid #2C2C2C;
+    border: 1px solid #3A4556;
 }
 
 /* ── Tabs ───────────────────────────────────────────── */
@@ -86,9 +117,9 @@ button[kind="primary"],
 /* ── Text inputs & text areas ───────────────────────── */
 .stTextInput > div > div > input,
 .stTextArea > div > div > textarea {
-    background-color: #1E1E1E;
+    background-color: #1E2530;
     color: #E0E0E0;
-    border: 1px solid #444444;
+    border: 1px solid #4A5568;
     border-radius: 4px;
 }
 .stTextInput > div > div > input:focus,
@@ -99,20 +130,20 @@ button[kind="primary"],
 
 /* ── Select boxes ───────────────────────────────────── */
 .stSelectbox > div > div {
-    background-color: #1E1E1E;
-    border: 1px solid #444444;
+    background-color: #1E2530;
+    border: 1px solid #4A5568;
     border-radius: 4px;
 }
 
 /* ── File uploader ──────────────────────────────────── */
 .stFileUploader > div {
-    border: 1px dashed #444444;
+    border: 1px dashed #4A5568;
     border-radius: 4px;
 }
 
 /* ── Code blocks ────────────────────────────────────── */
 .stCodeBlock {
-    border: 1px solid #2C2C2C;
+    border: 1px solid #3A4556;
     border-radius: 4px;
 }
 
@@ -122,10 +153,10 @@ button[kind="primary"],
     height: 6px;
 }
 ::-webkit-scrollbar-track {
-    background: #121212;
+    background: #252D38;
 }
 ::-webkit-scrollbar-thumb {
-    background: #444444;
+    background: #4A5568;
     border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
@@ -150,8 +181,8 @@ h2, h3 {
     align-items: center;
     gap: 12px;
     padding: 12px 16px;
-    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-    border: 1px solid #333;
+    background: linear-gradient(135deg, #1E2530 0%, #252D38 100%);
+    border: 1px solid #3A4556;
     border-left: 3px solid #4FC3F7;
     border-radius: 6px;
     margin-bottom: 8px;
@@ -179,7 +210,7 @@ h2, h3 {
     text-transform: uppercase;
     letter-spacing: 0.5px;
     padding: 8px 0 4px 0;
-    border-bottom: 1px solid #2C2C2C;
+    border-bottom: 1px solid #3A4556;
     margin-bottom: 4px;
 }
 .file-entry {
@@ -196,7 +227,7 @@ h2, h3 {
     flex-shrink: 0;
 }
 .file-meta {
-    color: #777;
+    color: #6B7A8C;
     font-size: 0.8em;
     margin-left: auto;
     flex-shrink: 0;
@@ -207,10 +238,10 @@ h2, h3 {
     height: 280px;
     overflow-y: auto;
     margin: 0;
-    background: #1e1e1e;
+    background: #1E2530;
     padding: 8px;
     border-radius: 4px;
-    border: 1px solid #333;
+    border: 1px solid #3A4556;
     font-family: monospace;
     font-size: 13px;
     white-space: pre-wrap;

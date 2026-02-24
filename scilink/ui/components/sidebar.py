@@ -9,12 +9,18 @@ import streamlit as st
 from ..config import MODEL_OPTIONS, SUPPORTED_DATA_EXTENSIONS, SUPPORTED_METADATA_EXTENSIONS
 
 
+_LOGO_PATH = Path(__file__).resolve().parent.parent.parent.parent / "misc" / "scilink_logo_v3_dark.svg"
+
+
 def render_sidebar() -> None:
     with st.sidebar:
-        st.title("SciLink")
-
-        # ── Configuration ────────────────────────────────────────
-        st.subheader("Configuration")
+        if st.session_state.agent_initialized and _LOGO_PATH.exists():
+            col_l, col_c, col_r = st.columns([1, 3, 1])
+            with col_c:
+                st.image(str(_LOGO_PATH), width=140)
+        else:
+            st.title("SciLink")
+            st.markdown("")
         preset = st.selectbox(
             "Model",
             MODEL_OPTIONS + ["Custom"],
@@ -26,13 +32,12 @@ def render_sidebar() -> None:
             model = preset
         api_key = st.text_input("API key", type="password", key="cfg_api_key")
         base_url = st.text_input("Base URL (optional)", key="cfg_base_url")
+        fh_api_key = st.text_input("FutureHouse API key (optional)", type="password", key="cfg_fh_api_key")
         mode = st.selectbox(
             "Analysis mode",
             ["co-pilot", "supervised", "autonomous"],
             key="cfg_mode",
         )
-
-        # ── Code-execution consent ───────────────────────────────
         consent = st.checkbox(
             "I understand that the agent will execute generated Python code on my machine",
             key="cfg_consent",
@@ -46,17 +51,12 @@ def render_sidebar() -> None:
                     "or a VM to sandbox generated code execution. "
                     "Example: `docker run -p 8501:8501 scilink-ui`"
                 )
-
-        st.divider()
-
-        # ── Session control ──────────────────────────────────────
-        st.subheader("Session")
         col1, col2 = st.columns(2)
 
         with col1:
             start_disabled = st.session_state.agent_initialized or not consent
             if st.button("Start Session", disabled=start_disabled, width="stretch"):
-                _start_session(model, api_key, base_url, mode)
+                _start_session(model, api_key, base_url, mode, fh_api_key)
 
         with col2:
             if st.button("Reset Session", disabled=not st.session_state.agent_initialized,
@@ -74,7 +74,7 @@ def render_sidebar() -> None:
                 key="uploader_data",
             )
             if data_file is not None:
-                _save_upload(data_file, "data")
+                save_upload(data_file, "data")
 
             meta_file = st.file_uploader(
                 "Metadata file",
@@ -82,7 +82,7 @@ def render_sidebar() -> None:
                 key="uploader_meta",
             )
             if meta_file is not None:
-                _save_upload(meta_file, "metadata")
+                save_upload(meta_file, "metadata")
 
             # ── Agent status ─────────────────────────────────────
             st.divider()
@@ -112,7 +112,7 @@ def render_sidebar() -> None:
 
 # ── helpers ──────────────────────────────────────────────────────
 
-def _start_session(model: str, api_key: str, base_url: str, mode: str) -> None:
+def _start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key: str = "") -> None:
     from scilink.agents.exp_agents.analysis_orchestrator import (
         AnalysisMode,
         AnalysisOrchestratorAgent,
@@ -146,6 +146,7 @@ def _start_session(model: str, api_key: str, base_url: str, mode: str) -> None:
                     model_name=model,
                     base_url=base_url or None,
                     analysis_mode=mode_map[mode],
+                    futurehouse_api_key=fh_api_key or None,
                 )
             except Exception as exc:
                 st.error(f"Failed to initialize agent: {exc}")
@@ -160,6 +161,7 @@ def _start_session(model: str, api_key: str, base_url: str, mode: str) -> None:
     }
     st.session_state.chat_messages = []
     st.session_state.known_images = set()
+    st.rerun()
 
 
 def _reset_session() -> None:
@@ -179,8 +181,8 @@ def _reset_session() -> None:
     st.rerun()
 
 
-def _save_upload(uploaded_file, kind: str) -> None:
-    """Save an uploaded file and queue an auto-examine/load if it's new."""
+def save_upload(uploaded_file, kind: str, auto_dispatch: bool = True) -> None:
+    """Save an uploaded file and optionally queue an auto-examine/load."""
     session_dir = Path(st.session_state.session_dir)
     upload_dir = session_dir / "uploads"
     upload_dir.mkdir(exist_ok=True)
@@ -199,8 +201,9 @@ def _save_upload(uploaded_file, kind: str) -> None:
     upload_key = (kind, dest_str)
     if upload_key not in st.session_state._processed_uploads:
         st.session_state._processed_uploads.add(upload_key)
-        if kind == "data":
-            st.session_state.pending_auto_examine = dest_str
-        else:
-            st.session_state.pending_auto_load_metadata = dest_str
+        if auto_dispatch:
+            if kind == "data":
+                st.session_state.pending_auto_examine = dest_str
+            else:
+                st.session_state.pending_auto_load_metadata = dest_str
         st.sidebar.success(f"Uploaded {kind} file: {uploaded_file.name}")

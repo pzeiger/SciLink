@@ -7,11 +7,11 @@ from pathlib import Path
 import streamlit as st
 
 from scilink.ui.state import init_session_state, ChatTask, FeedbackRequest
-from scilink.ui.components.sidebar import render_sidebar
+from scilink.ui.components.sidebar import render_sidebar, save_upload
 from scilink.ui.components.file_viewer import render_file_preview
 from scilink.ui.output_capture import OutputCapture
 from scilink.ui.theme import inject_theme
-from scilink.ui.config import AVATAR_USER, AVATAR_AGENT
+from scilink.ui.config import AVATAR_USER, AVATAR_AGENT, SUPPORTED_DATA_EXTENSIONS, SUPPORTED_METADATA_EXTENSIONS
 
 _LOGO_PATH = Path(__file__).resolve().parent.parent.parent / "misc" / "scilink_logo_v3_dark.svg"
 
@@ -132,14 +132,21 @@ if not st.session_state.agent_initialized:
         else:
             st.title("SciLink")
         st.markdown(
-            "1. Select a model (or type a custom name) and enter your API key in the sidebar.\n"
-            "2. Check the code-execution consent box, then click **Start Session**.\n"
-            "3. Upload a data file (and optionally a metadata file).\n"
-            "4. Chat with the analysis agent. Browse results in the **File Explorer** tab."
+            '<p style="text-align:center;color:#9E9E9E;font-size:1.1em;'
+            'margin-top:-8px;margin-bottom:24px">'
+            "LLM-powered analysis for experimental science</p>",
+            unsafe_allow_html=True,
         )
         st.markdown(
-            "**FFT Microscopy** · **SAM Segmentation** · "
-            "**Hyperspectral** · **Curve Fitting**"
+            '<p style="text-align:center;color:#B0B0B0;font-size:0.95em;'
+            'letter-spacing:0.3px">'
+            '<span style="color:#E0E0E0">Configure model & API key</span>'
+            '&ensp;<span style="color:#82B1FF">&rarr;</span>&ensp;'
+            '<span style="color:#E0E0E0">Upload data</span>'
+            '&ensp;<span style="color:#82B1FF">&rarr;</span>&ensp;'
+            '<span style="color:#E0E0E0">Chat with the agent</span>'
+            "</p>",
+            unsafe_allow_html=True,
         )
     st.stop()
 
@@ -151,6 +158,56 @@ chat_tab, files_tab = st.tabs(["Chat", "File Explorer"])
 
 # ── Chat tab ─────────────────────────────────────────────────────
 with chat_tab:
+    # Show a prominent upload zone until the chat conversation starts
+    if not st.session_state.chat_messages:
+        st.markdown(
+            '<div style="border:2px dashed #4A5568;border-radius:10px;'
+            "padding:32px 16px;text-align:center;margin-bottom:16px;"
+            'background:#1E2530">'
+            '<p style="color:#82B1FF;font-size:1.1em;margin:0 0 4px 0">'
+            "Upload your data to get started</p>"
+            '<p style="color:#6B7A8C;font-size:0.85em;margin:0">'
+            "Images, CSV, NumPy arrays, and more</p>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        up_data, up_meta = st.columns(2)
+        with up_data:
+            main_data = st.file_uploader(
+                "Data file",
+                type=[e.lstrip(".") for e in SUPPORTED_DATA_EXTENSIONS],
+                key="main_uploader_data",
+            )
+            if main_data is not None:
+                save_upload(main_data, "data", auto_dispatch=False)
+        with up_meta:
+            main_meta = st.file_uploader(
+                "Metadata (optional)",
+                type=[e.lstrip(".") for e in SUPPORTED_METADATA_EXTENSIONS],
+                key="main_uploader_meta",
+            )
+            if main_meta is not None:
+                save_upload(main_meta, "metadata", auto_dispatch=False)
+
+        # Show "Analyze" button once data is uploaded
+        if st.session_state.uploaded_data_path:
+            if st.button("Analyze", type="primary", width="stretch"):
+                data_path = st.session_state.uploaded_data_path
+                meta_path = st.session_state.uploaded_metadata_path
+                if data_path and meta_path:
+                    prompt = (
+                        f"I uploaded a data file at `{data_path}` "
+                        f"and a metadata file at `{meta_path}`. "
+                        f"Please examine the data and load the metadata."
+                    )
+                else:
+                    prompt = (
+                        f"I uploaded a data file at `{data_path}`. "
+                        f"Please examine it."
+                    )
+                st.session_state.chat_messages.append({"role": "user", "content": prompt})
+                _start_task(prompt)
+
     _avatars = {"user": AVATAR_USER, "assistant": AVATAR_AGENT}
     for msg in st.session_state.chat_messages:
         with st.chat_message(msg["role"], avatar=_avatars.get(msg["role"])):
