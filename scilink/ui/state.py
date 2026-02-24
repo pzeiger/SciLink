@@ -26,6 +26,7 @@ class ChatTask:
     verbose_log: str = ""
     feedback_request: Optional[FeedbackRequest] = None
     live_capture: object = None  # OutputCapture instance for real-time reading
+    stopped: bool = False  # True when the user requests cancellation
 
 
 def init_session_state() -> None:

@@ -125,9 +125,13 @@ def _run_agent_chat(task: ChatTask, agent, user_input: str) -> None:
     # Route logging output through the capture buffer so that
     # logging.info() messages (used by the verification-correction
     # loop) appear in the live verbose panel alongside print() output.
+    # A thread filter ensures each session only captures its own agent's
+    # logs, preventing cross-talk when multiple analyses run concurrently.
     log_handler = logging.StreamHandler(cap._buffer)
     log_handler.setLevel(logging.INFO)
     log_handler.setFormatter(logging.Formatter("%(message)s"))
+    _this_thread = threading.get_ident()
+    log_handler.addFilter(lambda record: record.thread == _this_thread)
     root_logger = logging.getLogger()
     root_logger.addHandler(log_handler)
 
@@ -135,16 +139,19 @@ def _run_agent_chat(task: ChatTask, agent, user_input: str) -> None:
         builtins.input = _streamlit_input
         with cap:
             result = agent.chat(user_input)
-        task.result = result
-        task.verbose_log = cap.getvalue()
+        if not task.stopped:
+            task.result = result
+            task.verbose_log = cap.getvalue()
     except Exception as exc:
-        task.error = str(exc)
-        task.verbose_log = cap.getvalue()
+        if not task.stopped:
+            task.error = str(exc)
+            task.verbose_log = cap.getvalue()
     finally:
         builtins.input = original_input
         root_logger.removeHandler(log_handler)
         task.live_capture = None
-        task.is_running = False
+        if not task.stopped:
+            task.is_running = False
 
 
 def _start_task(prompt: str) -> None:
@@ -438,15 +445,38 @@ with chat_tab:
 
         # ── 3. Live monitoring — fragment auto-reruns, no blocking ──
         if task.is_running:
-            st.markdown(
-                '<div class="agent-spinner-container">'
-                '  <div class="agent-spinner-dot"></div>'
-                '  <div class="agent-spinner-dot"></div>'
-                '  <div class="agent-spinner-dot"></div>'
-                '  <span class="agent-spinner-label">Agent is working...</span>'
-                '</div>',
-                unsafe_allow_html=True,
-            )
+            _spin_col, _stop_col = st.columns([4, 1])
+            with _spin_col:
+                st.markdown(
+                    '<div class="agent-spinner-container">'
+                    '  <div class="agent-spinner-dot"></div>'
+                    '  <div class="agent-spinner-dot"></div>'
+                    '  <div class="agent-spinner-dot"></div>'
+                    '  <span class="agent-spinner-label">Agent is working...</span>'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+            with _stop_col:
+                if st.button("Stop", type="secondary", key="stop_agent_btn",
+                             use_container_width=True):
+                    task.stopped = True
+                    task.is_running = False
+                    task.verbose_log = (
+                        task.live_capture.getvalue() if task.live_capture else ""
+                    )
+                    task.live_capture = None
+                    # Unblock any pending feedback wait
+                    if task.feedback_request is not None:
+                        task.feedback_request.response = ""
+                        task.feedback_request.event.set()
+                        task.feedback_request = None
+                    st.session_state.chat_messages.append({
+                        "role": "assistant",
+                        "content": "Analysis stopped by user.",
+                        "verbose": task.verbose_log,
+                    })
+                    st.session_state.chat_task = ChatTask()
+                    st.rerun(scope="app")
             live = ""
             if task.live_capture is not None:
                 try:
