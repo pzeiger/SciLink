@@ -650,65 +650,52 @@ class HumanFeedbackRefinementController:
             return {"needs_refinement": False, "reasoning": str(e)}
     
     def _collect_human_feedback(self, llm_assessment: dict) -> dict:
-        """Collect human feedback on the analysis."""
+        """Collect human feedback on the analysis.
+
+        Uses a single ``input()`` call so it maps directly to the
+        Streamlit UI's "Accept as-is" / "Submit feedback" buttons:
+        - Empty response  → accept LLM recommendation
+        - Non-empty text  → treat as natural-language parameter suggestion
+        """
         print("\n🤖 **LLM Assessment:**")
         evaluation = llm_assessment.get("evaluation", {})
         print(f"   - Coverage: {evaluation.get('coverage_score', 'N/A')}/10")
         print(f"   - Accuracy: {evaluation.get('accuracy_score', 'N/A')}/10")
         print(f"   - Overall Quality: {evaluation.get('overall_quality', 'N/A')}")
         print(f"\n   Reasoning: {llm_assessment.get('reasoning', 'N/A')}")
-        
-        if llm_assessment.get("needs_refinement"):
-            print("\n   📝 LLM recommends refinement with these parameters:")
+
+        needs_refinement = llm_assessment.get("needs_refinement", False)
+        if needs_refinement:
+            print("\n   📝 LLM Recommendation: **Refine** with these parameters:")
             rec_params = llm_assessment.get("recommended_parameters", {})
             for key, value in rec_params.items():
                 print(f"      - {key}: {value}")
-        
-        print("\n" + "-" * 80)
-        print("👤 **Your Options:**")
-        print("   [1] Accept current results (proceed to processing)")
-        print("   [2] Accept LLM's recommended parameters")
-        print("   [3] Provide feedback in natural language")
-        
-        try:
-            choice = input("\nYour choice [1/2/3]: ").strip()
-        except KeyboardInterrupt:
-            self.logger.warning("User interrupted. Accepting current results.")
-            return {"action": "accept", "params": None}
-        
-        if choice == '1' or choice == '':
-            return {"action": "accept", "params": None}
-        elif choice == '2':
-            return {"action": "use_llm", "params": llm_assessment.get("recommended_parameters", {})}
-        elif choice == '3':
-            return self._collect_natural_language_feedback()
         else:
-            print("Invalid choice. Accepting current results.")
-            return {"action": "accept", "params": None}
-    
-    def _collect_natural_language_feedback(self) -> dict:
-        """Collect natural language feedback and convert to parameters via LLM."""
-        print("\n📝 **Describe what you'd like to change:**")
-        print("   Examples:")
-        print("   - 'Detect smaller particles, current minimum is too high'")
-        print("   - 'The contrast is low, try enhancing it'")
-        print("   - 'Increase min_area to 150'")
-        
+            print("\n   ✅ LLM Recommendation: **Results look good — proceed to processing.**")
+
+        print("\n" + "-" * 80)
+        print("Press Enter to accept LLM recommendation, or type feedback to suggest changes.")
+
         try:
-            user_feedback = input("\nYour feedback: ").strip()
+            user_feedback = input("\n🤔 Your feedback (or press Enter to accept): ").strip()
         except KeyboardInterrupt:
-            self.logger.warning("User interrupted. Accepting current results.")
-            return {"action": "accept", "params": None}
-        
+            self.logger.warning("User interrupted. Accepting LLM recommendation.")
+            user_feedback = ""
+
+        # Empty → accept LLM recommendation
         if not user_feedback:
+            if needs_refinement:
+                return {"action": "use_llm", "params": llm_assessment.get("recommended_parameters", {})}
             return {"action": "accept", "params": None}
-        
+
+        # Non-empty → convert natural language to parameters
         params = self._convert_feedback_to_params(user_feedback)
-        
         if params:
             return {"action": "custom", "params": params}
         else:
-            print("Could not interpret feedback. Accepting current results.")
+            print("Could not interpret feedback. Accepting LLM recommendation.")
+            if needs_refinement:
+                return {"action": "use_llm", "params": llm_assessment.get("recommended_parameters", {})}
             return {"action": "accept", "params": None}
     
     def _convert_feedback_to_params(self, user_feedback: str) -> dict:

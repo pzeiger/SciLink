@@ -233,12 +233,7 @@ class HumanFeedbackRefinementController:
                 self.logger.info("✅ User accepted current results.")
                 state["locked_params"] = state.get("llm_params", state.get("current_params", {}))
                 break
-            
-            elif feedback["action"] == "cancel":
-                self.logger.info("❌ User cancelled analysis.")
-                state["batch_cancelled"] = True
-                return state
-            
+
             elif feedback["action"] == "modify" and feedback.get("params"):
                 state = self._rerun_analysis(state, feedback["params"])
         
@@ -292,32 +287,69 @@ class HumanFeedbackRefinementController:
         print("-" * 80)
     
     def _collect_human_feedback(self, state: dict) -> dict:
+        """Collect human feedback on the FFT/NMF analysis.
+
+        Uses a single ``input()`` call so it maps directly to the
+        Streamlit UI's "Accept as-is" / "Submit feedback" buttons:
+        - Empty response  → accept current parameters
+        - Non-empty text  → LLM converts natural-language suggestion to params
+        """
         llm_params = state.get("llm_params", {})
-        
-        print("\n👤 Options: [1] Accept  [2] Modify parameters  [c] Cancel")
-        
+        print(f"\nCurrent parameters: window_size_nm={llm_params.get('window_size_nm', 'auto')}, "
+              f"n_components={llm_params.get('n_components', 4)}")
+        print("Press Enter to accept, or describe what to change "
+              "(e.g. 'use 6 components', 'smaller window around 2nm').")
+
         try:
-            choice = input("\nChoice [1/2/c]: ").strip().lower()
+            user_feedback = input("\n🤔 Your feedback (or press Enter to accept): ").strip()
         except (KeyboardInterrupt, EOFError):
             return {"action": "accept"}
-        
-        if choice == '1' or choice == '':
+
+        if not user_feedback:
             return {"action": "accept"}
-        elif choice == 'c':
-            return {"action": "cancel"}
-        elif choice == '2':
-            mods = {}
-            try:
-                ws = input(f"   Window size (nm) [{llm_params.get('window_size_nm', 'auto')}]: ").strip()
-                if ws:
-                    mods['window_size_nm'] = float(ws)
-                nc = input(f"   Components [{llm_params.get('n_components', 4)}]: ").strip()
-                if nc:
-                    mods['n_components'] = int(nc)
-            except (KeyboardInterrupt, EOFError, ValueError):
-                pass
-            return {"action": "modify", "params": mods} if mods else {"action": "accept"}
+
+        params = self._convert_feedback_to_params(user_feedback, llm_params)
+        if params:
+            return {"action": "modify", "params": params}
         return {"action": "accept"}
+
+    def _convert_feedback_to_params(self, user_feedback: str, current_params: dict) -> dict:
+        """Use LLM to convert natural language feedback to FFT/NMF parameters."""
+        self.logger.info("   🧠 Converting feedback to parameters...")
+
+        prompt = f"""Convert user feedback into FFT/NMF parameter adjustments.
+
+**Current Parameters:**
+{json.dumps(current_params, indent=2)}
+
+**Available Parameters:**
+- window_size_nm (float): FFT window size in nanometers
+- n_components (integer): Number of NMF components to extract
+
+**User Feedback:**
+"{user_feedback}"
+
+Return JSON with ONLY the parameters to change:
+{{"n_components": 6, "window_size_nm": 2.0}}
+"""
+
+        try:
+            response = self.model.generate_content(
+                contents=[prompt],
+                generation_config=self.generation_config,
+                safety_settings=self.safety_settings,
+            )
+            result_json, error_dict = self._parse_llm_response(response)
+
+            if error_dict or not result_json:
+                return None
+
+            print(f"\n   ✅ Interpreted as: {json.dumps(result_json, indent=2)}")
+            return result_json
+
+        except Exception as e:
+            self.logger.error(f"Error converting feedback: {e}")
+            return None
     
     def _rerun_analysis(self, state: dict, new_params: dict) -> dict:
         self.logger.info(f"🔄 Re-running FFT/NMF with updated parameters...")
