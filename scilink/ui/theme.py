@@ -232,15 +232,12 @@ h2, h3 {
     border-left: 3px solid #4FC3F7;
     border-radius: 6px;
 }
-.agent-spinner-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background-color: #4FC3F7;
+.agent-spinner-heart {
+    font-size: 1.1em;
     animation: scilink-pulse 1.4s ease-in-out infinite;
 }
-.agent-spinner-dot:nth-child(2) { animation-delay: 0.2s; }
-.agent-spinner-dot:nth-child(3) { animation-delay: 0.4s; }
+.agent-spinner-heart:nth-child(2) { animation-delay: 0.2s; }
+.agent-spinner-heart:nth-child(3) { animation-delay: 0.4s; }
 .agent-spinner-label {
     color: #E0E0E0;
     font-size: 0.9em;
@@ -325,12 +322,12 @@ header [data-testid="stStatusWidget"] {
 @keyframes emoji-float {
     0% {
         opacity: 0;
-        transform: translateY(110vh) rotate(0deg);
+        transform: translateY(100vh) rotate(0deg);
     }
-    10% {
+    3% {
         opacity: var(--peak-opacity, 0.12);
     }
-    90% {
+    93% {
         opacity: var(--peak-opacity, 0.12);
     }
     100% {

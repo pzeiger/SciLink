@@ -559,9 +559,9 @@ with chat_tab:
             with _spin_col:
                 st.markdown(
                     '<div class="agent-spinner-container">'
-                    '  <div class="agent-spinner-dot"></div>'
-                    '  <div class="agent-spinner-dot"></div>'
-                    '  <div class="agent-spinner-dot"></div>'
+                    '  <span class="agent-spinner-heart">🐾</span>'
+                    '  <span class="agent-spinner-heart">🐾</span>'
+                    '  <span class="agent-spinner-heart">🐾</span>'
                     '  <span class="agent-spinner-label">Agent is working...</span>'
                     '</div>',
                     unsafe_allow_html=True,
