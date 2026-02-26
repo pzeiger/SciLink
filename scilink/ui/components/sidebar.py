@@ -137,6 +137,19 @@ def render_sidebar() -> None:
             elif app_mode == "plan":
                 _render_planning_status()
 
+        # ── Vibes sliders ───────────────────────────────────
+        st.divider()
+        st.slider(
+            "\U0001f49c Hearts",
+            min_value=0, max_value=50, value=7,
+            key="vibe_hearts",
+        )
+        st.slider(
+            "\u2795 Pluses",
+            min_value=0, max_value=50, value=7,
+            key="vibe_pluses",
+        )
+
         # ── Quit button (always visible at bottom) ────────────
         st.divider()
         if st.button("Quit App", use_container_width=True):

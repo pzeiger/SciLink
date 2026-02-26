@@ -298,10 +298,94 @@ h2, h3 {
 header [data-testid="stStatusWidget"] {
     display: none !important;
 }
+
+/* ── Floating background emojis ───────────────────── */
+.floating-emojis {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    pointer-events: none;
+    z-index: 0;
+    overflow: hidden;
+    animation: emojis-fade-in 2s ease-out forwards;
+}
+@keyframes emojis-fade-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+}
+.floating-emojis span {
+    position: absolute;
+    display: block;
+    font-size: var(--emoji-size, 28px);
+    opacity: 0;
+    animation: emoji-float var(--duration, 18s) var(--delay, 0s) ease-in-out infinite;
+}
+@keyframes emoji-float {
+    0% {
+        opacity: 0;
+        transform: translateY(110vh) rotate(0deg);
+    }
+    10% {
+        opacity: var(--peak-opacity, 0.12);
+    }
+    90% {
+        opacity: var(--peak-opacity, 0.12);
+    }
+    100% {
+        opacity: 0;
+        transform: translateY(-10vh) rotate(var(--rotation, 360deg));
+    }
+}
 </style>
 """
+
+_FLOATING_HTML = """
+<div class="floating-emojis" aria-hidden="true">
+{spans}
+</div>
+"""
+
+
+def _build_emoji_spans(n_hearts: int = 7, n_pluses: int = 7) -> str:
+    """Generate absolutely-positioned emoji spans with randomised CSS vars."""
+    import random
+
+    emojis: list[str] = (
+        ["\U0001f49c"] * n_hearts  # purple hearts
+        + ["\u2795"] * n_pluses     # plus signs
+    )
+    random.shuffle(emojis)
+
+    spans: list[str] = []
+    for emoji in emojis:
+        left = random.randint(2, 96)
+        size = random.randint(20, 40)
+        duration = round(random.uniform(16, 30), 1)
+        delay = round(random.uniform(0, 3), 1)
+        rotation = random.choice([-360, -180, 180, 360])
+        is_plus = emoji == "\u2795"
+        opacity = round(random.uniform(0.12, 0.22) if is_plus else random.uniform(0.10, 0.20), 2)
+        spans.append(
+            f'<span style="left:{left}%;'
+            f"--emoji-size:{size}px;"
+            f"--duration:{duration}s;"
+            f"--delay:{delay}s;"
+            f"--rotation:{rotation}deg;"
+            f'--peak-opacity:{opacity}">{emoji}</span>'
+        )
+    return "\n".join(spans)
 
 
 def inject_theme() -> None:
     """Inject the Material Design CSS into the current page."""
     st.markdown(_MATERIAL_CSS, unsafe_allow_html=True)
+
+    n_hearts = st.session_state.get("vibe_hearts", 7)
+    n_pluses = st.session_state.get("vibe_pluses", 7)
+    if n_hearts or n_pluses:
+        st.markdown(
+            _FLOATING_HTML.format(spans=_build_emoji_spans(n_hearts, n_pluses)),
+            unsafe_allow_html=True,
+        )
