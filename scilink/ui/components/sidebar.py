@@ -99,6 +99,13 @@ def render_sidebar() -> None:
             )
             if st.session_state.get("cfg_embedding_preset") == "Custom":
                 st.text_input("Embedding model name", key="cfg_embedding_custom", disabled=_locked)
+            st.text_input(
+                "Embedding API key (optional)",
+                type="password",
+                key="cfg_embedding_api_key",
+                disabled=_locked,
+                help="Leave blank to use the main API key",
+            )
 
         mode = st.selectbox(
             "Autonomy mode",
@@ -183,6 +190,7 @@ def render_sidebar() -> None:
                     st.session_state.get("cfg_embedding_custom", "")
                     if _embed_preset == "Custom" else _embed_preset
                 ) or None
+                _embed_api_key = st.session_state.get("cfg_embedding_api_key", "") or None
                 st.session_state._pending_init = {
                     "model": model,
                     "api_key": api_key,
@@ -190,6 +198,7 @@ def render_sidebar() -> None:
                     "mode": mode,
                     "fh_api_key": fh_api_key,
                     "embedding_model": _embed_model,
+                    "embedding_api_key": _embed_api_key,
                 }
 
         with col2:
@@ -359,7 +368,7 @@ def _render_planning_status() -> None:
 
 # ── helpers ──────────────────────────────────────────────────────
 
-def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key: str = "", embedding_model: str = None) -> None:
+def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key: str = "", embedding_model: str = None, embedding_api_key: str = None) -> None:
     """Initialize the agent and session directory.
 
     Dispatches to the appropriate agent based on ``st.session_state.app_mode``.
@@ -387,6 +396,7 @@ def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key
             agent = _init_planning_agent(
                 session_dir, resolved_key, model, base_url, mode, fh_api_key,
                 embedding_model=embedding_model,
+                embedding_api_key=embedding_api_key,
             )
         else:
             agent = _init_analysis_agent(
@@ -431,7 +441,7 @@ def _init_analysis_agent(session_dir, api_key, model, base_url, mode, fh_api_key
 
 
 def _init_planning_agent(session_dir, api_key, model, base_url, mode, fh_api_key,
-                         embedding_model=None):
+                         embedding_model=None, embedding_api_key=None):
     """Create a PlanningOrchestratorAgent."""
     from scilink.agents.planning_agents.planning_orchestrator import (
         AutonomyLevel,
@@ -456,6 +466,8 @@ def _init_planning_agent(session_dir, api_key, model, base_url, mode, fh_api_key
     kwargs = {}
     if embedding_model:
         kwargs["embedding_model"] = embedding_model
+    if embedding_api_key:
+        kwargs["embedding_api_key"] = embedding_api_key
 
     return PlanningOrchestratorAgent(
         objective=objective,
