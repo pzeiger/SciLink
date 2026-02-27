@@ -127,9 +127,10 @@ def render_sidebar() -> None:
                     "or a VM to sandbox generated code execution. "
                     "Example: `docker run -p 8501:8501 scilink-ui`"
                 )
-        # ── Resume past session (analyze mode only) ────────
-        if not _locked and st.session_state.app_mode in ("analyze", None):
-            past = _discover_resumable_sessions("analyze")
+        # ── Resume past session ────────────────────────────
+        if not _locked:
+            _resume_mode = st.session_state.app_mode or "analyze"
+            past = _discover_resumable_sessions(_resume_mode)
             if past:
                 with st.expander("Resume past session", expanded=False):
                     labels = []
@@ -169,6 +170,12 @@ def render_sidebar() -> None:
                         use_container_width=True,
                         key="resume_session_btn",
                     ):
+                        _r_embed_preset = st.session_state.get("cfg_embedding_preset", "")
+                        _r_embed_model = (
+                            st.session_state.get("cfg_embedding_custom", "")
+                            if _r_embed_preset == "Custom" else _r_embed_preset
+                        ) or None
+                        _r_embed_api_key = st.session_state.get("cfg_embedding_api_key", "") or None
                         st.session_state._pending_resume = {
                             "session_dir": str(selected["path"]),
                             "model": model,
@@ -176,6 +183,8 @@ def render_sidebar() -> None:
                             "base_url": base_url,
                             "mode": mode,
                             "fh_api_key": fh_api_key,
+                            "embedding_model": _r_embed_model,
+                            "embedding_api_key": _r_embed_api_key,
                         }
 
         col1, col2 = st.columns(2)
@@ -557,14 +566,12 @@ def resume_session(
     base_url: str,
     mode: str,
     fh_api_key: str = "",
+    embedding_model: str = None,
+    embedding_api_key: str = None,
 ) -> None:
     """Restore an agent from a past session directory and re-populate the UI."""
     import json as _json
     import scilink.executors as executors
-    from scilink.agents.exp_agents.analysis_orchestrator import (
-        AnalysisMode,
-        AnalysisOrchestratorAgent,
-    )
 
     resolved_key = (
         api_key
@@ -582,20 +589,51 @@ def resume_session(
     session_path = Path(session_dir)
     executors._GLOBAL_SANDBOX_APPROVED = True
 
-    mode_map = {
-        "co-pilot": AnalysisMode.CO_PILOT,
-        "supervised": AnalysisMode.SUPERVISED,
-        "autonomous": AnalysisMode.AUTONOMOUS,
-    }
+    app_mode = st.session_state.app_mode or "analyze"
+
     try:
-        agent = AnalysisOrchestratorAgent.restore_from_checkpoint(
-            base_dir=str(session_path),
-            api_key=resolved_key,
-            model_name=model,
-            base_url=base_url or None,
-            analysis_mode=mode_map[mode],
-            futurehouse_api_key=fh_api_key or None,
-        )
+        if app_mode == "plan":
+            from scilink.agents.planning_agents.planning_orchestrator import (
+                AutonomyLevel,
+                PlanningOrchestratorAgent,
+            )
+            plan_mode_map = {
+                "co-pilot": AutonomyLevel.CO_PILOT,
+                "supervised": AutonomyLevel.SUPERVISED,
+                "autonomous": AutonomyLevel.AUTONOMOUS,
+            }
+            kwargs = {}
+            if embedding_model:
+                kwargs["embedding_model"] = embedding_model
+            if embedding_api_key:
+                kwargs["embedding_api_key"] = embedding_api_key
+            agent = PlanningOrchestratorAgent.restore_from_checkpoint(
+                base_dir=str(session_path),
+                api_key=resolved_key,
+                model_name=model,
+                base_url=base_url or None,
+                autonomy_level=plan_mode_map[mode],
+                futurehouse_api_key=fh_api_key or None,
+                **kwargs,
+            )
+        else:
+            from scilink.agents.exp_agents.analysis_orchestrator import (
+                AnalysisMode,
+                AnalysisOrchestratorAgent,
+            )
+            analysis_mode_map = {
+                "co-pilot": AnalysisMode.CO_PILOT,
+                "supervised": AnalysisMode.SUPERVISED,
+                "autonomous": AnalysisMode.AUTONOMOUS,
+            }
+            agent = AnalysisOrchestratorAgent.restore_from_checkpoint(
+                base_dir=str(session_path),
+                api_key=resolved_key,
+                model_name=model,
+                base_url=base_url or None,
+                analysis_mode=analysis_mode_map[mode],
+                futurehouse_api_key=fh_api_key or None,
+            )
     except Exception as exc:
         st.error(f"Failed to restore session: {exc}")
         return
