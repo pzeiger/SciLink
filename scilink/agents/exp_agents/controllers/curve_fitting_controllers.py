@@ -496,9 +496,9 @@ class GenerateCurveFittingReportController:
 
         html = "<div>"
         if r_squared is not None:
-            if r_squared >= 0.99:
+            if r_squared >= self.r2_threshold + 0.04:
                 badge_class, label = "quality-good", "Excellent"
-            elif r_squared >= 0.95:
+            elif r_squared >= self.r2_threshold:
                 badge_class, label = "quality-ok", "Good"
             else:
                 badge_class, label = "quality-poor", "Poor"
@@ -819,7 +819,7 @@ The automated fitting could not achieve adequate fit quality.
 
 **Options:**
 1. Suggest a different model or approach
-2. Adjust the R² threshold for this analysis (e.g., "threshold 0.90")
+2. Adjust the R² threshold for this analysis (e.g., "threshold {example_threshold:.2f}")
 3. Accept the best available fit (type "accept")
 
 Your guidance: '''
@@ -1211,10 +1211,10 @@ If ANY box above is checked: set fit_acceptable: FALSE, explain the data range o
 ## STEP 2: IF STEP 1 PASSED, evaluate fit quality
 
 **Accept if:**
-- R² ≥ 0.95 AND residuals are mostly random noise AND main data features are captured
+- R² ≥ {accept_threshold:.2f} AND residuals are mostly random noise AND main data features are captured
 
 **Reject if:**
-- R² < 0.90
+- R² < {reject_threshold:.2f}
 - Major systematic residual pattern across ENTIRE spectrum  
 - A prominent data feature is completely missed by the model
 
@@ -1273,7 +1273,9 @@ Remember: Rejecting a good fit (R² > 0.98) to chase marginal improvements often
             r_squared=r_squared,
             model_type=model_type,
             n_components=n_components,
-            parameters=params_str
+            parameters=params_str,
+            accept_threshold=self.r2_threshold,
+            reject_threshold=self.r2_threshold - 0.05,
         )
         
         # Add history context
@@ -1402,6 +1404,7 @@ Return JSON with the refined fitting approach:
             best_r2=best_result.get("fit_quality", {}).get("r_squared", 0),
             threshold=self.r2_threshold,
             models_tried=models_tried,
+            example_threshold=self.r2_threshold - 0.05,
         )
         print(prompt)
         
