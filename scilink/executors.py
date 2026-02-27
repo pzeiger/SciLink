@@ -12,6 +12,48 @@ from .auth import get_api_key
 
 DEFAULT_TIMEOUT = 120
 
+# Global registry of active subprocesses, keyed by thread ID.
+# Accessible from any thread so the UI stop handler can kill them.
+_active_subprocesses_lock = threading.Lock()
+_active_subprocesses: dict[int, set[subprocess.Popen]] = {}
+
+
+def _register_subprocess(proc: subprocess.Popen) -> None:
+    """Register a subprocess so it can be killed when the user clicks Stop."""
+    tid = threading.get_ident()
+    with _active_subprocesses_lock:
+        _active_subprocesses.setdefault(tid, set()).add(proc)
+
+
+def _unregister_subprocess(proc: subprocess.Popen) -> None:
+    """Remove a subprocess from the registry."""
+    tid = threading.get_ident()
+    with _active_subprocesses_lock:
+        procs = _active_subprocesses.get(tid)
+        if procs:
+            procs.discard(proc)
+            if not procs:
+                del _active_subprocesses[tid]
+
+
+def kill_subprocesses_for_thread(tid: int) -> None:
+    """Terminate all subprocesses registered by a given thread.
+
+    Safe to call from any thread (e.g. the Streamlit UI thread).
+    """
+    with _active_subprocesses_lock:
+        procs = list(_active_subprocesses.pop(tid, []))
+    for proc in procs:
+        try:
+            proc.terminate()          # SIGTERM first
+            try:
+                proc.wait(timeout=2)  # Give it a moment to clean up
+            except subprocess.TimeoutExpired:
+                proc.kill()           # SIGKILL if still alive
+                proc.wait()
+        except OSError:
+            pass  # Already dead
+
 # Global cache for sandbox approval (shared across all agents in session)
 _GLOBAL_SANDBOX_APPROVED: bool = False
 
@@ -257,27 +299,38 @@ class ScriptExecutor:
             with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, dir=os.getcwd()) as tf:
                 tf.write(script_content)
                 temp_script_file = tf.name
-            
+
             env = os.environ.copy()
             if self.mp_api_key:
                 env['MP_API_KEY'] = self.mp_api_key
 
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 ['python', os.path.basename(temp_script_file)],
-                capture_output=True, text=True, timeout=self.timeout, env=env, check=False
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, env=env,
             )
-            
-            logging.debug(f"STDOUT:\n{result.stdout}")
-            logging.debug(f"STDERR:\n{result.stderr}")
+            # Register so OutputCapture.kill_subprocesses() can terminate it.
+            _register_subprocess(proc)
+            try:
+                stdout, stderr = proc.communicate(timeout=self.timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                return {"status": "error", "message": f"Script execution timed out after {self.timeout} seconds."}
+            finally:
+                _unregister_subprocess(proc)
 
-            if result.returncode == 0:
-                return {"status": "success", "stdout": result.stdout, "stderr": result.stderr}
+            logging.debug(f"STDOUT:\n{stdout}")
+            logging.debug(f"STDERR:\n{stderr}")
+
+            if proc.returncode == 0:
+                return {"status": "success", "stdout": stdout, "stderr": stderr}
+            elif proc.returncode == -signal.SIGTERM or proc.returncode == -signal.SIGKILL:
+                return {"status": "error", "message": "Script execution was stopped by the user."}
             else:
-                error_msg = f"Script execution failed with return code {result.returncode}.\nSTDERR:\n{result.stderr}"
+                error_msg = f"Script execution failed with return code {proc.returncode}.\nSTDERR:\n{stderr}"
                 return {"status": "error", "message": error_msg}
 
-        except subprocess.TimeoutExpired:
-            return {"status": "error", "message": f"Script execution timed out after {self.timeout} seconds."}
         except Exception as e:
             return {"status": "error", "message": f"An unexpected error occurred: {e}"}
         finally:
