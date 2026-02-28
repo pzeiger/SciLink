@@ -104,8 +104,8 @@ def render_sidebar() -> None:
                 type="password",
                 key="cfg_embedding_api_key",
                 disabled=_locked,
-                help="Leave blank to use the main API key",
             )
+            st.caption("\u2139\ufe0f Leave blank to use the main API key")
 
         mode = st.selectbox(
             "Autonomy mode",

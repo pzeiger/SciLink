@@ -538,15 +538,6 @@ section[data-testid="stSidebar"] [data-testid="stMarkdown"]:has(.logo-glow-sm) {
     padding-top: 0 !important;
 }
 
-/* ── Tooltip icon visibility ───────────────────────── */
-[data-testid="stTooltipIcon"] {
-    color: #757575 !important;
-    opacity: 1 !important;
-}
-[data-testid="stTooltipIcon"] svg {
-    stroke: #757575 !important;
-}
-
 /* ── Sidebar section dividers ───────────────────────── */
 section[data-testid="stSidebar"] hr {
     border-color: #E0E0E0;
