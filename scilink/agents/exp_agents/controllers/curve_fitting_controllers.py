@@ -2394,6 +2394,482 @@ Return JSON with:
 
 
 
+class AdaptiveRefitController:
+    """
+    Post-processing recovery step that re-analyzes flagged spectra independently.
+
+    After the locked-config series processing completes, this controller:
+    1. Identifies spectra flagged for quality reasons (below_threshold, fit_failed)
+    2. Re-runs each one with full LLM planning + model selection + verification
+    3. Updates series_results with improved fits where possible
+    4. Re-runs outlier detection on updated results
+
+    Statistical outliers (reason="statistical_outlier") are NOT re-fitted,
+    because their low R² may reflect genuine physical phenomena rather
+    than model inadequacy.
+    """
+
+    REFIT_REASONS = frozenset({"below_threshold", "fit_failed", "outlier_and_below_threshold"})
+
+    def __init__(
+        self,
+        model,
+        logger: logging.Logger,
+        generation_config,
+        safety_settings,
+        parse_fn: Callable,
+        executor: Any,
+        script_instructions: str,
+        correction_instructions: str,
+        quality_instructions: str,
+        output_dir: str,
+        plot_fn: Callable,
+        r2_threshold: float = 0.95,
+        max_model_retries: int = 3,
+        max_verification_iterations: int = 3,
+        preprocessor: Any = None,
+        enable_human_feedback: bool = False,
+    ):
+        self.logger = logger
+        self.output_dir = Path(output_dir)
+        self.plot_fn = plot_fn
+        self.r2_threshold = r2_threshold
+        self.enable_human_feedback = enable_human_feedback
+
+        # Compose a fitting helper to reuse _fit_with_quality_control
+        self._fitting_helper = UnifiedSeriesProcessingController(
+            model=model,
+            logger=logger,
+            generation_config=generation_config,
+            safety_settings=safety_settings,
+            parse_fn=parse_fn,
+            executor=executor,
+            script_instructions=script_instructions,
+            correction_instructions=correction_instructions,
+            quality_instructions=quality_instructions,
+            output_dir=output_dir,
+            plot_fn=plot_fn,
+            r2_threshold=r2_threshold,
+            max_model_retries=max_model_retries,
+            enable_human_feedback=False,
+            max_verification_iterations=max_verification_iterations,
+            preprocessor=preprocessor,
+        )
+
+    def _load_spectrum(self, idx, spectrum_paths, spectrum_stack):
+        """Load spectrum data for re-analysis."""
+        if spectrum_stack is not None:
+            return spectrum_stack[idx]
+        if spectrum_paths and idx < len(spectrum_paths):
+            try:
+                return self._fitting_helper._load_curve_data(spectrum_paths[idx])
+            except Exception as e:
+                self.logger.error(f"Failed to load {spectrum_paths[idx]}: {e}")
+                return None
+        return None
+
+    def _preprocess_spectrum(self, curve_data, state):
+        """Apply locked preprocessing strategy if available."""
+        if self._fitting_helper.preprocessor is None:
+            return curve_data
+        locked_strategy = state.get("locked_preprocessing_strategy")
+        try:
+            curve_data, _ = self._fitting_helper.preprocessor.run_preprocessing(
+                curve_data, state.get("system_info", {}),
+                locked_strategy=locked_strategy,
+            )
+        except Exception as e:
+            self.logger.warning(f"Preprocessing failed during refit: {e}")
+        return curve_data
+
+    def _build_refit_state(self, state, curve_data, idx, name):
+        """Build a temporary state dict for independent re-analysis."""
+        locked_config = state.get("locked_fitting_config", {})
+        original_result = state["series_results"][idx]
+        original_r2 = original_result.get("fit_quality", {}).get("r_squared", 0)
+
+        # Build experimental context so the LLM knows what it's fitting
+        system_info = state.get("system_info", {})
+        series_metadata = state.get("series_metadata", {})
+        num_spectra = state.get("num_spectra", 0)
+
+        # Serialize full system_info so the LLM gets all metadata
+        # regardless of key structure (flat or nested)
+        exp_context_parts = []
+        if system_info:
+            exp_context_parts.append(json.dumps(system_info, indent=2, default=str))
+        if series_metadata.get("variable") and series_metadata.get("values"):
+            values = series_metadata["values"]
+            units = series_metadata.get("units", "")
+            if idx < len(values):
+                exp_context_parts.append(
+                    f"Series position: spectrum {idx + 1}/{num_spectra}, "
+                    f"{series_metadata['variable']} = {values[idx]} {units}"
+                )
+        exp_context = "\n".join(exp_context_parts)
+
+        # Summarize series context: what worked, what failed, neighbors
+        series_results = state.get("series_results", [])
+        series_context_parts = []
+        successful = [r for r in series_results if r.get("success") and not r.get("flagged")]
+        if successful:
+            r2_vals = [r.get("fit_quality", {}).get("r_squared", 0) for r in successful]
+            series_context_parts.append(
+                f"Successful fits (locked model): {len(successful)}/{len(series_results)} spectra, "
+                f"R² range {min(r2_vals):.4f}–{max(r2_vals):.4f}, "
+                f"model: {successful[0].get('model_type', 'N/A')}"
+            )
+        flagged = [r for r in series_results if r.get("flagged") or not r.get("success")]
+        if flagged:
+            flagged_indices = [str(r["index"]) for r in flagged]
+            series_context_parts.append(f"Failed spectra indices: [{', '.join(flagged_indices)}]")
+        # Nearest successful neighbor summary
+        for offset in (-1, 1):
+            neighbor_idx = idx + offset
+            if 0 <= neighbor_idx < len(series_results):
+                nr = series_results[neighbor_idx]
+                if nr.get("success") and not nr.get("flagged"):
+                    nr2 = nr.get("fit_quality", {}).get("r_squared", 0)
+                    series_context_parts.append(
+                        f"Neighbor spectrum [{neighbor_idx}] fitted successfully: "
+                        f"model={nr.get('model_type', 'N/A')}, R²={nr2:.4f}"
+                    )
+        series_context = "\n".join(series_context_parts)
+
+        refit_context = (
+            f"This spectrum was previously fitted using the locked series model but achieved "
+            f"inadequate fit quality (R² = {original_r2:.4f}, threshold = {self.r2_threshold}).\n\n"
+            f"The locked model was: {locked_config.get('physical_model', 'Unknown')}\n"
+            f"The locked strategy was: {locked_config.get('fitting_strategy', 'Unknown')}\n\n"
+        )
+        if exp_context:
+            refit_context += f"**Experimental context:**\n{exp_context}\n\n"
+        if series_context:
+            refit_context += f"**Series context:**\n{series_context}\n\n"
+        refit_context += (
+            f"IMPORTANT: The locked model failed for this specific spectrum. You MUST try a DIFFERENT "
+            f"fitting approach. Consider:\n"
+            f"1. Different functional forms (the locked model's shape may not match this spectrum)\n"
+            f"2. Additional components (this spectrum may have features others don't)\n"
+            f"3. Different physical models (this spectrum may represent a different physical regime)\n\n"
+            f"Do NOT simply retry the same model with different initial parameters.\n\n"
+            f"PARSIMONY: Use the SIMPLEST model that achieves R² ≥ {self.r2_threshold}. "
+            f"Do not add extra components beyond what the data clearly requires. "
+            f"If two peaks are visible, use a two-component model — not three or more."
+        )
+
+        fresh_config = {
+            "analysis_approach": refit_context,
+            "physical_model": f"Alternative to: {locked_config.get('physical_model', 'Unknown')}",
+            "fitting_strategy": "Independent analysis - try different approach than locked model",
+            "parameters_to_extract": locked_config.get("parameters_to_extract", []),
+        }
+
+        spectrum_paths = state.get("spectrum_paths", [])
+        data_path = spectrum_paths[idx] if spectrum_paths and idx < len(spectrum_paths) else name
+
+        stats = self._fitting_helper._compute_statistics(curve_data)
+        plot_bytes = self.plot_fn(curve_data, state.get("system_info", {}))
+
+        return {
+            "data_path": data_path,
+            "curve_data": curve_data,
+            "original_plot_bytes": plot_bytes,
+            "data_statistics": stats,
+            "locked_fitting_config": fresh_config,
+            "system_info": state.get("system_info", {}),
+            "literature_context": state.get("literature_context"),
+            "analysis_hints": state.get("analysis_hints"),
+            "analysis_objective": state.get("analysis_objective"),
+            "skill_name": state.get("skill_name"),
+            "skill_sections": state.get("skill_sections"),
+            "auxiliary_plot_bytes": state.get("auxiliary_plot_bytes"),
+            "auxiliary_label": state.get("auxiliary_label"),
+            "auxiliary_summary": state.get("auxiliary_summary"),
+            "auxiliary_mime_type": state.get("auxiliary_mime_type"),
+            "prior_knowledge": state.get("prior_knowledge", []),
+            "analysis_images": [],
+        }
+
+    def _ask_user_for_consensus(self, improved, model_counts):
+        """Ask user which model to use when refits found no consensus."""
+        print("\n" + "=" * 60)
+        print("🔄 ADAPTIVE REFIT: No model consensus among re-fitted spectra")
+        print("=" * 60)
+        print("\nThe re-fitted spectra used different models:")
+        for i, (model, count) in enumerate(
+            sorted(model_counts.items(), key=lambda x: -x[1]), 1
+        ):
+            indices = [str(r["index"]) for r in improved if r["new_model"] == model]
+            r2s = [r["new_r2"] for r in improved if r["new_model"] == model]
+            r2_str = ", ".join(f"{v:.4f}" for v in r2s)
+            print(f"  {i}. '{model}' — spectra [{', '.join(indices)}], R²: {r2_str}")
+
+        print("\nOptions:")
+        print("  • Enter a number (1, 2, ...) to use that model for all re-fitted spectra")
+        print("  • Type a model name to suggest a different model")
+        print("  • Press Enter to keep the independent results as-is")
+        print("-" * 60)
+
+        response = input("\n🤔 Your choice: ").strip()
+        if not response:
+            print("✅ Keeping independent refit results.")
+            return None
+
+        # Check if user entered a number
+        try:
+            choice = int(response)
+            models = sorted(model_counts.keys(), key=lambda m: -model_counts[m])
+            if 1 <= choice <= len(models):
+                selected = models[choice - 1]
+                print(f"✅ Will re-fit with '{selected}'")
+                return selected
+        except ValueError:
+            pass
+
+        # User typed a model name directly
+        print(f"✅ Will re-fit with '{response}'")
+        return response
+
+    def _run_consistency_refit(
+        self, minority, target_model, improved, state, series_results,
+        spectrum_paths, spectrum_stack,
+    ):
+        """Re-fit minority spectra using the target model."""
+        peer_r2 = [r["new_r2"] for r in improved if r["new_model"] == target_model]
+        peer_count = len(peer_r2)
+
+        for entry in minority:
+            idx = entry["index"]
+            name = entry["name"]
+            self.logger.info(f"  Re-fitting [{idx}] {name} with '{target_model}'")
+
+            curve_data = self._load_spectrum(idx, spectrum_paths, spectrum_stack)
+            if curve_data is None:
+                continue
+            curve_data = self._preprocess_spectrum(curve_data, state)
+
+            refit_state = self._build_refit_state(state, curve_data, idx, name)
+            if peer_r2:
+                refit_state["locked_fitting_config"]["analysis_approach"] += (
+                    f"\n\n**Peer evidence:** {peer_count} other spectra in this series "
+                    f"were successfully refitted with '{target_model}' "
+                    f"(R² {min(peer_r2):.4f}–{max(peer_r2):.4f}). "
+                    f"Strongly prefer this model unless the data clearly "
+                    f"requires something different."
+                )
+            refit_state["locked_fitting_config"]["physical_model"] = target_model
+
+            data_path = (spectrum_paths[idx]
+                         if spectrum_paths and idx < len(spectrum_paths) else name)
+            try:
+                result = self._fitting_helper._fit_with_quality_control(
+                    state=refit_state, curve_data=curve_data, data_path=data_path,
+                    spectrum_name=name, spectrum_idx=idx,
+                )
+            except Exception as e:
+                self.logger.error(f"  Consistency refit failed for {name}: {e}")
+                continue
+
+            new_r2 = result.get("fit_quality", {}).get("r_squared", 0)
+            prev_r2 = entry["new_r2"] or 0
+
+            if result["success"] and new_r2 >= prev_r2 * 0.99:
+                self.logger.info(f"  ✅ Consistent: R² {new_r2:.4f} with '{target_model}'")
+                result["adaptively_refitted"] = True
+                result["original_r2"] = entry["original_r2"]
+                result["refit_model_type"] = result.get("model_type")
+                result["locked_model_type"] = state.get(
+                    "locked_fitting_config", {}
+                ).get("physical_model")
+                series_results[idx] = result
+                entry["new_r2"] = new_r2
+                entry["new_model"] = result.get("model_type")
+            elif self.enable_human_feedback:
+                keep = self._ask_keep_consistency_result(
+                    name, idx, target_model, new_r2,
+                    entry["new_model"], prev_r2,
+                )
+                if keep:
+                    result["adaptively_refitted"] = True
+                    result["original_r2"] = entry["original_r2"]
+                    result["refit_model_type"] = result.get("model_type")
+                    result["locked_model_type"] = state.get(
+                        "locked_fitting_config", {}
+                    ).get("physical_model")
+                    series_results[idx] = result
+                    entry["new_r2"] = new_r2
+                    entry["new_model"] = result.get("model_type")
+                else:
+                    self.logger.info(f"  Keeping original refit for [{idx}] {name}")
+            else:
+                self.logger.info(
+                    f"  Keeping original refit: consensus R²={new_r2:.4f} "
+                    f"vs previous R²={prev_r2:.4f}"
+                )
+
+    def _ask_keep_consistency_result(
+        self, name, idx, consensus_model, consensus_r2,
+        original_model, original_r2,
+    ):
+        """Ask user whether to keep consensus model when R² dropped."""
+        print("\n" + "-" * 60)
+        print(f"⚠️  Spectrum [{idx}] {name}: consensus model has lower R²")
+        print("-" * 60)
+        print(f"  Consensus: '{consensus_model}' → R² = {consensus_r2:.4f}")
+        print(f"  Independent: '{original_model}' → R² = {original_r2:.4f}")
+        print("\nOptions:")
+        print(f"  • Type 'consensus' to use '{consensus_model}' for consistency")
+        print(f"  • Press Enter to keep '{original_model}'")
+
+        response = input("\nYour choice: ").strip().lower()
+        if response == "consensus":
+            print(f"✅ Using consensus model for [{idx}] {name}")
+            return True
+        print(f"✅ Keeping independent model for [{idx}] {name}")
+        return False
+
+    def execute(self, state: dict) -> dict:
+        if state.get("error_dict"):
+            return state
+
+        if state.get("is_single_spectrum", True):
+            return state
+
+        flagged_spectra = state.get("flagged_spectra", [])
+        if not flagged_spectra:
+            self.logger.info("\n🔄 Adaptive refit: No flagged spectra, skipping.")
+            return state
+
+        refit_candidates = [f for f in flagged_spectra if f["reason"] in self.REFIT_REASONS]
+        if not refit_candidates:
+            self.logger.info("\n🔄 Adaptive refit: Flagged spectra are statistical outliers only, skipping.")
+            return state
+
+        self.logger.info(f"\n🔄 ADAPTIVE REFIT: {len(refit_candidates)} spectra to re-analyze independently")
+
+        series_results = state.get("series_results", [])
+        spectrum_paths = state.get("spectrum_paths", [])
+        spectrum_stack = state.get("spectrum_stack")
+        refit_summary = []
+
+        for flagged in refit_candidates:
+            idx = flagged["index"]
+            name = flagged["name"]
+            original_r2 = flagged.get("r_squared")
+
+            self.logger.info(f"\n  Re-analyzing [{idx}] {name} (original R²={original_r2})")
+
+            curve_data = self._load_spectrum(idx, spectrum_paths, spectrum_stack)
+            if curve_data is None:
+                self.logger.warning(f"  Could not load spectrum data for {name}, skipping")
+                continue
+
+            curve_data = self._preprocess_spectrum(curve_data, state)
+
+            refit_state = self._build_refit_state(state, curve_data, idx, name)
+            spectrum_paths_list = state.get("spectrum_paths", [])
+            data_path = spectrum_paths_list[idx] if spectrum_paths_list and idx < len(spectrum_paths_list) else name
+
+            try:
+                refit_result = self._fitting_helper._fit_with_quality_control(
+                    state=refit_state, curve_data=curve_data, data_path=data_path,
+                    spectrum_name=name, spectrum_idx=idx,
+                )
+            except Exception as e:
+                self.logger.error(f"  Refit failed for {name}: {e}")
+                refit_summary.append({
+                    "index": idx, "name": name,
+                    "original_r2": original_r2, "new_r2": None,
+                    "improved": False,
+                })
+                continue
+
+            new_r2 = refit_result.get("fit_quality", {}).get("r_squared", 0)
+            locked_model = state.get("locked_fitting_config", {}).get("physical_model")
+
+            if refit_result["success"] and (original_r2 is None or new_r2 > original_r2):
+                self.logger.info(f"  ✅ Improved: R² {original_r2} → {new_r2:.4f}")
+                refit_result["adaptively_refitted"] = True
+                refit_result["original_r2"] = original_r2
+                refit_result["refit_model_type"] = refit_result.get("model_type")
+                refit_result["locked_model_type"] = locked_model
+                series_results[idx] = refit_result
+
+                refit_summary.append({
+                    "index": idx, "name": name,
+                    "original_r2": original_r2, "new_r2": new_r2,
+                    "original_model": locked_model,
+                    "new_model": refit_result.get("model_type"),
+                    "improved": True,
+                })
+            else:
+                self.logger.info(f"  No improvement: R² {original_r2} → {new_r2:.4f}, keeping original")
+                refit_summary.append({
+                    "index": idx, "name": name,
+                    "original_r2": original_r2, "new_r2": new_r2,
+                    "improved": False,
+                })
+
+        # --- Consistency pass ---
+        # If a majority of improved refits converged on the same model type,
+        # re-refit outlier models using the consensus as guidance.
+        # If no consensus, optionally ask the user for guidance.
+        improved = [r for r in refit_summary if r["improved"] and r.get("new_model")]
+        if len(improved) >= 2:
+            model_counts = {}
+            for r in improved:
+                model_counts[r["new_model"]] = model_counts.get(r["new_model"], 0) + 1
+            top_model, top_count = max(model_counts.items(), key=lambda x: x[1])
+            has_majority = top_count > len(improved) / 2
+            minority = [r for r in improved if r["new_model"] != top_model]
+
+            if has_majority and minority:
+                self.logger.info(
+                    f"\n🔄 Consistency pass: majority model is '{top_model}' "
+                    f"({top_count}/{len(improved)}), re-fitting {len(minority)} outlier(s)"
+                )
+                self._run_consistency_refit(
+                    minority, top_model, improved, state, series_results,
+                    spectrum_paths, spectrum_stack,
+                )
+            elif not has_majority and len(model_counts) > 1:
+                if self.enable_human_feedback:
+                    # No consensus — ask user for guidance
+                    user_model = self._ask_user_for_consensus(improved, model_counts)
+                    if user_model:
+                        user_minority = [r for r in improved if r["new_model"] != user_model]
+                        if user_minority:
+                            self.logger.info(
+                                f"\n🔄 User-guided consistency: re-fitting "
+                                f"{len(user_minority)} spectra with '{user_model}'"
+                            )
+                            self._run_consistency_refit(
+                                user_minority, user_model, improved, state,
+                                series_results, spectrum_paths, spectrum_stack,
+                            )
+                else:
+                    # No human feedback and no consensus — keep independent results.
+                    # The parsimony prompt should minimize this case; if models still
+                    # disagree, the inconsistency is noted in the synthesis.
+                    self.logger.info(
+                        f"\n⚠️ No model consensus among refitted spectra "
+                        f"({dict(model_counts)}). Keeping independent results."
+                    )
+
+        state["series_results"] = series_results
+        state["refit_summary"] = refit_summary
+
+        # Re-run outlier detection with updated results
+        updated_flagged = self._fitting_helper._detect_outliers(series_results)
+        state["flagged_spectra"] = updated_flagged
+
+        improved_count = sum(1 for r in refit_summary if r["improved"])
+        self.logger.info(f"\n🔄 Adaptive refit complete: {improved_count}/{len(refit_candidates)} spectra improved")
+
+        return state
+
+
 class ConditionalTrendAnalysisController:
     """Generates and executes custom Python script for trend analysis. Only for n>=2."""
     
@@ -2664,6 +3140,9 @@ class UnifiedCurveSynthesisController:
 **FLAGGED SPECTRA (require attention):**
 {flagged_summary}
 
+**ADAPTIVE REFIT RESULTS:**
+{refit_summary}
+
 **TREND ANALYSIS RESULTS:**
 {trend_results}
 
@@ -2680,6 +3159,7 @@ Provide comprehensive scientific synthesis including:
 4. **Analysis of flagged spectra** - what might explain why these fit poorly?
 5. Scientific claims supported by the data
 6. Caveats and limitations
+7. **Analysis of adaptively re-fitted spectra** - if any spectra were re-analyzed with different models, interpret what this means scientifically (e.g., phase transition, different regime, instrumental change)
 
 Return JSON with:
 {{
@@ -2700,6 +3180,11 @@ Return JSON with:
         "possible_causes": ["list of explanations"],
         "recommended_followup": ["suggested investigations"],
         "scientific_significance": "whether outliers represent interesting physics"
+    }},
+    "refit_analysis": {{
+        "summary": "interpretation of why different models were needed",
+        "model_changes": [{{"index": 0, "from_model": "...", "to_model": "...", "interpretation": "..."}}],
+        "scientific_implications": "what the model changes tell us about the system"
     }},
     "caveats": "limitations and considerations"
 }}
@@ -2779,7 +3264,8 @@ Return JSON with:
         flagged_spectra = state.get("flagged_spectra", [])
         
         successful_fits = [r for r in series_results if r["success"]]
-        
+        refit_summary_data = state.get("refit_summary", [])
+
         fit_summaries = []
         for r in successful_fits[:15]:
             summary = {"index": r["index"], "name": r["name"], "model": r.get("model_type"),
@@ -2787,11 +3273,32 @@ Return JSON with:
             if r.get("flagged"):
                 summary["flagged"] = True
                 summary["flag_reason"] = r.get("flag_reason")
+            if r.get("adaptively_refitted"):
+                summary["adaptively_refitted"] = True
+                summary["original_r2"] = r.get("original_r2")
+                summary["refit_model"] = r.get("refit_model_type")
+                summary["locked_model"] = r.get("locked_model_type")
             fit_summaries.append(summary)
-        
+
         flagged_summary = json.dumps(flagged_spectra, indent=2) if flagged_spectra else "No spectra were flagged."
-        model_type = successful_fits[0].get("model_type") if successful_fits else "Unknown"
-        
+        refit_summary_str = json.dumps(refit_summary_data, indent=2) if refit_summary_data else "No spectra were adaptively re-fitted."
+
+        # Handle mixed model types when refitting occurred
+        model_types_used = set()
+        for r in successful_fits:
+            mt = r.get("model_type")
+            if mt:
+                model_types_used.add(mt)
+
+        if len(model_types_used) <= 1:
+            model_type = successful_fits[0].get("model_type") if successful_fits else "Unknown"
+        else:
+            locked_model = state.get("locked_fitting_config", {}).get("physical_model", "Unknown")
+            refitted_models = [r.get("refit_model_type") for r in successful_fits
+                             if r.get("adaptively_refitted") and r.get("refit_model_type")]
+            unique_refit = sorted(set(refitted_models))
+            model_type = f"Primary: {locked_model}; Re-fitted: {', '.join(unique_refit)}"
+
         prompt = self.SERIES_SYNTHESIS_INSTRUCTIONS.format(
             num_spectra=state.get("num_spectra", 1),
             successful_fits=len(successful_fits),
@@ -2799,6 +3306,7 @@ Return JSON with:
             flagged_count=len(flagged_spectra),
             fit_summaries=json.dumps(fit_summaries, indent=2),
             flagged_summary=flagged_summary,
+            refit_summary=refit_summary_str,
             trend_results=json.dumps(trend_results, indent=2),
             series_metadata=json.dumps(series_metadata, indent=2),
             system_info=json.dumps(state.get("system_info", {}), indent=2)
@@ -2933,6 +3441,48 @@ class UnifiedCurveReportController:
         html += '</div>'
         return html
 
+    def _generate_refit_section(self, refit_summary: List[dict], series_results: List[dict]) -> str:
+        """Generate HTML section for adaptive refit results."""
+        if not refit_summary:
+            return ""
+
+        improved = [r for r in refit_summary if r["improved"]]
+        not_improved = [r for r in refit_summary if not r["improved"]]
+
+        html = f"""
+        <h2>🔄 Adaptive Re-Fitting Results</h2>
+        <div class="refit-summary">
+            <p><strong>{len(improved)}/{len(refit_summary)}</strong> spectra improved through independent re-analysis</p>
+        </div>
+"""
+
+        if improved:
+            html += '<h3>Improved Fits</h3><table class="params-table"><thead><tr>'
+            html += '<th>Spectrum</th><th>Original R²</th><th>New R²</th><th>Original Model</th><th>New Model</th>'
+            html += '</tr></thead><tbody>'
+            for r in improved:
+                orig_r2 = f"{r['original_r2']:.4f}" if r.get("original_r2") is not None else "Failed"
+                new_r2 = f"{r['new_r2']:.4f}" if r.get("new_r2") is not None else "N/A"
+                html += f'<tr><td>{r["name"]}</td><td>{orig_r2}</td><td>{new_r2}</td>'
+                html += f'<td>{r.get("original_model", "N/A")}</td><td>{r.get("new_model", "N/A")}</td></tr>'
+            html += '</tbody></table>'
+
+        if not_improved:
+            html += '<h3>Unchanged Fits</h3><p>The following spectra could not be improved with alternative models:</p><ul>'
+            for r in not_improved:
+                html += f'<li>{r["name"]} (R² remained {r.get("original_r2", "N/A")})</li>'
+            html += '</ul>'
+
+        # Include visualizations for improved spectra
+        for r in improved:
+            result = next((sr for sr in series_results if sr.get("index") == r["index"]), None)
+            if result and result.get("visualization_path") and Path(result["visualization_path"]).exists():
+                with open(result["visualization_path"], 'rb') as f:
+                    b64 = self._image_to_base64(f.read())
+                html += f'<div class="image-card" style="border-left: 4px solid #17a2b8;"><img src="data:image/png;base64,{b64}" alt="{r["name"]}"><div class="image-label">{r["name"]} (Re-fitted, R²: {r.get("new_r2", 0):.4f})</div></div>'
+
+        return html
+
     def _generate_individual_fits_section(self, series_results: List[dict], num_spectra: int) -> str:
         results_with_viz = [(i, r) for i, r in enumerate(series_results) 
                            if r.get("visualization_path") and Path(r["visualization_path"]).exists()]
@@ -2979,20 +3529,25 @@ class UnifiedCurveReportController:
                 
                 if not r["success"]:
                     status, status_color = "✗ FAILED", "#e74c3c"
+                elif r.get("adaptively_refitted"):
+                    status, status_color = "🔄 Re-fitted", "#17a2b8"
                 elif r.get("flagged"):
                     status, status_color = f"⚠ {r.get('flag_reason', 'Flagged')}", "#fd7e14"
                 else:
                     status, status_color = "✓", "#27ae60"
-                
+
                 r_squared = r.get("fit_quality", {}).get("r_squared", 0)
                 r2_str = f"R² = {r_squared:.4f}" if isinstance(r_squared, float) else ""
-                
+                refit_note = ""
+                if r.get("adaptively_refitted") and r.get("original_r2") is not None:
+                    refit_note = f"<br><small>Original R²: {r['original_r2']:.4f}</small>"
+
                 html += f'''
             <div class="image-card" style="border-left: 4px solid {status_color};">
                 <img src="data:image/png;base64,{b64}" alt="{r['name']}">
                 <div style="margin-top: 8px;">
                     <strong>{r['name']}</strong><br>
-                    <span style="color: {status_color};">{status}</span> {r2_str}
+                    <span style="color: {status_color};">{status}</span> {r2_str}{refit_note}
                 </div>
             </div>
 '''
@@ -3024,11 +3579,13 @@ class UnifiedCurveReportController:
         series_metadata = state.get("series_metadata", {})
         locked_config = state.get("locked_fitting_config", {})
         flagged_spectra = state.get("flagged_spectra", [])
-        
+        refit_summary = state.get("refit_summary", [])
+
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         num_spectra = len(series_results)
         successful = sum(1 for r in series_results if r["success"])
         flagged_count = len(flagged_spectra)
+        refitted_count = sum(1 for r in refit_summary if r.get("improved"))
         
         # Quality status indicator
         if flagged_count == 0:
@@ -3114,6 +3671,11 @@ class UnifiedCurveReportController:
         .flagged-badge {{ padding: 3px 10px; border-radius: 12px; font-size: 0.85em; color: white; }}
         .flagged-card img {{ max-width: 100%; margin-top: 10px; border-radius: 4px; }}
         .flagged-recommendation {{ margin: 10px 0; font-size: 0.9em; color: #666; }}
+        .refit-summary {{ background-color: #d1ecf1; border-left: 5px solid #17a2b8; padding: 15px; margin-bottom: 20px; border-radius: 0 5px 5px 0; }}
+        .params-table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+        .params-table th, .params-table td {{ border: 1px solid #dee2e6; padding: 8px 12px; text-align: left; }}
+        .params-table th {{ background-color: #e9ecef; font-weight: bold; }}
+        .params-table tr:nth-child(even) {{ background-color: #f8f9fa; }}
     </style>
 </head>
 <body>
@@ -3123,7 +3685,7 @@ class UnifiedCurveReportController:
             <p><strong>Date:</strong> {timestamp}</p>
             <p><strong>Spectra Processed:</strong> {successful}/{num_spectra}</p>
             <p><strong>Series Type:</strong> {series_metadata.get('series_type', 'N/A')}</p>
-            <p><strong>Fitting Model:</strong> {locked_config.get('physical_model', 'N/A')}</p>
+            <p><strong>Fitting Model:</strong> {locked_config.get('physical_model', 'N/A')}{f' ({refitted_count} spectra re-fitted with alternative models)' if refitted_count > 0 else ''}</p>
             <p><strong>Quality Status:</strong> {quality_indicator}</p>
         </div>
         <h2>1. Scientific Analysis</h2>
@@ -3131,6 +3693,7 @@ class UnifiedCurveReportController:
         {param_trends_html}
         {trend_viz_html}
         {self._generate_individual_fits_section(series_results, num_spectra)}
+        {self._generate_refit_section(refit_summary, series_results) if refit_summary else ''}
         {self._generate_flagged_spectra_section(flagged_spectra, series_results, synthesis) if flagged_spectra else ''}
         {claims_html}
         {caveats_html}
