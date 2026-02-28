@@ -26,6 +26,7 @@ from ..controllers.curve_fitting_controllers import (
     # Unified controllers for series support
     HumanFeedbackRefinementController,
     UnifiedSeriesProcessingController,
+    AdaptiveRefitController,
     ConditionalTrendAnalysisController,
     UnifiedCurveSynthesisController,
     UnifiedCurveReportController,
@@ -64,19 +65,19 @@ def create_unified_curve_fitting_pipeline(
     Factory function to create the unified curve fitting pipeline.
     
     This pipeline handles BOTH single spectra and series with quality control:
-    
+
     1. Analyze First Spectrum Data
        - Compute statistics, create initial visualization
-       
+
     2. Human Feedback Refinement (optional)
        - LLM plans fitting approach
        - Human can refine the plan
        - Configuration is LOCKED for series processing
-       
+
     3. Literature Search (if enabled)
        - Search for relevant fitting models
        - Runs only once (on first spectrum context)
-       
+
     4. Unified Series Processing with Quality Control
        - Fits ALL spectra using locked configuration
        - Single spectrum = series of 1
@@ -84,22 +85,27 @@ def create_unified_curve_fitting_pipeline(
        - Human feedback for additional refinement (if enabled)
        - Automatic model retry if R² below threshold
        - Statistical outlier detection for series
-       
-    5. Conditional Trend Analysis
+
+    5. Adaptive Refit (automatic)
+       - Re-analyzes flagged spectra independently with full quality control
+       - Uses different models when the locked config fails
+       - Skipped for single spectrum or when no spectra are flagged
+
+    6. Conditional Trend Analysis
        - For n>=2: Generates and executes trend analysis
        - Highlights flagged spectra in visualizations
        - For n=1: Skipped
-       
-    6. Synthesis
+
+    7. Synthesis
        - For n>=2: Cross-spectrum synthesis with outlier analysis
        - For n=1: Single-spectrum interpretation
-       
-    7. Store Results
+
+    8. Store Results
        - Save analysis images and artifacts
-       
-    8. Report Generation
+
+    9. Report Generation
        - Adapts format based on single vs series
-       - Includes flagged spectra section for series
+       - Includes flagged spectra and refit sections for series
     
     Args:
         model: LLM model instance
@@ -174,7 +180,29 @@ def create_unified_curve_fitting_pipeline(
         )
     )
 
-    # Step 5: Conditional trend analysis (only for n>=2)
+    # Step 5: Adaptive refit of flagged spectra (post-processing recovery)
+    pipeline.append(
+        AdaptiveRefitController(
+            model=model,
+            logger=logger,
+            generation_config=generation_config,
+            safety_settings=safety_settings,
+            parse_fn=parse_fn,
+            executor=executor,
+            script_instructions=FITTING_SCRIPT_INSTRUCTIONS,
+            correction_instructions=FITTING_SCRIPT_CORRECTION_INSTRUCTIONS,
+            quality_instructions=FIT_QUALITY_ASSESSMENT_INSTRUCTIONS,
+            output_dir=output_dir,
+            plot_fn=plot_fn,
+            r2_threshold=r2_threshold,
+            max_model_retries=max_model_retries,
+            max_verification_iterations=max_verification_iterations,
+            preprocessor=preprocessor,
+            enable_human_feedback=enable_human_feedback,
+        )
+    )
+
+    # Step 6: Conditional trend analysis (only for n>=2)
     pipeline.append(
         ConditionalTrendAnalysisController(
             model=model,
@@ -188,7 +216,7 @@ def create_unified_curve_fitting_pipeline(
         )
     )
 
-    # Step 6: Synthesis (adapts to single vs series)
+    # Step 7: Synthesis (adapts to single vs series)
     pipeline.append(
         UnifiedCurveSynthesisController(
             model=model,
@@ -201,17 +229,17 @@ def create_unified_curve_fitting_pipeline(
         )
     )
 
-    # Step 7: Store analysis results/images
+    # Step 8: Store analysis results/images
     pipeline.append(
         StoreAnalysisResultsController(logger, store_fn)
     )
 
-    # Step 8a: Single spectrum report
+    # Step 9a: Single spectrum report
     pipeline.append(
         GenerateCurveFittingReportController(logger, output_dir, r2_threshold=r2_threshold)
     )
 
-    # Step 8b: Series report (only generates for n>=2)
+    # Step 9b: Series report (only generates for n>=2)
     pipeline.append(
         UnifiedCurveReportController(logger, output_dir)
     )

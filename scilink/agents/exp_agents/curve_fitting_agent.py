@@ -7,14 +7,21 @@ analysis and spectral series analysis using the same unified architecture.
 Quality control features:
 - Automatic model retry when R² is inadequate (configurable threshold)
 - Statistical outlier detection for series (may indicate interesting physics)
+- Adaptive refit of flagged spectra with independent model selection
+- Consistency pass to align refitted models across spectra
 - Human feedback integration for unresolved quality issues
 
 For series analysis:
 1. Carefully fit the first spectrum with full LLM planning and quality control
 2. Lock the fitting model and strategy for remaining spectra
-3. Detect and flag statistical outliers
-4. Generate custom analysis code for trend visualization
-5. Synthesize findings across the series
+3. Detect and flag spectra where the locked model fails (low R²)
+4. Adaptive refit: re-analyze flagged spectra independently with full QC,
+   injecting experimental context (technique, sample, series position) and
+   series context (successful fits, neighbor info) into the refit prompt
+5. Consistency pass: if a majority of refitted spectra converge on the same
+   model, re-refit outliers using the consensus model as peer evidence
+6. Generate custom analysis code for trend visualization
+7. Synthesize findings across the series, including refit analysis
 """
 
 import os
@@ -47,21 +54,36 @@ logger = logging.getLogger(__name__)
 class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
     Unified Curve Fitting Agent for spectroscopic analysis.
-    
+
     ALL analysis follows the series processing pattern:
     - Single spectrum analysis = series of 1
     - Multiple spectra = standard series processing
     - Numpy array stack = series processing
-    
+
     Quality control:
     - LLM verification loop (n iterations) to catch and fix fit issues automatically
     - Human feedback for additional refinement (if enabled)
     - Automatic model retry when R² < threshold
     - Statistical outlier detection for series (may indicate interesting physics)
-    
+    - Adaptive refit of flagged spectra with independent model selection
+    - Consistency pass to align refitted models when a majority agrees
+    - Human feedback for no-consensus and R²-drop scenarios (if enabled)
+
     For series analysis, the fitting model is carefully selected on the
     first spectrum and then LOCKED for consistent analysis across all spectra.
-    
+    When the locked model fails on some spectra (e.g., due to a phase
+    transition), the adaptive refit step re-analyzes those spectra
+    independently. The refit prompt includes experimental context (technique,
+    sample, series position) and series context (successful fits summary,
+    failed indices, neighbor info) so the LLM doesn't analyze in isolation.
+
+    After independent refits, a consistency pass checks whether a majority of
+    refitted spectra converged on the same model. If so, minority spectra are
+    re-refitted with the consensus model as peer evidence. If no majority
+    exists and human feedback is enabled, the user is asked to select a model.
+    If a consensus refit produces lower R² than the independent result, the
+    user is asked which to keep (when human feedback is enabled).
+
     Security:
     - This agent executes LLM-generated Python code for curve fitting
     - A sandbox check is performed at initialization
@@ -76,32 +98,35 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         futurehouse_api_key: FutureHouse API key for literature
         use_literature: Enable literature search (default: False)
         run_preprocessing: Enable data preprocessing
-        enable_human_feedback: Enable feedback loop
+        enable_human_feedback: Enable feedback loop (controls human-in-the-loop
+            for fitting approach refinement, no-consensus model selection, and
+            R²-drop decisions during adaptive refit)
         executor_timeout: Script timeout in seconds
-        r2_threshold: Minimum acceptable R² value (default: 0.95)
+        r2_threshold: Minimum acceptable R² value (default: 0.95). Spectra
+            below this threshold are flagged for adaptive refit.
         max_model_retries: Max alternative models to try (default: 3)
         outlier_sigma: Sigma threshold for outlier detection (default: 2.0)
         max_verification_iterations: Max LLM verification iterations (default: 3)
 
     Example:
         agent = CurveFittingAgent(api_key="...", use_literature=True)
-        
+
         # Single spectrum
         result = agent.analyze("spectrum.csv")
-        
+
         # Multiple spectra (series)
         result = agent.analyze(["spec1.csv", "spec2.csv", "spec3.csv"])
-        
+
         # Numpy stack
         result = agent.analyze(my_spectra_stack)
-        
+
         # With metadata and hints
         result = agent.analyze(
             "spectrum.csv",
             system_info={"sample": "TiO2"},
             hints="Focus on the band gap"
         )
-        
+
         # Series with metadata
         result = agent.analyze(
             spectra_paths,
@@ -111,7 +136,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "unit": "K"
             }
         )
-        
+
         # Custom quality settings
         agent = CurveFittingAgent(
             api_key="...",
@@ -120,10 +145,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             outlier_sigma=3.0,              # Less aggressive outlier detection
             max_verification_iterations=5   # More verification passes
         )
-        
+
         # Get measurement recommendations
         recommendations = agent.recommend_measurements(analysis_result=result)
-    
+
     Raises:
         RuntimeError: If sandbox check fails and user declines to proceed.
     """
@@ -770,10 +795,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # Series: full structure with trends and flagged spectra
             successful = sum(1 for r in series_results if r.get("success", False))
             
+            refit_summary = state.get("refit_summary", [])
             results["summary"] = {
                 "total_spectra": num_spectra,
                 "successful_fits": successful,
                 "flagged_count": len(flagged_spectra),
+                "refitted_count": sum(1 for r in refit_summary if r.get("improved")),
                 "input_type": state.get("input_type"),
                 "locked_model": state.get("locked_fitting_config", {}).get("physical_model"),
                 "is_single_spectrum": False
@@ -798,12 +825,17 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "flagged": r.get("flagged", False),
                     "flag_reason": r.get("flag_reason"),
                     "flag_recommendation": r.get("flag_recommendation"),
+                    "adaptively_refitted": r.get("adaptively_refitted", False),
+                    "original_r2": r.get("original_r2"),
+                    "locked_model_type": r.get("locked_model_type"),
                 }
                 for r in series_results
             ]
-            
+
             results["flagged_spectra"] = flagged_spectra
             results["flagged_spectra_analysis"] = synthesis.get("flagged_spectra_analysis", {})
+            results["refit_summary"] = refit_summary
+            results["refit_analysis"] = synthesis.get("refit_analysis", {})
             results["trend_analysis"] = state.get("trend_analysis_results", {})
             results["parameter_trends"] = synthesis.get("parameter_trends", {})
             results["caveats"] = synthesis.get("caveats", "")
