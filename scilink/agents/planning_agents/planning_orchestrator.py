@@ -285,7 +285,7 @@ class PlanningOrchestratorAgent:
         objective: str = "Undefined Research Goal",
         base_dir: str = "./campaign_outputs",
         api_key: Optional[str] = None,
-        model_name: str = "gemini-3-pro-preview",
+        model_name: str = "gemini-3.1-pro-preview",
         base_url: Optional[str] = None,
         embedding_model: str = "gemini-embedding-001",
         embedding_api_key: Optional[str] = None,
