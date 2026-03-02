@@ -81,9 +81,8 @@ def _render_analyze_uploads(start_task_fn) -> None:
                 prompt = (
                     f"I uploaded data files at `{data_path}` along with "
                     f"per-file JSON sidecar metadata in the same directory. "
-                    f"Please examine the data. The sidecar metadata will be "
-                    f"detected automatically during analysis — do not attempt "
-                    f"to load a global metadata file."
+                    f"Please examine the data and load the metadata "
+                    f"(pass the directory path `{data_path}` to load_metadata)."
                 )
             else:
                 prompt = (

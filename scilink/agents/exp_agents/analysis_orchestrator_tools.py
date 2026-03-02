@@ -1119,12 +1119,15 @@ class AnalysisOrchestratorTools:
             func=load_metadata,
             name="load_metadata",
             description=(
-                "Load existing JSON metadata file. "
-                "Can accept a direct path to a .json file OR a directory path "
-                "(will automatically find metadata.json, meta.json, info.json, etc. in the directory). "
-                "Per-file sidecar JSONs (stem-matched to data files, e.g. spec_5K.json) are "
-                "excluded from the search so they are not mistakenly loaded as global metadata. "
-                "Use this when analyzing a directory of spectra that contains a metadata file."
+                "Load experiment metadata. "
+                "Can accept a direct path to a .json file OR a directory path. "
+                "When given a directory it will: (1) look for a dedicated metadata file "
+                "(metadata.json, meta.json, info.json, etc.), or (2) if none exists, "
+                "automatically synthesize global metadata from per-file sidecar JSONs "
+                "by extracting fields that are shared across all sidecars and "
+                "normalizing them into the canonical schema. "
+                "Use this for any directory containing metadata — whether as a "
+                "single file or as per-file sidecars."
             ),
             parameters={
                 "json_path": {
