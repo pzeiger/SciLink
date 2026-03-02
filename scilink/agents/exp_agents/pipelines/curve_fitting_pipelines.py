@@ -139,7 +139,6 @@ def create_unified_curve_fitting_pipeline(
         SeriesScoutController(
             logger=logger,
             plot_fn=plot_fn,
-            preprocessor=preprocessor,
         )
     )
 

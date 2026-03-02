@@ -231,11 +231,9 @@ class SeriesScoutController:
         self,
         logger: logging.Logger,
         plot_fn: Callable,
-        preprocessor: Any = None,
     ):
         self.logger = logger
         self.plot_fn = plot_fn
-        self.preprocessor = preprocessor
 
     @staticmethod
     def _select_scout_indices(num_spectra: int) -> list:
@@ -359,16 +357,6 @@ class SeriesScoutController:
         for idx in scout_indices:
             try:
                 curve_data = self._load_spectrum(idx, state)
-
-                if self.preprocessor is not None:
-                    try:
-                        locked_strategy = state.get("locked_preprocessing_strategy")
-                        curve_data, _ = self.preprocessor.run_preprocessing(
-                            curve_data, state.get("system_info", {}),
-                            locked_strategy=locked_strategy,
-                        )
-                    except Exception as e:
-                        self.logger.warning(f"  Preprocessing failed for scout {idx}: {e}")
 
                 stats = self._compute_statistics(curve_data)
 
