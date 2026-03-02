@@ -1497,6 +1497,60 @@ class AnalysisOrchestratorTools:
                             self.orch.current_metadata[
                                 "per_file_metadata"
                             ] = per_file_meta
+
+                            # Synthesize normalized global metadata from
+                            # shared invariant fields across all sidecars,
+                            # unless current_metadata already contains
+                            # normalized top-level sections.
+                            _has_global = any(
+                                k in self.orch.current_metadata
+                                for k in ("experiment", "sample", "instrument")
+                            )
+                            if not _has_global:
+                                _all_dicts = list(per_file_meta.values())
+                                _shared = set(_all_dicts[0].keys())
+                                for _sd in _all_dicts[1:]:
+                                    _shared &= _sd.keys()
+                                _synth: dict = {}
+                                for _k in _shared:
+                                    _vals = [_sd[_k] for _sd in _all_dicts]
+                                    if all(v == _vals[0] for v in _vals):
+                                        _synth[_k] = _vals[0]
+                                if _synth:
+                                    try:
+                                        _ok, _ = check_schema_conformance(_synth)
+                                        if not _ok:
+                                            _normed, _ = normalize_metadata_dict(_synth)
+                                            _re_ok, _ = check_schema_conformance(_normed)
+                                            if not _re_ok:
+                                                _llm = normalize_metadata_dict_with_llm(
+                                                    _synth, self.orch.model, self.logger
+                                                )
+                                                if _llm:
+                                                    for _k2, _v2 in _synth.items():
+                                                        if _k2 not in _llm:
+                                                            _llm[_k2] = _v2
+                                                    _synth = _llm
+                                                else:
+                                                    _synth = _normed
+                                            else:
+                                                _synth = _normed
+                                        # Merge normalized global fields into
+                                        # current_metadata without overwriting
+                                        # per_file_metadata or series.
+                                        for _k3, _v3 in _synth.items():
+                                            if _k3 not in self.orch.current_metadata:
+                                                self.orch.current_metadata[_k3] = _v3
+                                        print(
+                                            f"    Synthesized global metadata from "
+                                            f"{len(per_file_meta)} sidecar(s)"
+                                        )
+                                    except Exception as _e:
+                                        self.logger.warning(
+                                            "Failed to synthesize global metadata "
+                                            "in run_analysis: %s", _e
+                                        )
+
                         # Auto-populate series metadata if extraction succeeded
                         if extracted_series is not None:
                             self.orch.current_metadata["series"] = extracted_series
@@ -1640,6 +1694,18 @@ class AnalysisOrchestratorTools:
                             # Replace dict with sorted list for agent consumption
                             series_info["values"] = sorted_values
                             self.orch.current_metadata["series"] = series_info
+
+                # === Re-save metadata now that sidecar synthesis is done ===
+                with open(metadata_copy_path, 'w') as f:
+                    json.dump({
+                        "analysis_id": analysis_id,
+                        "data_path": data_path,
+                        "agent_id": agent_id,
+                        "agent_name": self.AGENT_NAMES.get(agent_id),
+                        "analysis_goal": analysis_goal,
+                        "timestamp": datetime.now().isoformat(),
+                        "metadata": self.orch.current_metadata
+                    }, f, indent=2)
 
                 # === Run analysis ===
                 analyze_kwargs = {
