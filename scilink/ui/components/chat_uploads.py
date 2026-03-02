@@ -11,7 +11,7 @@ from ..config import (
     SUPPORTED_METADATA_EXTENSIONS,
     SUPPORTED_PLANNING_DATA_EXTENSIONS,
 )
-from .sidebar import save_upload, save_upload_batch
+from .sidebar import save_metadata_to_series, save_upload, save_upload_batch
 
 
 def render_pre_chat_uploads(start_task_fn) -> None:
@@ -57,20 +57,33 @@ def _render_analyze_uploads(start_task_fn) -> None:
             "Metadata (optional)",
             type=[e.lstrip(".") for e in SUPPORTED_METADATA_EXTENSIONS],
             key="main_uploader_meta",
+            accept_multiple_files=True,
         )
-        if main_meta is not None:
-            save_upload(main_meta, "metadata", auto_dispatch=False)
+        if main_meta:
+            if len(main_meta) == 1:
+                save_upload(main_meta[0], "metadata", auto_dispatch=False)
+            else:
+                save_metadata_to_series(main_meta, auto_dispatch=False)
 
     # Show "Analyze" button once data is uploaded
     if st.session_state.uploaded_data_path:
         if st.button("Analyze", type="primary", use_container_width=True):
             data_path = st.session_state.uploaded_data_path
             meta_path = st.session_state.uploaded_metadata_path
+            has_sidecars = st.session_state.get("uploaded_sidecar_metadata", False)
             if data_path and meta_path:
                 prompt = (
                     f"I uploaded a data file at `{data_path}` "
                     f"and a metadata file at `{meta_path}`. "
                     f"Please examine the data and load the metadata."
+                )
+            elif data_path and has_sidecars:
+                prompt = (
+                    f"I uploaded data files at `{data_path}` along with "
+                    f"per-file JSON sidecar metadata in the same directory. "
+                    f"Please examine the data. The sidecar metadata will be "
+                    f"detected automatically during analysis — do not attempt "
+                    f"to load a global metadata file."
                 )
             else:
                 prompt = (

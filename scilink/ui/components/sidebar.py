@@ -708,6 +708,41 @@ def save_upload(uploaded_file, kind: str, auto_dispatch: bool = True) -> None:
         st.sidebar.success(f"Uploaded {kind} file: {uploaded_file.name}")
 
 
+_GLOBAL_META_NAMES = {"metadata.json", "meta.json", "info.json", "experiment.json"}
+
+
+def save_metadata_to_series(uploaded_files: list, auto_dispatch: bool = True) -> None:
+    """Save multiple metadata files into the series directory.
+
+    Sidecar JSONs (per-file metadata) are placed alongside data files
+    so that run_analysis can detect them via stem-matching.  If a
+    global metadata file is found among the uploads, it is registered
+    as uploaded_metadata_path for the orchestrator to load.
+    """
+    session_dir = Path(st.session_state.session_dir)
+    series_dir = session_dir / "uploads" / "series"
+    series_dir.mkdir(parents=True, exist_ok=True)
+
+    global_meta_path = None
+    for f in uploaded_files:
+        dest = series_dir / f.name
+        dest.write_bytes(f.getvalue())
+        if f.name.lower() in _GLOBAL_META_NAMES:
+            global_meta_path = str(dest)
+
+    if global_meta_path:
+        st.session_state.uploaded_metadata_path = global_meta_path
+
+    st.session_state.uploaded_sidecar_metadata = True
+
+    upload_key = ("metadata_batch", str(series_dir))
+    if upload_key not in st.session_state._processed_uploads:
+        st.session_state._processed_uploads.add(upload_key)
+        st.sidebar.success(
+            f"Uploaded {len(uploaded_files)} metadata file(s) to series/"
+        )
+
+
 def save_upload_batch(uploaded_files: list, kind: str, auto_dispatch: bool = True) -> None:
     """Save multiple uploaded files into a subdirectory for series/batch analysis."""
     session_dir = Path(st.session_state.session_dir)

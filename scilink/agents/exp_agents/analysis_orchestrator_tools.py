@@ -5,12 +5,19 @@ Supports both OpenAI (JSON schemas) and LiteLLM formats.
 Each analysis run creates a unique output directory to ensure traceability
 and prevent output collisions when analyzing multiple datasets.
 
-UPDATED: Novelty assessment results are now stored in analysis records
-and passed to get_recommendations for informed follow-up suggestions.
+Per-file JSON sidecar metadata
+------------------------------
+When a data directory contains JSON files whose stems match data files
+(e.g. ``spec_5K.csv`` ↔ ``spec_5K.json``), they are treated as *sidecar
+metadata* rather than global metadata.  ``run_analysis`` will attempt to
+extract the series control variable from the sidecars automatically via
+LLM reasoning.  If extraction fails, the user is prompted and shown the
+sidecar contents to help them specify the variable manually.
 """
 
 import json
 import logging
+import re
 import time
 import numpy as np
 from datetime import datetime
@@ -26,6 +33,323 @@ from .metadata_converter import (
 )
 from ..lit_agents import OwlLiteratureAgent, NoveltyScorer
 from ...skills.loader import list_skills
+
+# Names that are always treated as global (directory-level) metadata files,
+# never as per-file sidecars, even if their stem happens to match a data file.
+_GLOBAL_METADATA_NAMES = frozenset([
+    "metadata.json", "meta.json", "info.json", "experiment.json",
+])
+
+
+def _detect_sidecar_jsons(
+    data_files: list[Path],
+    all_files: list[Path],
+) -> tuple[dict[str, Path], list[Path]]:
+    """Identify JSON files that are stem-matched sidecars for data files.
+
+    A JSON file is a *sidecar* when its stem matches a data file's stem
+    (e.g. ``spec_5K.json`` ↔ ``spec_5K.csv``).  Files whose names are in
+    ``_GLOBAL_METADATA_NAMES`` are always treated as global metadata.
+
+    Returns
+    -------
+    sidecar_map : dict[str, Path]
+        ``{data_filename: sidecar_Path}`` for every matched pair.
+    global_jsons : list[Path]
+        JSON files that are **not** sidecars (global metadata or unmatched).
+    """
+    data_stems = {f.stem: f for f in data_files}
+    json_files = [f for f in all_files if f.suffix.lower() == ".json"]
+
+    sidecar_map: dict[str, Path] = {}
+    global_jsons: list[Path] = []
+
+    for jf in json_files:
+        if jf.name.lower() in _GLOBAL_METADATA_NAMES:
+            global_jsons.append(jf)
+        elif jf.stem in data_stems:
+            sidecar_map[data_stems[jf.stem].name] = jf
+        else:
+            global_jsons.append(jf)
+
+    return sidecar_map, global_jsons
+
+
+def _parse_single_key_response(raw: str, valid_keys: list[str]) -> str | None:
+    """Extract a candidate key name from a potentially noisy LLM response.
+
+    Handles common verbosity patterns:
+    - Bare key:         ``temperature``
+    - Quoted:           ``"temperature"`` or ``'temperature'``
+    - Backtick-wrapped: `` `temperature` `` or `` **temperature** ``
+    - Markdown fence:   ````` ```temperature``` `````
+    - Sentence:         ``The control variable is temperature.``
+    - With preamble:    ``Based on the context, temperature``
+
+    Returns the matched key, or ``None`` for NONE / UNCERTAIN / no match.
+    """
+    # Strip markdown fences
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.split("```")[1].split("```")[0].strip()
+
+    # Quick exact match (ideal case)
+    clean = text.strip().strip("\"'`*. ")
+    if clean.upper() in ("NONE", "UNCERTAIN"):
+        return None
+    if clean in valid_keys:
+        return clean
+
+    # Try to find a candidate key anywhere in the response (case-sensitive,
+    # matching whole words to avoid partial matches like "temp" in
+    # "temperature").  If exactly one key appears, use it.
+    found = []
+    for key in valid_keys:
+        if re.search(rf"\b{re.escape(key)}\b", text):
+            found.append(key)
+
+    if len(found) == 1:
+        return found[0]
+
+    # Check for NONE / UNCERTAIN buried in the response
+    upper = text.upper()
+    if "NONE" in upper or "UNCERTAIN" in upper:
+        return None
+
+    # Truly ambiguous or unrecognisable
+    return None
+
+
+def _llm_pick_series_variable(
+    varying_keys: list[str],
+    sidecar_data: dict[str, dict],
+    model,
+    logger: logging.Logger,
+    experimental_context: dict | None = None,
+) -> str | None:
+    """Use the LLM to decide which varying sidecar field, if any, is the
+    true independent control variable.
+
+    Works for both single- and multi-candidate scenarios. The LLM may
+    return ``NONE`` when no candidate is a genuine control variable
+    (e.g. a single varying field that is clearly an acquisition setting).
+
+    Parameters
+    ----------
+    varying_keys : list[str]
+        Numeric sidecar keys whose values differ across files (≥ 1).
+    sidecar_data : dict[str, dict]
+        ``{data_filename: sidecar_dict}`` for every file.
+    model
+        LLM wrapper with a ``generate_content`` method.
+    logger
+        Logger instance.
+    experimental_context : dict | None
+        Optional dict with keys ``"objective"``, ``"hints"``, and/or
+        ``"metadata"`` providing broader experimental context.
+
+    Returns
+    -------
+    str | None
+        The chosen key name, or ``None`` if the LLM could not decide or
+        determined that none of the candidates is a control variable.
+    """
+    # Build a summary of each candidate key and its per-file values
+    candidates_summary = {}
+    for key in varying_keys:
+        candidates_summary[key] = {
+            fname: d[key] for fname, d in sidecar_data.items()
+        }
+
+    # Assemble context lines
+    context_parts = []
+    if experimental_context:
+        if experimental_context.get("objective"):
+            context_parts.append(
+                f"Analysis objective: {experimental_context['objective']}"
+            )
+        if experimental_context.get("hints"):
+            context_parts.append(
+                f"User hints: {experimental_context['hints']}"
+            )
+        meta = experimental_context.get("metadata")
+        if isinstance(meta, dict):
+            # Include high-level experiment info, not the full blob
+            for k in ("experiment_type", "experiment", "sample"):
+                if k in meta:
+                    context_parts.append(f"{k}: {json.dumps(meta[k])}")
+
+    context_block = "\n".join(context_parts) if context_parts else "None provided."
+
+    keys_list = ", ".join(varying_keys)
+    prompt = (
+        "You are a scientific data analysis assistant. A user has a series of "
+        "data files, each accompanied by a JSON sidecar containing per-file "
+        "metadata. The following numeric fields change across the files.\n\n"
+        "Your task is to decide whether any of these fields is the "
+        "**independent control variable** — the physical or experimental "
+        "quantity the experimenter intentionally varied across measurements "
+        "(e.g. temperature, concentration, voltage, pressure, dose). "
+        "Instrument and acquisition parameters that happen to differ "
+        "(e.g. laser_power, integration_time, slit_width, probe_current) "
+        "are NOT control variables.\n\n"
+        "It is also possible that NONE of the listed fields is a true "
+        "control variable — for example the real control variable was set "
+        "manually and not recorded in the sidecar metadata.\n\n"
+        f"Experimental context:\n{context_block}\n\n"
+        f"Candidate fields and their per-file values:\n"
+        f"{json.dumps(candidates_summary, indent=2)}\n\n"
+        "IMPORTANT: Your response must be a SINGLE word — no explanations, "
+        "no punctuation, no formatting. Respond with exactly one of:\n"
+        f"  {keys_list}, NONE, UNCERTAIN\n"
+    )
+
+    try:
+        response = model.generate_content(contents=[prompt])
+        raw = (
+            response.text
+            if hasattr(response, "text")
+            else str(response)
+        ).strip()
+
+        chosen = _parse_single_key_response(raw, varying_keys)
+
+        if chosen is None:
+            logger.info(
+                "LLM did not select a series variable "
+                "(response: %r, candidates: %s)",
+                raw,
+                varying_keys,
+            )
+            return None
+
+        logger.info(
+            "LLM selected '%s' as the series variable from candidates %s",
+            chosen,
+            varying_keys,
+        )
+        return chosen
+
+    except Exception as exc:
+        logger.warning("LLM series-variable selection failed: %s", exc)
+        return None
+
+
+def _extract_series_from_sidecars(
+    sidecar_map: dict[str, Path],
+    data_files: list[Path],
+    logger: logging.Logger,
+    model=None,
+    experimental_context: dict | None = None,
+) -> tuple[dict | None, dict[str, dict]]:
+    """Try to auto-build series metadata from per-file sidecar JSONs.
+
+    The algorithm:
+
+    1. Load every sidecar; bail out if coverage is incomplete.
+    2. Collect top-level numeric keys common to **all** sidecars.
+    3. Keep only keys whose values **differ** across files — this naturally
+       eliminates constant instrument settings (e.g. integration_time=1.0
+       in every file).
+    4. If *model* is provided, ask the LLM to evaluate the remaining
+       candidates (even if there is only one) and decide whether any is a
+       true independent control variable.  A single varying key might still
+       be just an acquisition setting; the real control variable may not be
+       recorded in the sidecars at all.
+    5. Fall back to ``None`` (user prompt) if no model or the LLM cannot
+       decide.
+
+    Returns
+    -------
+    series_meta : dict | None
+        ``{"variable": ..., "values": {fname: val}, "unit": ...}``
+        or ``None`` when extraction is not possible.
+    per_file_meta : dict[str, dict]
+        Full sidecar contents keyed by data filename (always returned,
+        even when ``series_meta`` is ``None``).
+    """
+    per_file_meta: dict[str, dict] = {}
+    sidecar_data: dict[str, dict] = {}
+
+    # 1. Load all sidecars
+    for fname, jpath in sidecar_map.items():
+        try:
+            with open(jpath, "r") as f:
+                content = json.load(f)
+            if isinstance(content, dict):
+                sidecar_data[fname] = content
+                per_file_meta[fname] = content
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Failed to load sidecar %s: %s", jpath.name, exc)
+
+    if not sidecar_data:
+        return None, per_file_meta
+
+    # 2. Only proceed when every data file has a sidecar
+    data_fnames = {f.name for f in data_files}
+    if set(sidecar_data.keys()) != data_fnames:
+        logger.info(
+            "Sidecar coverage incomplete: %d/%d files",
+            len(sidecar_data),
+            len(data_fnames),
+        )
+        return None, per_file_meta
+
+    # 3. Common top-level numeric keys across all sidecars
+    all_keys: set[str] | None = None
+    for d in sidecar_data.values():
+        numeric_keys = {
+            k for k, v in d.items() if isinstance(v, (int, float))
+        }
+        all_keys = numeric_keys if all_keys is None else all_keys & numeric_keys
+
+    if not all_keys:
+        return None, per_file_meta
+
+    # 4. Keep only keys whose values differ across files
+    varying_keys = []
+    for key in all_keys:
+        vals = [d[key] for d in sidecar_data.values()]
+        if len(set(vals)) > 1:
+            varying_keys.append(key)
+
+    if not varying_keys:
+        return None, per_file_meta
+
+    # 5. Ask the LLM to evaluate candidates (even a single one could be
+    #    just an acquisition setting rather than a true control variable).
+    if model is not None:
+        print(
+            f"    Varying fields in sidecars: {varying_keys}. "
+            f"Asking LLM to identify the control variable..."
+        )
+        variable = _llm_pick_series_variable(
+            varying_keys, sidecar_data, model, logger,
+            experimental_context=experimental_context,
+        )
+    else:
+        variable = None
+
+    if variable is None:
+        logger.info(
+            "Could not identify a series control variable from "
+            "sidecar candidates: %s",
+            varying_keys,
+        )
+        return None, per_file_meta
+
+    # 6. Build series metadata
+    values = {fname: sidecar_data[fname][variable] for fname in sidecar_data}
+
+    # Try to find a unit: {variable}_unit, {variable}_units, unit, units
+    unit = ""
+    sample_sidecar = next(iter(sidecar_data.values()))
+    for unit_key in [f"{variable}_unit", f"{variable}_units", "unit", "units"]:
+        if unit_key in sample_sidecar:
+            unit = str(sample_sidecar[unit_key])
+            break
+
+    return {"variable": variable, "values": values, "unit": unit}, per_file_meta
 
 
 class AnalysisOrchestratorTools:
@@ -71,8 +395,14 @@ class AnalysisOrchestratorTools:
         # =====================================================================
         def examine_data(data_path: str) -> str:
             """
-            Examine a data file or directory to determine its type and characteristics.
-            Supports single files and directories containing multiple spectra.
+            Examine a data file or directory to determine its type and
+            characteristics.  Supports single files and directories
+            containing multiple spectra.
+
+            For directories, JSON files whose stems match a data file
+            (e.g. ``spec_5K.json`` ↔ ``spec_5K.csv``) are reported as
+            per-file sidecar metadata in ``sidecar_json_files``, separate
+            from global ``metadata_files``.
             """
             print(f"  ⚡ Tool: Examining data at {data_path}...")
             
@@ -104,17 +434,42 @@ class AnalysisOrchestratorTools:
                         result["message"] = "Directory is empty"
                         return json.dumps(result)
                     
-                    # Look for metadata files first
-                    metadata_files = [f for f in files if f.suffix.lower() == '.json' or 
-                                      'metadata' in f.name.lower() or 
-                                      f.name.lower() in ['info.txt', 'description.txt', 'readme.txt']]
-                    
-                    if metadata_files:
-                        result["metadata_files"] = [f.name for f in metadata_files]
-                        result["metadata_hint"] = f"Found potential metadata file(s): {[f.name for f in metadata_files]}"
-                    
-                    # Get data file extensions (excluding metadata)
-                    data_files = [f for f in files if f not in metadata_files]
+                    # Look for metadata files — distinguish sidecar JSONs from
+                    # global metadata so the orchestrator knows sidecars exist.
+                    non_json_stems = {
+                        f.stem for f in files if f.suffix.lower() != ".json"
+                    }
+                    sidecar_jsons = [
+                        f for f in files
+                        if f.suffix.lower() == ".json"
+                        and f.name.lower() not in _GLOBAL_METADATA_NAMES
+                        and f.stem in non_json_stems
+                    ]
+                    global_meta_files = [
+                        f for f in files
+                        if (
+                            (f.suffix.lower() == ".json" and f not in sidecar_jsons)
+                            or "metadata" in f.name.lower()
+                            or f.name.lower() in ["info.txt", "description.txt", "readme.txt"]
+                        )
+                    ]
+
+                    if global_meta_files:
+                        result["metadata_files"] = [f.name for f in global_meta_files]
+                        result["metadata_hint"] = (
+                            f"Found potential metadata file(s): "
+                            f"{[f.name for f in global_meta_files]}"
+                        )
+                    if sidecar_jsons:
+                        result["sidecar_json_files"] = [f.name for f in sidecar_jsons]
+                        result["sidecar_hint"] = (
+                            f"Found {len(sidecar_jsons)} per-file JSON sidecar(s) "
+                            f"(may contain series variable values)"
+                        )
+
+                    # Get data file extensions (excluding metadata and sidecars)
+                    excluded = set(global_meta_files) | set(sidecar_jsons)
+                    data_files = [f for f in files if f not in excluded]
                     extensions = set(f.suffix.lower() for f in data_files)
                     result["extensions"] = list(extensions)
                     
@@ -334,7 +689,10 @@ class AnalysisOrchestratorTools:
             name="examine_data",
             description=(
                 "Examine a data file to determine its type and characteristics. "
-                "Returns data type, shape, and suggested analysis agents."
+                "Returns data type, shape, and suggested analysis agents. "
+                "For directories, also detects per-file JSON sidecar metadata "
+                "(stem-matched to data files) and reports them separately from "
+                "global metadata files."
             ),
             parameters={
                 "data_path": {
@@ -473,8 +831,12 @@ class AnalysisOrchestratorTools:
         def load_metadata(json_path: str) -> str:
             """
             Load existing JSON metadata file.
-            Can accept either a direct path to a JSON file, or a directory path
-            (will search for metadata.json or similar files in the directory).
+
+            Can accept either a direct path to a JSON file, or a directory
+            path (will search for metadata.json or similar files in the
+            directory).  Per-file sidecar JSONs (whose stem matches a data
+            file) are excluded from the search so they are not mistakenly
+            loaded as global metadata.
             """
             print(f"  ⚡ Tool: Loading metadata from {json_path}...")
             
@@ -495,19 +857,32 @@ class AnalysisOrchestratorTools:
                     path / "experiment.json",
                 ]
                 
-                # Also look for any .json file
+                # Also look for any .json file, but exclude sidecar JSONs
+                # (files whose stem matches a data file, e.g. spec_5K.json ↔ spec_5K.csv)
                 json_files = list(path.glob("*.json"))
-                
+                _data_exts = {
+                    ".csv", ".txt", ".tsv", ".xlsx",
+                    ".npy", ".tif", ".tiff", ".png", ".jpg", ".jpeg",
+                }
+                _data_stems = {
+                    f.stem
+                    for f in path.iterdir()
+                    if f.is_file() and f.suffix.lower() in _data_exts
+                }
+                non_sidecar_jsons = [
+                    jf for jf in json_files if jf.stem not in _data_stems
+                ]
+
                 # Find the first existing metadata file
                 metadata_path = None
                 for candidate in metadata_candidates:
                     if candidate.exists():
                         metadata_path = candidate
                         break
-                
-                # If no standard name found, use first .json file
-                if metadata_path is None and json_files:
-                    metadata_path = json_files[0]
+
+                # If no standard name found, use first non-sidecar .json file
+                if metadata_path is None and non_sidecar_jsons:
+                    metadata_path = non_sidecar_jsons[0]
                 
                 if metadata_path is None:
                     # Look for .txt description files
@@ -605,6 +980,8 @@ class AnalysisOrchestratorTools:
                 "Load existing JSON metadata file. "
                 "Can accept a direct path to a .json file OR a directory path "
                 "(will automatically find metadata.json, meta.json, info.json, etc. in the directory). "
+                "Per-file sidecar JSONs (stem-matched to data files, e.g. spec_5K.json) are "
+                "excluded from the search so they are not mistakenly loaded as global metadata. "
                 "Use this when analyzing a directory of spectra that contains a metadata file."
             ),
             parameters={
@@ -810,17 +1187,33 @@ class AnalysisOrchestratorTools:
             the analysis without fitting/unmixing it. Supported by CurveFitting
             and Hyperspectral agents.
 
-            series_metadata is a JSON string describing the independent variable
-            across spectra in a series. When ``values`` is a dict mapping
-            filenames to values, files are automatically sorted by value for
-            correct physical ordering and the dict is converted to a sorted
-            list before passing to the agent. Expected format::
+            Series metadata resolution (in priority order):
 
-                {"variable": "temperature", "values": {"spec_5K.csv": 5, ...}, "unit": "K"}
+            1. **Explicit ``series_metadata`` parameter** — a JSON string
+               describing the independent variable.  When ``values`` is a
+               dict mapping filenames to values, files are automatically
+               sorted by value for correct physical ordering and the dict
+               is converted to a sorted list before passing to the agent.
+               Expected format::
 
-            If multiple data files are detected and no series_metadata is
-            provided, returns a ``needs_series_metadata`` status prompting the
-            caller to supply it.
+                   {"variable": "temperature",
+                    "values": {"spec_5K.csv": 5, ...}, "unit": "K"}
+
+            2. **Per-file JSON sidecars** — if the data directory contains
+               JSON files whose stems match data files (e.g.
+               ``spec_5K.json`` ↔ ``spec_5K.csv``), the system loads them,
+               identifies numeric fields that vary across files, and uses
+               LLM reasoning (with experimental context from *objective*,
+               *hints*, and loaded metadata) to decide which field, if any,
+               is the true control variable.  Full sidecar contents are
+               stored in ``current_metadata["per_file_metadata"]`` for
+               downstream agent access.
+
+            3. **User prompt** — if neither of the above yields series
+               metadata, returns a ``needs_series_metadata`` status.  When
+               sidecars were loaded but the LLM could not identify a
+               control variable, the sidecar contents are included in the
+               response so the orchestrator can show them to the user.
 
             Output directory format: results/analysis_{dataset_name}_{timestamp}_{counter}/
             """
@@ -847,10 +1240,23 @@ class AnalysisOrchestratorTools:
                 })
             
             if self.orch.current_metadata is None:
-                return json.dumps({
-                    "status": "error",
-                    "message": "No metadata available. Use load_metadata or convert_metadata first."
-                })
+                # When a data directory contains sidecar JSONs, allow
+                # run_analysis to proceed so the sidecar extraction code
+                # below can populate metadata automatically.
+                data_p = Path(data_path)
+                has_sidecars = False
+                if data_p.is_dir():
+                    _all = [f for f in data_p.iterdir() if f.is_file() and not f.name.startswith('.')]
+                    _data = [f for f in _all if f.suffix.lower() != ".json"]
+                    _smap, _ = _detect_sidecar_jsons(_data, _all)
+                    has_sidecars = bool(_smap)
+                if has_sidecars:
+                    self.orch.current_metadata = {}
+                else:
+                    return json.dumps({
+                        "status": "error",
+                        "message": "No metadata available. Use load_metadata or convert_metadata first."
+                    })
             
             try:
                 # === Generate unique analysis output directory ===
@@ -971,30 +1377,101 @@ class AnalysisOrchestratorTools:
                     except (json.JSONDecodeError, TypeError) as e:
                         self.logger.warning(f"Failed to parse series_metadata: {e}")
 
+                # === Try to extract series metadata from sidecar JSON files ===
+                if is_series and not has_series_meta and path.is_dir():
+                    sidecar_map, _global_jsons = _detect_sidecar_jsons(
+                        data_files, all_files
+                    )
+                    if sidecar_map:
+                        print(
+                            f"    Found {len(sidecar_map)} sidecar JSON file(s) "
+                            f"paired with data files"
+                        )
+                        extracted_series, per_file_meta = (
+                            _extract_series_from_sidecars(
+                                sidecar_map,
+                                data_files,
+                                self.logger,
+                                model=self.orch.model,
+                                experimental_context={
+                                    "objective": objective,
+                                    "hints": hints,
+                                    "metadata": self.orch.current_metadata,
+                                },
+                            )
+                        )
+                        # Store per-file metadata for agent access
+                        if per_file_meta:
+                            self.orch.current_metadata[
+                                "per_file_metadata"
+                            ] = per_file_meta
+                        # Auto-populate series metadata if extraction succeeded
+                        if extracted_series is not None:
+                            self.orch.current_metadata["series"] = extracted_series
+                            has_series_meta = True
+                            print(
+                                f"    Auto-extracted series variable "
+                                f"'{extracted_series['variable']}' from sidecar JSONs"
+                            )
+
                 if is_series and not has_series_meta:
                     num_files = len(actual_data_input)
-                    return json.dumps({
+
+                    # If per-file sidecar metadata was loaded, include it in
+                    # the prompt so the orchestrator LLM can show the user
+                    # what each file already contains.
+                    per_file = self.orch.current_metadata.get(
+                        "per_file_metadata"
+                    )
+                    sidecar_note = ""
+                    if per_file:
+                        sidecar_note = (
+                            " Per-file JSON sidecar metadata was found but "
+                            "none of the recorded fields could be "
+                            "confidently identified as the control variable. "
+                            "Show the user the sidecar contents below and "
+                            "ask them to confirm which field (if any) is the "
+                            "control variable, or to specify it manually."
+                        )
+
+                    prompt_payload = {
                         "status": "needs_series_metadata",
                         "message": (
-                            f"Detected {num_files} spectra (series mode) but no series metadata found. "
-                            "Series metadata describes the experimental variable that changes across spectra "
+                            f"Detected {num_files} spectra (series mode) but "
+                            "no series metadata found. "
+                            "Series metadata describes the experimental "
+                            "variable that changes across spectra "
                             "(e.g. temperature, concentration, voltage). "
-                            "Ask the user what variable changes across the spectra, the range or "
-                            "values, and the units. The user can describe this naturally — e.g. "
-                            "'temperature from 300 to 500 K in 50 K steps' or 'concentration: "
-                            "0.1, 0.2, 0.5 mM'. Use the filenames and the user's response to "
-                            "build the values dict mapping each filename to its value, then "
-                            "re-call run_analysis with the series_metadata parameter. "
-                            "Files will be sorted by value automatically for correct trend analysis."
+                            "Ask the user what variable changes across the "
+                            "spectra, the range or values, and the units. "
+                            "The user can describe this naturally — e.g. "
+                            "'temperature from 300 to 500 K in 50 K steps' "
+                            "or 'concentration: 0.1, 0.2, 0.5 mM'. "
+                            "Use the filenames and the user's response to "
+                            "build the values dict mapping each filename to "
+                            "its value, then re-call run_analysis with the "
+                            "series_metadata parameter. "
+                            "Files will be sorted by value automatically for "
+                            "correct trend analysis."
+                            + sidecar_note
                         ),
                         "num_spectra": num_files,
                         "expected_format": {
                             "variable": "<variable name, e.g. temperature>",
-                            "values": {"<filename>": "<value>", "...": "..."},
-                            "unit": "<unit string, e.g. K, mM, V>"
+                            "values": {
+                                "<filename>": "<value>",
+                                "...": "...",
+                            },
+                            "unit": "<unit string, e.g. K, mM, V>",
                         },
-                        "files": [Path(f).name for f in actual_data_input],
-                    })
+                        "files": [
+                            Path(f).name for f in actual_data_input
+                        ],
+                    }
+                    if per_file:
+                        prompt_payload["per_file_sidecar_metadata"] = per_file
+
+                    return json.dumps(prompt_payload)
 
                 # Sort files by series values for correct physical ordering
                 if is_series and has_series_meta:
@@ -1093,6 +1570,10 @@ class AnalysisOrchestratorTools:
                 "Execute analysis with the selected or specified agent. "
                 "Each run creates a unique output directory (analysis_{dataset_name}_{timestamp}) "
                 "for traceability. Requires data path and metadata to be set. "
+                "For series analysis, the system resolves the control variable in order: "
+                "(1) explicit series_metadata parameter, "
+                "(2) automatic extraction from per-file JSON sidecars via LLM reasoning, "
+                "(3) user prompt. "
                 "Optional objective provides a high-level scientific question to frame the analysis "
                 "(e.g. 'Determine the oxidation state of Ti'). "
                 "Optional hints provide tactical guidance to steer the analysis "
@@ -1157,7 +1638,8 @@ class AnalysisOrchestratorTools:
                     "type": "string",
                     "description": (
                         "JSON string describing the experimental variable that changes across "
-                        "spectra in a series. Required for series analysis (multiple spectra). "
+                        "spectra in a series. Takes highest priority — overrides automatic "
+                        "extraction from per-file JSON sidecars. "
                         "Values is a dict mapping each filename to its value — files are "
                         "automatically sorted by value for correct trend analysis. "
                         "Format: {\"variable\": \"<variable>\", \"values\": {\"<filename>\": <value>, ...}, \"unit\": \"<units>\"}. "
