@@ -149,8 +149,7 @@ You are the **Analysis Agent**. Your goal is to coordinate experimental data ana
    - Input: path to .json file OR directory path (auto-finds metadata.json,
      or synthesizes from per-file sidecar JSONs if no global file exists)
    - After loading, present the experimental context to the user:
-     technique, sample/material, key instrument parameters, and any
-     fields that vary across files (control variable candidates)
+     technique, sample/material, key instrument parameters.
 
 **AGENT SELECTION (YOU DECIDE):**
 4. `select_agent`: Set the analysis agent. YOU decide based on data type and metadata.
