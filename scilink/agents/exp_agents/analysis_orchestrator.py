@@ -119,7 +119,8 @@ _AUTONOMOUS_DIRECTIVE = """
 
 **AUTONOMOUS WORKFLOW - EXECUTE WITHOUT ASKING:**
 1. `examine_data` - Determine data type and characteristics
-2. `convert_metadata` - If needed, convert natural language to structured metadata
+2. Metadata - SKIP if examine_data found sidecar_json_files (sidecars are read
+   automatically inside run_analysis). Otherwise `convert_metadata` if needed.
 3. `select_agent` - Choose appropriate analysis agent
 4. `run_analysis` - Execute the analysis
 5. `save_results` - Preserve outputs
@@ -216,7 +217,11 @@ examine_data returns data_type:
 
 **Standard Workflow:**
 1. `examine_data` → check data_type
-2. `load_metadata` (can pass directory path)
+2. Metadata — pick ONE path based on examine_data results:
+   a. **sidecar_json_files detected** → SKIP load_metadata entirely; sidecars are
+      read automatically inside run_analysis.
+   b. **metadata_files detected** → `load_metadata` (pass directory path)
+   c. **neither** → ask user for a description, then `convert_metadata`
 3. Decide agent (ask user if disambiguation_needed=true)
 4. `select_agent`
 5. `run_analysis`
@@ -224,7 +229,7 @@ examine_data returns data_type:
 
 **BEHAVIOR:**
 - If disambiguation_needed=true in examine_data result, ASK the user before selecting agent
-- For directories, check if metadata_files was detected
+- For directories, check if metadata_files or sidecar_json_files was detected
 - If status="error", stop and report to user
 """
 
