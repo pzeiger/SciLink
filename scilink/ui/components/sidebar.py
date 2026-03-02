@@ -733,6 +733,8 @@ def save_metadata_to_series(uploaded_files: list, auto_dispatch: bool = True) ->
     if global_meta_path:
         st.session_state.uploaded_metadata_path = global_meta_path
 
+    st.session_state.uploaded_sidecar_metadata = True
+
     upload_key = ("metadata_batch", str(series_dir))
     if upload_key not in st.session_state._processed_uploads:
         st.session_state._processed_uploads.add(upload_key)

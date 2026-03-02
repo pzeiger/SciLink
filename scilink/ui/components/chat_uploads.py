@@ -70,11 +70,20 @@ def _render_analyze_uploads(start_task_fn) -> None:
         if st.button("Analyze", type="primary", use_container_width=True):
             data_path = st.session_state.uploaded_data_path
             meta_path = st.session_state.uploaded_metadata_path
+            has_sidecars = st.session_state.get("uploaded_sidecar_metadata", False)
             if data_path and meta_path:
                 prompt = (
                     f"I uploaded a data file at `{data_path}` "
                     f"and a metadata file at `{meta_path}`. "
                     f"Please examine the data and load the metadata."
+                )
+            elif data_path and has_sidecars:
+                prompt = (
+                    f"I uploaded data files at `{data_path}` along with "
+                    f"per-file JSON sidecar metadata in the same directory. "
+                    f"Please examine the data. The sidecar metadata will be "
+                    f"detected automatically during analysis — do not attempt "
+                    f"to load a global metadata file."
                 )
             else:
                 prompt = (
