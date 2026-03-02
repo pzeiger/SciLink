@@ -963,14 +963,11 @@ class AnalysisOrchestratorTools:
                                 # every sidecar (these describe the experiment,
                                 # not the varying control variable).
                                 synthesized: dict = {}
-                                varying_fields: dict = {}
                                 for key in shared_keys:
                                     values = [sd[key] for sd in all_sidecar_dicts]
                                     ref = values[0]
                                     if all(v == ref for v in values):
                                         synthesized[key] = ref
-                                    elif isinstance(ref, (int, float)):
-                                        varying_fields[key] = values
 
                                 if synthesized:
                                     # Normalize to canonical schema
@@ -1019,23 +1016,6 @@ class AnalysisOrchestratorTools:
                                             else synthesized.get("material")
                                         ),
                                     }
-                                    if varying_fields:
-                                        result_payload["varying_fields"] = {
-                                            k: {
-                                                "min": min(v),
-                                                "max": max(v),
-                                                "num_unique": len(set(v)),
-                                            }
-                                            for k, v in varying_fields.items()
-                                        }
-                                        result_payload["varying_fields_note"] = (
-                                            "These numeric fields differ across "
-                                            "sidecar files and are candidates for "
-                                            "the series control variable. Present "
-                                            "them to the user and ask which one "
-                                            "(if any) is the independent variable "
-                                            "for this experiment series."
-                                        )
                                     if missing:
                                         result_payload["message"] = (
                                             f"Metadata synthesized from sidecar JSONs "
