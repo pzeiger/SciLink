@@ -21,6 +21,7 @@ from typing import Callable, List, Any
 from ..controllers.curve_fitting_controllers import (
     # Original controllers
     AnalyzeDataController,
+    SeriesScoutController,
     LiteratureSearchController,
     GenerateCurveFittingReportController,
     # Unified controllers for series support
@@ -132,6 +133,15 @@ def create_unified_curve_fitting_pipeline(
 
     # Step 1: Analyze first spectrum data (compute stats, initial plot)
     pipeline.append(AnalyzeDataController(logger, plot_fn))
+
+    # Step 1.5: Scout representative spectra for series planning
+    pipeline.append(
+        SeriesScoutController(
+            logger=logger,
+            plot_fn=plot_fn,
+            preprocessor=preprocessor,
+        )
+    )
 
     # Step 2: Human feedback refinement on fitting approach
     pipeline.append(

@@ -2092,6 +2092,59 @@ Examine the data and determine the appropriate fitting/analysis approach. Consid
 """
 
 
+SERIES_REGIME_PLANNING_SUPPLEMENT = """
+## Series Analysis Planning
+
+You are analyzing a series of {num_spectra} spectra. Representative spectra from across
+the series are shown above so you can see how the data evolves.
+
+**If the data appears UNIFORM** across the series (same peak structure, similar shapes):
+Return the standard response format with a single model for all spectra.
+
+**If the data changes SIGNIFICANTLY** across the series (new peaks appearing, peak
+splitting, major shape changes, or features indicating different physical regimes):
+Add a `"series_analysis_plan"` field to your JSON response:
+
+```json
+{{
+    "observations": "...",
+    "analysis_approach": "...",
+    "physical_model": "primary model (for the first/majority regime)",
+    "parameters_to_extract": ["param1", "param2"],
+    "fitting_strategy": "...",
+    "literature_query": "...",
+    "series_analysis_plan": {{
+        "rationale": "Why multiple fitting regimes are needed",
+        "regimes": [
+            {{
+                "name": "descriptive regime name",
+                "spectrum_indices": [0, 1, 2, 3],
+                "physical_model": "model for this regime",
+                "fitting_strategy": "strategy for this regime",
+                "parameters_to_extract": ["param1", "param2"]
+            }}
+        ],
+        "transition_points": [
+            {{
+                "between_indices": [3, 4],
+                "variable_value": null,
+                "description": "Description of what changes at this transition"
+            }}
+        ]
+    }}
+}}
+```
+
+**Rules:**
+- Every spectrum index (0 through {num_spectra_minus_1}) must appear in exactly ONE regime.
+- Each regime must have at least one spectrum.
+- Only use multiple regimes when you can clearly see different spectral character.
+- When in doubt, use a single model — the adaptive refit step can recover individual failures later.
+- Consider the experimental metadata and user objective when deciding regime boundaries.
+- If you detect a gradual transition, place the boundary where the dominant spectral feature changes.
+"""
+
+
 FITTING_SCRIPT_INSTRUCTIONS = """Write a curve fitting script for spectroscopic data.
 
 **Your Plan:**
