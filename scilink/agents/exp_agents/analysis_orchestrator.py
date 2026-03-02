@@ -103,6 +103,8 @@ _SUPERVISED_DIRECTIVE = """
 - After examining data, recommend an analysis approach and proceed if logical.
 - Briefly summarize progress but don't wait for response on obvious next steps.
 - Only pause to report errors or request human input on ambiguous decisions.
+- Exception: after loading metadata, always present the experimental context
+  (technique, sample, conditions) before proceeding — the user needs this.
 """
 
 _AUTONOMOUS_DIRECTIVE = """
