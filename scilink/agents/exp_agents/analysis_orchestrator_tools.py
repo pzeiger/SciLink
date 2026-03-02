@@ -991,6 +991,9 @@ class AnalysisOrchestratorTools:
                                             synthesized = normed
 
                                     self.orch.current_metadata = synthesized
+                                    output_path = self.orch.base_dir / "metadata.json"
+                                    with open(output_path, 'w') as f:
+                                        json.dump(synthesized, f, indent=2)
                                     print(
                                         f"    Synthesized global metadata from "
                                         f"{len(sidecar_paths)} sidecar JSON(s)"
