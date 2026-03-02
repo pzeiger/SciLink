@@ -84,6 +84,10 @@ _CO_PILOT_DIRECTIVE = """
 **METADATA REQUIREMENT:**
 - ALWAYS ensure metadata is available before analysis
 - If no metadata provided, ask user to provide it or use convert_metadata tool
+- EXCEPTION: If examine_data reports per-file sidecar JSONs (sidecar_json_files),
+  those count as metadata — you do NOT need a separate global metadata file.
+  Proceed directly to agent selection and run_analysis; the sidecars will be
+  read automatically during analysis.
 
 **RESPONSE STYLE:**
 - After each tool call, summarize the result and wait for user direction.
