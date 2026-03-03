@@ -264,9 +264,14 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Load skill if provided
         skill_state = {"skill_name": None, "skill_sections": None}
         if skill:
-            parsed = load_skill(skill, domain="hyperspectral")
-            skill_state = {"skill_name": parsed["name"], "skill_sections": parsed}
-            self.logger.info(f"   Skill loaded: {parsed['name']}")
+            try:
+                parsed = load_skill(skill, domain="hyperspectral")
+                skill_state = {"skill_name": parsed["name"], "skill_sections": parsed}
+                self.logger.info(f"   Skill loaded: {parsed['name']}")
+            except FileNotFoundError:
+                self.logger.warning(
+                    f"   Skill '{skill}' not found — proceeding without domain skill"
+                )
 
         # Load auxiliary data if provided
         auxiliary_state = {

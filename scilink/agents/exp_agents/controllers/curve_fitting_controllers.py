@@ -106,7 +106,14 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     if not content:
         return
 
-    prompt.append(f"\n## Domain Skill: {skill_name} ({stage})")
+    prompt.append(f"\n## MANDATORY Domain Skill Rules: {skill_name} ({stage})")
+    prompt.append(
+        "The following rules are MANDATORY. Your analysis plan and implementation "
+        "MUST conform to these domain-specific requirements. These rules encode "
+        "validated domain expertise and take precedence over general-purpose defaults. "
+        "Do NOT substitute your own preferences where these rules specify a method, "
+        "treatment, or constraint."
+    )
     prompt.append(content)
 
     # Include validation rules during planning and interpretation
@@ -114,7 +121,7 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     if stage in ("planning", "interpretation"):
         validation = sections.get("validation", "")
         if validation:
-            prompt.append(f"\n## Domain Validation Rules ({skill_name})")
+            prompt.append(f"\n## MANDATORY Domain Validation Rules ({skill_name})")
             prompt.append(validation)
 
 
@@ -1230,6 +1237,7 @@ Your guidance: '''
         outlier_sigma: float = None,
         max_verification_iterations: int = None,
         preprocessor: Any = None,
+        conformance_instructions: str = "",
     ):
         self.model = model
         self.logger = logger
@@ -1248,6 +1256,7 @@ Your guidance: '''
         self.outlier_sigma = outlier_sigma if outlier_sigma is not None else self.DEFAULT_OUTLIER_SIGMA
         self.max_verification_iterations = max_verification_iterations if max_verification_iterations is not None else self.DEFAULT_MAX_VERIFICATION_ITERATIONS
         self.preprocessor = preprocessor
+        self.conformance_instructions = conformance_instructions
 
     def _generate_fitting_script(self, state: dict, data_path: str, stats: dict) -> str:
         config = state.get("locked_fitting_config", {})
@@ -1257,7 +1266,9 @@ Your guidance: '''
         skill_sections = state.get("skill_sections")
         if skill_sections and skill_sections.get("fitting"):
             context_parts.append(
-                f"## Domain Skill Guidance ({state.get('skill_name', 'skill')})\n"
+                f"## MANDATORY Domain Skill Rules ({state.get('skill_name', 'skill')})\n"
+                "The following domain rules are MANDATORY and must be implemented exactly "
+                "as specified. They take precedence over general-purpose fitting defaults.\n\n"
                 + skill_sections["fitting"]
             )
 
@@ -1294,7 +1305,9 @@ Your guidance: '''
         skill_sections = state.get("skill_sections")
         if skill_sections and skill_sections.get("fitting"):
             prompt += (
-                f"\n\n## Domain Fitting Guidance ({state.get('skill_name', 'skill')})\n"
+                f"\n\n## MANDATORY Domain Skill Rules ({state.get('skill_name', 'skill')})\n"
+                "While fixing the error, you MUST continue to follow these domain rules. "
+                "Do not change the fitting model or workflow to deviate from these rules.\n\n"
                 + skill_sections["fitting"]
             )
 
@@ -1308,6 +1321,60 @@ Your guidance: '''
             self.logger.info(f"    Diagnosis: {result['diagnosis']}")
 
         return result["script"]
+
+    def _check_plan_conformance(self, state: dict, script: str) -> dict | None:
+        """Use the LLM to verify a generated script implements the locked plan.
+
+        Returns a dict with ``conformant``, ``justified_deviations``,
+        ``unjustified_deviations``, and ``summary`` keys, or ``None`` if the
+        check cannot be performed (missing config, LLM error, etc.).
+        """
+        config = state.get("locked_fitting_config", {})
+        if not config or not config.get("physical_model"):
+            return None
+        if not self.conformance_instructions:
+            return None
+
+        # Build skill rules text for conformance checking
+        skill_rules_text = ""
+        skill_sections = state.get("skill_sections")
+        if skill_sections:
+            skill_name = state.get("skill_name", "domain skill")
+            rules_parts = []
+            for stage in ("planning", "fitting", "validation"):
+                content = skill_sections.get(stage, "")
+                if content:
+                    rules_parts.append(f"### {stage.title()} rules\n{content}")
+            if rules_parts:
+                skill_rules_text = (
+                    f"\n**MANDATORY Domain Skill Rules ({skill_name}):**\n"
+                    + "\n".join(rules_parts)
+                    + "\n"
+                )
+
+        prompt = self.conformance_instructions.format(
+            analysis_approach=config.get("analysis_approach", ""),
+            physical_model=config.get("physical_model", ""),
+            parameters_to_extract=", ".join(
+                config.get("parameters_to_extract", [])
+            ),
+            fitting_strategy=config.get("fitting_strategy", ""),
+            skill_rules=skill_rules_text,
+            script=script,
+        )
+
+        try:
+            response = self.model.generate_content(contents=[prompt])
+            result, error = self._parse(response)
+            if error or not result:
+                self.logger.debug(
+                    "Plan conformance check parse failed: %s", error
+                )
+                return None
+            return result
+        except Exception as exc:
+            self.logger.debug("Plan conformance check failed: %s", exc)
+            return None
 
     def _adapt_script_for_spectrum(self, base_script: str, data_path: str, output_prefix: str) -> str:
         adapted = base_script
@@ -1431,6 +1498,30 @@ Your guidance: '''
                     script = self._adapt_script_for_spectrum(base_script, str(temp_data_path), output_prefix)
                 elif attempt == 1:
                     script = self._generate_fitting_script(state, str(temp_data_path), stats)
+                    # Check conformance with locked plan on fresh generation
+                    conformance = self._check_plan_conformance(state, script)
+                    if conformance and not conformance.get("conformant", True):
+                        issues = "; ".join(
+                            conformance.get("unjustified_deviations", [])
+                        )
+                        self.logger.warning(
+                            "    \u26a0\ufe0f Plan conformance issue: %s", issues
+                        )
+                        last_error = (
+                            "PLAN CONFORMANCE: Script deviates from the "
+                            "locked plan without justification. Issues: "
+                            f"{issues}. Plan model: "
+                            f"{state.get('locked_fitting_config', {}).get('physical_model', '')}. "
+                            "Either fix the script to match the plan, or if "
+                            "the plan cannot work, implement the closest "
+                            "viable alternative and explain why in the summary."
+                        )
+                        continue
+                    if conformance and conformance.get("justified_deviations"):
+                        self.logger.info(
+                            "    \u2139\ufe0f Justified plan deviations: %s",
+                            "; ".join(conformance["justified_deviations"]),
+                        )
                 else:
                     script = self._correct_script(state, script, last_error)
 
@@ -2554,7 +2645,22 @@ Return JSON with:
             # Apply preprocessing with locking support for series consistency
             if self.preprocessor is not None:
                 try:
-                    if idx == 0:
+                    if idx == 0 and state.get("first_spectrum_preprocessed"):
+                        # Reuse preprocessing from analyze() — avoid redundant LLM call
+                        curve_data = state.get("curve_data", curve_data)
+                        preprocess_quality = state.get(
+                            "first_spectrum_preprocess_quality", {}
+                        ) or {}
+                        locked_preprocessing_strategy = preprocess_quality.get("strategy")
+                        if locked_preprocessing_strategy:
+                            state["locked_preprocessing_strategy"] = locked_preprocessing_strategy
+                            self.logger.info(
+                                "📝 Preprocessing strategy locked (from planning stage): "
+                                f"{locked_preprocessing_strategy.get('reasoning', 'N/A')[:60]}"
+                            )
+                        else:
+                            self.logger.info("Preprocessed (reused from planning stage)")
+                    elif idx == 0:
                         curve_data, preprocess_quality = self.preprocessor.run_preprocessing(
                             curve_data, state.get("system_info", {})
                         )
@@ -2918,6 +3024,7 @@ class AdaptiveRefitController:
         max_verification_iterations: int = 3,
         preprocessor: Any = None,
         enable_human_feedback: bool = False,
+        conformance_instructions: str = "",
     ):
         self.logger = logger
         self.output_dir = Path(output_dir)
@@ -2943,6 +3050,7 @@ class AdaptiveRefitController:
             enable_human_feedback=False,
             max_verification_iterations=max_verification_iterations,
             preprocessor=preprocessor,
+            conformance_instructions=conformance_instructions,
         )
 
     def _load_spectrum(self, idx, spectrum_paths, spectrum_stack):

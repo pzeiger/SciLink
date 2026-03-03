@@ -41,6 +41,7 @@ from ..instruct import (
     FITTING_SCRIPT_CORRECTION_INSTRUCTIONS,
     FIT_QUALITY_ASSESSMENT_INSTRUCTIONS,
     FITTING_INTERPRETATION_INSTRUCTIONS,
+    PLAN_CONFORMANCE_CHECK_INSTRUCTIONS,
 )
 
 
@@ -185,7 +186,8 @@ def create_unified_curve_fitting_pipeline(
             enable_human_feedback=enable_human_feedback,
             outlier_sigma=outlier_sigma,
             max_verification_iterations=max_verification_iterations,
-            preprocessor=preprocessor
+            preprocessor=preprocessor,
+            conformance_instructions=PLAN_CONFORMANCE_CHECK_INSTRUCTIONS,
         )
     )
 
@@ -208,6 +210,7 @@ def create_unified_curve_fitting_pipeline(
             max_verification_iterations=max_verification_iterations,
             preprocessor=preprocessor,
             enable_human_feedback=enable_human_feedback,
+            conformance_instructions=PLAN_CONFORMANCE_CHECK_INSTRUCTIONS,
         )
     )
 
