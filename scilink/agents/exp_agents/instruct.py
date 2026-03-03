@@ -2083,6 +2083,14 @@ meaning is always preferred over a complex model with marginally better fit stat
 - If residuals show systematic structure, first reconsider the baseline or peak shape
   (e.g., Voigt vs Gaussian) before adding more peaks.
 
+**Domain Skill Rules (when provided):** If a "MANDATORY Domain Skill Rules" section appears \
+below, its rules are MANDATORY constraints on your analysis plan. These rules encode validated \
+domain expertise and override general-purpose defaults. For example, if the skill specifies a \
+particular baseline treatment (e.g., "Shirley background"), you MUST use that treatment — do \
+not substitute your own preference. If the skill specifies line shapes, component constraints, \
+or fitting workflow steps, follow them exactly. Violations of skill rules are treated as errors, \
+not style preferences.
+
 **Common Analysis Approaches** (for reference):
 - Peak fitting (Gaussian, Lorentzian, Voigt, Pseudo-Voigt, Pearson VII, asymmetric profiles)
 - Peak deconvolution (overlapping features with constraints)
@@ -2092,12 +2100,20 @@ meaning is always preferred over a complex model with marginally better fit stat
 - Derivative spectroscopy
 - Peak detection and integration
 
+**Commit to specific choices — do NOT hedge:**
+- State ONE model type, not alternatives (write "Voigt profiles" not "Gaussian or Voigt")
+- State the exact number of components, not a range (write "3 peaks" not "3-4 peaks")
+- Specify the exact baseline/background treatment (write "linear baseline" not "polynomial or linear")
+- If you are unsure between options, pick the one best supported by the data and physics —
+  the user can refine before the plan is locked
+- This plan will be translated directly into code; any ambiguity forces the code generator to guess
+
 **Output Format:**
 ```json
 {
     "observations": "What you see in the data",
     "analysis_approach": "What you will do",
-    "physical_model": "Mathematical form",
+    "physical_model": "Mathematical form — be specific: state the exact profile/function type, exact number of components, and baseline treatment",
     "parameters_to_extract": ["param1", "param2"],
     "fitting_strategy": "How you will fit (initial guesses, constraints, method)",
     "literature_query": "Question for literature search to help with fitting, or null if not needed"
@@ -2170,6 +2186,21 @@ FITTING_SCRIPT_INSTRUCTIONS = """Write a curve fitting script for spectroscopic 
 - Parameters: {parameters_to_extract}
 - Strategy: {fitting_strategy}
 
+**CONFORMANCE REQUIREMENT:** Your script MUST implement exactly what the plan specifies:
+- Use the exact mathematical model described (e.g., if the plan says "Voigt profiles", implement Voigt — not Gaussian, not Lorentzian)
+- Match the exact number of components (e.g., "3 peaks" means 3, not 2 or 4)
+- Match the baseline/background treatment described
+- If the plan specifies exponential decay, implement exponential decay — not a polynomial fit
+- If the Context section below contains "MANDATORY Domain Skill Rules", those rules are \
+binding constraints that MUST be followed in your implementation. Skill rules specify required \
+methods (e.g., Shirley background, Voigt line shapes, spin-orbit constraints) that cannot be \
+substituted with alternatives.
+Deviations are acceptable ONLY when they are obvious from the data dimensions provided \
+(e.g., more parameters than data points). In such cases, implement the closest viable model \
+and document the deviation and reasoning in the results "summary" field. \
+Do NOT preemptively deviate because you think the plan might not converge — implement the \
+plan as specified and let the retry pipeline handle actual runtime failures.
+
 **Context:** {context}
 
 **Data:**
@@ -2219,6 +2250,50 @@ FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed script.
 **CRITICAL:** Fix only the execution error. Do NOT change the fitting model, its parameters, or the overall analysis approach. The model is locked for series consistency.
 
 **Response:** Return only `{{"diagnosis": "...", "script": "..."}}`
+"""
+
+
+PLAN_CONFORMANCE_CHECK_INSTRUCTIONS = """You are verifying that a Python script correctly implements a scientific analysis plan.
+
+**ANALYSIS PLAN (authoritative specification):**
+- Approach: {analysis_approach}
+- Model: {physical_model}
+- Parameters to extract: {parameters_to_extract}
+- Strategy: {fitting_strategy}
+{skill_rules}
+**GENERATED SCRIPT:**
+```python
+{script}
+```
+
+Compare the script against the plan and determine if the script faithfully implements \
+what the plan describes.
+
+Check:
+1. **Mathematical model**: Does the script implement the same type of model? \
+(e.g., if the plan says "Voigt profiles", does the script use Voigt — not Gaussian? \
+If "bi-exponential decay", does it use two exponentials — not a stretched exponential?)
+2. **Number of components**: Does the script create the number of model components \
+the plan specifies?
+3. **Background/baseline treatment**: Does the script handle the baseline as the plan \
+describes?
+4. **Parameters**: Does the script compute and report the parameters the plan lists?
+5. **Domain skill compliance**: If MANDATORY Domain Skill Rules are listed above, does \
+the script follow ALL of them? (e.g., if the skill requires Shirley background, does \
+the script implement Shirley — not linear or polynomial? If the skill specifies Voigt \
+line shapes, does the script use Voigt — not Gaussian?)
+
+Allow reasonable implementation-level variation (variable naming, optimization algorithm, \
+library choice). A deviation is **justified** only if it is obvious from the data dimensions \
+that the plan cannot work (e.g., more components than data points). In that case the script's \
+"summary" field should explain the deviation. Justified deviations should be marked conformant.
+
+Mark as non-conformant when the script implements a different model or structure than the plan \
+describes without clear justification (e.g., plan says "3 Voigt peaks" but script uses \
+2 Gaussians with no explanation), OR when the script violates mandatory domain skill rules.
+
+Return JSON:
+{{"conformant": true/false, "justified_deviations": ["deviations with stated reasoning, if any"], "unjustified_deviations": ["deviations with no explanation"], "summary": "one sentence"}}
 """
 
 
