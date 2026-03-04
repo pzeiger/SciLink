@@ -81,24 +81,29 @@ class LAMMPSUpdater:
     # ============================================================================
     
     def _generate_json(self, prompt: str) -> Dict[str, Any]:
-        """Generate JSON response from LLM."""
+        """Generate JSON from LLM, handling providers that don't support response_mime_type."""
         try:
+            # Try with response_mime_type first
             response = self.model.generate_content(
                 prompt,
                 generation_config={"response_mime_type": "application/json"}
             )
             return json.loads(response.text)
-        except json.JSONDecodeError as e:
-            self.logger.error(f"Failed to parse JSON: {e}")
-            text = response.text
-            match = re.search(r'\{.*\}', text, re.DOTALL)
-            if match:
-                try:
+        except Exception as e:
+            if "type conflicts" in str(e) or "BadRequestError" in str(e):
+                # Bedrock doesn't support response_mime_type - fall back to text
+                self.logger.warning("Provider doesn't support response_mime_type, using text fallback")
+                response = self.model.generate_content(prompt)
+                text = response.text.strip()
+                # Extract JSON from response
+                if text.startswith("```"):
+                    text = re.sub(r'```(?:json)?', '', text).strip()
+                match = re.search(r'\{.*\}', text, re.DOTALL)
+                if match:
                     return json.loads(match.group(0))
-                except:
-                    pass
-            raise ValueError(f"Could not parse JSON: {e}")
-    
+                raise ValueError(f"Could not extract JSON from response: {text[:200]}")
+            raise
+
     def _generate_text(self, prompt: str) -> str:
         """Generate text response from LLM."""
         try:
@@ -108,10 +113,7 @@ class LAMMPSUpdater:
             self.logger.error(f"Error generating text: {e}")
             raise
     
-    # ============================================================================
-    # EXISTING METHODS - Update to use helper methods
-    # ============================================================================
-    
+   
     def _analyze_issues(self, errors: List[str], input_script: str, data_content: str = "", 
                        ff_content: str = "", log_content: str = "") -> Dict[str, Any]:
         """Have the LLM analyze the issues and suggest a correction strategy."""
@@ -191,9 +193,7 @@ Respond with a JSON object:
                     lammps_log: str = 'log.lammps') -> Tuple[str, Dict[str, Any]]:
         """Refine LAMMPS input files based on error output."""
         self.logger.info(f"Refining LAMMPS input: {input_path}")
-        
-        # ... [read files - unchanged] ...
-        
+                
         input_txt = Path(input_path).read_text()
         
         ff_txt = ""
@@ -280,7 +280,9 @@ CRITICAL RESTART RULES:
                                   research_goal: str,
                                   quality_assessment: Dict[str, Any],
                                   system_info: Dict[str, Any],
-                                  stage: str) -> Tuple[str, Dict[str, Any]]:
+                                  stage: str,
+                                  ff_was_modified: bool = False,
+                                  charges_were_modified: bool = False) -> Tuple[str, Dict[str, Any]]:
         """Refine LAMMPS input based on quality assessment."""
         self.logger.info(f"Refining for quality issues at stage: {stage}")
         
@@ -294,57 +296,76 @@ CRITICAL RESTART RULES:
             self.logger.warning("No quality issues provided")
             return input_txt, {"status": "no_issues", "message": "No quality issues"}
         
+        # Build data strings OUTSIDE the f-string to avoid {{}} issues
+        issues_list = [
+            {"severity": i.get("severity"), "description": i.get("description"),
+             "metric": i.get("metric"), "value": i.get("value")}
+            for i in issues
+        ]
+        issues_str = json.dumps(issues_list, indent=2, default=str)
+        
+        recs_str = "\n".join(f"- {rec}" for rec in recommendations)
+        metrics_str = json.dumps(metrics, indent=2, default=str)
+        
+        prior_fixes = []
+        if ff_was_modified:
+            prior_fixes.append("Force field parameters (ff_params.lammps) were updated")
+        if charges_were_modified:
+            prior_fixes.append("Partial charges in the data file were updated")
+        prior_text = "\n".join(prior_fixes) if prior_fixes else "None"
+        
+        atom_count = system_info.get('atom_count', 'Unknown')
+        element_counts = system_info.get('element_counts', {})
+        element_str = json.dumps(element_counts, default=str)
+        
         prompt = f"""
-You are a LAMMPS expert. Adjust this simulation to address quality issues.
-
-RESEARCH GOAL: {research_goal}
-STAGE: {stage}
-
-QUALITY ISSUES DETECTED:
-{json.dumps([{{"severity": i.get("severity"), "description": i.get("description"), "metric": i.get("metric"), "value": i.get("value")}} for i in issues], indent=2)}
-
-RECOMMENDATIONS:
-{chr(10).join(f"- {rec}" for rec in recommendations)}
-
-QUALITY METRICS:
-{json.dumps(metrics, indent=2)}
-
-SYSTEM INFO:
-- Atoms: {system_info.get('atom_count', 'Unknown')}
-- Composition: {system_info.get('element_counts', {{}})}
-
-CURRENT SCRIPT:
-{input_txt}
-
-COMMON QUALITY FIXES:
-
-1. **Low density** (<0.001 g/cm³): Box too large, system expanding, or check if gas-phase
-2. **High density** (>3.0 g/cm³): Over-compressed, reduce equilibration aggressiveness
-3. **Temperature instability**: Adjust thermostat damping (tdamp parameter)
-4. **Pressure oscillations**: Increase pdamp parameter (100-1000 for real units)
-5. **Insufficient equilibration**: Increase equilibration time
-
-TASK:
-Generate corrected LAMMPS script addressing quality issues.
-
-REQUIREMENTS:
-- Keep same research objective
-- Maintain restart file functionality
-- Only modify parameters relevant to issues
-- Add comments explaining changes
-
-Return ONLY the corrected LAMMPS script without markdown.
-"""
+    You are a LAMMPS expert. Adjust this simulation script to address quality issues.
+    
+    RESEARCH GOAL: {research_goal}
+    STAGE: {stage}
+    
+    QUALITY ISSUES DETECTED:
+    {issues_str}
+    
+    RECOMMENDATIONS:
+    {recs_str}
+    
+    QUALITY METRICS:
+    {metrics_str}
+    
+    PRIOR FIXES ALREADY APPLIED:
+    {prior_text}
+    
+    SYSTEM INFO:
+    - Atoms: {atom_count}
+    - Composition: {element_str}
+    
+    CURRENT SCRIPT:
+    {input_txt}
+    
+    IMPORTANT:
+    - If FF or charges were modified, use read_data instead of read_restart
+    - If FF or charges were modified, add minimization before dynamics
+    - For density problems, check pair_modify mix rule
+    - For temperature issues, adjust Tdamp (~100*timestep)
+    - For pressure issues, adjust Pdamp (~100*timestep)
+    - Keep restart file functionality
+    - Only modify parameters relevant to the issues
+    
+    Return ONLY the corrected LAMMPS script without markdown.
+    """
         
         try:
-            corrected_script = self._generate_text(prompt)  # ✅ Use helper
+            corrected_script = self._generate_text(prompt)
             corrected_script = self._clean_script(corrected_script)
             
             correction_analysis = {
                 "status": "corrected",
                 "issues_addressed": [i.get("description") for i in issues],
                 "corrections_made": "Quality-based parameter adjustments",
-                "stage": stage
+                "stage": stage,
+                "ff_was_modified": ff_was_modified,
+                "charges_was_modified": charges_were_modified
             }
             
             self.logger.info("Quality-based correction completed")
@@ -356,11 +377,7 @@ Return ONLY the corrected LAMMPS script without markdown.
                 "status": "error",
                 "message": f"Failed to generate quality corrections: {e}"
             }
-    
-    # ============================================================================
-    # EXISTING HELPER METHODS - unchanged
-    # ============================================================================
-    
+
     def _extract_errors(self, log_content: str) -> List[str]:
         """Extract all errors from LAMMPS output."""
         lines = log_content.splitlines()
@@ -381,8 +398,8 @@ Return ONLY the corrected LAMMPS script without markdown.
                                   data_content: str = "", 
                                   ff_content: str = "") -> str:
         """Generate targeted correction prompt."""
-        # ... [unchanged from before] ...
-        
+        self.logger.info("Generating correction prompt based on analysis")       
+
         issues_summary = "\n".join([f"- {issue['error_text']}: {issue['root_cause']}" 
                                   for issue in analysis.get("issues", [])])
         fix_strategies = "\n".join([f"- {issue['fix_strategy']}" 

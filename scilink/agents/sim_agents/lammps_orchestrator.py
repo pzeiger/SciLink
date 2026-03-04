@@ -11,8 +11,8 @@ from typing import Dict, Any, Optional, List, Tuple
 
 from .lammps_agent import LAMMPSSimulationAgent
 from .lammps_updater import LAMMPSUpdater
-from .lammps_analysis_agent import LAMMPSAnalysisAgent
-
+from .lammps_analysis import LAMMPSAnalysisAgent
+from .lammps_utils import VMDLAMMPSConverter
 
 class LAMMPSOrchestrator:
     """
@@ -109,7 +109,8 @@ class LAMMPSOrchestrator:
                 base_url=self.base_url
             )
         return self._updater
-    
+
+
     def run_supervised_simulation(self,
                                   data_file: str,
                                   research_goal: str,
@@ -211,11 +212,30 @@ class LAMMPSOrchestrator:
                 exec_result = self._execute_lammps(stage_script_path)
                 
                 if exec_result["status"] == "lammps_error":
+                    error_msg = exec_result.get('error', 'Unknown')
                     print(f"  ❌ LAMMPS error detected")
-                    print(f"     Error: {exec_result.get('error', 'Unknown')[:100]}")
+                    print(f"     Return code: {exec_result.get('returncode', '?')}")
+                    print(f"     Error details:")
+                    for line in error_msg.split('\n'):
+                        if line.strip():
+                            print(f"       {line.strip()}")
+                    
+                    # Save error details for this attempt
+                    error_log_path = self.working_dir / f"error_details_{stage_name}_attempt{attempt}.txt"
+                    with open(error_log_path, 'w') as f:
+                        f.write(f"Stage: {stage_name}\n")
+                        f.write(f"Attempt: {attempt}\n")
+                        f.write(f"Script: {stage_script_path}\n")
+                        f.write(f"Return code: {exec_result.get('returncode', '?')}\n")
+                        f.write(f"\n{'='*60}\nERROR MESSAGE:\n{'='*60}\n")
+                        f.write(error_msg)
+                        f.write(f"\n\n{'='*60}\nSTDERR:\n{'='*60}\n")
+                        f.write(getattr(self, '_last_stderr', 'N/A'))
+                        f.write(f"\n\n{'='*60}\nLOG CONTENT:\n{'='*60}\n")
+                        f.write(getattr(self, '_last_log_content', 'N/A'))
                     
                     # Try to fix LAMMPS error
-                    print(f"  🔧 Attempting LAMMPS error correction...")
+                    print(f"\n  🔧 Attempting LAMMPS error correction...")
                     corrected, new_script_path, correction_info = self._fix_lammps_error(
                         stage_script_path,
                         research_goal,
@@ -223,7 +243,7 @@ class LAMMPSOrchestrator:
                     )
                     
                     if corrected:
-                        print(f"  ✓  LAMMPS error corrected")
+                        print(f"  ✓  LAMMPS error corrected → {Path(new_script_path).name}")
                         stage_script_path = new_script_path
                         self.correction_history.append({
                             "stage": stage_name,
@@ -234,11 +254,11 @@ class LAMMPSOrchestrator:
                         continue  # Retry
                     else:
                         print(f"  ✗  Could not fix LAMMPS error")
+                        print(f"     Reason: {correction_info.get('error', 'Unknown')}")
                         return self._partial_result(
                             completed_stages,
-                            f"Unrecoverable LAMMPS error in {stage_name}"
-                        )
-                
+                            f"Unrecoverable LAMMPS error in {stage_name}: {error_msg[:200]}"
+                        )                
                 # LAMMPS completed successfully
                 print(f"  ✓  LAMMPS completed")
                 
@@ -393,17 +413,8 @@ class LAMMPSOrchestrator:
     # ============================================================================
     # LAMMPS EXECUTION
     # ============================================================================
-    
     def _execute_lammps(self, script_path: str) -> Dict[str, Any]:
-        """
-        Execute a LAMMPS script.
-        
-        Args:
-            script_path: Path to LAMMPS input script
-            
-        Returns:
-            Execution result with status and any errors
-        """
+        """Execute a LAMMPS script."""
         log_file = self.working_dir / "log.lammps"
         
         # Backup previous log if it exists
@@ -411,38 +422,72 @@ class LAMMPSOrchestrator:
             backup_log = self.working_dir / f"log.lammps.bak{int(time.time())}"
             log_file.rename(backup_log)
         
+        self._last_stderr = ""
+        self._last_stdout = ""
+        self._last_log_content = ""  # Store log content before it gets overwritten
+        
         try:
             self.logger.info(f"Executing: {self.lammps_command} -in {script_path}")
-            
             result = subprocess.run(
-                [self.lammps_command, "-in", script_path],
+                f"{self.lammps_command} -in {script_path}",
+                shell=True,
+                check=False,
                 cwd=self.working_dir,
                 capture_output=True,
                 text=True,
                 timeout=self.stage_timeout
             )
             
-            # Check for LAMMPS errors
+            self._last_stderr = result.stderr or ""
+            self._last_stdout = result.stdout or ""
+            
+            # Read log file immediately and store it
+            if log_file.exists():
+                with open(log_file, 'r') as f:
+                    self._last_log_content = f.read()
+            
             if result.returncode != 0:
                 self.logger.warning(f"LAMMPS exited with code {result.returncode}")
+                
+                error_parts = []
+                
+                # Check log file for LAMMPS ERROR lines
+                if self._last_log_content:
+                    error_lines = [l for l in self._last_log_content.split('\n') if 'ERROR' in l]
+                    if error_lines:
+                        error_parts.append("LAMMPS ERROR: " + '\n'.join(error_lines[:5]))
+                        
+                    # Also get the "Last command" line
+                    last_cmd_lines = [l for l in self._last_log_content.split('\n') if 'Last command' in l]
+                    if last_cmd_lines:
+                        error_parts.append("Last command: " + last_cmd_lines[-1].strip())
+                
+                # Check stderr
+                if result.stderr:
+                    error_parts.append("STDERR: " + result.stderr[:500])
+                
+                # Check stdout for errors too
+                if result.stdout:
+                    stdout_errors = [l for l in result.stdout.split('\n') if 'ERROR' in l]
+                    if stdout_errors:
+                        error_parts.append("STDOUT ERRORS: " + '\n'.join(stdout_errors[:3]))
+                
+                error_msg = '\n'.join(error_parts) if error_parts else f"Unknown error (exit code {result.returncode})"
+                
                 return {
                     "status": "lammps_error",
-                    "error": result.stderr or result.stdout,
+                    "error": error_msg,
                     "returncode": result.returncode
                 }
             
-            # Check log for ERROR
-            if log_file.exists():
-                with open(log_file, 'r') as f:
-                    log_content = f.read()
-                    if "ERROR" in log_content:
-                        # Extract error message
-                        error_lines = [line for line in log_content.split('\n') if 'ERROR' in line]
-                        return {
-                            "status": "lammps_error",
-                            "error": '\n'.join(error_lines[:5]),
-                            "returncode": result.returncode
-                        }
+            # Check log for ERROR even with return code 0
+            if self._last_log_content and "ERROR" in self._last_log_content:
+                error_lines = [l for l in self._last_log_content.split('\n') if 'ERROR' in l]
+                return {
+                    "status": "lammps_error",
+                    "error": '\n'.join(error_lines[:5]),
+                    "returncode": result.returncode
+                }
             
             self.logger.info("LAMMPS execution completed successfully")
             return {
@@ -452,24 +497,15 @@ class LAMMPSOrchestrator:
             }
             
         except subprocess.TimeoutExpired:
-            self.logger.error(f"LAMMPS execution timed out after {self.stage_timeout}s")
-            return {
-                "status": "lammps_error",
-                "error": f"LAMMPS execution timed out after {self.stage_timeout}s"
-            }
+            self._last_stderr = f"Timed out after {self.stage_timeout}s"
+            return {"status": "lammps_error", "error": self._last_stderr}
         except FileNotFoundError:
-            self.logger.error(f"LAMMPS executable not found: {self.lammps_command}")
-            return {
-                "status": "lammps_error",
-                "error": f"LAMMPS executable not found: {self.lammps_command}"
-            }
+            self._last_stderr = f"LAMMPS executable not found: {self.lammps_command}"
+            return {"status": "lammps_error", "error": self._last_stderr}
         except Exception as e:
-            self.logger.error(f"LAMMPS execution failed: {e}")
-            return {
-                "status": "lammps_error",
-                "error": str(e)
-            }
-    
+            self._last_stderr = str(e)
+            return {"status": "lammps_error", "error": str(e)}
+
     # ============================================================================
     # ERROR CORRECTION
     # ============================================================================
@@ -480,33 +516,233 @@ class LAMMPSOrchestrator:
                          sim_info: Dict[str, Any]) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Fix LAMMPS errors using LAMMPSUpdater.
-        
-        Args:
-            script_path: Path to failed script
-            research_goal: Research objective
-            sim_info: Simulation information
-            
-        Returns:
-            Tuple of (success, new_script_path, correction_info)
+        Shows the updater's LLM reasoning for debugging.
         """
         try:
             log_file = self.working_dir / "log.lammps"
             
-            if not log_file.exists():
-                self.logger.error("No log file found for error analysis")
-                return False, script_path, {"error": "No log file"}
+            # Use stored log content from the execution that just failed
+            stored_log = getattr(self, '_last_log_content', '')
+            stderr_content = getattr(self, '_last_stderr', '')
+            stdout_content = getattr(self, '_last_stdout', '')
             
-            # Use updater to refine
-            corrected_script, analysis = self.updater.refine_inputs(
-                input_path=script_path,
-                research_goal=research_goal,
-                data_path=sim_info.get("data_path"),
-                lammps_log=str(log_file)
+            # Determine the best source of error information
+            if stored_log and "ERROR" in stored_log:
+                log_content = stored_log
+                self.logger.info("Using stored log content (has ERROR)")
+            elif log_file.exists():
+                with open(log_file, 'r') as f:
+                    log_content = f.read()
+                self.logger.info("Using log.lammps file")
+            else:
+                log_content = ""
+            
+            # If current log has no error, search backup logs
+            if "ERROR" not in log_content:
+                backup_logs = sorted(
+                    self.working_dir.glob("log.lammps.bak*"),
+                    key=lambda f: f.stat().st_mtime,
+                    reverse=True
+                )
+                for backup in backup_logs[:3]:
+                    with open(backup, 'r') as f:
+                        backup_content = f.read()
+                    if "ERROR" in backup_content:
+                        self.logger.info(f"Found error in backup log: {backup.name}")
+                        log_content = backup_content
+                        break
+            
+            # Create comprehensive error log for the updater
+            combined_log = self.working_dir / "log_for_correction.lammps"
+            with open(combined_log, 'w') as f:
+                f.write(log_content)
+                if stderr_content:
+                    f.write("\n\n# === STDERR FROM LAMMPS EXECUTION ===\n")
+                    f.write(stderr_content)
+                if stdout_content and "ERROR" in stdout_content:
+                    f.write("\n\n# === STDOUT ERRORS ===\n")
+                    f.write(stdout_content)
+            
+            # Check if we have error information
+            has_error_info = (
+                "ERROR" in log_content or 
+                "ERROR" in stderr_content or 
+                "MPI_ABORT" in stderr_content
             )
             
-            # Save corrected script with timestamp
-            script_name = Path(script_path).stem
-            new_script_path = self.working_dir / f"{script_name}_corrected_{int(time.time())}.lammps"
+            if not has_error_info:
+                self.logger.error("No error information found in any source")
+                print(f"     ⚠️  No error information found in:")
+                print(f"        - log.lammps ({len(log_content)} chars)")
+                print(f"        - stderr ({len(stderr_content)} chars)")
+                print(f"        - {len(list(self.working_dir.glob('log.lammps.bak*')))} backup logs")
+                return False, script_path, {"error": "No error information available"}
+            
+            # Print what we're sending to the updater
+            print(f"     📋 Error log: {len(log_content)} chars, stderr: {len(stderr_content)} chars")
+            
+            # Parse data file for type information
+            data_path = sim_info.get("data_path")
+            enhanced_goal = research_goal
+            if data_path and os.path.exists(data_path):
+                data_file_context = self._get_data_file_context(data_path)
+                if data_file_context:
+                    enhanced_goal = (
+                        f"{research_goal}\n\n"
+                        f"CRITICAL - DATA FILE TYPE INFORMATION:\n"
+                        f"{data_file_context}\n"
+                        f"You MUST use these exact type numbers."
+                    )
+            
+            # Call the updater
+            print(f"     🤖 Calling LLM updater for analysis...")
+            corrected_script, analysis = self.updater.refine_inputs(
+                input_path=script_path,
+                research_goal=enhanced_goal,
+                data_path=data_path,
+                lammps_log=str(combined_log)
+            )
+            
+            # ============================================================
+            # PRINT THE UPDATER'S REASONING
+            # ============================================================
+            print(f"\n     {'─'*60}")
+            print(f"     📊 UPDATER ANALYSIS:")
+            print(f"     {'─'*60}")
+            
+            # Print issues found
+            issues = analysis.get("issues", [])
+            if issues:
+                print(f"     Issues identified: {len(issues)}")
+                for i, issue in enumerate(issues, 1):
+                    error_text = issue.get("error_text", "No error text")
+                    root_cause = issue.get("root_cause", "Unknown")
+                    fix_strategy = issue.get("fix_strategy", "Unknown")
+                    print(f"\n     Issue {i}:")
+                    print(f"       Error: {error_text[:120]}")
+                    print(f"       Cause: {root_cause[:120]}")
+                    print(f"       Fix:   {fix_strategy[:120]}")
+            else:
+                print(f"     ⚠️  No issues identified by updater!")
+            
+            # Print overall assessment
+            overall = analysis.get("overall_assessment", "")
+            if overall:
+                print(f"\n     Overall: {overall[:200]}")
+            
+            # Print correction approach
+            approach = analysis.get("correction_approach", "")
+            if approach:
+                print(f"     Approach: {approach[:200]}")
+            
+            # Print if data file or force field problem
+            if analysis.get("is_data_file_problem"):
+                print(f"     ⚠️  Data file problem detected")
+            if analysis.get("is_force_field_problem"):
+                print(f"     ⚠️  Force field problem detected")
+            
+            # Print simulation progress
+            progress = analysis.get("simulation_progress", {})
+            if progress:
+                pct = progress.get("percent_complete", 0)
+                stage = progress.get("stage", "unknown")
+                print(f"     Progress: {stage} - {pct}% complete")
+            
+            # Print should_restart
+            if analysis.get("should_restart"):
+                restart_file = analysis.get("restart_file", "unknown")
+                print(f"     🔄 Recommends restart from: {restart_file}")
+            
+            # Print modified commands
+            modified = analysis.get("modified_commands", [])
+            if modified:
+                print(f"\n     Modified commands ({len(modified)}):")
+                for mod in modified[:5]:
+                    orig = mod.get("original", "?")
+                    corr = mod.get("corrected", "?")
+                    print(f"       - {orig[:60]}")
+                    print(f"       + {corr[:60]}")
+                if len(modified) > 5:
+                    print(f"       ... and {len(modified) - 5} more")
+            
+            # Print commands to add/remove
+            to_add = analysis.get("critical_commands_to_add", [])
+            if to_add:
+                print(f"\n     Commands to add:")
+                for cmd in to_add[:5]:
+                    print(f"       + {cmd[:80]}")
+            
+            to_remove = analysis.get("critical_commands_to_remove", [])
+            if to_remove:
+                print(f"\n     Commands to remove:")
+                for cmd in to_remove[:5]:
+                    print(f"       - {cmd[:80]}")
+            
+            print(f"     {'─'*60}")
+            
+            # ============================================================
+            # SAVE ANALYSIS TO FILE
+            # ============================================================
+            analysis_path = self.working_dir / f"error_analysis_{Path(script_path).stem}.json"
+            with open(analysis_path, 'w') as f:
+                json.dump(analysis, f, indent=2)
+            print(f"     💾 Analysis saved: {analysis_path.name}")
+            
+            # ============================================================
+            # CHECK IF UPDATER ACTUALLY CHANGED ANYTHING
+            # ============================================================
+            with open(script_path, 'r') as f:
+                original_content = f.read()
+            
+            if corrected_script.strip() == original_content.strip():
+                print(f"     ⚠️  Updater returned IDENTICAL script - no fix applied!")
+                
+                if not issues:
+                    print(f"     ❌ Updater found no issues and made no changes")
+                    print(f"     Possible causes:")
+                    print(f"       - Error info not reaching the updater")
+                    print(f"       - LLM doesn't understand this LAMMPS error")
+                    print(f"       - Error is in data file, not script")
+                    return False, script_path, {
+                        "error": "Updater could not identify or fix the error",
+                        "analysis": analysis,
+                        "log_excerpt": log_content[-300:] if log_content else "empty"
+                    }
+                else:
+                    print(f"     ⚠️  Updater identified {len(issues)} issues but didn't change the script!")
+                    print(f"     This may indicate the LLM suggested changes it couldn't implement")
+                    return False, script_path, {
+                        "error": "Updater identified issues but failed to modify script",
+                        "analysis": analysis
+                    }
+            
+            # Show diff summary
+            orig_lines = set(original_content.strip().split('\n'))
+            new_lines = set(corrected_script.strip().split('\n'))
+            added = new_lines - orig_lines
+            removed = orig_lines - new_lines
+            
+            if added or removed:
+                print(f"\n     📝 Script changes: +{len(added)} lines, -{len(removed)} lines")
+                if removed:
+                    print(f"     Removed:")
+                    for line in list(removed)[:3]:
+                        stripped = line.strip()
+                        if stripped and not stripped.startswith('#'):
+                            print(f"       - {stripped[:80]}")
+                if added:
+                    print(f"     Added:")
+                    for line in list(added)[:3]:
+                        stripped = line.strip()
+                        if stripped and not stripped.startswith('#'):
+                            print(f"       + {stripped[:80]}")
+            
+            # ============================================================
+            # SAVE CORRECTED SCRIPT
+            # ============================================================
+            base_name = Path(script_path).stem.split("_corrected_")[0]
+            attempt_num = len(list(self.working_dir.glob(f"{base_name}_corrected_*.lammps"))) + 1
+            new_script_path = self.working_dir / f"{base_name}_corrected_{attempt_num}.lammps"
             
             with open(new_script_path, 'w') as f:
                 f.write(corrected_script)
@@ -515,16 +751,103 @@ class LAMMPSOrchestrator:
                 "original_script": script_path,
                 "corrected_script": str(new_script_path),
                 "analysis": analysis,
-                "correction_type": "lammps_error"
+                "correction_type": "lammps_error",
+                "lines_added": len(added),
+                "lines_removed": len(removed)
             }
             
-            self.logger.info(f"LAMMPS error corrected: {new_script_path}")
+            print(f"     ✓ Corrected script: {new_script_path.name}")
+            
             return True, str(new_script_path), correction_info
             
         except Exception as e:
             self.logger.error(f"Error correction failed: {e}")
+            import traceback
+            traceback.print_exc()
             return False, script_path, {"error": str(e)}
-    
+
+    def _get_data_file_context(self, data_path: str) -> str:
+        """Extract type information from data file for error correction context."""
+        context_lines = []
+        
+        try:
+            with open(data_path, 'r') as f:
+                lines = f.readlines()
+            
+            # Extract comment headers with type info
+            section = None
+            for line in lines:
+                stripped = line.strip()
+                
+                if stripped == "# Pair Coeffs":
+                    section = "atom"
+                    context_lines.append("ATOM TYPES:")
+                    continue
+                elif stripped == "# Bond Coeffs":
+                    section = "bond"
+                    context_lines.append("BOND TYPES:")
+                    continue
+                elif stripped == "# Angle Coeffs":
+                    section = "angle"
+                    context_lines.append("ANGLE TYPES:")
+                    continue
+                elif stripped == "# Dihedral Coeffs":
+                    section = "dihedral"
+                    context_lines.append("DIHEDRAL TYPES:")
+                    continue
+                elif stripped == "#":
+                    continue
+                elif not stripped.startswith("#"):
+                    section = None
+                    continue
+                
+                if section and stripped.startswith("#"):
+                    parts = stripped[1:].strip().split()
+                    if len(parts) >= 2:
+                        try:
+                            type_id = int(parts[0])
+                            name = parts[1]
+                            context_lines.append(f"  Type {type_id}: {name}")
+                        except ValueError:
+                            pass
+            
+            # Also get Masses section
+            in_masses = False
+            context_lines.append("MASSES:")
+            for line in lines:
+                stripped = line.strip()
+                if stripped == "Masses":
+                    in_masses = True
+                    continue
+                if in_masses:
+                    if not stripped or stripped.startswith("Atoms"):
+                        break
+                    if stripped.startswith("#"):
+                        continue
+                    parts = stripped.split()
+                    if len(parts) >= 2 and "#" in stripped:
+                        try:
+                            type_id = int(parts[0])
+                            mass = float(parts[1])
+                            comment = stripped.split("#")[1].strip()
+                            context_lines.append(f"  Type {type_id}: mass={mass:.3f} ({comment})")
+                        except (ValueError, IndexError):
+                            pass
+            
+            # Count header info
+            for line in lines[:20]:
+                stripped = line.strip()
+                for keyword in ["atoms", "bonds", "angles", "dihedrals", "atom types", 
+                               "bond types", "angle types", "dihedral types"]:
+                    if keyword in stripped.lower():
+                        context_lines.append(f"  {stripped}")
+                        break
+            
+        except Exception as e:
+            context_lines.append(f"  (Could not parse data file: {e})")
+        
+        return "\n".join(context_lines)
+
     def _fix_quality_issues(self,
                            script_path: str,
                            quality_result: Dict[str, Any],
@@ -532,51 +855,141 @@ class LAMMPSOrchestrator:
                            sim_info: Dict[str, Any],
                            stage: str) -> Tuple[bool, str, Dict[str, Any]]:
         """
-        Fix quality issues (not LAMMPS errors) using LAMMPSUpdater.
+        Coordinate quality fixes across sub-agents.
         
-        Args:
-            script_path: Path to current script
-            quality_result: Quality assessment from LAMMPSAnalysisAgent
-            research_goal: Research objective
-            sim_info: Simulation information
-            stage: Current stage name
-            
-        Returns:
-            Tuple of (success, new_script_path, correction_info)
+        Delegates to:
+        - ForceFieldAgent for FF params and charges
+        - LAMMPSUpdater for script adjustments
         """
+        from .force_field_agent import ForceFieldAgent
+        
+        issues = quality_result.get("issues", [])
+        recommendations = quality_result.get("recommendations", [])
+        
+        print(f"\n     {'─'*60}")
+        print(f"     🔬 QUALITY ISSUE DIAGNOSIS:")
+        print(f"     {'─'*60}")
+        
+        if issues:
+            print(f"     Issues ({len(issues)}):")
+            for i, issue in enumerate(issues, 1):
+                severity = issue.get("severity", "?")
+                desc = issue.get("description", "")
+                print(f"       {i}. [{severity.upper()}] {desc}")
+        
+        if recommendations:
+            print(f"\n     Recommendations:")
+            for i, rec in enumerate(recommendations, 1):
+                desc = rec.get("description", rec) if isinstance(rec, dict) else str(rec)
+                print(f"       {i}. {desc}")
+        
+        print(f"     {'─'*60}")
+        
+        corrections_made = []
+        
         try:
-            # Use updater's quality refinement method
-            corrected_script, correction_analysis = self.updater.refine_for_quality_issues(
+            # ============================================================
+            # Step 1: Ask ForceFieldAgent to diagnose and fix parameters
+            # ============================================================
+            ff_params_path = self.working_dir / "ff_params.lammps"
+            data_path = sim_info.get("data_path")
+            
+            if ff_params_path.exists() and data_path:
+                print(f"\n     🧪 Step 1: ForceFieldAgent diagnosing parameters...")
+                
+                ff_agent = ForceFieldAgent(
+                    working_dir=str(self.working_dir),
+                    api_key=self.api_key,
+                    model_name=self.model_name,
+                    base_url=self.base_url
+                )
+                
+                ff_result = ff_agent.diagnose_and_fix_force_field(
+                    quality_result=quality_result,
+                    research_goal=research_goal,
+                    data_file=data_path,
+                    ff_params_path=str(ff_params_path),
+                    stage=stage
+                )
+                
+                print(f"     Diagnosis: {ff_result.get('diagnosis', 'N/A')[:150]}")
+                
+                if ff_result.get("ff_modified"):
+                    print(f"     ✓ Force field parameters adjusted")
+                    corrections_made.append(("force_field", ff_result["details"].get("force_field", {})))
+                
+                if ff_result.get("charges_modified"):
+                    print(f"     ✓ Charges adjusted")
+                    corrections_made.append(("charges", ff_result["details"].get("charges", {})))
+                
+                if not ff_result.get("ff_modified") and not ff_result.get("charges_modified"):
+                    print(f"     → No parameter changes needed")
+            
+            # ============================================================
+            # Step 2: Ask LAMMPSUpdater to fix the script
+            # ============================================================
+            print(f"\n     ⚙️  Step 2: LAMMPSUpdater adjusting script...")
+            
+            ff_was_modified = any(c[0] == "force_field" for c in corrections_made)
+            charges_were_modified = any(c[0] == "charges" for c in corrections_made)
+            
+            corrected_script, script_analysis = self.updater.refine_for_quality_issues(
                 input_path=script_path,
                 research_goal=research_goal,
                 quality_assessment=quality_result,
                 system_info=sim_info.get("system_info", {}),
-                stage=stage
+                stage=stage,
+                ff_was_modified=ff_was_modified,
+                charges_were_modified=charges_were_modified
             )
             
-            # Save corrected script
-            script_name = Path(script_path).stem
-            new_script_path = self.working_dir / f"{script_name}_quality_fix_{int(time.time())}.lammps"
+            # Check if script changed
+            with open(script_path, 'r') as f:
+                original_script = f.read()
             
-            with open(new_script_path, 'w') as f:
-                f.write(corrected_script)
+            if corrected_script.strip() != original_script.strip():
+                # Save corrected script
+                base_name = Path(script_path).stem.split("_quality_")[0].split("_corrected_")[0]
+                attempt_num = len(list(self.working_dir.glob(f"{base_name}_quality_*.lammps"))) + 1
+                new_script_path = self.working_dir / f"{base_name}_quality_{attempt_num}.lammps"
+                
+                with open(new_script_path, 'w') as f:
+                    f.write(corrected_script)
+                
+                corrections_made.append(("script", {"new_script": str(new_script_path)}))
+                print(f"     ✓ Script adjusted → {new_script_path.name}")
+            else:
+                new_script_path = script_path
+                print(f"     → Script unchanged")
+            
+            # ============================================================
+            # Summary
+            # ============================================================
+            if not corrections_made:
+                print(f"\n     ❌ No corrections could be made")
+                return False, script_path, {"error": "No corrections applied"}
+            
+            print(f"\n     📝 Corrections applied: {len(corrections_made)}")
+            for corr_type, corr_info in corrections_made:
+                summary = corr_info.get("summary", "modified")
+                print(f"       - {corr_type}: {summary}")
             
             correction_info = {
                 "original_script": script_path,
                 "corrected_script": str(new_script_path),
-                "quality_issues": quality_result.get("issues", []),
-                "recommendations_applied": quality_result.get("recommendations", []),
+                "quality_issues": [i.get("description", "") for i in issues],
                 "correction_type": "quality_issue",
-                "analysis": correction_analysis
+                "corrections_made": [{"type": t, "info": i} for t, i in corrections_made]
             }
             
-            self.logger.info(f"Quality issues corrected: {new_script_path}")
             return True, str(new_script_path), correction_info
             
         except Exception as e:
             self.logger.error(f"Quality correction failed: {e}")
+            import traceback
+            traceback.print_exc()
             return False, script_path, {"error": str(e)}
-    
+
     # ============================================================================
     # HELPER METHODS
     # ============================================================================
@@ -714,53 +1127,256 @@ class LAMMPSOrchestrator:
         
         self.logger.info(f"Summary report generated: {report_path}")
         return str(report_path)
-    
-    # ============================================================================
-    # CONVENIENCE METHOD FOR SIMPLE USAGE
-    # ============================================================================
-    
-    @classmethod
-    def quick_run(cls,
-                  data_file: str,
-                  research_goal: str,
-                  working_dir: Optional[str] = None,
-                  **kwargs) -> Dict[str, Any]:
+      
+    @staticmethod
+    def _prepare_data_file(
+                          input_file: str, 
+                          working_dir: str,
+                          box_dimensions: float = 40.0,
+                          vmd_path: str = None,
+                          force_reconvert: bool = False,
+                          assign_charges: bool = True,
+                          research_goal: Optional[str] = None,
+                          api_key: Optional[str] = None,
+                          model_name: str = "gemini-3-pro-preview",
+                          base_url: Optional[str] = None) -> Tuple[str, Optional[Dict]]:
         """
-        Convenience method for quick supervised simulation runs.
-        
-        Usage:
-            results = SimulationOrchestrator.quick_run(
-                data_file="system.data",
-                research_goal="Calculate diffusion coefficients"
-            )
+        Prepare LAMMPS data file from PDB or verify existing data file.
+        Now includes automatic charge assignment via ForceFieldAgent.
         
         Args:
-            data_file: LAMMPS data file
-            research_goal: Research objective
-            working_dir: Working directory (auto-generated if not provided)
-            **kwargs: Additional parameters
+            input_file: Path to input structure file (PDB, LAMMPS data, etc.)
+            working_dir: Working directory
+            box_dimensions: Box size in Angstroms (only used if converting PDB)
+            vmd_path: Path to VMD executable (only needed for PDB conversion)
+            force_reconvert: Force reconversion even if data file exists
+            assign_charges: Whether to assign charges using ForceFieldAgent
+            research_goal: Research goal (used for charge assignment)
+            api_key: API key for ForceFieldAgent
+            model_name: Model name for ForceFieldAgent
+            base_url: Base URL for ForceFieldAgent
             
         Returns:
-            Complete simulation results
+            Tuple of (path to LAMMPS data file, force field info dict or None)
         """
-        # Auto-generate working dir if not provided
-        if working_dir is None:
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
-            working_dir = f"supervised_sim_{timestamp}"
+        from .force_field_agent import ForceFieldAgent  # Import here to avoid circular imports
         
-        # Create orchestrator
-        orchestrator = cls(working_dir=working_dir, **kwargs)
+        input_path = Path(input_file)
         
-        # Run supervised simulation
+        if not input_path.exists():
+            raise FileNotFoundError(f"Input file not found: {input_file}")
+        
+        force_field_info = None
+        
+        # Check if it's already a LAMMPS data file
+        if input_path.suffix.lower() in ['.lammps', '.data', '.lmp']:
+            logging.info(f"✓ Input is already a LAMMPS data file: {input_file}")
+            data_file = str(input_path)
+            
+        # If PDB, convert using VMD
+        elif input_path.suffix.lower() == '.pdb':
+            logging.info(f"📄 Input is a PDB file, conversion needed")
+            
+            # Check if converted data file already exists
+            output_file = Path(working_dir) / f"{input_path.stem}.data"
+            
+            if output_file.exists() and not force_reconvert:
+                logging.info(f"✓ Converted data file already exists: {output_file}")
+                data_file = str(output_file)
+            else:
+                # Convert PDB to LAMMPS data file
+                logging.info(f"🔄 Converting PDB to LAMMPS data file...")
+                
+                # Get VMD path
+                if vmd_path is None:
+                    vmd_path = os.getenv('VMD_PATH')
+                    if vmd_path is None:
+                        converter_temp = VMDLAMMPSConverter()
+                        vmd_path = converter_temp.vmd_path
+                
+                if not vmd_path:
+                    raise RuntimeError("VMD executable not found")
+                
+                # Initialize converter
+                converter = VMDLAMMPSConverter(
+                    vmd_path=vmd_path,
+                    working_dir=working_dir
+                )
+                
+                data_file = converter.convert(
+                    pdb_file=str(input_path),
+                    output_file=str(output_file),
+                    box_dimensions=box_dimensions,
+                    options={
+                        'autobonds': True,
+                        'retypebonds': True,
+                        'guessangles': True,
+                        'guess_dihedrals': True,
+                        'guess_impropers': True,
+                        'style': 'full',
+                        'atom_style': 'full',
+                        'center_system': True
+                    }
+                )
+                logging.info(f"✓ Successfully converted PDB to data file: {data_file}")
+        else:
+            raise ValueError(f"Unsupported input format: {input_path.suffix}")
+        
+        # Assign charges if requested
+        if assign_charges:
+            logging.info(f"⚡ Assigning partial charges using ForceFieldAgent...")
+            
+            try:
+                ff_agent = ForceFieldAgent(
+                    working_dir=working_dir,
+                    api_key=api_key,
+                    model_name=model_name,
+                    base_url=base_url
+                )
+                
+                # Run complete parameterization
+                force_field_info = ff_agent.complete_parameterization(
+                    pdb_file=str(input_path) if input_path.suffix.lower() == '.pdb' else None,
+                    data_file=data_file,
+                    research_goal=research_goal or "Molecular dynamics simulation"
+                )
+                
+                if force_field_info["status"] == "success":
+                    # Use the charged data file
+                    data_file = force_field_info["output_files"]["charged_data_file"]
+                    logging.info(f"✓ Charges assigned successfully: {data_file}")
+                else:
+                    logging.warning(f"⚠️ Charge assignment had issues: {force_field_info.get('errors', [])}")
+                    
+            except Exception as e:
+                logging.error(f"❌ Charge assignment failed: {e}")
+                logging.warning("Continuing with uncharged data file (simulation may fail)")
+        
+        return data_file, force_field_info
+
+    @classmethod
+    def quick_run(cls,
+                  input_file: str,
+                  research_goal: str,
+                  working_dir: str,
+                  lammps_command: str = "lmp",
+                  vmd_path: str = None,
+                  max_stage_attempts: int = 3,
+                  run_final_analysis: bool = True,
+                  temperature: float = 300.0,
+                  pressure: float = 1.0,
+                  box_dimensions: float = 40.0,
+                  force_reconvert: bool = False,
+                  assign_charges: bool = True,
+                  stage_timeout: int = 14400,
+                  **kwargs) -> Dict:
+        """
+        Quick run with automatic file format detection, conversion, and charge assignment.
+        """
+        os.makedirs(working_dir, exist_ok=True)
+        
+        logging.info("="*80)
+        logging.info("LAMMPS ORCHESTRATOR - QUICK RUN")
+        logging.info("="*80)
+        
+        # Get API config from kwargs
+        api_key = kwargs.get('api_key') or os.getenv("GOOGLE_API_KEY")
+        model_name = kwargs.get('model_name', "gemini-3-pro-preview")
+        base_url = kwargs.get('base_url')
+        
+        # Step 1: Prepare data file WITH charge assignment
+        logging.info("\n📋 Step 1: Preparing data file and assigning charges...")
+        
+        conversion_info = {
+            'input_file': input_file,
+            'input_type': Path(input_file).suffix,
+            'converted': False,
+            'charges_assigned': False,
+            'conversion_time': None
+        }
+        
+        try:
+            import time
+            start_time = time.time()
+            
+            prepared_data_file, force_field_info = cls._prepare_data_file(
+                input_file=input_file,
+                working_dir=working_dir,
+                box_dimensions=box_dimensions,
+                vmd_path=vmd_path,
+                force_reconvert=force_reconvert,
+                assign_charges=assign_charges,
+                research_goal=research_goal,
+                api_key=api_key,
+                model_name=model_name,
+                base_url=base_url
+            )
+            
+            conversion_time = time.time() - start_time
+            
+            conversion_info.update({
+                'prepared_file': prepared_data_file,
+                'converted': (Path(prepared_data_file).name != Path(input_file).name),
+                'charges_assigned': assign_charges and force_field_info is not None,
+                'conversion_time': conversion_time,
+                'force_field_info': force_field_info
+            })
+            
+            logging.info(f"✓ Data preparation completed in {conversion_time:.2f} seconds")
+            
+        except Exception as e:
+            logging.error(f"❌ Data file preparation failed: {e}")
+            return {
+                'status': 'failed',
+                'reason': f'Data file preparation failed: {str(e)}',
+                'stage': 'preparation',
+                'working_directory': working_dir,
+                'conversion_info': conversion_info,
+                'error': str(e)
+            }
+        
+        # Step 2: Initialize orchestrator
+        logging.info("\n🔧 Step 2: Initializing orchestrator...")
+        
+        try:
+            orchestrator = cls(
+                working_dir=working_dir,
+                lammps_command=lammps_command,
+                max_stage_attempts=max_stage_attempts,
+                stage_timeout=stage_timeout,
+                api_key=api_key,
+                model_name=model_name,
+                base_url=base_url
+            )
+        except Exception as e:
+            logging.error(f"❌ Orchestrator initialization failed: {e}")
+            return {
+                'status': 'failed',
+                'reason': f'Orchestrator initialization failed: {str(e)}',
+                'stage': 'initialization',
+                'working_directory': working_dir,
+                'conversion_info': conversion_info,
+                'error': str(e)
+            }
+        
+        # Step 3: Run simulation
+        logging.info("\n🚀 Step 3: Running simulation stages...")
+        
+        # Pass force field files if available
+        force_field_files = None
+        if force_field_info and force_field_info.get("status") == "success":
+            param_files = force_field_info.get("output_files", {}).get("parameter_files", {})
+            if param_files:
+                force_field_files = param_files
+        
         results = orchestrator.run_supervised_simulation(
-            data_file=data_file,
+            data_file=prepared_data_file,
             research_goal=research_goal,
-            **kwargs
+            force_field_files=force_field_files,
+            run_final_analysis=run_final_analysis
         )
         
-        # Generate summary report
-        if results.get("status") in ["success", "partial"]:
-            report_path = orchestrator.generate_summary_report()
-            results["summary_report"] = report_path
+        # Add conversion info to results
+        results['conversion_info'] = conversion_info
         
         return results

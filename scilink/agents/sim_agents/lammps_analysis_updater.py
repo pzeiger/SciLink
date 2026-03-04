@@ -10,7 +10,7 @@ from typing import Dict, Any, Optional, List
 from ...auth import get_internal_proxy_key
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
-from ...utils.deprecation import normalize_params
+from ._deprecation import normalize_params
 
 
 class LAMMPSAnalysisUpdater:

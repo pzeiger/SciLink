@@ -81,7 +81,277 @@ class LAMMPSSimulationAgent:
             )
         
         self.generation_config = None
+
+    def _integrate_force_field_files(self, script_text: str, force_field_files: Dict[str, str]) -> str:
+        """
+        Integrate force field parameter files into the LAMMPS script.
+        
+        Handles cases where files may already be in the working directory.
+        """
+        if not force_field_files:
+            return script_text
     
+        lines = script_text.split('\n')
+    
+        # Find the position to insert force field parameters (after read_data)
+        insert_pos = 0
+        for i, line in enumerate(lines):
+            if "read_data" in line:
+                insert_pos = i + 1
+                break
+    
+        # Fallback: find first non-comment, non-empty line
+        if insert_pos == 0:
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#"):
+                    insert_pos = i
+                    break
+    
+        insertion = ["", "# Include force field parameters"]
+        included_files = []
+    
+        def safe_copy_file(source: str, dest_dir: Path, preferred_name: Optional[str] = None) -> Optional[str]:
+            """
+            Safely copy a file to destination directory.
+            Returns the filename to use in the include statement, or None if failed.
+            """
+            if not source or not os.path.exists(source):
+                self.logger.warning(f"Source file does not exist: {source}")
+                return None
+            
+            source_path = Path(source).resolve()
+            
+            # Determine destination filename
+            if preferred_name:
+                dest_name = preferred_name if preferred_name.endswith('.lammps') else f"{preferred_name}.lammps"
+            else:
+                dest_name = source_path.name
+            
+            dest_path = (dest_dir / dest_name).resolve()
+            
+            # Check if source and destination are the same file
+            try:
+                if source_path.samefile(dest_path):
+                    self.logger.info(f"File already in working directory: {dest_name}")
+                    return dest_name
+            except (OSError, FileNotFoundError):
+                # samefile can fail if dest doesn't exist yet, which is fine
+                pass
+            
+            # Check if destination already exists with same content
+            if dest_path.exists():
+                try:
+                    if source_path.read_bytes() == dest_path.read_bytes():
+                        self.logger.info(f"Identical file already exists: {dest_name}")
+                        return dest_name
+                except Exception:
+                    pass
+                
+                # Destination exists but is different - create unique name
+                base = dest_path.stem
+                suffix = dest_path.suffix or '.lammps'
+                counter = 1
+                while dest_path.exists():
+                    dest_name = f"{base}_{counter}{suffix}"
+                    dest_path = dest_dir / dest_name
+                    counter += 1
+            
+            # Copy the file
+            try:
+                shutil.copy2(str(source_path), str(dest_path))
+                self.logger.info(f"Copied {source_path.name} to {dest_path}")
+                return dest_name
+            except shutil.SameFileError:
+                # This shouldn't happen after our checks, but handle it anyway
+                self.logger.info(f"File already in place: {dest_name}")
+                return dest_path.name
+            except Exception as e:
+                self.logger.error(f"Failed to copy {source}: {e}")
+                return None
+    
+        # Process main force field file
+        if "main" in force_field_files:
+            main_source = force_field_files["main"]
+            filename = safe_copy_file(main_source, self.working_dir)
+            if filename:
+                insertion.append(f"include {filename}")
+                included_files.append(filename)
+    
+        # Process additional force field files
+        additional = force_field_files.get("additional", {})
+        if isinstance(additional, dict):
+            for name, path in additional.items():
+                if path:
+                    filename = safe_copy_file(path, self.working_dir, preferred_name=name)
+                    if filename and filename not in included_files:
+                        insertion.append(f"include {filename}")
+                        included_files.append(filename)
+        elif isinstance(additional, str):
+            # Handle case where additional is a single file path string
+            filename = safe_copy_file(additional, self.working_dir)
+            if filename and filename not in included_files:
+                insertion.append(f"include {filename}")
+                included_files.append(filename)
+    
+        # Only add insertion if we actually have files to include
+        if len(insertion) > 2:  # More than just the header comments
+            insertion.append("")
+            updated_lines = lines[:insert_pos] + insertion + lines[insert_pos:]
+            return '\n'.join(updated_lines)
+        else:
+            self.logger.warning("No force field files were successfully integrated")
+            return script_text
+
+    def generate_simulation(self,
+                              data_file: str,
+                              research_goal: str,
+                              system_description: Optional[str] = None,
+                              temperature: float = 300.0,
+                              pressure: float = 1.0,
+                              force_field_files: Optional[Dict[str, str]] = None,
+                              **kwargs) -> Dict[str, Any]:
+            """
+            Generate LAMMPS simulation(s) based on a research goal.
+    
+            Args:
+                data_file: Path to LAMMPS data file
+                research_goal: Research objective in natural language
+                system_description: Description of the molecular system (optional)
+                temperature: Default temperature in K
+                pressure: Default pressure in atm
+                force_field_files: Dictionary with paths to force field parameter files
+                **kwargs: Additional parameters
+    
+            Returns:
+                Dictionary with generated simulation info
+            """
+            # Copy the data file to the working directory
+            local_data_file = self._copy_data_file(data_file)
+    
+            # Analyze the system
+            system_info = self.analyze_system(data_file)
+    
+            # If system description is not provided, generate one
+            if not system_description:
+                system_description = self._generate_system_description(system_info)
+    
+            # Determine simulation parameters
+            simulation_params = self._determine_simulation_parameters(
+                research_goal=research_goal,
+                system_info=system_info,
+                temperature=temperature,
+                pressure=pressure,
+                **kwargs
+            )
+    
+            # Generate LAMMPS script
+            script_text = self._generate_script(
+                data_filename=os.path.basename(local_data_file),
+                research_goal=research_goal,
+                system_description=system_description,
+                system_info=system_info,
+                **simulation_params
+            )
+    
+            # Add force field parameters
+            if force_field_files:
+                self.logger.info("Integrating provided force field files")
+                script_text = self._integrate_force_field_files(script_text, force_field_files)
+            else:
+                self.logger.info("Generating basic force field parameters")
+                script_text = self._ensure_force_field_parameters(script_text, system_info)
+                        # Save the script
+            script_path = self.working_dir / "run.lammps"
+            with open(script_path, 'w') as f:
+                f.write(script_text)
+    
+            # Create README
+            readme_path = self._generate_readme(
+                research_goal=research_goal,
+                system_description=system_description,
+                system_info=system_info,
+                simulation_params=simulation_params,
+                script_path=str(script_path)
+            )
+    
+            return {
+                "script_path": str(script_path),
+                "readme_path": readme_path,
+                "data_path": str(local_data_file),
+                "system_info": system_info,
+                "simulation_parameters": simulation_params
+            }
+
+    def generate_staged_simulation(self,
+                                   data_file: str,
+                                   research_goal: str,
+                                   system_description: Optional[str] = None,
+                                   force_field_files: Optional[Dict[str, str]] = None,
+                                   **kwargs) -> Dict[str, Any]:
+        """
+        Generate simulation broken into checkpointed stages for quality monitoring.
+        
+        This generates separate scripts for:
+        - Minimization
+        - Equilibration (may be multiple phases)
+        - Production
+        
+        Each stage writes restart files and can be quality-checked independently.
+        
+        Args:
+            data_file: Path to LAMMPS data file
+            research_goal: Research objective
+            system_description: System description (optional)
+            force_field_files: Force field parameter files (optional)
+            **kwargs: Additional simulation parameters
+            
+        Returns:
+            Dictionary with:
+                - All fields from generate_simulation()
+                - "staged_scripts": Dict mapping stage name to script path
+                - "stages": List of stage names in execution order
+        """
+        self.logger.info("Generating staged simulation with checkpoints")
+        
+        # First generate full simulation (reuse existing logic)
+        full_sim_info = self.generate_simulation(
+            data_file=data_file,
+            research_goal=research_goal,
+            system_description=system_description,
+            force_field_files=force_field_files,
+            **kwargs
+        )
+        
+        # Read the generated full script
+        full_script = Path(full_sim_info["script_path"]).read_text()
+        
+        # Split into stages using LLM
+        self.logger.info("Splitting simulation into stages for quality checks")
+        stages = self._split_into_stages(
+            script_content=full_script,
+            simulation_params=full_sim_info["simulation_parameters"],
+            system_info=full_sim_info["system_info"],
+            data_filename=os.path.basename(full_sim_info["data_path"])
+        )
+        
+        # Write individual stage scripts
+        stage_scripts = {}
+        for stage_name, stage_content in stages.items():
+            stage_path = self.working_dir / f"run_{stage_name}.lammps"
+            with open(stage_path, 'w') as f:
+                f.write(stage_content)
+            stage_scripts[stage_name] = str(stage_path)
+            self.logger.info(f"  ✓ Generated stage: {stage_name} -> {stage_path.name}")
+        
+        # Add to return dict
+        full_sim_info["staged_scripts"] = stage_scripts
+        full_sim_info["stages"] = list(stages.keys())
+        full_sim_info["is_staged"] = True
+        
+        return full_sim_info
+
+
     # ============================================================================
     # HELPER METHODS FOR LLM CALLS
     # ============================================================================
@@ -134,10 +404,7 @@ class LAMMPSSimulationAgent:
             self.logger.error(f"Error generating text: {e}")
             raise
     
-    # ============================================================================
-    # EXISTING METHODS - Update to use _generate_json() and _generate_text()
-    # ============================================================================
-    
+   
     def _determine_simulation_parameters(self, 
                                        research_goal: str, 
                                        system_info: Dict[str, Any],
@@ -230,17 +497,7 @@ Respond with JSON:
                 "production_time": 1.5,
                 "required_outputs": ["energy", "trajectory"]
             }
-    
-    def _generate_script(self, **kwargs) -> str:
-        """Generate LAMMPS script(s) based on simulation parameters."""
-        # ... [build prompt logic - unchanged] ...
         
-        # Generate the script
-        response = self._generate_text(script_prompt)  # ✅ Use helper method
-        script_text = self._clean_script(response)
-        
-        return script_text
-    
     def _split_into_stages(self,
                           script_content: str,
                           simulation_params: Dict[str, Any],
@@ -249,49 +506,231 @@ Respond with JSON:
         """Split LAMMPS script into stages at natural checkpoints."""
         
         prompt = f"""
-You are a LAMMPS expert. Split this simulation into stages for quality checking.
-
-FULL LAMMPS SCRIPT:
-{script_content}
-
-SIMULATION INFO:
-- Ensemble: {simulation_params.get('ensemble', 'NPT')}
-- Temperature: {simulation_params.get('temperature', 300)} K
-- Simulation time: {simulation_params.get('simulation_time', 2)} ns
-
-TASK:
-Split this script into 2-4 stages at natural breakpoints:
-1. **Minimization** (if present)
-2. **Equilibration** (may be split into multiple phases)
-3. **Production** (data collection)
-
-[... rest of prompt from earlier ...]
-
-Return JSON:
-{{
-    "minimization": "complete script...",
-    "equilibration_nvt": "complete script...",
-    "equilibration_npt": "complete script...",
-    "production": "complete script..."
-}}
-
-Return ONLY JSON.
-"""
+    You are a LAMMPS expert. Split this simulation into stages for quality checking.
+    
+    FULL LAMMPS SCRIPT:
+    {script_content}
+    
+    DATA FILE: {data_filename}
+    
+    SIMULATION INFO:
+    - Ensemble: {simulation_params.get('ensemble', 'NPT')}
+    - Temperature: {simulation_params.get('temperature', 300)} K
+    - Pressure: {simulation_params.get('pressure', 1.0)} atm
+    - Simulation time: {simulation_params.get('simulation_time', 2)} ns
+    
+    TASK:
+    Split this script into 2-4 stages at natural breakpoints:
+    1. **equilibration_npt** - NPT equilibration to reach target T and P
+    2. **production** - Production run for data collection
+    
+    Each stage MUST be a complete, standalone, runnable LAMMPS script that includes:
+    1. units real
+    2. atom_style full
+    3. boundary p p p
+    4. read_data {data_filename} (for first stage) OR read_restart (for later stages)
+    5. All necessary pair_style, bond_style, etc. OR include ff_params.lammps
+    6. Proper fix commands for the ensemble
+    7. Output commands (thermo, dump, etc.)
+    8. run command
+    9. write_restart command at the end
+    
+    CRITICAL REQUIREMENTS:
+    - Each script must start with: units real
+    - Do NOT use undefined variables like ${{t}} or ${{run_id}} - use actual values
+    - Temperature should be {simulation_params.get('temperature', 300)} K
+    - Use actual numbers, not placeholders
+    - Each stage must be independently executable
+    
+    Return JSON where keys are stage names and values are complete LAMMPS scripts.
+    Example format:
+    {{
+        "equilibration_npt": "units real\\natom_style full\\n...",
+        "production": "units real\\natom_style full\\n..."
+    }}
+    
+    Return ONLY valid JSON with complete scripts. No markdown, no explanations.
+    """
         
         try:
-            stages = self._generate_json(prompt)  # ✅ Use helper method
+            stages = self._generate_json(prompt)
             
             if not stages or not isinstance(stages, dict):
                 raise ValueError("Invalid stage splitting result")
             
-            self.logger.info(f"Split into {len(stages)} stages: {list(stages.keys())}")
-            return stages
+            # Validate and fix each stage script
+            validated_stages = {}
+            for stage_name, stage_script in stages.items():
+                if not isinstance(stage_script, str):
+                    self.logger.warning(f"Stage {stage_name} is not a string, skipping")
+                    continue
+                
+                # Clean and validate the script
+                cleaned_script = self._validate_and_fix_stage_script(
+                    stage_script, 
+                    stage_name, 
+                    data_filename, 
+                    simulation_params
+                )
+                
+                if cleaned_script:
+                    validated_stages[stage_name] = cleaned_script
+                else:
+                    self.logger.warning(f"Stage {stage_name} failed validation, skipping")
+            
+            if not validated_stages:
+                raise ValueError("No valid stages produced")
+            
+            self.logger.info(f"Split into {len(validated_stages)} stages: {list(validated_stages.keys())}")
+            return validated_stages
             
         except Exception as e:
             self.logger.error(f"Error splitting into stages: {e}")
             self.logger.warning("Falling back to single-stage simulation")
-            return {"production": script_content}
+            # Return the original script as a single stage, but validate it first
+            validated = self._validate_and_fix_stage_script(
+                script_content, "production", data_filename, simulation_params
+            )
+            return {"production": validated or script_content}
+
+
+    def _validate_and_fix_stage_script(self,
+                                        script: str,
+                                        stage_name: str,
+                                        data_filename: str,
+                                        params: Dict[str, Any]) -> Optional[str]:
+        """
+        Validate and fix a LAMMPS stage script.
         
+        Returns the fixed script, or None if unfixable.
+        """
+        if not script or not script.strip():
+            return None
+        
+        lines = script.strip().split('\n')
+        fixed_lines = []
+        
+        # Track what we've seen
+        has_units = False
+        has_atom_style = False
+        has_boundary = False
+        has_read_data = False
+        has_read_restart = False
+        
+        # Get actual values for substitution
+        temperature = params.get('temperature', 300.0)
+        pressure = params.get('pressure', 1.0)
+        timestep = params.get('timestep', 2.0)
+        
+        for line in lines:
+            original_line = line
+            stripped = line.strip()
+            
+            # Skip empty lines and comments (keep them)
+            if not stripped or stripped.startswith('#'):
+                fixed_lines.append(line)
+                continue
+            
+            # Check for and fix broken template lines
+            # Pattern: starts with { or contains unresolved ${...} or {...}
+            if stripped.startswith('{') and not stripped.startswith('{#'):
+                # This is a broken template line like "{run_id}: Temperature..."
+                self.logger.warning(f"Removing broken template line: {stripped[:50]}...")
+                continue
+            
+            # Fix unresolved variables
+            line = line.replace('${t}', str(temperature))
+            line = line.replace('${T}', str(temperature))
+            line = line.replace('${temp}', str(temperature))
+            line = line.replace('${temperature}', str(temperature))
+            line = line.replace('{t}', str(temperature))
+            line = line.replace('{temperature}', str(temperature))
+            
+            line = line.replace('${p}', str(pressure))
+            line = line.replace('${P}', str(pressure))
+            line = line.replace('${press}', str(pressure))
+            line = line.replace('${pressure}', str(pressure))
+            line = line.replace('{p}', str(pressure))
+            line = line.replace('{pressure}', str(pressure))
+            
+            line = line.replace('${run_id}', '1')
+            line = line.replace('{run_id}', '1')
+            line = line.replace('${dt}', str(timestep))
+            line = line.replace('{dt}', str(timestep))
+            
+            line = line.replace('{data_file}', data_filename)
+            line = line.replace('${data_file}', data_filename)
+            line = line.replace('<your_data_filename>', data_filename)
+            line = line.replace('your_data_file.data', data_filename)
+            line = line.replace('system.data', data_filename)
+            
+            # Check for unmatched quotes (common LLM error)
+            stripped_fixed = line.strip()
+            if stripped_fixed.count('"') % 2 != 0:
+                # Odd number of quotes - try to fix
+                if stripped_fixed.endswith('"') and not stripped_fixed.startswith('print'):
+                    # Looks like a broken print statement
+                    self.logger.warning(f"Fixing broken quote line: {stripped_fixed[:50]}...")
+                    line = f'print "{stripped_fixed.rstrip(chr(34))}"'
+                elif stripped_fixed.startswith('"'):
+                    # Missing closing quote
+                    line = line.rstrip() + '"'
+            
+            # Track what commands we see
+            first_word = stripped_fixed.split()[0] if stripped_fixed.split() else ''
+            if first_word == 'units':
+                has_units = True
+            elif first_word == 'atom_style':
+                has_atom_style = True
+            elif first_word == 'boundary':
+                has_boundary = True
+            elif first_word == 'read_data':
+                has_read_data = True
+            elif first_word == 'read_restart':
+                has_read_restart = True
+            
+            fixed_lines.append(line)
+        
+        # Prepend missing initialization if needed
+        init_lines = []
+        
+        if not has_units:
+            init_lines.append("units real")
+        if not has_atom_style:
+            init_lines.append("atom_style full")
+        if not has_boundary:
+            init_lines.append("boundary p p p")
+        
+        # Add read_data if this is the first stage and it's missing
+        if not has_read_data and not has_read_restart:
+            if stage_name in ['minimization', 'equilibration', 'equilibration_nvt', 'equilibration_npt'] or 'equil' in stage_name.lower():
+                init_lines.append("")
+                init_lines.append(f"read_data {data_filename}")
+        
+        if init_lines:
+            # Find where to insert (after any initial comments)
+            insert_pos = 0
+            for i, line in enumerate(fixed_lines):
+                if line.strip() and not line.strip().startswith('#'):
+                    insert_pos = i
+                    break
+            
+            # Add header comment
+            init_lines.insert(0, f"# Stage: {stage_name}")
+            init_lines.insert(1, f"# Auto-fixed by LAMMPSSimulationAgent")
+            init_lines.append("")
+            
+            fixed_lines = fixed_lines[:insert_pos] + init_lines + fixed_lines[insert_pos:]
+        
+        result = '\n'.join(fixed_lines)
+        
+        # Final validation - check for any remaining broken patterns
+        if re.search(r'\{[a-z_]+\}', result, re.IGNORECASE):
+            remaining = re.findall(r'\{[a-z_]+\}', result, re.IGNORECASE)
+            self.logger.warning(f"Script still has unresolved templates after fixing: {remaining}")
+        
+        return result
+
     def analyze_system(self, data_file: str) -> Dict[str, Any]:
         """Analyze a LAMMPS data file using ASE to identify its components."""
         self.logger.info(f"Analyzing system from {data_file}")
@@ -497,33 +936,119 @@ Respond with JSON:
                 "required_outputs": ["energy", "trajectory"]
             }
     
+    def _parse_data_file_types(self, data_file: str) -> str:
+        """
+        Parse data file to extract type information for script generation.
+        
+        Returns a formatted string describing all types in the data file,
+        suitable for including in LLM prompts.
+        """
+        type_info = []
+        
+        try:
+            with open(data_file, 'r') as f:
+                lines = f.readlines()
+            
+            # Parse comment headers
+            sections = {"# Pair Coeffs": "ATOM", "# Bond Coeffs": "BOND", 
+                        "# Angle Coeffs": "ANGLE", "# Dihedral Coeffs": "DIHEDRAL"}
+            current_section = None
+            
+            for line in lines:
+                stripped = line.strip()
+                
+                if stripped in sections:
+                    current_section = sections[stripped]
+                    type_info.append(f"\n{current_section} TYPES:")
+                    continue
+                elif stripped == "#":
+                    continue
+                elif not stripped.startswith("#"):
+                    current_section = None
+                    continue
+                
+                if current_section and stripped.startswith("#"):
+                    parts = stripped[1:].strip().split()
+                    if len(parts) >= 2:
+                        try:
+                            type_id = int(parts[0])
+                            name = " ".join(parts[1:])
+                            type_info.append(f"  {current_section.lower()}_type {type_id} = {name}")
+                        except ValueError:
+                            pass
+            
+            # Parse header counts
+            type_info.insert(0, "DATA FILE TOPOLOGY:")
+            for line in lines[:20]:
+                stripped = line.strip()
+                parts = stripped.split()
+                if len(parts) >= 2:
+                    for keyword in ["atoms", "bonds", "angles", "dihedrals", "impropers",
+                                   "atom types", "bond types", "angle types", "dihedral types"]:
+                        if keyword in stripped.lower():
+                            type_info.insert(1, f"  {stripped}")
+                            break
+            
+            # Parse Masses with element names
+            in_masses = False
+            type_info.append("\nMASS-ELEMENT MAPPING:")
+            for line in lines:
+                stripped = line.strip()
+                if stripped == "Masses":
+                    in_masses = True
+                    continue
+                if in_masses:
+                    if not stripped or stripped.startswith("Atoms"):
+                        break
+                    if stripped.startswith("#"):
+                        continue
+                    parts = stripped.split()
+                    if len(parts) >= 2 and "#" in stripped:
+                        try:
+                            type_id = int(parts[0])
+                            mass = float(parts[1])
+                            comment = stripped.split("#")[1].strip()
+                            type_info.append(f"  atom_type {type_id} = {comment} (mass {mass:.3f})")
+                        except (ValueError, IndexError):
+                            pass
+        
+        except Exception as e:
+            type_info.append(f"  (Could not parse: {e})")
+        
+        return "\n".join(type_info)
+    
     def _generate_script(self, **kwargs) -> str:
-        """
-        Generate LAMMPS script(s) based on simulation parameters.
-        Handles both single and multiple simulation setups.
-        """
+        """Generate LAMMPS script(s) based on simulation parameters."""
         system_info = kwargs.get("system_info", {})
         data_filename = kwargs.get("data_filename", "system.data")
         research_goal = kwargs.get("research_goal", "")
         system_description = kwargs.get("system_description", "")
-        
+    
+        # Parse data file for correct type info
+        data_file_path = self.working_dir / data_filename
+        if data_file_path.exists():
+            data_type_info = self._parse_data_file_types(str(data_file_path))
+        else:
+            data_type_info = "DATA FILE NOT FOUND - use placeholder type numbers"
+    
         requires_multiple = kwargs.get("requires_multiple_simulations", False)
         num_sims = kwargs.get("number_of_simulations", 1)
         sim_technique = kwargs.get("simulation_technique", "standard_md")
-        
+    
         ensemble = kwargs.get("ensemble", "NPT")
         temperature = kwargs.get("temperature", 300.0)
         pressure = kwargs.get("pressure", 1.0)
         timestep = kwargs.get("timestep", 2.0)
         simulation_time = kwargs.get("simulation_time", 2.0)
-        
+    
         equil_time = kwargs.get("equilibration_time", simulation_time * 0.25)
         prod_time = kwargs.get("production_time", simulation_time * 0.75)
         equil_steps = int((equil_time * 1e6) / timestep)
         prod_steps = int((prod_time * 1e6) / timestep)
-        
+    
         if requires_multiple and num_sims > 1:
             script_prompt = self._build_multi_simulation_prompt(
+                data_type_info=data_type_info,
                 research_goal=research_goal,
                 system_description=system_description,
                 system_info=system_info,
@@ -545,6 +1070,7 @@ Respond with JSON:
             )
         else:
             script_prompt = self._build_single_simulation_prompt(
+                data_type_info=data_type_info,
                 research_goal=research_goal,
                 system_description=system_description,
                 system_info=system_info,
@@ -566,13 +1092,13 @@ Respond with JSON:
                     system_info
                 )
             )
-        
+    
         response = self.model.generate_content(script_prompt)
         script_text = response.text
         script_text = self._clean_script(script_text)
-        
-        return script_text
     
+        return script_text
+
     def _build_multi_simulation_prompt(self,
                                        research_goal: str,
                                        system_description: str,
@@ -591,7 +1117,8 @@ Respond with JSON:
                                        simulation_time: float,
                                        equilibration_time: float,
                                        production_time: float,
-                                       analysis_method: str = "WHAM") -> str:
+                                       analysis_method: str = "WHAM",
+                                       data_type_info: str = "") -> str:
         """Build prompt for multiple simulations (umbrella sampling, etc.)"""
         
         if variable_values:
@@ -668,8 +1195,9 @@ Return ONLY the LAMMPS input content without markdown formatting.
                                        prod_steps: int,
                                        properties_to_calculate: List[str],
                                        required_outputs: List[str],
-                                       output_commands: str) -> str:
-        """Build prompt for standard single simulation - use existing template"""
+                                       output_commands: str,
+                                       data_type_info: str = "") -> str:
+        """Build prompt for standard single simulation."""
         
         element_info_str = "\n  - ".join([f"{e}: {c}" for e, c in 
                                          system_info.get("element_counts", {}).items()])
@@ -682,6 +1210,7 @@ Return ONLY the LAMMPS input content without markdown formatting.
             box_dimensions=system_info.get("box_dimensions", [40, 40, 40]),
             bond_types=system_info.get("bond_types", 0),
             angle_types=system_info.get("angle_types", 0),
+            data_type_info=data_type_info,
             has_water="Yes" if system_info.get("has_water") else "No",
             has_ions="Yes" if system_info.get("has_ions") else "No",
             has_organic="Yes" if system_info.get("has_organic") else "No",
@@ -697,7 +1226,7 @@ Return ONLY the LAMMPS input content without markdown formatting.
             data_filename=data_filename,
             output_commands=output_commands
         )
-    
+
     def _generate_output_commands(self, 
                                 required_outputs: List[str], 
                                 properties_to_calculate: List[str], 
