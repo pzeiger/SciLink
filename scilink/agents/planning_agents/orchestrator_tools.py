@@ -120,6 +120,33 @@ class OrchestratorTools:
             return [str(self.orch.knowledge_dir)]
         return None
 
+    @staticmethod
+    def _build_objective_guidance(n_data: int, numeric_cols: list) -> dict:
+        """Return data-aware guidance on how many targets the data can support."""
+        # Estimate max feasible inputs (assume at least 2)
+        n_numeric = len(numeric_cols)
+        est_inputs = max(2, n_numeric // 2)
+
+        supported = {}
+        for n_t in range(1, min(n_numeric, 5)):
+            needed = 5 * est_inputs * n_t
+            supported[n_t] = {"min_recommended": needed, "feasible": n_data >= needed}
+
+        max_feasible = max((k for k, v in supported.items() if v["feasible"]), default=1)
+
+        return {
+            "data_points": n_data,
+            "numeric_columns": n_numeric,
+            "supported_targets": supported,
+            "max_feasible_targets": max_feasible,
+            "recommendation": (
+                f"With {n_data} data points, up to {max_feasible} target(s) can be "
+                f"optimized reliably. Pick the {max_feasible} most important target(s) "
+                f"aligned with the stated objective. Additional targets can be added "
+                f"later when more data is collected."
+            ),
+        }
+
     def _resolve_data_path(self, path_input: str) -> tuple[str, str]:
         """
         Resolves user input to actual file path with fuzzy matching for typos.
@@ -144,8 +171,15 @@ class OrchestratorTools:
                     print(f"    🔍 Resolved: {path.name} → {candidate.name}")
                     return str(candidate), None
         
-        # Case 3: Try in common data folders
-        search_folders = ['./experimental_results', './data', './results', './']
+        # Case 3: Try in common data folders (session dirs first, then cwd-relative)
+        session = self.orch.base_dir
+        search_folders = [
+            str(session / "uploads"),
+            str(session / "uploads" / "series"),
+            str(session / "data"),
+            str(session),
+            './experimental_results', './data', './results', './',
+        ]
         all_candidates = []  # Track all files we find for fuzzy matching
         
         if not path.is_absolute():
@@ -854,10 +888,12 @@ class OrchestratorTools:
                 targets: List of column names to treat as OPTIMIZATION TARGETS
             """
             print(f"  ⚡ Tool: Analyzing {file_path}...")
-            
-            if not Path(file_path).exists(): 
-                return json.dumps({"status": "error", "message": f"File {file_path} not found"})
-            
+
+            resolved_path, error = self._resolve_data_path(file_path)
+            if error:
+                return error
+            file_path = resolved_path
+
             # Resolve absolute path for tracking
             file_path_abs = str(Path(file_path).resolve())
             
@@ -1012,17 +1048,34 @@ class OrchestratorTools:
 
                 elif current_row_count == prev_row_count:
                     # prev_hash == current_hash (guaranteed by earlier elif)
-                    # TRULY UNCHANGED
-                    print(f"    ℹ️  File unchanged (same content hash)")
-                    df_final = pd.read_csv(self.orch.bo_data_path) if self.orch.bo_data_path.exists() else pd.DataFrame()
-                    
-                    return json.dumps({
-                        "status": "success",
-                        "message": "File already analyzed - no changes detected",
-                        "data_points_collected": len(df_final),
-                        "rows_added": 0,
-                        "optimization_ready": len(df_final) >= 3
-                    })
+                    schema_changed = (
+                        inputs and targets and (
+                            set(inputs) != set(self.orch.expected_input_columns or [])
+                            or set(targets) != set(self.orch.expected_target_columns or [])
+                        )
+                    )
+                    if schema_changed:
+                        # Same data, new schema — reprocess with updated columns
+                        print(f"    🔄 Schema changed — reprocessing with new inputs/targets")
+                        df_to_append = df_new
+                        num_new = len(df_new)
+                        # Clear existing optimization data (schema mismatch)
+                        if self.orch.bo_data_path.exists():
+                            backup = self.orch.bo_data_path.with_suffix('.csv.backup')
+                            self.orch.bo_data_path.rename(backup)
+                            print(f"    ⚠️  Old optimization data backed up (schema change)")
+                    else:
+                        # TRULY UNCHANGED
+                        print(f"    ℹ️  File unchanged (same content hash)")
+                        df_final = pd.read_csv(self.orch.bo_data_path) if self.orch.bo_data_path.exists() else pd.DataFrame()
+
+                        return json.dumps({
+                            "status": "success",
+                            "message": "File already analyzed - no changes detected",
+                            "data_points_collected": len(df_final),
+                            "rows_added": 0,
+                            "optimization_ready": len(df_final) >= 3
+                        })
 
                 else:
                     # FEWER ROWS - file was truncated/replaced
@@ -1085,16 +1138,42 @@ class OrchestratorTools:
                     print(f"       Inputs: {self.orch.expected_input_columns}")
                     print(f"       Targets: {self.orch.expected_target_columns}")
                 
-                # Case 3: Fallback - Auto-detect (Single-Objective default)
+                # Case 3: No schema — require the LLM to classify columns
                 else:
-                    # Heuristic: numeric columns that look like targets go to targets
-                    # This is a last resort - prefer explicit schema
-                    self.orch.expected_target_columns = [all_cols[-1]]
-                    self.orch.expected_input_columns = [c for c in all_cols if c != all_cols[-1]] 
-                    print(f"    📊 Schema Auto-Detected (Default Single-Objective):")
-                    print(f"       Inputs: {self.orch.expected_input_columns}")
-                    print(f"       Targets: {self.orch.expected_target_columns}")
-                    print(f"    ⚠️  Warning: Using auto-detected schema. For multi-objective optimization, specify inputs and targets explicitly.")
+                    print(f"    ⚠️  No schema specified. Extracted columns: {all_cols}")
+                    # Build context to help the LLM classify columns
+                    data_preview = df_to_append.head(3).to_dict(orient='records')
+                    col_stats = {}
+                    for col in all_cols:
+                        if pd.api.types.is_numeric_dtype(df_to_append[col]):
+                            col_stats[col] = {
+                                "type": "numeric",
+                                "unique": int(df_to_append[col].nunique()),
+                                "min": float(df_to_append[col].min()),
+                                "max": float(df_to_append[col].max()),
+                            }
+                        else:
+                            col_stats[col] = {"type": "non-numeric", "unique": int(df_to_append[col].nunique())}
+                    n_data = len(df_to_append)
+                    numeric_cols = [c for c in all_cols if pd.api.types.is_numeric_dtype(df_to_append[c])]
+                    return json.dumps({
+                        "status": "schema_required",
+                        "message": "Cannot auto-detect which columns are inputs vs targets. Re-call analyze_file with explicit inputs and targets.",
+                        "available_columns": all_cols,
+                        "column_stats": col_stats,
+                        "data_preview": data_preview,
+                        "data_points": n_data,
+                        "objective": self.orch.objective or "Not set",
+                        "hint": (
+                            "Use the objective, column names, and data preview to decide: "
+                            "which columns are controllable INPUT parameters (experimentally set) "
+                            "and which are measured TARGET metrics (outcomes to optimize). "
+                            "Non-numeric columns (e.g., Sample_ID, Notes) should be excluded. "
+                            "Columns with very few unique values relative to rows may be controlled inputs. "
+                            "Then call: analyze_file(file_path=..., inputs=[...], targets=[...])"
+                        ),
+                        "objective_count_guidance": self._build_objective_guidance(n_data, numeric_cols)
+                    })
                 
                 # SCHEMA ENFORCEMENT ON SAVE
                 if self.orch.bo_data_path.exists():
@@ -1204,7 +1283,13 @@ class OrchestratorTools:
                 backup_path = self.orch.bo_data_path.with_suffix('.csv.backup')
                 self.orch.bo_data_path.rename(backup_path)
                 print(f"    ⚠️  Old data backed up to: {backup_path.name}")
-            
+
+            bo_history = self.orch.bo.history_file
+            if bo_history.exists():
+                backup = bo_history.with_suffix('.json.backup')
+                bo_history.rename(backup)
+                print(f"    ⚠️  BO history backed up to: {backup.name}")
+
             return json.dumps({
                 "status": "success",
                 "message": "Analysis logic reset. All files will be reprocessed fresh on next analyze_file call.",
@@ -1406,6 +1491,36 @@ class OrchestratorTools:
             if physical_constraints:
                 print(f"       Constraints: {physical_constraints[:100]}...")
             
+            # ============================================
+            # DATA SUFFICIENCY CHECK FOR MOO
+            # ============================================
+            n_targets = len(self.orch.expected_target_columns)
+            n_inputs = len(self.orch.expected_input_columns)
+            n_data = len(df)
+            if n_targets > 1:
+                min_recommended = 5 * n_inputs * n_targets
+                if n_data < min_recommended:
+                    print(f"    ⚠️  MOO data sufficiency: {n_data} points for "
+                          f"{n_inputs} inputs × {n_targets} targets (recommend ≥{min_recommended})")
+                    return json.dumps({
+                        "status": "warning",
+                        "message": (
+                            f"Multi-objective optimization with {n_targets} targets and "
+                            f"{n_inputs} inputs ideally needs ≥{min_recommended} data points, "
+                            f"but only {n_data} are available. The Pareto recommendations "
+                            f"will be unreliable."
+                        ),
+                        "suggestion": (
+                            f"Consider starting with single-objective optimization on "
+                            f"the most important target. You can switch to MOO once "
+                            f"more data is collected. To proceed anyway, ask the user "
+                            f"to confirm they want MOO with limited data."
+                        ),
+                        "current_targets": self.orch.expected_target_columns,
+                        "data_points": n_data,
+                        "recommended_minimum": min_recommended,
+                    })
+
             try:
                 # ============================================
                 # CALL BO
@@ -1456,6 +1571,10 @@ class OrchestratorTools:
                 if res.get("acq_data_path"):
                     response["acq_data_path"] = res["acq_data_path"]
                 
+                # Include visual inspection results
+                if res.get("inspection"):
+                    response["inspection"] = res["inspection"]
+
                 # Include constrained planning metadata
                 if res.get("constrained_planning"):
                     cp = res["constrained_planning"]

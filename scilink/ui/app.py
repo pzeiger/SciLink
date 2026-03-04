@@ -56,6 +56,9 @@ def _find_new_images(summary_only: bool = False) -> list[str]:
         for p in Path(session_dir).rglob(f"*{ext}"):
             if "review" in p.stem:
                 continue
+            # Skip the full dashboard — show only the acquisition plot in chat
+            if p.parent.name == "bo_artifacts" and not p.stem.startswith("acq_"):
+                continue
             # Skip user-uploaded files
             if _upload_dirs & {part for part in p.relative_to(session_dir).parts[:-1]}:
                 continue

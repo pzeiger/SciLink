@@ -360,7 +360,7 @@ class SingleObjectiveOptimizer:
         ax.set_title(f'Acquisition Function: {self.acq_strategy_name}')
         ax.legend(); ax.grid(True, alpha=0.3)
 
-        plt.tight_layout(); plt.savefig(save_path, dpi=150); plt.close()
+        fig.tight_layout(); fig.savefig(save_path, dpi=150); plt.close(fig)
         return save_path
 
     def _plot_acq_2d(self, anchor: np.ndarray, candidate_x: np.ndarray,
@@ -385,7 +385,7 @@ class SingleObjectiveOptimizer:
         ax.set_title(f'Acquisition Function: {self.acq_strategy_name}')
         ax.legend(loc='upper right')
 
-        plt.tight_layout(); plt.savefig(save_path, dpi=150); plt.close()
+        fig.tight_layout(); fig.savefig(save_path, dpi=150); plt.close(fig)
         return save_path
 
     def _plot_acq_nd(self, anchor: np.ndarray, candidate_x: np.ndarray,
@@ -450,7 +450,7 @@ class SingleObjectiveOptimizer:
             ax.set_title(f'Slice: {self.feature_names[i]}', fontsize=10)
             ax.grid(True, alpha=0.2)
 
-        plt.savefig(save_path, dpi=150, bbox_inches='tight'); plt.close()
+        fig.savefig(save_path, dpi=150, bbox_inches='tight'); plt.close(fig)
         return save_path
 
     def save_acquisition_data(self, candidate_x: np.ndarray, save_path: str,
@@ -544,7 +544,7 @@ class SingleObjectiveOptimizer:
             indices.append(max(0.0, (numerator / var_Y).item()))
         return self.feature_names, indices
 
-    def generate_diagnostics(self, candidate_x: np.ndarray, history_y: List[float], save_path: str):
+    def generate_diagnostics(self, candidate_x: np.ndarray, history_y: List[float], save_path: str, n_initial: int = 0):
         """Generates 4-Panel Dashboard: Calibration, Trend, Acquisition Slice, Sensitivity."""
         x_plot = candidate_x[0:1]
 
@@ -567,13 +567,20 @@ class SingleObjectiveOptimizer:
         # --- 2. Trend (Top Right) ---
         ax_trend = axes[0, 1]
         steps = np.arange(1, len(history_y) + 1)
-        ax_trend.plot(steps, history_y, 'ko-', alpha=0.3)
+        if n_initial > 0 and n_initial < len(history_y):
+            ax_trend.plot(steps[:n_initial], history_y[:n_initial], 's', color='gray', alpha=0.4, label='Initial data')
+            ax_trend.plot(steps[n_initial:], history_y[n_initial:], 'ko-', alpha=0.5, label='BO-guided')
+            ax_trend.axvline(n_initial + 0.5, color='gray', linestyle=':', linewidth=1, alpha=0.6)
+        else:
+            ax_trend.plot(steps, history_y, 'ko-', alpha=0.3)
         ax_trend.plot(steps, np.maximum.accumulate(history_y), 'g-', linewidth=2, label='Best Found')
+        ax_trend.legend(fontsize=8)
         ax_trend.set_title("2. Optimization Trend")
 
         # --- 3. Sensitivity (Bottom Right) ---
         ax_sens = axes[1, 1]
         top_dim_idx = 0
+        sorted_idx = np.arange(self.input_dim)  # default: original order
         try:
             names, scores = self._compute_sensitivity()
             sorted_idx = np.argsort(scores)[::-1]
@@ -684,7 +691,7 @@ class SingleObjectiveOptimizer:
         ax_acq.legend()
         ax_acq.grid(True, alpha=0.3)
 
-        plt.tight_layout(); plt.savefig(save_path); plt.close()
+        fig.tight_layout(); fig.savefig(save_path); plt.close(fig)
 
 
 class MultiObjectiveOptimizer:
@@ -878,8 +885,8 @@ class MultiObjectiveOptimizer:
         for i in range(n_plots, len(axes_list)):
             axes_list[i].axis('off')
 
-        plt.suptitle(f"Multi-Objective Diagnostics ({self.output_dim} Objectives)", fontsize=16)
-        plt.tight_layout(); plt.savefig(save_path); plt.close()
+        fig.suptitle(f"Multi-Objective Diagnostics ({self.output_dim} Objectives)", fontsize=16)
+        fig.tight_layout(); fig.savefig(save_path); plt.close(fig)
 
 
 def get_optimizer(is_moo: bool, device: str = "cpu"):
