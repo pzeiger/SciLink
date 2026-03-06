@@ -35,7 +35,7 @@ SUPPORTED_METADATA_EXTENSIONS = (".json", ".txt")
 
 SUPPORTED_KNOWLEDGE_EXTENSIONS = (".pdf", ".txt", ".md", ".docx", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".csv", ".xlsx", ".tsv")
 SUPPORTED_CODE_EXTENSIONS = (".py", ".txt", ".md", ".json", ".yaml", ".yml")
-SUPPORTED_PLANNING_DATA_EXTENSIONS = (".csv", ".xlsx", ".tsv", ".txt", ".npy")
+SUPPORTED_PLANNING_DATA_EXTENSIONS = (".csv", ".xlsx", ".tsv", ".txt", ".npy", ".json")
 
 AVATAR_USER = str(Path(__file__).resolve().parent / "assets" / "avatar_user.svg")
 AVATAR_AGENT = str(Path(__file__).resolve().parent / "assets" / "avatar_agent.svg")

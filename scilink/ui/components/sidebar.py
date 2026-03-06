@@ -109,7 +109,7 @@ def render_sidebar() -> None:
 
         mode = st.selectbox(
             "Autonomy mode",
-            ["supervised", "co-pilot", "autonomous"],
+            ["co-pilot", "supervised", "autonomous"],
             key="cfg_mode",
             disabled=_locked,
         )
@@ -294,13 +294,17 @@ def _render_analyze_sidebar_uploads() -> None:
         else:
             save_upload_batch(data_files, "data")
 
-    meta_file = st.file_uploader(
-        "Metadata file",
+    meta_files = st.file_uploader(
+        "Metadata file(s)",
         type=[e.lstrip(".") for e in SUPPORTED_METADATA_EXTENSIONS],
         key="uploader_meta",
+        accept_multiple_files=True,
     )
-    if meta_file is not None:
-        save_upload(meta_file, "metadata")
+    if meta_files:
+        if len(meta_files) == 1:
+            save_upload(meta_files[0], "metadata")
+        else:
+            save_metadata_to_series(meta_files)
 
 
 def _render_planning_sidebar_uploads() -> None:
@@ -670,9 +674,29 @@ def _reset_session() -> None:
         task.feedback_request.response = ""
         task.feedback_request.event.set()
 
+    # Preserve mode and configuration across reset
+    _keep = {
+        "app_mode": st.session_state.get("app_mode"),
+        "theme_mode": st.session_state.get("theme_mode", "dark"),
+        "cfg_model_preset": st.session_state.get("cfg_model_preset"),
+        "cfg_model_custom": st.session_state.get("cfg_model_custom"),
+        "cfg_api_key": st.session_state.get("cfg_api_key"),
+        "cfg_base_url": st.session_state.get("cfg_base_url"),
+        "cfg_fh_api_key": st.session_state.get("cfg_fh_api_key"),
+        "cfg_mode": st.session_state.get("cfg_mode"),
+        "cfg_embedding_preset": st.session_state.get("cfg_embedding_preset"),
+        "cfg_embedding_custom": st.session_state.get("cfg_embedding_custom"),
+        "cfg_embedding_api_key": st.session_state.get("cfg_embedding_api_key"),
+    }
+
     # Clear all state keys — both app state and widget keys
     for key in list(st.session_state.keys()):
         del st.session_state[key]
+
+    # Restore preserved keys
+    for key, val in _keep.items():
+        if val is not None:
+            st.session_state[key] = val
 
     # Use query params to force a clean page load, which fully resets
     # widget keys that would otherwise re-initialize with stale values

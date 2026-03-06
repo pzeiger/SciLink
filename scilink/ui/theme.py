@@ -927,6 +927,25 @@ section[data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stExpa
     background-color: #1E1E1E !important;
 }
 
+/* ── JSON viewer ───────────────────────────────────── */
+[data-testid="stJson"],
+[data-testid="stJson"] > div {
+    background-color: #FFFFFF !important;
+    color: #212121 !important;
+    border: 1px solid #E0E0E0;
+    border-radius: 4px;
+}
+
+/* ── Dataframe / table ─────────────────────────────── */
+[data-testid="stDataFrame"],
+[data-testid="stDataFrame"] > div,
+[data-testid="stTable"],
+[data-testid="stTable"] > div {
+    background-color: #FFFFFF !important;
+    color: #212121 !important;
+    border-radius: 4px;
+}
+
 /* ── Scrollbar (webkit) ─────────────────────────────── */
 ::-webkit-scrollbar {
     width: 6px;

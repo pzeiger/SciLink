@@ -41,6 +41,10 @@ def _find_new_images(summary_only: bool = False) -> list[str]:
     Skips temporary review files (e.g. first_spectrum_fit_review.png)
     to avoid showing the same fit plot twice during the feedback step.
 
+    For scalarizer debug plots (debug_*.png), only shows the first,
+    middle, and last files to give a representative spread without
+    flooding the chat.
+
     If *summary_only* is True, only returns summary grid images
     (files containing ``Summary_Grid`` in their name). This is used
     during the human-feedback step so the user sees only the final
@@ -52,17 +56,52 @@ def _find_new_images(summary_only: bool = False) -> list[str]:
     # Directories that contain user uploads, not agent output
     _upload_dirs = {"uploads", "knowledge", "code", "data"}
     new = []
+    debug_plots = []  # collect scalarizer debug plots separately
     for ext in IMAGE_EXTENSIONS:
         for p in Path(session_dir).rglob(f"*{ext}"):
             if "review" in p.stem:
+                continue
+            # In bo_artifacts/, show only step dashboards (acq is embedded in dashboard)
+            if p.parent.name == "bo_artifacts" and not p.stem.startswith("step_"):
                 continue
             # Skip user-uploaded files
             if _upload_dirs & {part for part in p.relative_to(session_dir).parts[:-1]}:
                 continue
             s = str(p)
             if s not in st.session_state.known_images:
-                st.session_state.known_images.add(s)
-                new.append(s)
+                # Collect scalarizer debug plots for subsampling
+                if p.stem.startswith("debug_"):
+                    debug_plots.append(s)
+                else:
+                    st.session_state.known_images.add(s)
+                    new.append(s)
+
+    # Handle scalarizer debug plots based on autonomy level
+    if debug_plots:
+        for s in debug_plots:
+            st.session_state.known_images.add(s)
+
+        # In co-pilot mode, show sample fits inline (first, middle, last)
+        # In supervised/autonomous, skip — user can find them in File Explorer
+        agent = st.session_state.get("agent")
+        is_copilot = (
+            agent is not None
+            and hasattr(agent, "autonomy_level")
+            and agent.autonomy_level.value == "co_pilot"
+        )
+        if is_copilot:
+            import re
+            def _natural_sort_key(s):
+                return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', s)]
+            debug_plots.sort(key=_natural_sort_key)
+            selected = [debug_plots[0]]
+            if len(debug_plots) > 2:
+                selected.append(debug_plots[len(debug_plots) // 2])
+            if len(debug_plots) > 1:
+                selected.append(debug_plots[-1])
+            # Sample fits before BO dashboards (chronological order)
+            new[0:0] = selected
+
     if summary_only:
         new = [p for p in new if "Summary_Grid" in Path(p).stem]
     return new
@@ -97,6 +136,14 @@ def _find_feedback_preview_images() -> list[str]:
         for p in search_root.rglob(f"*{ext}"):
             if "review" in p.stem or "Summary_Grid" in p.stem:
                 previews.append(str(p))
+    # Also check scalarizer_outputs for debug plots (planning agents)
+    scalarizer_dir = Path(session_dir) / "scalarizer_outputs"
+    if scalarizer_dir.exists():
+        for ext in IMAGE_EXTENSIONS:
+            for p in scalarizer_dir.glob(f"debug_*{ext}"):
+                s = str(p)
+                if s not in previews:
+                    previews.append(s)
     return previews
 
 
@@ -371,7 +418,13 @@ with chat_tab:
             st.markdown(msg["content"])
             for img_path in msg.get("images", []):
                 try:
-                    st.image(img_path)
+                    _img_name = Path(img_path).stem
+                    # Show a readable caption for scalarizer debug plots
+                    if _img_name.startswith("debug_"):
+                        _sample = _img_name[len("debug_"):]
+                        st.image(img_path, caption=f"Sample fit: {_sample}")
+                    else:
+                        st.image(img_path)
                 except Exception:
                     st.caption(f"(image not found: {img_path})")
             for html_path in msg.get("html_reports", []):
@@ -409,6 +462,10 @@ with chat_tab:
         # ── 1. Completion — append result, full rerun to render it ──
         if not task.is_running and (task.result is not None or task.error is not None):
             content = task.result if task.result is not None else f"Error: {task.error}"
+            # Strip markdown image tags with local file paths — images are
+            # rendered separately via st.image() from _find_new_images()
+            import re
+            content = re.sub(r"!\[[^\]]*\]\([^)]+\)\n?", "", content).strip()
             new_images = _find_new_images()
             new_reports = _find_new_html_reports()
             # When an HTML report is present it already embeds the
@@ -526,6 +583,10 @@ with chat_tab:
                 _input_label = "Your plan feedback (optional):"
                 _submit_label = "Request changes"
                 _accept_label = "Approve plan"
+            elif "SCALARIZER REVIEW" in _ctx_tail:
+                _input_label = "Your extraction feedback (optional):"
+                _submit_label = "Request changes"
+                _accept_label = "Approve extraction"
             else:
                 _input_label = "Your feedback (optional):"
                 _submit_label = "Submit feedback"

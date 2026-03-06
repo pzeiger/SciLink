@@ -198,10 +198,63 @@ def _render_planning_uploads(start_task_fn) -> None:
         if _folders.get("code"):
             parts.append(f"Code folder: `{_folders['code']}`")
         if st.session_state.uploaded_planning_data_paths:
-            paths = ", ".join(f"`{p}`" for p in st.session_state.uploaded_planning_data_paths)
-            parts.append(f"Data files: {paths}")
+            data_paths = [p for p in st.session_state.uploaded_planning_data_paths if not p.endswith(".json")]
+            json_paths = [p for p in st.session_state.uploaded_planning_data_paths if p.endswith(".json")]
+            if data_paths:
+                paths_str = ", ".join(f"`{p}`" for p in data_paths)
+                if len(data_paths) > 1 and json_paths:
+                    # Multiple data files + JSON metadata → suggest analyze_batch
+                    json_str = ", ".join(f"`{p}`" for p in json_paths)
+                    parts.append(f"Data files: {paths_str}")
+                    parts.append(f"Conditions/metadata JSON: {json_str}")
+                    parts.append(
+                        "Use `analyze_batch` to process these files together, "
+                        "using the JSON as the conditions source."
+                    )
+                elif len(data_paths) > 1:
+                    parts.append(f"Data files: {paths_str}")
+                    parts.append(
+                        "Use `analyze_batch` to process these files together. "
+                        "If these are measurement-only files (e.g., spectra), "
+                        "you will need experimental conditions for each file."
+                    )
+                else:
+                    parts.append(f"Data files: {paths_str}")
+            if json_paths and not data_paths:
+                paths_str = ", ".join(f"`{p}`" for p in json_paths)
+                parts.append(f"Data/metadata files: {paths_str}")
         if _folders.get("data"):
-            parts.append(f"Data folder: `{_folders['data']}`")
+            data_dir = Path(_folders["data"])
+            data_exts = {".csv", ".xlsx", ".tsv", ".txt"}
+            dir_data_files = sorted(
+                [f for f in data_dir.iterdir() if f.suffix.lower() in data_exts],
+                key=lambda f: [int(c) if c.isdigit() else c.lower()
+                               for c in __import__("re").split(r"(\d+)", f.name)]
+            )
+            dir_json_files = sorted(
+                [f for f in data_dir.iterdir() if f.suffix.lower() == ".json"],
+                key=lambda f: f.name
+            )
+            if len(dir_data_files) > 1:
+                paths_str = ", ".join(f"`{f}`" for f in dir_data_files)
+                parts.append(f"Data files: {paths_str}")
+                if dir_json_files:
+                    json_str = ", ".join(f"`{f}`" for f in dir_json_files)
+                    parts.append(f"Conditions/metadata JSON: {json_str}")
+                    parts.append(
+                        "Use `analyze_batch` to process these files together, "
+                        "using the JSON as the conditions source."
+                    )
+                else:
+                    parts.append(
+                        "Use `analyze_batch` to process these files together. "
+                        "If these are measurement-only files (e.g., spectra), "
+                        "you will need experimental conditions for each file."
+                    )
+            elif len(dir_data_files) == 1:
+                parts.append(f"Data file: `{dir_data_files[0]}`")
+            else:
+                parts.append(f"Data folder: `{_folders['data']}`")
         prompt = "\n\n".join(parts) if parts else "Please help me plan my experiment."
 
         # Point the agent's dirs to the original folder paths so that
