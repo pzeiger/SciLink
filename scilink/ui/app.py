@@ -135,7 +135,7 @@ def _find_feedback_preview_images() -> list[str]:
     previews = []
     for ext in IMAGE_EXTENSIONS:
         for p in search_root.rglob(f"*{ext}"):
-            if "review" in p.stem or "Summary_Grid" in p.stem:
+            if "review" in p.stem or "Summary_Grid" in p.stem or "TestLoop" in p.stem:
                 previews.append(str(p))
     # Also check scalarizer_outputs for debug plots (planning agents)
     scalarizer_dir = Path(session_dir) / "scalarizer_outputs"
@@ -863,17 +863,27 @@ with files_tab:
                         with st.expander(f"📁 {d.name} ({child_count})", expanded=(depth == 0)):
                             _render_dir(d, depth + 1)
 
+                    def _truncate_name(name: str, max_len: int = 25) -> str:
+                        stem, suffix = Path(name).stem, Path(name).suffix
+                        if len(name) <= max_len:
+                            return name
+                        keep = max_len - len(suffix) - 1
+                        return stem[:keep] + "\u2026" + suffix
+
                     def _render_files(file_list: list[Path]) -> None:
                         for f in file_list:
                             icon = _FILE_TYPE_ICONS.get(f.suffix.lower(), "📄")
                             size = _format_size(f.stat().st_size)
                             is_sel = st.session_state.get("selected_preview_file") == str(f)
                             btn_type = "primary" if is_sel else "secondary"
+                            display_name = _truncate_name(f.name)
+                            tooltip = f.name if f.name != display_name else None
                             if st.button(
-                                f"{icon}  {f.name}  ({size})",
+                                f"{icon}  {display_name}  ({size})",
                                 key=f"fbtn_{f.relative_to(session_path)}",
                                 use_container_width=True,
                                 type=btn_type,
+                                help=tooltip,
                             ):
                                 st.session_state.selected_preview_file = str(f)
                                 st.rerun()

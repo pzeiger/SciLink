@@ -132,9 +132,9 @@ class IterativeFeedbackController:
         print(f"🧠 LLM's Proposed Plan: Refinement Needed = **{decision.get('refinement_needed', False)}**")
         print(f"Reasoning: {decision.get('reasoning', 'N/A')}")
         print()
-        print("=" * 80)
+        print("-" * 80)
         print(f"\U0001f3af Targeted Actions ({len(targets)} found)")
-        print("=" * 80)
+        print("-" * 80)
 
         if not targets:
             print("  (No specific targets were generated.)")
@@ -145,7 +145,6 @@ class IterativeFeedbackController:
             t_desc = t.get('description', 'No description provided.')
 
             print(f"\n  [{i}] {t_type}  (value: {t_value})")
-            # Wrap long descriptions at ~70 chars with indentation
             for line in textwrap.wrap(t_desc, width=70):
                 print(f"      {line}")
 

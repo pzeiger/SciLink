@@ -224,9 +224,9 @@ class IterationFeedbackMixin:
         print(f"\n🧠 LLM Decision: Refinement Needed = {is_needed}")
         print(f"Reasoning: {decision.get('reasoning', 'N/A')}")
         print()
-        print("=" * 80)
+        print("-" * 80)
         print(f"\U0001f3af Targeted Actions ({len(targets)} found)")
-        print("=" * 80)
+        print("-" * 80)
         for i, t in enumerate(targets, 1):
             t_type = t.get('type', 'N/A')
             value_str = str(t.get('value', 'N/A'))
