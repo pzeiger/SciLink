@@ -405,8 +405,9 @@ class LAMMPSAnalysisAgent:
                         print(f"      ✓ Success")
                         results[name] = result
                     else:
-                        print(f"      ✗ Failed: {result.get('message', 'Unknown')[:80]}")
-    
+                        concise = result.get("concise_error", result.get("message", "Unknown")[:120])
+                        print(f"      ✗ Failed: {concise}")
+
                         # Try refinement
                         if self.max_refinement_attempts > 0:
                             print(f"      🔧 Attempting refinement...")
@@ -815,7 +816,15 @@ Return ONLY JSON.
     - ALL output file paths MUST use os.path.join(output_dir, ...)
     - Return ABSOLUTE paths in results dictionary
     
-    Provide ONLY the Python code with no markdown or explanations.
+    CRITICAL RULES FOR OUTPUT:
+    1. The VERY FIRST LINE of your output must be an import statement (e.g., "import numpy as np")
+    2. Do NOT start with "python", "#!/usr/bin/env python", or any shebang line
+    3. Do NOT include any shell commands
+    4. Do NOT wrap code in markdown code blocks
+    5. Do NOT include any text before or after the Python code
+    6. Always include matplotlib.use('Agg') before importing pyplot
+    7. Always print results as JSON on the last line using print(json.dumps(results))
+    8. The code will be executed directly by a Python interpreter - output ONLY valid Python
     """
         
         try:
@@ -827,7 +836,9 @@ Return ONLY JSON.
             code = re.sub(r'^```\s*', '', code, flags=re.MULTILINE)
             code = re.sub(r'\s*```$', '', code, flags=re.MULTILINE)
             code = code.strip()
-            
+           
+            code = self._clean_generated_code(code)
+
             # Replace placeholders
             code = code.replace('DATA_FILES_PLACEHOLDER', json.dumps(data_files))
             code = code.replace('OUTPUT_DIR_PLACEHOLDER', str(self.output_dir))
@@ -1527,7 +1538,14 @@ Return ONLY JSON.
     - Skip comment lines starting with #
     - Common columns: Step, Temp, Press, Density, PotEng, KinEng, TotEng
     
-    Return ONLY Python code, no markdown.
+    CRITICAL RULES FOR OUTPUT:
+    1. The VERY FIRST LINE must be an import statement (e.g., "import numpy as np")
+    2. Do NOT start with "python", "#!/usr/bin/env python", or any shebang line
+    3. Do NOT include any shell commands or markdown
+    4. Always include matplotlib.use('Agg') before importing pyplot
+    5. Always print results as JSON on the last line
+    6. Return numeric metrics as floats in the results dict
+    7. The code will be executed directly by a Python interpreter - output ONLY valid Python
     """
         
         try:
@@ -1539,7 +1557,9 @@ Return ONLY JSON.
             code = re.sub(r'^```\s*', '', code, flags=re.MULTILINE)
             code = re.sub(r'\s*```$', '', code, flags=re.MULTILINE)
             code = code.strip()
-            
+
+            code = self._clean_generated_code(code)
+
             # Replace placeholders
             code = code.replace('DATA_FILES_PLACEHOLDER', json.dumps(data_files))
             code = code.replace('OUTPUT_DIR_PLACEHOLDER', str(self.output_dir))
@@ -1559,19 +1579,11 @@ Return ONLY JSON.
         print(json.dumps(results))
     """
     
-    
     def _execute_analysis_code(self,
                                 code: str,
                                 analysis_name: str) -> Dict[str, Any]:
         """
         Execute analysis code using the ScriptExecutor.
-        
-        Args:
-            code: Python code to execute
-            analysis_name: Name for logging and file naming
-            
-        Returns:
-            Result dictionary from the executed code
         """
         self.logger.info(f"Executing analysis: {analysis_name}")
         
@@ -1586,12 +1598,13 @@ Return ONLY JSON.
                 script_content=code,
                 working_dir=str(self.output_dir)
             )
-
-            if exec_result.get("status") == "success":
-                # Try to parse JSON output
+            
+            exec_status = exec_result.get("status")
+            self.logger.info(f"Executor status for {analysis_name}: {exec_status}")
+            
+            if exec_status == "success":
                 stdout = exec_result.get("stdout", "")
                 
-                # Find the last JSON object in stdout
                 result = self._extract_json_from_output(stdout)
                 
                 if result:
@@ -1601,23 +1614,72 @@ Return ONLY JSON.
                     return {
                         "status": "success",
                         "message": "Code executed but no JSON output found",
-                        "raw_output": stdout[:1000]
+                        "raw_output": stdout[:2000]
                     }
             else:
+                # The executor puts everything in "message" - extract the useful parts
+                raw_message = exec_result.get("message", "")
+                stderr = exec_result.get("stderr", "")
+                stdout = exec_result.get("stdout", "")
+                
+                # Parse stderr out of the message if it's embedded
+                error_message = raw_message
+                
+                # Extract the actual Python traceback
+                traceback_text = ""
+                
+                # Check in message first (executor often embeds stderr here)
+                if "Traceback" in raw_message:
+                    tb_start = raw_message.find("Traceback")
+                    traceback_text = raw_message[tb_start:]
+                elif "Traceback" in stderr:
+                    tb_start = stderr.find("Traceback")
+                    traceback_text = stderr[tb_start:]
+                elif "Traceback" in stdout:
+                    tb_start = stdout.find("Traceback")
+                    traceback_text = stdout[tb_start:]
+                
+                # Extract just the final error line for a concise message
+                concise_error = ""
+                if traceback_text:
+                    tb_lines = traceback_text.strip().split('\n')
+                    # Last line is usually the actual error
+                    for line in reversed(tb_lines):
+                        line = line.strip()
+                        if line and not line.startswith("File") and not line.startswith("Traceback"):
+                            concise_error = line
+                            break
+                
+                # Build comprehensive error for the updater
+                if concise_error:
+                    full_error = f"{concise_error}\n\nFull traceback:\n{traceback_text[-2000:]}"
+                elif traceback_text:
+                    full_error = traceback_text[-2000:]
+                elif raw_message:
+                    full_error = raw_message[-2000:]
+                else:
+                    full_error = "Script failed with no error output captured"
+                
+                self.logger.error(f"Analysis {analysis_name} failed: {concise_error or full_error[:200]}")
+                
                 return {
                     "status": "error",
-                    "message": exec_result.get("error", "Unknown execution error"),
-                    "stderr": exec_result.get("stderr", "")[:1000],
-                    "stdout": exec_result.get("stdout", "")[:1000]
+                    "message": full_error,
+                    "stderr": stderr[:2000] if stderr else traceback_text[:2000],
+                    "stdout": stdout[:2000],
+                    "concise_error": concise_error
                 }
             
         except Exception as e:
             self.logger.error(f"Execution failed for {analysis_name}: {e}")
+            import traceback
+            tb = traceback.format_exc()
             return {
                 "status": "error",
-                "message": str(e)
-            }
-    
+                "message": f"{str(e)}\n{tb}",
+                "stderr": tb,
+                "concise_error": str(e)
+            }    
     
     def _extract_json_from_output(self, stdout: str) -> Optional[Dict[str, Any]]:
         """Extract the last JSON object from stdout."""
@@ -2301,3 +2363,102 @@ Return ONLY JSON.
                         self.logger.debug(f"Required package: {pkg}")
                     
                     break  # Only match first pattern per line
+
+    def _clean_generated_code(self, code: str) -> str:
+        """
+        Clean LLM-generated Python code to ensure it's executable.
+        """
+        lines = code.split('\n')
+        cleaned_lines = []
+        
+        for line in lines:
+            stripped = line.strip()
+            
+            # Skip shebang lines
+            if stripped.startswith('#!'):
+                continue
+            
+            # Skip bare 'python' invocations
+            if stripped in ('python', 'python3', 'python3.12'):
+                continue
+            if re.match(r'^python[3]?\s+', stripped):
+                continue
+            
+            # Skip shell commands
+            if stripped.startswith('$ ') or stripped.startswith('% '):
+                continue
+            
+            # Skip markdown remnants
+            if stripped.startswith('```'):
+                continue
+            
+            cleaned_lines.append(line)
+        
+        # Remove leading/trailing blank lines
+        while cleaned_lines and not cleaned_lines[0].strip():
+            cleaned_lines.pop(0)
+        while cleaned_lines and not cleaned_lines[-1].strip():
+            cleaned_lines.pop()
+        
+        result = '\n'.join(cleaned_lines)
+        
+        # Fix JavaScript-style booleans/nulls in Python code
+        # Only fix outside of strings (simple heuristic: not inside quotes)
+        result = self._fix_json_literals_in_python(result)
+        
+        return result
+    
+    
+    def _fix_json_literals_in_python(self, code: str) -> str:
+        """
+        Fix JavaScript/JSON-style literals in Python code.
+        
+        Converts:
+            true  -> True
+            false -> False
+            null  -> None
+            
+        Only fixes bare keywords, not those inside strings.
+        """
+        lines = code.split('\n')
+        fixed_lines = []
+        
+        for line in lines:
+            # Skip comment lines and string-only lines
+            stripped = line.strip()
+            if stripped.startswith('#'):
+                fixed_lines.append(line)
+                continue
+            
+            # Skip lines that are inside triple-quoted strings
+            # (Simple heuristic - not perfect but catches most cases)
+            if stripped.startswith('"""') or stripped.startswith("'''"):
+                fixed_lines.append(line)
+                continue
+            
+            # Split line into code and inline comment
+            # Handle # inside strings roughly
+            code_part = line
+            comment_part = ""
+            
+            in_single = False
+            in_double = False
+            for i, char in enumerate(line):
+                if char == "'" and not in_double:
+                    in_single = not in_single
+                elif char == '"' and not in_single:
+                    in_double = not in_double
+                elif char == '#' and not in_single and not in_double:
+                    code_part = line[:i]
+                    comment_part = line[i:]
+                    break
+            
+            # Fix JSON literals in code part only (not in strings)
+            # Use word boundary regex to avoid replacing inside variable names
+            code_part = re.sub(r'\btrue\b', 'True', code_part)
+            code_part = re.sub(r'\bfalse\b', 'False', code_part)
+            code_part = re.sub(r'\bnull\b', 'None', code_part)
+            
+            fixed_lines.append(code_part + comment_part)
+        
+        return '\n'.join(fixed_lines)
