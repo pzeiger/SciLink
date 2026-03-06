@@ -837,9 +837,22 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         
         valid_config = self._validate_config(raw_config)
         valid_config["batch_size"] = int(batch_size)
-        
+
         # Store current config in state
         self.state["current_config"] = valid_config
+
+        # Log strategy selection details
+        model_cfg = valid_config.get("model_config", {})
+        acq_cfg = valid_config.get("acquisition_strategy", {})
+        rationale = valid_config.get("rationale", "No rationale provided")
+        print(f"    📋 Strategy config:")
+        print(f"       Kernel: {model_cfg.get('kernel', 'N/A')}")
+        print(f"       Noise: {model_cfg.get('noise', 'N/A')}")
+        print(f"       Acquisition: {acq_cfg.get('type', 'N/A')}")
+        acq_params = acq_cfg.get("params", {})
+        if acq_params:
+            print(f"       Acq params: {acq_params}")
+        print(f"       Rationale: {rationale}")
 
         # 3. Fit Model
         optimizer = get_optimizer(is_moo=is_moo)

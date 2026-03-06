@@ -158,6 +158,14 @@ class ScalarizerAgent(BaseAgent):
             json_match = re.search(r'\{.*\}', process.stdout.strip(), re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group(0))
+                # Check if the script itself reported an error
+                if data.get("metrics") is None and data.get("error"):
+                    return {
+                        "status": "failure",
+                        "error": data.get("error", "Script error"),
+                        "stderr": data.get("traceback", process.stderr),
+                        "stdout": process.stdout
+                    }
                 return {
                     "status": "success",
                     "metrics": data.get("metrics", {}),
@@ -372,11 +380,14 @@ class ScalarizerAgent(BaseAgent):
             if column_roles:
                 self.state["column_roles"] = column_roles
 
-            # Save Script
+            # Save Script — replace OUTPUT_DIR_PLACEHOLDER if the LLM left it in
+            code = result["implementation_code"]
+            if "OUTPUT_DIR_PLACEHOLDER" in code:
+                code = code.replace("OUTPUT_DIR_PLACEHOLDER", plot_output_dir)
             sanitized_name = Path(data_path).stem.replace(" ", "_")
             script_path = self.output_dir / f"proc_{sanitized_name}.py"
             with open(script_path, "w", encoding="utf-8") as f:
-                f.write(result["implementation_code"])
+                f.write(code)
             
             # Track active script in state
             self.state["active_script"] = str(script_path)
@@ -396,20 +407,31 @@ class ScalarizerAgent(BaseAgent):
                 schema_for_verification = experiment_context["_schema_requirements"]
 
             # Auto-Reflection
-            print(f"    🤔 Auto-Reflecting on visual proof...")
-            verification = self._verify_analysis(
-                objective=objective_query,
-                context_str=exp_context_str,
-                script_content=result["implementation_code"],
-                metrics=exec_res["metrics"],
-                plot_path=exec_res["plot_path"],
-                schema_requirements=schema_for_verification
-            )
-            
-            if verification.get("status") == "fail":
-                feedback = verification.get("feedback", "Unknown logic error")
-                print(f"    ❌ Self-Correction Triggered: {feedback}")
-                current_prompt = base_prompt + f"\n\n**AUTO-CRITIQUE:** {feedback}\nAdjust the code and visuals."
+            plot_path = exec_res.get("plot_path")
+            if plot_path and Path(plot_path).exists():
+                print(f"    🤔 Auto-Reflecting on visual proof...")
+                verification = self._verify_analysis(
+                    objective=objective_query,
+                    context_str=exp_context_str,
+                    script_content=result["implementation_code"],
+                    metrics=exec_res["metrics"],
+                    plot_path=plot_path,
+                    schema_requirements=schema_for_verification
+                )
+
+                if verification.get("status") == "fail":
+                    feedback = verification.get("feedback", "Unknown logic error")
+                    print(f"    ❌ Self-Correction Triggered: {feedback}")
+                    current_prompt = base_prompt + f"\n\n**AUTO-CRITIQUE:** {feedback}\nAdjust the code and visuals."
+                    continue
+            else:
+                # Plot missing — script ran but didn't save the plot.
+                # Trigger retry so the LLM can fix the plotting code.
+                print(f"    ⚠️  No plot file found — triggering retry")
+                current_prompt = base_prompt + (
+                    "\n\n**AUTO-CRITIQUE:** The script ran but did not produce a plot file. "
+                    "Ensure plt.savefig() writes to the correct path and is called before plt.close()."
+                )
                 continue
             
             print(f"    ✅ Auto-Reflection Passed.")
