@@ -135,7 +135,7 @@ def _find_feedback_preview_images() -> list[str]:
     previews = []
     for ext in IMAGE_EXTENSIONS:
         for p in search_root.rglob(f"*{ext}"):
-            if "review" in p.stem or "Summary_Grid" in p.stem or "TestLoop" in p.stem:
+            if "review" in p.stem or "Summary_Grid" in p.stem:
                 previews.append(str(p))
     # Also check scalarizer_outputs for debug plots (planning agents)
     scalarizer_dir = Path(session_dir) / "scalarizer_outputs"
@@ -877,13 +877,12 @@ with files_tab:
                             is_sel = st.session_state.get("selected_preview_file") == str(f)
                             btn_type = "primary" if is_sel else "secondary"
                             display_name = _truncate_name(f.name)
-                            tooltip = f.name if f.name != display_name else None
                             if st.button(
                                 f"{icon}  {display_name}  ({size})",
                                 key=f"fbtn_{f.relative_to(session_path)}",
                                 use_container_width=True,
                                 type=btn_type,
-                                help=tooltip,
+                                help=f.name,
                             ):
                                 st.session_state.selected_preview_file = str(f)
                                 st.rerun()
