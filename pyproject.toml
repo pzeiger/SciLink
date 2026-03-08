@@ -72,6 +72,7 @@ scilink = "scilink.cli.main:main"
 scilink-workflows = "scilink.cli.workflows:main"
 scilink-agent = "scilink.cli.run_agent:main"
 scilink-ui = "scilink.cli.ui:main"
+scilink-mcp = "scilink.cli.serve:main"
 
 # Third-party packages can advertise custom analysis agents here.
 # SciLink discovers these automatically on startup via importlib.metadata.
