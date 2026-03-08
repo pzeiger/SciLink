@@ -62,6 +62,11 @@ def _render_tools_section(agent, app_mode: str) -> None:
 
         st.divider()
 
+        # MCP server connections
+        _render_mcp_section(agent)
+
+        st.divider()
+
     # List built-in orchestrator tools
     st.subheader("Built-in Tools")
     external_names = {
@@ -100,7 +105,7 @@ def _render_analysis_agents(agent) -> None:
         accept_multiple_files=True,
         help=(
             "Python file with a class extending BaseAnalysisAgent. "
-            "Must implement analyze(). See examples/custom_peak_agent.py."
+            "Must implement analyze()."
         ),
     )
 
@@ -283,3 +288,67 @@ def _load_agent_file(agent, uploaded_file) -> None:
             f"No BaseAnalysisAgent subclasses found in {uploaded_file.name}. "
             "The agent class must inherit from BaseAnalysisAgent and implement analyze()."
         )
+
+
+def _render_mcp_section(agent) -> None:
+    """Connect/disconnect MCP servers and list their tools."""
+    st.subheader("MCP Servers")
+
+    mcp_connections = getattr(agent, "_mcp_connections", {})
+
+    # Connection form
+    transport = st.radio(
+        "Transport", ["stdio", "sse"], horizontal=True, key="mcp_transport"
+    )
+    col_name, col_addr = st.columns([1, 2])
+    with col_name:
+        mcp_name = st.text_input("Server name", key="mcp_name")
+    with col_addr:
+        if transport == "stdio":
+            mcp_addr = st.text_input(
+                "Command",
+                placeholder="npx -y @modelcontextprotocol/server-name /path",
+                key="mcp_addr",
+            )
+        else:
+            mcp_addr = st.text_input(
+                "URL",
+                placeholder="http://localhost:8080/sse",
+                key="mcp_addr",
+            )
+
+    if st.button("Connect", key="mcp_connect_btn"):
+        if not mcp_name or not mcp_addr:
+            st.warning("Provide both a server name and a command/URL.")
+        elif mcp_name in mcp_connections:
+            st.warning(f"'{mcp_name}' is already connected.")
+        else:
+            try:
+                with st.spinner(f"Connecting to '{mcp_name}'..."):
+                    if transport == "stdio":
+                        count = agent.connect_mcp_server(
+                            mcp_name, command=mcp_addr.split()
+                        )
+                    else:
+                        count = agent.connect_mcp_server(
+                            mcp_name, url=mcp_addr
+                        )
+                st.success(f"Connected to '{mcp_name}': {count} tool(s)")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to connect: {e}")
+
+    # Show connected servers
+    if mcp_connections:
+        for name, conn in list(mcp_connections.items()):
+            with st.expander(f"MCP: {name}", expanded=False):
+                tool_count = len(conn.tool_schemas) if hasattr(conn, "tool_schemas") else 0
+                st.caption(
+                    f"Transport: {'stdio' if conn.command else 'sse'} · "
+                    f"{tool_count} tool(s)"
+                )
+                if st.button(f"Disconnect", key=f"mcp_disconnect_{name}"):
+                    agent.disconnect_mcp_server(name)
+                    st.rerun()
+    else:
+        st.caption("No MCP servers connected.")

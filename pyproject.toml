@@ -54,9 +54,13 @@ sim = [
 ui = [
     "streamlit>=1.37.0",
 ]
+mcp = [
+    "mcp>=1.0.0",
+]
 all = [
     "scilink[sim]",
     "scilink[ui]",
+    "scilink[mcp]",
 ]
 
 [project.urls]
