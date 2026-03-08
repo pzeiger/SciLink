@@ -40,6 +40,20 @@ def _require_mcp():
         )
 
 
+# Tools that require user approval in co-pilot / supervised modes.
+# In co-pilot mode ALL of these pause; in supervised mode only the
+# high-impact subset (run_analysis, run_optimization) pauses.
+_COPILOT_APPROVAL_TOOLS = {
+    "run_analysis", "select_agent", "assess_novelty",
+    "get_recommendations", "run_optimization", "generate_initial_plan",
+    "generate_implementation_code", "run_economic_analysis",
+    "discard_plan",
+}
+_SUPERVISED_APPROVAL_TOOLS = {
+    "run_analysis", "run_optimization", "discard_plan",
+}
+
+
 # ── Schema conversion ───────────────────────────────────────────────────
 
 def _openai_to_mcp_tool(schema: dict, prefix: str = "scilink") -> types.Tool:
@@ -78,6 +92,30 @@ class PendingAction:
         self.kwargs = kwargs
         self.prompt = prompt
         self.context = context or {}
+
+
+def _needs_approval(tool_name: str, mode: str) -> bool:
+    """Check whether a tool requires user approval given the autonomy mode."""
+    if mode == "autonomous":
+        return False
+    if mode in ("co-pilot", "co_pilot", "copilot"):
+        return tool_name in _COPILOT_APPROVAL_TOOLS
+    if mode == "supervised":
+        return tool_name in _SUPERVISED_APPROVAL_TOOLS
+    return False
+
+
+def _build_approval_prompt(tool_name: str, kwargs: dict) -> str:
+    """Build a human-readable description of the pending action."""
+    parts = [f"SciLink wants to execute: {tool_name}"]
+    if kwargs:
+        for k, v in kwargs.items():
+            val = str(v)
+            if len(val) > 100:
+                val = val[:100] + "..."
+            parts.append(f"  {k}: {val}")
+    parts.append("\nCall scilink_respond with 'yes' to approve or 'no' to cancel.")
+    return "\n".join(parts)
 
 
 # ── Server factory ──────────────────────────────────────────────────────
@@ -143,19 +181,18 @@ def create_server(
         if log:
             logging.info(f"[init] {log}")
 
-        # Build tool map
+        # Build tool map — analysis tools first, then planning with
+        # collision avoidance (prefix colliding names with "plan_").
         if state["analysis_orch"]:
             for schema in state["analysis_orch"].tools.openai_schemas:
                 fn_name = schema.get("function", {}).get("name", "")
                 if fn_name:
-                    mcp_name = f"scilink_{fn_name}"
-                    tool_map[mcp_name] = ("analysis_orch", fn_name)
+                    tool_map[f"scilink_{fn_name}"] = ("analysis_orch", fn_name)
 
         if state["planning_orch"]:
             for schema in state["planning_orch"].tools.openai_schemas:
                 fn_name = schema.get("function", {}).get("name", "")
                 if fn_name:
-                    # Avoid collisions with analysis tools
                     mcp_name = f"scilink_{fn_name}"
                     if mcp_name in tool_map:
                         mcp_name = f"scilink_plan_{fn_name}"
@@ -179,15 +216,12 @@ def create_server(
 
         if state["analysis_orch"]:
             for schema in state["analysis_orch"].tools.openai_schemas:
-                fn_name = schema.get("function", {}).get("name", "")
-                mcp_name = f"scilink_{fn_name}"
                 tools.append(_openai_to_mcp_tool(schema, prefix="scilink"))
 
         if state["planning_orch"]:
             for schema in state["planning_orch"].tools.openai_schemas:
                 fn_name = schema.get("function", {}).get("name", "")
                 mcp_name = f"scilink_{fn_name}"
-                # Use the same collision-avoidance as tool_map
                 if mcp_name in tool_map and tool_map[mcp_name][0] != "planning_orch":
                     prefix = "scilink_plan"
                 else:
@@ -244,6 +278,26 @@ def create_server(
 
         orch_key, original_name = tool_map[name]
         orch = state[orch_key]
+        autonomy = state["config"]["analysis_mode"]
+
+        # Co-pilot / supervised: intercept tools that need approval
+        if _needs_approval(original_name, autonomy):
+            prompt = _build_approval_prompt(original_name, arguments)
+            state["pending_action"] = PendingAction(
+                tool_name=original_name,
+                kwargs=arguments,
+                prompt=prompt,
+                context={"orch_key": orch_key},
+            )
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "status": "needs_input",
+                    "message": prompt,
+                    "tool": original_name,
+                    "arguments": arguments,
+                }),
+            )]
 
         result = await asyncio.to_thread(
             _execute_tool_captured, orch.tools, original_name, arguments
@@ -259,24 +313,42 @@ def create_server(
         resources = []
 
         if state["analysis_orch"]:
-            resources.append(types.Resource(
-                uri="scilink://session/status",
-                name="Session Status",
-                description="Current analysis session state",
-                mimeType="application/json",
-            ))
-            resources.append(types.Resource(
-                uri="scilink://session/metadata",
-                name="Current Metadata",
-                description="Loaded sample/experiment metadata",
-                mimeType="application/json",
-            ))
-            resources.append(types.Resource(
-                uri="scilink://session/agents",
-                name="Available Agents",
-                description="Registered analysis agents",
-                mimeType="application/json",
-            ))
+            resources.extend([
+                types.Resource(
+                    uri="scilink://analysis/status",
+                    name="Analysis Session Status",
+                    description="Current analysis session state",
+                    mimeType="application/json",
+                ),
+                types.Resource(
+                    uri="scilink://analysis/metadata",
+                    name="Current Metadata",
+                    description="Loaded sample/experiment metadata",
+                    mimeType="application/json",
+                ),
+                types.Resource(
+                    uri="scilink://analysis/agents",
+                    name="Available Agents",
+                    description="Registered analysis agents",
+                    mimeType="application/json",
+                ),
+            ])
+
+        if state["planning_orch"]:
+            resources.extend([
+                types.Resource(
+                    uri="scilink://planning/status",
+                    name="Planning Session Status",
+                    description="Current planning session state",
+                    mimeType="application/json",
+                ),
+                types.Resource(
+                    uri="scilink://planning/plan",
+                    name="Current Plan",
+                    description="Active experimental plan",
+                    mimeType="application/json",
+                ),
+            ])
 
         return resources
 
@@ -285,24 +357,26 @@ def create_server(
     @server.read_resource()
     async def read_resource(uri: str) -> str:
         _ensure_initialized()
-        orch = state.get("analysis_orch")
 
-        if uri == "scilink://session/status":
-            data = {
-                "current_data_path": getattr(orch, "current_data_path", None),
-                "current_data_type": getattr(orch, "current_data_type", None),
-                "selected_agent_id": getattr(orch, "selected_agent_id", None),
-                "analysis_count": len(getattr(orch, "analysis_results", [])),
-                "message_count": getattr(orch, "message_count", 0),
-            }
-            return json.dumps(data, indent=2)
+        # Analysis resources
+        a_orch = state.get("analysis_orch")
+        if uri == "scilink://analysis/status" and a_orch:
+            return json.dumps({
+                "current_data_path": getattr(a_orch, "current_data_path", None),
+                "current_data_type": getattr(a_orch, "current_data_type", None),
+                "selected_agent_id": getattr(a_orch, "selected_agent_id", None),
+                "analysis_count": len(getattr(a_orch, "analysis_results", [])),
+                "message_count": getattr(a_orch, "message_count", 0),
+                "autonomy_mode": state["config"]["analysis_mode"],
+            }, indent=2)
 
-        elif uri == "scilink://session/metadata":
-            meta = getattr(orch, "current_metadata", None)
-            return json.dumps(meta or {}, indent=2)
+        if uri == "scilink://analysis/metadata" and a_orch:
+            return json.dumps(
+                getattr(a_orch, "current_metadata", None) or {}, indent=2
+            )
 
-        elif uri == "scilink://session/agents":
-            registry = getattr(orch, "_agent_registry", {})
+        if uri == "scilink://analysis/agents" and a_orch:
+            registry = getattr(a_orch, "_agent_registry", {})
             agents = {}
             for aid, entry in registry.items():
                 agents[str(aid)] = {
@@ -311,6 +385,30 @@ def create_server(
                     "short_name": entry.get("short_name", ""),
                 }
             return json.dumps(agents, indent=2)
+
+        # Planning resources
+        p_orch = state.get("planning_orch")
+        if uri == "scilink://planning/status" and p_orch:
+            return json.dumps({
+                "has_plan": getattr(p_orch, "current_plan", None) is not None,
+                "iteration": getattr(p_orch, "current_iteration", 0),
+                "message_count": len(getattr(p_orch, "messages", [])),
+                "autonomy_level": str(getattr(p_orch, "autonomy_level", "unknown")),
+            }, indent=2)
+
+        if uri == "scilink://planning/plan" and p_orch:
+            plan = getattr(p_orch, "current_plan", None)
+            if plan and hasattr(plan, "to_dict"):
+                return json.dumps(plan.to_dict(), indent=2)
+            return json.dumps(plan or {}, indent=2)
+
+        # Backward compatibility with Phase 1 URIs
+        if uri == "scilink://session/status" and a_orch:
+            return await read_resource("scilink://analysis/status")
+        if uri == "scilink://session/metadata" and a_orch:
+            return await read_resource("scilink://analysis/metadata")
+        if uri == "scilink://session/agents" and a_orch:
+            return await read_resource("scilink://analysis/agents")
 
         return json.dumps({"error": f"Unknown resource: {uri}"})
 
@@ -331,19 +429,6 @@ def _init_orchestrators(state: dict, config: dict) -> None:
         session_dir = str(Path.home() / "scilink_mcp_sessions" / f"session_{ts}")
     Path(session_dir).mkdir(parents=True, exist_ok=True)
 
-    # Resolve analysis mode enum
-    from scilink.agents.exp_agents.analysis_orchestrator import AnalysisMode
-    mode_map = {
-        "co-pilot": AnalysisMode.CO_PILOT,
-        "co_pilot": AnalysisMode.CO_PILOT,
-        "copilot": AnalysisMode.CO_PILOT,
-        "supervised": AnalysisMode.SUPERVISED,
-        "autonomous": AnalysisMode.AUTONOMOUS,
-    }
-    analysis_mode = mode_map.get(
-        config["analysis_mode"].lower(), AnalysisMode.AUTONOMOUS
-    )
-
     api_key = config["api_key"]
     model_name = config["model_name"]
     base_url = config["base_url"]
@@ -351,7 +436,17 @@ def _init_orchestrators(state: dict, config: dict) -> None:
 
     if config["mode"] in ("analyze", "both"):
         from scilink.agents.exp_agents.analysis_orchestrator import (
-            AnalysisOrchestratorAgent,
+            AnalysisOrchestratorAgent, AnalysisMode,
+        )
+        mode_map = {
+            "co-pilot": AnalysisMode.CO_PILOT,
+            "co_pilot": AnalysisMode.CO_PILOT,
+            "copilot": AnalysisMode.CO_PILOT,
+            "supervised": AnalysisMode.SUPERVISED,
+            "autonomous": AnalysisMode.AUTONOMOUS,
+        }
+        analysis_mode = mode_map.get(
+            config["analysis_mode"].lower(), AnalysisMode.AUTONOMOUS
         )
         state["analysis_orch"] = AnalysisOrchestratorAgent(
             base_dir=session_dir,
@@ -365,13 +460,29 @@ def _init_orchestrators(state: dict, config: dict) -> None:
     if config["mode"] in ("plan", "both"):
         try:
             from scilink.agents.planning_agents.planning_orchestrator import (
-                PlanningOrchestratorAgent,
+                PlanningOrchestratorAgent, AutonomyLevel,
             )
+            autonomy_map = {
+                "co-pilot": AutonomyLevel.CO_PILOT,
+                "co_pilot": AutonomyLevel.CO_PILOT,
+                "copilot": AutonomyLevel.CO_PILOT,
+                "supervised": AutonomyLevel.SUPERVISED,
+                "autonomous": AutonomyLevel.AUTONOMOUS,
+            }
+            autonomy_level = autonomy_map.get(
+                config["analysis_mode"].lower(), AutonomyLevel.AUTONOMOUS
+            )
+            # Planning orchestrator needs data_dir in autonomous mode
+            data_dir = str(Path(session_dir) / "data")
+            Path(data_dir).mkdir(parents=True, exist_ok=True)
             state["planning_orch"] = PlanningOrchestratorAgent(
                 base_dir=session_dir,
                 api_key=api_key,
                 model_name=model_name,
                 base_url=base_url,
+                futurehouse_api_key=fh_key,
+                autonomy_level=autonomy_level,
+                data_dir=data_dir,
             )
         except Exception as exc:
             logging.warning(f"Planning orchestrator not available: {exc}")
@@ -397,13 +508,15 @@ async def _handle_respond(
     state["pending_action"] = None
 
     if response in ("yes", "y", "approve", "ok", "proceed"):
-        # Execute the pending tool
         orch_key = pending.context.get("orch_key", "analysis_orch")
         orch = state.get(orch_key)
         if orch is None:
             return [types.TextContent(
                 type="text",
-                text=json.dumps({"status": "error", "message": "Orchestrator not found."}),
+                text=json.dumps({
+                    "status": "error",
+                    "message": "Orchestrator not found.",
+                }),
             )]
 
         result = await asyncio.to_thread(
