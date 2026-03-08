@@ -61,9 +61,21 @@ def main():
     parser.add_argument(
         "--transport",
         type=str,
-        choices=["stdio"],
+        choices=["stdio", "sse"],
         default="stdio",
         help="MCP transport (default: stdio)",
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="127.0.0.1",
+        help="Bind address for SSE transport (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Bind port for SSE transport (default: 8000)",
     )
     parser.add_argument(
         "--futurehouse-key",
@@ -102,7 +114,7 @@ def main():
     sys.stdout = sys.stderr
 
     try:
-        from scilink.mcp_server import create_server, run_stdio
+        from scilink.mcp_server import create_server, run_stdio, run_sse
     except ImportError as exc:
         print(
             f"Error: {exc}\n"
@@ -125,8 +137,18 @@ def main():
     # Claude Desktop times out after ~5 seconds.
     server.eager_init()
 
-    import asyncio
-    asyncio.run(run_stdio(server, real_stdout=_real_stdout))
+    if args.transport == "sse":
+        # SSE doesn't need stdout redirection — it's HTTP, not stdio.
+        print(
+            f"Starting SciLink MCP server (SSE) on "
+            f"http://{args.host}:{args.port}/sse",
+            file=sys.stderr,
+        )
+        run_sse(server, host=args.host, port=args.port)
+    else:
+        import asyncio
+        asyncio.run(run_stdio(server, real_stdout=_real_stdout))
+
     return 0
 
 

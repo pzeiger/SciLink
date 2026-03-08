@@ -815,3 +815,53 @@ async def run_stdio(server: Server, real_stdout=None) -> None:
             read_stream, write_stream,
             server.create_initialization_options(),
         )
+
+
+def run_sse(server: Server, host: str = "127.0.0.1", port: int = 8000) -> None:
+    """Run the MCP server over SSE (Server-Sent Events) transport.
+
+    Starts an HTTP server with two endpoints:
+
+    - ``GET /sse`` — SSE stream for client connections
+    - ``POST /messages/`` — message submission endpoint
+
+    Args:
+        server: The configured MCP Server.
+        host: Bind address (default: ``127.0.0.1``).
+        port: Bind port (default: ``8000``).
+    """
+    _require_mcp()
+
+    try:
+        from mcp.server.sse import SseServerTransport
+        from starlette.applications import Starlette
+        from starlette.routing import Route, Mount
+        from starlette.responses import Response
+        import uvicorn
+    except ImportError as exc:
+        raise ImportError(
+            f"SSE transport requires additional packages: {exc}\n"
+            "Install with: pip install uvicorn starlette sse-starlette"
+        ) from exc
+
+    sse_transport = SseServerTransport("/messages/")
+
+    async def handle_sse(request):
+        async with sse_transport.connect_sse(
+            request.scope, request.receive, request._send
+        ) as streams:
+            await server.run(
+                streams[0], streams[1],
+                server.create_initialization_options(),
+            )
+        return Response()
+
+    app = Starlette(
+        routes=[
+            Route("/sse", endpoint=handle_sse, methods=["GET"]),
+            Mount("/messages/", app=sse_transport.handle_post_message),
+        ],
+    )
+
+    logging.info(f"SciLink MCP server (SSE) at http://{host}:{port}/sse")
+    uvicorn.run(app, host=host, port=port, log_level="warning")
