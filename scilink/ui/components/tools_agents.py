@@ -105,7 +105,7 @@ def _render_analysis_agents(agent) -> None:
         accept_multiple_files=True,
         help=(
             "Python file with a class extending BaseAnalysisAgent. "
-            "Must implement analyze(). See examples/custom_peak_agent.py."
+            "Must implement analyze()."
         ),
     )
 
