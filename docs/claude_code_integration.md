@@ -7,7 +7,9 @@ SciLink can run as an MCP (Model Context Protocol) server, making its analysis a
 ### 1. Install SciLink with MCP support
 
 ```bash
-pip install -e ".[mcp]"
+pip install -e ".[mcp]"          # MCP server only
+pip install -e ".[ui,mcp]"       # MCP server + Streamlit UI
+pip install -e ".[all]"          # everything (UI + MCP + simulation)
 ```
 
 ### 2a. Claude Code — register the MCP server
