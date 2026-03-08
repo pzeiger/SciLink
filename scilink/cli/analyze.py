@@ -463,6 +463,7 @@ Supported data types:
         """Load BaseAnalysisAgent subclasses from user-supplied .py files and register them."""
         import importlib.util
         import inspect
+        import sys
         from scilink.agents.exp_agents.base_agent import BaseAnalysisAgent
 
         for file_path in agent_files:
@@ -471,7 +472,12 @@ Supported data types:
             try:
                 spec = importlib.util.spec_from_file_location(path.stem, path)
                 module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
+                _prev = sys.dont_write_bytecode
+                sys.dont_write_bytecode = True
+                try:
+                    spec.loader.exec_module(module)
+                finally:
+                    sys.dont_write_bytecode = _prev
             except Exception as e:
                 print(f"   ❌ Failed to load {path.name}: {e}")
                 continue
@@ -510,6 +516,7 @@ Supported data types:
         """
         import importlib.util
         import inspect
+        import sys
 
         for file_path in tool_files:
             path = Path(file_path).resolve()
@@ -517,7 +524,12 @@ Supported data types:
             try:
                 spec = importlib.util.spec_from_file_location(path.stem, path)
                 module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
+                _prev = sys.dont_write_bytecode
+                sys.dont_write_bytecode = True
+                try:
+                    spec.loader.exec_module(module)
+                finally:
+                    sys.dont_write_bytecode = _prev
             except Exception as e:
                 print(f"   ❌ Failed to load {path.name}: {e}")
                 continue

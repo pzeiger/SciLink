@@ -2,6 +2,7 @@
 
 import importlib.util
 import inspect
+import sys
 from pathlib import Path
 
 import streamlit as st
@@ -81,16 +82,40 @@ def _render_tools_section(agent, app_mode: str) -> None:
 
 def _render_agents_section(agent, app_mode: str) -> None:
     """Display registered agents or sub-agents."""
-    st.subheader("Available Agents")
-
     if app_mode == "analyze":
         _render_analysis_agents(agent)
     elif app_mode == "plan":
+        st.subheader("Available Agents")
         _render_planning_agents(agent)
 
 
 def _render_analysis_agents(agent) -> None:
-    """Show analysis agent registry."""
+    """Upload custom agent files and show analysis agent registry."""
+    # Custom agent upload
+    st.subheader("Custom Agents")
+    uploaded = st.file_uploader(
+        "Upload a custom agent file (.py)",
+        type=["py"],
+        key="agent_file_uploader",
+        accept_multiple_files=True,
+        help=(
+            "Python file with a class extending BaseAnalysisAgent. "
+            "Must implement analyze(). See examples/custom_peak_agent.py."
+        ),
+    )
+
+    if uploaded:
+        for f in uploaded:
+            upload_key = ("custom_agent", f.name)
+            if upload_key in st.session_state._processed_uploads:
+                continue
+            _load_agent_file(agent, f)
+            st.session_state._processed_uploads.add(upload_key)
+
+    st.divider()
+
+    # List registered agents
+    st.subheader("Registered Agents")
     registry = getattr(agent, "_agent_registry", {})
     if not registry:
         st.caption("No agents registered.")
@@ -143,11 +168,16 @@ def _load_tool_file(agent, uploaded_file) -> None:
     dest = tools_dir / uploaded_file.name
     dest.write_bytes(uploaded_file.getvalue())
 
-    # Load module
+    # Load module (suppress __pycache__ in session directory)
     try:
         spec = importlib.util.spec_from_file_location(dest.stem, dest)
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        _prev = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = _prev
     except Exception as e:
         st.error(f"Failed to load {uploaded_file.name}: {e}")
         return
@@ -199,3 +229,57 @@ def _load_tool_file(agent, uploaded_file) -> None:
         st.success(f"Registered {count} tool(s) from {uploaded_file.name}")
     except Exception as e:
         st.error(f"Failed to register tools: {e}")
+
+
+def _load_agent_file(agent, uploaded_file) -> None:
+    """Load a custom agent .py file and register it with the orchestrator."""
+    from scilink.agents.exp_agents.base_agent import BaseAnalysisAgent
+
+    # Save to session dir
+    session_dir = st.session_state.get("session_dir")
+    if session_dir is None:
+        st.error("No active session.")
+        return
+
+    agents_dir = Path(session_dir) / "custom_agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    dest = agents_dir / uploaded_file.name
+    dest.write_bytes(uploaded_file.getvalue())
+
+    # Load module (suppress __pycache__ in session directory)
+    try:
+        spec = importlib.util.spec_from_file_location(dest.stem, dest)
+        module = importlib.util.module_from_spec(spec)
+        _prev = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = _prev
+    except Exception as e:
+        st.error(f"Failed to load {uploaded_file.name}: {e}")
+        return
+
+    # Discover BaseAnalysisAgent subclasses
+    registry = getattr(agent, "_agent_registry", {})
+    found = 0
+    for _, cls in inspect.getmembers(module, inspect.isclass):
+        if (
+            issubclass(cls, BaseAnalysisAgent)
+            and cls is not BaseAnalysisAgent
+            and cls.__module__ == module.__name__
+        ):
+            next_id = max(registry.keys()) + 1 if registry else 4
+            try:
+                agent.register_agent(next_id, cls)
+                name = getattr(cls, "AGENT_NAME", cls.__name__)
+                st.success(f"Registered agent '{name}' as ID {next_id}")
+                found += 1
+            except Exception as e:
+                st.error(f"Failed to register {cls.__name__}: {e}")
+
+    if found == 0:
+        st.warning(
+            f"No BaseAnalysisAgent subclasses found in {uploaded_file.name}. "
+            "The agent class must inherit from BaseAnalysisAgent and implement analyze()."
+        )
