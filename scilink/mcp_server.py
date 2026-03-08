@@ -856,10 +856,21 @@ def run_sse(server: Server, host: str = "127.0.0.1", port: int = 8000) -> None:
             )
         return Response()
 
+    from starlette.middleware import Middleware
+    from starlette.middleware.cors import CORSMiddleware
+
     app = Starlette(
         routes=[
             Route("/sse", endpoint=handle_sse, methods=["GET"]),
             Mount("/messages/", app=sse_transport.handle_post_message),
+        ],
+        middleware=[
+            Middleware(
+                CORSMiddleware,
+                allow_origins=["*"],
+                allow_methods=["*"],
+                allow_headers=["*"],
+            ),
         ],
     )
 
