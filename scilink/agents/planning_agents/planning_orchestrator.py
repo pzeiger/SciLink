@@ -518,15 +518,18 @@ class PlanningOrchestratorAgent:
         
         # --- Init Sub-Agents ---
         print("🤖 Agent: Hiring sub-agents...")
-        self.planner = PlanningAgent(
+        planner_kwargs = dict(
             api_key=api_key,
             model_name=model_name,
             base_url=base_url,
             embedding_model=embedding_model,
             embedding_api_key=embedding_api_key,
             futurehouse_api_key=futurehouse_api_key,
-            output_dir=str(self.base_dir)
+            output_dir=str(self.base_dir),
         )
+        if self.knowledge_dir:
+            planner_kwargs["kb_base_path"] = str(self.knowledge_dir / "default_kb")
+        self.planner = PlanningAgent(**planner_kwargs)
         self.scalarizer = ScalarizerAgent(
             api_key=api_key,
             model_name=model_name,
