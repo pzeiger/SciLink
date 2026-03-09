@@ -28,44 +28,42 @@ def render_tools_agents_tab() -> None:
 
 def _render_tools_section(agent, app_mode: str) -> None:
     """Upload custom tool files and list registered tools."""
-    # Custom tool upload — only for analyze mode (planning doesn't support it yet)
-    if app_mode == "analyze":
-        st.subheader("Custom Tools")
-        uploaded = st.file_uploader(
-            "Upload a custom tool file (.py)",
-            type=["py"],
-            key="tool_file_uploader",
-            accept_multiple_files=True,
-            help=(
-                "Python file with tool_schemas (OpenAI-format list) "
-                "and create_tool_functions(data) factory."
-            ),
-        )
+    st.subheader("Custom Tools")
+    uploaded = st.file_uploader(
+        "Upload a custom tool file (.py)",
+        type=["py"],
+        key="tool_file_uploader",
+        accept_multiple_files=True,
+        help=(
+            "Python file with tool_schemas (OpenAI-format list) "
+            "and create_tool_functions(data) factory."
+        ),
+    )
 
-        if uploaded:
-            for f in uploaded:
-                upload_key = ("custom_tool", f.name)
-                if upload_key in st.session_state._processed_uploads:
-                    continue
-                _load_tool_file(agent, f)
-                st.session_state._processed_uploads.add(upload_key)
+    if uploaded:
+        for f in uploaded:
+            upload_key = ("custom_tool", f.name)
+            if upload_key in st.session_state._processed_uploads:
+                continue
+            _load_tool_file(agent, f)
+            st.session_state._processed_uploads.add(upload_key)
 
-        # List registered external tools
-        external_tools = getattr(agent, "_external_tools", [])
-        if external_tools:
-            st.markdown("**Registered custom tools:**")
-            for t in external_tools:
-                with st.expander(t["name"], expanded=False):
-                    st.markdown(t.get("description", "No description."))
-        else:
-            st.caption("No custom tools registered yet.")
+    # List registered external tools
+    external_tools = getattr(agent, "_external_tools", [])
+    if external_tools:
+        st.markdown("**Registered custom tools:**")
+        for t in external_tools:
+            with st.expander(t["name"], expanded=False):
+                st.markdown(t.get("description", "No description."))
+    else:
+        st.caption("No custom tools registered yet.")
 
-        st.divider()
+    st.divider()
 
-        # MCP server connections
-        _render_mcp_section(agent)
+    # MCP server connections
+    _render_mcp_section(agent)
 
-        st.divider()
+    st.divider()
 
     # List built-in orchestrator tools
     st.subheader("Built-in Tools")
@@ -346,12 +344,18 @@ def _render_mcp_section(agent) -> None:
         for name, conn in list(mcp_connections.items()):
             with st.expander(f"MCP: {name}", expanded=False):
                 tool_count = len(conn.tool_schemas) if hasattr(conn, "tool_schemas") else 0
-                st.caption(
-                    f"Transport: {'stdio' if conn.command else 'sse'} · "
-                    f"{tool_count} tool(s)"
-                )
-                if st.button(f"Disconnect", key=f"mcp_disconnect_{name}"):
-                    agent.disconnect_mcp_server(name)
-                    st.rerun()
+                col_info, col_btn = st.columns([5, 1])
+                with col_info:
+                    st.caption(
+                        f"Transport: {'stdio' if conn.command else 'sse'} · "
+                        f"{tool_count} tool(s)"
+                    )
+                with col_btn:
+                    if st.button(
+                        "\u2715", key=f"mcp_disconnect_{name}",
+                        help=f"Disconnect {name}",
+                    ):
+                        agent.disconnect_mcp_server(name)
+                        st.rerun()
     else:
         st.caption("No MCP servers connected.")
