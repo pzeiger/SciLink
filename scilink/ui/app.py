@@ -2,6 +2,7 @@
 
 import base64
 import builtins
+import re
 import threading
 from pathlib import Path
 
@@ -15,6 +16,17 @@ from scilink.ui.components.tools_agents import render_tools_agents_tab
 from scilink.ui.output_capture import AgentStoppedError, OutputCapture
 from scilink.ui.theme import inject_theme
 from scilink.ui.config import AVATAR_USER, AVATAR_AGENT, APP_MODES, SESSION_DIR_PREFIXES
+
+def _escape_tildes(text: str) -> str:
+    """Escape tildes outside LaTeX ($...$, $$...$$) to prevent Markdown strikethrough."""
+    # Split on LaTeX delimiters, preserving them
+    parts = re.split(r"(\$\$[\s\S]*?\$\$|\$[^$]+?\$)", text)
+    for i, part in enumerate(parts):
+        # Odd indices are LaTeX blocks — leave them untouched
+        if i % 2 == 0:
+            parts[i] = part.replace("~", "\\~")
+    return "".join(parts)
+
 
 _LOGO_DIR = Path(__file__).resolve().parent / "assets"
 _LOGO_DARK = _LOGO_DIR / "scilink_logo_v3_dark.svg"
@@ -416,7 +428,9 @@ with chat_tab:
     _avatars = {"user": AVATAR_USER, "assistant": AVATAR_AGENT}
     for msg in st.session_state.chat_messages:
         with st.chat_message(msg["role"], avatar=_avatars.get(msg["role"])):
-            st.markdown(msg["content"])
+            # Escape tildes outside LaTeX blocks to prevent Markdown strikethrough
+            _content = _escape_tildes(msg["content"]) if msg["role"] == "assistant" else msg["content"]
+            st.markdown(_content)
             for img_path in msg.get("images", []):
                 try:
                     _img_name = Path(img_path).stem
