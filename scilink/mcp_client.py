@@ -198,7 +198,7 @@ class MCPConnection:
     def _run(self, coro):
         """Schedule a coroutine on the background loop and wait for the result."""
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result(timeout=60)
+        return future.result(timeout=300)
 
     def __del__(self):
         try:

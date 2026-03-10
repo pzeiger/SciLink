@@ -568,11 +568,27 @@ class OrchestratorTools:
                 generator = HTMLReportGenerator(self.orch.planner.state)
                 generator.generate(str(html_path))
                 
+                # Check if any experiments actually got code
+                experiments = updated_plan.get("proposed_experiments", [])
+                has_code = any(
+                    exp.get("implementation_code")
+                    for exp in experiments
+                )
+
+                if not has_code:
+                    return json.dumps({
+                        "status": "error",
+                        "message": "Code generation failed — no executable code was produced for any experiment.",
+                        "hint": "This may be due to an LLM API timeout or error. Try again.",
+                        "output_path": str(output_path),
+                        "html_report": str(html_path)
+                    })
+
                 # Save scripts to output folder
                 final_out = str(self.orch.base_dir / "output_scripts")
                 print(f"\n--- Saving Scripts to: {final_out} ---")
                 write_experiments_to_disk(updated_plan, final_out)
-                
+
                 return json.dumps({
                     "status": "success",
                     "message": "Implementation code added to plan",
@@ -775,13 +791,13 @@ class OrchestratorTools:
                     })
                 
                 # Save
-                output_path = self.orch.base_dir / "plan_refined.json"
+                output_path = self.orch.base_dir / "plan.json"
                 with open(output_path, 'w') as f:
                     json.dump(plan, f, indent=2)
-                
+
                 # Generate HTML
                 from .html_generator import HTMLReportGenerator
-                html_path = self.orch.base_dir / "plan_refined.html"
+                html_path = self.orch.base_dir / "plan.html"
                 generator = HTMLReportGenerator(self.orch.planner.state)
                 generator.generate(str(html_path))
                 
@@ -823,6 +839,79 @@ class OrchestratorTools:
             required=["result_data"]
         )
         
+        # 4b. ADJUST PLAN FOR CONSTRAINTS (pre-execution)
+        def adjust_plan_for_constraints(constraint_description: str):
+            """
+            Adjusts the experimental plan for implementation or instrument
+            constraints discovered during protocol/code generation.
+            Does NOT increment the iteration — the experiment hasn't run yet.
+            """
+            print(f"  ⚡ Tool: Adjusting plan for implementation constraints...")
+
+            try:
+                plan = self.orch.planner.adjust_plan_for_constraints(
+                    constraint_description=constraint_description,
+                    enable_human_feedback=self._get_human_feedback_enabled()
+                )
+
+                if plan.get("error"):
+                    return json.dumps({
+                        "status": "error",
+                        "message": plan.get("error")
+                    })
+
+                # Save
+                output_path = self.orch.base_dir / "plan.json"
+                with open(output_path, 'w') as f:
+                    json.dump(plan, f, indent=2)
+
+                # Generate HTML
+                from .html_generator import HTMLReportGenerator
+                html_path = self.orch.base_dir / "plan.html"
+                generator = HTMLReportGenerator(self.orch.planner.state)
+                generator.generate(str(html_path))
+
+                return json.dumps({
+                    "status": "success",
+                    "iteration": plan.get('iteration'),
+                    "num_experiments": len(plan.get('proposed_experiments', [])),
+                    "output_path": str(output_path),
+                    "html_report": str(html_path),
+                    "hint": "Use generate_implementation_code() or refine_implementation_code() to update executable code for the adjusted plan."
+                })
+
+            except Exception as e:
+                logging.error(f"Plan adjustment error: {e}", exc_info=True)
+                return json.dumps({
+                    "status": "error",
+                    "message": str(e)
+                })
+
+        self._register_tool(
+            func=adjust_plan_for_constraints,
+            name="adjust_plan_for_constraints",
+            description=(
+                "Adjusts the experimental plan when implementation or instrument "
+                "constraints make the current plan impractical BEFORE running the experiment. "
+                "Use when protocol generation reveals incompatibilities (e.g., pipette type "
+                "vs plate layout, equipment limitations, reagent availability). "
+                "Does NOT increment iteration or log as experimental results. "
+                "Use refine_plan_with_results() instead when adjusting based on actual experimental outcomes."
+            ),
+            parameters={
+                "constraint_description": {
+                    "type": "string",
+                    "description": (
+                        "Description of the implementation constraint or instrument "
+                        "incompatibility that requires plan adjustment. Include what "
+                        "the constraint is, why it conflicts with the current plan, "
+                        "and any proposed resolution if known."
+                    )
+                }
+            },
+            required=["constraint_description"]
+        )
+
         # 5. REFINE IMPLEMENTATION CODE (based on refined plan)
         def refine_implementation_code():
             """
