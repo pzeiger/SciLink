@@ -11,9 +11,7 @@ Supports three autonomy modes:
 - **co-pilot** — tools that need approval return a ``needs_input``
   response; the MCP client must call ``scilink_respond`` to continue.
 
-Requires the ``mcp`` optional dependency::
-
-    pip install scilink[mcp]
+The ``mcp`` package is installed by default with SciLink.
 """
 
 import asyncio
@@ -38,7 +36,7 @@ def _require_mcp():
     if not HAS_MCP:
         raise ImportError(
             "MCP server support requires the 'mcp' package. "
-            "Install with: pip install scilink[mcp]"
+            "Install with: pip install scilink"
         )
 
 

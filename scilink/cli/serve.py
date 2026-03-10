@@ -118,7 +118,7 @@ def main():
     except ImportError as exc:
         print(
             f"Error: {exc}\n"
-            "Install MCP support with: pip install scilink[mcp]",
+            "Install MCP support with: pip install scilink",
             file=sys.stderr,
         )
         return 1

@@ -126,7 +126,7 @@ If an external tool name collides with a built-in tool, it's automatically prefi
 ## Requirements
 
 ```bash
-pip install scilink[mcp]
+pip install scilink
 ```
 
-The `mcp` optional dependency is needed for both connecting to external servers and running SciLink as a server.
+The `mcp` package is included in the default SciLink installation.
