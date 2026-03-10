@@ -619,7 +619,10 @@ class OrchestratorTools:
                 "code_paths": {
                     "type": "string",
                     "description": (
-                        "Comma-separated paths to code/API folders (e.g., './opentrons_api,./automation_lib'). "
+                        "Comma-separated paths to SOURCE CODE or API documentation folders "
+                        "(e.g., './opentrons_api,./automation_lib'). "
+                        "Must contain .py, .js, or other code files — NOT scientific papers, "
+                        "PDFs, or literature. Do NOT pass the knowledge directory here. "
                         "OPTIONAL if Code Knowledge Base is already loaded. "
                         "REQUIRED if no Code KB exists."
                     )
