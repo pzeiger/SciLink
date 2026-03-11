@@ -534,6 +534,7 @@ class PlanningOrchestratorAgent:
         self.active_scalarizer_script = None
         self.expected_input_columns = None
         self.expected_target_columns = []
+        self.target_directions = {}  # e.g. {"Yield": "maximize", "Defect_Density": "minimize"}
         self.latest_tea_results = None
 
         # Custom tools / MCP state
@@ -943,6 +944,7 @@ class PlanningOrchestratorAgent:
             else:
                 self.expected_target_columns = []
 
+            self.target_directions = state.get("target_directions", {})
             self.latest_tea_results = state.get("latest_tea_results")
             
             # Restore autonomy level if saved
@@ -1032,6 +1034,7 @@ class PlanningOrchestratorAgent:
                 "active_scalarizer_script": self.active_scalarizer_script,
                 "expected_input_columns": self.expected_input_columns,
                 "expected_target_columns": self.expected_target_columns,
+                "target_directions": self.target_directions,
                 "data_points_collected": len(pd.read_csv(self.bo_data_path)) if self.bo_data_path.exists() else 0,
                 "planner_state": self.planner.state,
                 "message_count": self.message_count,

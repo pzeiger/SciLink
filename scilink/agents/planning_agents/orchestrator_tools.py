@@ -18,6 +18,7 @@ def _natural_sort_key(s):
     return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', str(s))]
 
 from .parser_utils import write_experiments_to_disk
+from .instruct import BO_OBJECTIVE_DISTILL_PROMPT
 
 
 class OrchestratorTools:
@@ -58,6 +59,41 @@ class OrchestratorTools:
             logging.warning(f"Could not compute hash for {file_path}: {e}")
             return ""
 
+
+    def _distill_objective_for_bo(self, target_cols: list) -> str:
+        """
+        Distill a verbose user objective into a concise BO-relevant objective.
+        Uses the orchestrator's LLM to extract only optimization targets and
+        directions. Result is cached on self.orch._distilled_objective.
+        """
+        raw = self.orch.objective
+        # Skip distillation for short/default objectives
+        if (not raw
+                or raw == "Undefined Research Goal"
+                or len(raw) <= 200):
+            return raw
+
+        cached = getattr(self.orch, '_distilled_objective', None)
+        if cached is not None:
+            return cached
+
+        try:
+            prompt = BO_OBJECTIVE_DISTILL_PROMPT.format(
+                objective=raw,
+                target_cols=", ".join(target_cols),
+            )
+            resp = self.orch.bo.model.generate_content(
+                [prompt], generation_config=self.orch.bo.generation_config
+            )
+            distilled = resp.text.strip()
+            if distilled:
+                print(f"    🎯 Distilled objective: {distilled}")
+                self.orch._distilled_objective = distilled
+                return distilled
+        except Exception as e:
+            logging.warning(f"Objective distillation failed, using original: {e}")
+
+        return raw
 
     def _parse_result_input(self, result_data: str):
         """
@@ -1342,12 +1378,25 @@ class OrchestratorTools:
                     
                     self.orch.expected_input_columns = inputs
                     self.orch.expected_target_columns = targets
+                    # Capture optimization direction from scalarizer
+                    column_roles = res.get("column_roles", {})
+                    opt_dir = column_roles.get("optimization_direction", {})
+                    if opt_dir:
+                        self.orch.target_directions = opt_dir
                     print(f"    📊 Schema Enforced (User-Specified):")
                     print(f"       Inputs: {self.orch.expected_input_columns}")
                     print(f"       Targets: {self.orch.expected_target_columns}")
-                
+                    if self.orch.target_directions:
+                        print(f"       Directions: {self.orch.target_directions}")
+
                 # Case 2: Schema already established from previous analysis
                 elif self.orch.expected_input_columns and self.orch.expected_target_columns:
+                    # Still capture direction if scalarizer provided it and we don't have one yet
+                    if not self.orch.target_directions:
+                        column_roles = res.get("column_roles", {})
+                        opt_dir = column_roles.get("optimization_direction", {})
+                        if opt_dir:
+                            self.orch.target_directions = opt_dir
                     print(f"    📊 Schema Enforced (From Previous Analysis):")
                     print(f"       Inputs: {self.orch.expected_input_columns}")
                     print(f"       Targets: {self.orch.expected_target_columns}")
@@ -1367,9 +1416,12 @@ class OrchestratorTools:
                             proposed_inputs, proposed_targets = [], []
                         else:
                             reasoning = column_roles.get("reasoning", "")
+                            opt_dir = column_roles.get("optimization_direction", {})
                             print(f"    🔬 Scalarizer classified columns:")
                             print(f"       Inputs: {proposed_inputs}")
                             print(f"       Targets: {proposed_targets}")
+                            if opt_dir:
+                                print(f"       Directions: {opt_dir}")
                             if reasoning:
                                 print(f"       Reasoning: {reasoning}")
 
@@ -1380,6 +1432,7 @@ class OrchestratorTools:
                                     "status": "schema_proposed",
                                     "inputs": proposed_inputs,
                                     "targets": proposed_targets,
+                                    "optimization_direction": opt_dir,
                                     "reasoning": reasoning,
                                     "data_points": n_data,
                                     "message": "Scalarizer proposes this classification. Confirm or adjust.",
@@ -1389,6 +1442,8 @@ class OrchestratorTools:
                                 # SUPERVISED/AUTONOMOUS: accept directly
                                 self.orch.expected_input_columns = proposed_inputs
                                 self.orch.expected_target_columns = proposed_targets
+                                if opt_dir:
+                                    self.orch.target_directions = opt_dir
                                 print(f"    ✅ Schema auto-accepted: inputs={proposed_inputs}, targets={proposed_targets}")
 
                     # Targets found but no inputs — measurement-only data (e.g., spectra)
@@ -2254,14 +2309,18 @@ class OrchestratorTools:
 
             try:
                 # ============================================
-                # CALL BO
+                # DISTILL OBJECTIVE & CALL BO
                 # ============================================
+                bo_objective = self._distill_objective_for_bo(
+                    self.orch.expected_target_columns
+                )
                 res = self.orch.bo.run_optimization_loop(
                     data_path=str(self.orch.bo_data_path),
-                    objective_text=self.orch.objective,
+                    objective_text=bo_objective,
                     input_cols=self.orch.expected_input_columns,
                     input_bounds=input_bounds,
                     target_cols=self.orch.expected_target_columns,
+                    target_directions=self.orch.target_directions,
                     output_dir=str(self.orch.base_dir / "bo_artifacts"),
                     batch_size=int(final_batch_size),
                     physical_constraints=physical_constraints,
