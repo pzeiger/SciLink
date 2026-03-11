@@ -71,22 +71,23 @@ def _render_available_skills(agent) -> None:
     """Show built-in and custom skills."""
     st.subheader("Available Skills")
 
-    # Built-in skills (auto-discovered)
+    # Built-in subsection
+    st.markdown("**Built-in**")
     builtin = list_all_skills()
     if builtin:
         for domain, names in builtin.items():
             label = domain.replace("_", " ").title()
-            with st.expander(f"Built-in: {label} ({len(names)})", expanded=False):
+            with st.expander(f"{label} ({len(names)})", expanded=False):
                 for name in names:
                     st.markdown(f"- `{name}`")
     else:
         st.caption("No built-in skills found.")
 
-    # Custom skills
+    # Custom subsection
+    st.markdown("**Custom**")
     custom = getattr(agent, "_custom_skills", {})
     if custom:
-        with st.expander(f"Custom ({len(custom)})", expanded=True):
-            for name, path in sorted(custom.items()):
-                st.markdown(f"- `{name}`")
+        for name in sorted(custom.keys()):
+            st.markdown(f"- `{name}`")
     else:
         st.caption("No custom skills registered yet.")
