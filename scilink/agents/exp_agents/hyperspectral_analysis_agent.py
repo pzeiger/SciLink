@@ -267,7 +267,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             try:
                 parsed = load_skill(skill, domain="hyperspectral")
                 skill_state = {"skill_name": parsed["name"], "skill_sections": parsed}
-                self.logger.info(f"   Skill loaded: {parsed['name']}")
+                self.logger.info(f"   📖 Skill loaded: {parsed['name']}")
             except FileNotFoundError:
                 self.logger.warning(
                     f"   Skill '{skill}' not found — proceeding without domain skill"

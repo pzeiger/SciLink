@@ -34,7 +34,7 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     Args:
         prompt: Mutable list of prompt parts to extend.
         state: Pipeline state dict containing ``skill_sections`` and ``skill_name``.
-        stage: One of ``"planning"``, ``"fitting"``, ``"interpretation"``, ``"validation"``.
+        stage: One of ``"planning"``, ``"analysis"``, ``"interpretation"``, ``"validation"``.
     """
     sections = state.get("skill_sections")
     if not sections:

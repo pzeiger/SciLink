@@ -13,6 +13,7 @@ from scilink.ui.components.sidebar import render_sidebar, start_session
 from scilink.ui.components.chat_uploads import render_pre_chat_uploads
 from scilink.ui.components.file_viewer import render_file_preview
 from scilink.ui.components.tools_agents import render_tools_agents_tab
+from scilink.ui.components.skills import render_skills_tab
 from scilink.ui.output_capture import AgentStoppedError, OutputCapture
 from scilink.ui.theme import inject_theme
 from scilink.ui.config import AVATAR_USER, AVATAR_AGENT, APP_MODES, SESSION_DIR_PREFIXES
@@ -417,7 +418,7 @@ if not st.session_state.agent_initialized:
 # ══════════════════════════════════════════════════════════════════
 # Active session — Chat + File Explorer tabs
 # ══════════════════════════════════════════════════════════════════
-chat_tab, files_tab, tools_tab = st.tabs(["Chat", "File Explorer", "Tools"])
+chat_tab, files_tab, tools_tab, skills_tab = st.tabs(["Chat", "File Explorer", "Tools", "Skills"])
 
 # ── Chat tab ─────────────────────────────────────────────────────
 with chat_tab:
@@ -923,3 +924,7 @@ with files_tab:
 # ── Tools tab ────────────────────────────────────────────────────
 with tools_tab:
     render_tools_agents_tab()
+
+# ── Skills tab ───────────────────────────────────────────────────
+with skills_tab:
+    render_skills_tab()

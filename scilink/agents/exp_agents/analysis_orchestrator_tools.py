@@ -32,7 +32,53 @@ from .metadata_converter import (
     normalize_metadata_dict_with_llm,
 )
 from ..lit_agents import OwlLiteratureAgent, NoveltyScorer
-from ...skills.loader import list_skills
+from ...skills.loader import list_skills, list_all_skills
+
+def _build_skill_description(agent_registry: dict = None,
+                              custom_skills: dict = None) -> str:
+    """Build the ``skill`` parameter description for ``run_analysis``.
+
+    Auto-discovers built-in skill domains and inspects the agent registry
+    to determine which agents accept a ``skill`` parameter.
+    """
+    import inspect
+
+    parts = ["Domain skill name or path to a custom .md skill file."]
+
+    # Discover which agents support skills from their analyze() signature.
+    # Registry entries use lazy class loading — resolve class_path if needed.
+    if agent_registry:
+        supported = []
+        for entry in agent_registry.values():
+            cls = entry.get("class")
+            if cls is None and "class_path" in entry:
+                try:
+                    module_path, cls_name = entry["class_path"].rsplit(".", 1)
+                    import importlib
+                    mod = importlib.import_module(module_path)
+                    cls = getattr(mod, cls_name)
+                except Exception:
+                    continue
+            if cls is None:
+                continue
+            try:
+                sig = inspect.signature(cls.analyze)
+                if "skill" in sig.parameters:
+                    supported.append(entry["name"])
+            except (ValueError, TypeError):
+                continue
+        if supported:
+            parts.append(f"Supported by: {', '.join(supported)}.")
+
+    # Auto-discover all built-in skill domains
+    for domain, names in list_all_skills().items():
+        parts.append(f"Built-in {domain} skills: {names}.")
+
+    if custom_skills:
+        parts.append(f"Custom skills: {sorted(custom_skills.keys())}.")
+
+    return " ".join(parts)
+
 
 # Names that are always treated as global (directory-level) metadata files,
 # never as per-file sidecars, even if their stem happens to match a data file.
@@ -1779,6 +1825,11 @@ class AnalysisOrchestratorTools:
                 if auxiliary_label is not None:
                     analyze_kwargs["auxiliary_label"] = auxiliary_label
                 if skill is not None:
+                    # Resolve custom skill names to their file paths so the
+                    # agent's load_skill() can locate them.
+                    custom_skills = getattr(self.orch, "_custom_skills", {})
+                    if skill in custom_skills:
+                        skill = custom_skills[skill]
                     analyze_kwargs["skill"] = skill
                 if self.orch.active_knowledge:
                     analyze_kwargs["prior_knowledge"] = self.orch.active_knowledge
@@ -1891,12 +1942,10 @@ class AnalysisOrchestratorTools:
                 },
                 "skill": {
                     "type": "string",
-                    "description": (
-                        "Domain skill name or path to a custom .md skill file. "
-                        "Supported by CurveFitting and Hyperspectral agents. "
-                        f"Built-in curve_fitting skills: {list_skills('curve_fitting')}. "
-                        f"Built-in hyperspectral skills: {list_skills('hyperspectral')}."
-                    )
+                    "description": _build_skill_description(
+                        getattr(self.orch, "_agent_registry", None),
+                        getattr(self.orch, "_custom_skills", None),
+                    ),
                 },
                 "series_metadata": {
                     "type": "string",
@@ -2068,11 +2117,10 @@ class AnalysisOrchestratorTools:
                     "description": self.AGENT_DESCRIPTIONS[agent_id]
                 })
 
-            available_skills = {}
-            for domain in ["curve_fitting", "hyperspectral"]:
-                skills = list_skills(domain)
-                if skills:
-                    available_skills[domain] = skills
+            available_skills = list_all_skills()
+            custom_skills = getattr(self.orch, "_custom_skills", {})
+            if custom_skills:
+                available_skills["custom"] = sorted(custom_skills.keys())
 
             result = {
                 "status": "success",
@@ -2729,6 +2777,22 @@ class AnalysisOrchestratorTools:
             }
         }
         self.openai_schemas.append(openai_schema)
+
+    def _update_skill_description(self, custom_skills: dict) -> None:
+        """Update the ``skill`` parameter description in ``run_analysis``
+        to include newly registered custom skills."""
+        for schema in self.openai_schemas:
+            fn = schema.get("function", {})
+            if fn.get("name") != "run_analysis":
+                continue
+            skill_prop = fn["parameters"]["properties"].get("skill")
+            if skill_prop is None:
+                break
+            skill_prop["description"] = _build_skill_description(
+                getattr(self.orch, "_agent_registry", None),
+                custom_skills,
+            )
+            break
 
     def execute_tool(self, tool_name: str, **kwargs) -> str:
         """Execute a tool by name with given arguments."""
