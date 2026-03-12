@@ -276,6 +276,7 @@ Metadata Options:
         'agent_files': args.agent_files or [],
         'tool_files': args.tool_files or [],
         'skill_files': args.skill_files or [],
+        'mcp_servers': args.mcp_servers or [],
     }
     
     # Run the interactive orchestrator

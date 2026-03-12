@@ -20,6 +20,7 @@ import contextlib
 import io
 import json
 import logging
+import sys
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -550,6 +551,9 @@ def _init_orchestrators(state: dict, config: dict) -> None:
     import os
     from datetime import datetime
     from pathlib import Path
+
+    # MCP server manages trust via client — skip interactive sandbox prompt
+    os.environ.setdefault("UNSAFE_EXECUTION_OK", "true")
 
     session_dir = config["session_dir"]
     if not session_dir:
