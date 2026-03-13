@@ -2878,6 +2878,78 @@ class AnalysisOrchestratorTools:
             required=[]
         )
 
+        # =====================================================================
+        # 16. SAVE FILE
+        # =====================================================================
+        def save_file(filename: str, content: str, subfolder: str = "") -> str:
+            """
+            Save text content (reports, summaries, tables, scripts) to a file
+            in the session directory.
+            """
+            print(f"  ⚡ Tool: Saving file '{filename}'...")
+
+            # Sanitise: strip path separators from filename to prevent traversal.
+            safe_name = Path(filename).name
+            if not safe_name:
+                return json.dumps({
+                    "status": "error",
+                    "message": "Invalid filename.",
+                })
+
+            target_dir = self.orch.base_dir
+            if subfolder:
+                safe_sub = Path(subfolder).name
+                target_dir = target_dir / safe_sub
+            target_dir.mkdir(parents=True, exist_ok=True)
+            dest = target_dir / safe_name
+
+            try:
+                dest.write_text(content, encoding="utf-8")
+                print(f"    💾 Saved: {dest}")
+                return json.dumps({
+                    "status": "success",
+                    "path": str(dest),
+                    "size_bytes": dest.stat().st_size,
+                })
+            except Exception as e:
+                logging.error(f"save_file failed: {e}")
+                return json.dumps({
+                    "status": "error",
+                    "message": str(e),
+                })
+
+        self._register_tool(
+            func=save_file,
+            name="save_file",
+            description=(
+                "Save text content (reports, summaries, tables, scripts, notes) "
+                "to a file in the session directory. Use this to persist "
+                "synthesized knowledge summaries, analysis reports, exported "
+                "results, or any text artifact the user requests."
+            ),
+            parameters={
+                "filename": {
+                    "type": "string",
+                    "description": (
+                        "Name of the file to create, e.g. 'analysis_report.md', "
+                        "'peak_positions.csv', or 'summary.txt'."
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The text content to write to the file.",
+                },
+                "subfolder": {
+                    "type": "string",
+                    "description": (
+                        "Optional subfolder within the session directory, "
+                        "e.g. 'reports' or 'exports'. Created if it doesn't exist."
+                    ),
+                },
+            },
+            required=["filename", "content"]
+        )
+
     def _register_tool(
         self,
         func: Callable,
