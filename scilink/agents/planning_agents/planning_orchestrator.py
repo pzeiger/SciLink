@@ -330,6 +330,13 @@ Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions
       
 11. `save_checkpoint`: Save campaign state. Use after every 3-5 experiments.
 
+**KNOWLEDGE & SKILL TOOLS:**
+12. `synthesize_knowledge`: Distill findings from completed planning iterations into reusable knowledge. Use when the user wants to capture learnings from a campaign.
+13. `list_knowledge`: Show all active knowledge entries synthesized from planning iterations.
+14. `clear_knowledge`: Remove active knowledge entries.
+15. `graduate_to_skill`: Convert a knowledge entry into a reusable domain skill (.md file) that is automatically applied to future plans.
+16. `update_skill`: Update a graduated skill with new knowledge entries.
+
 **FILE PATH RULES:**
 Assume user runs agent from project directory. For example, when user says "file.csv in data", use "./data/file.csv"
 
@@ -542,6 +549,11 @@ class PlanningOrchestratorAgent:
         self._external_tools: List[Dict[str, str]] = []
         self._mcp_connections: Dict[str, Any] = {}
 
+        # Knowledge synthesis state (mirrors AnalysisOrchestratorAgent)
+        self.active_knowledge: List[Dict[str, Any]] = []
+        self._custom_skills: Dict[str, str] = {}  # name → path
+        self._graduated_skill_sources: Dict[str, list] = {}  # skill_name → [knowledge_ids]
+
         self.message_count = 0
         self.last_checkpoint_message_count = 0
         
@@ -683,6 +695,30 @@ class PlanningOrchestratorAgent:
     def get_human_feedback_setting(self) -> bool:
         """Returns current human feedback setting for sub-agents."""
         return self._enable_human_feedback
+
+    # ── Skill registration ─────────────────────────────────────────────
+
+    def register_skill(self, skill_path: str) -> str:
+        """Register a graduated skill for use in subsequent plan generation.
+
+        Args:
+            skill_path: Path to the skill ``.md`` file.
+
+        Returns:
+            The skill name (file stem).
+        """
+        path = Path(skill_path).resolve()
+        if not path.exists():
+            raise FileNotFoundError(f"Skill file not found: {path}")
+
+        name = path.stem
+        self._custom_skills[name] = str(path)
+
+        # Make it the active skill for subsequent generate_initial_plan calls
+        self._active_skill = str(path)
+
+        logging.info(f"📖 Registered planning skill: {name} → {path}")
+        return name
 
     # ── Custom tools ──────────────────────────────────────────────────
 
@@ -961,7 +997,15 @@ class PlanningOrchestratorAgent:
                 self.knowledge_dir = Path(state["knowledge_dir"])
             if "code_dir" in state and state["code_dir"]:
                 self.code_dir = Path(state["code_dir"])
-            
+
+            # Restore knowledge/skill state
+            self.active_knowledge = state.get("active_knowledge", [])
+            self._graduated_skill_sources = state.get("graduated_skill_sources", {})
+            restored_skills = state.get("custom_skills", {})
+            for skill_name, skill_path in restored_skills.items():
+                if Path(skill_path).exists():
+                    self._custom_skills[skill_name] = skill_path
+
             print(f"    ✅ Restored state:")
             print(f"       - Analysis script: {Path(self.active_scalarizer_script).name if self.active_scalarizer_script else 'None'}")
             print(f"       - Schema: {self.expected_input_columns} → {self.expected_target_columns}")
@@ -1043,6 +1087,9 @@ class PlanningOrchestratorAgent:
                 "data_dir": str(self.data_dir) if self.data_dir else None,
                 "knowledge_dir": str(self.knowledge_dir) if self.knowledge_dir else None,
                 "code_dir": str(self.code_dir) if self.code_dir else None,
+                "active_knowledge": self.active_knowledge,
+                "graduated_skill_sources": self._graduated_skill_sources,
+                "custom_skills": self._custom_skills,
             }
             
             with open(self.checkpoint_path, 'w') as f:

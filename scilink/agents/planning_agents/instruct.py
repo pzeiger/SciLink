@@ -652,3 +652,64 @@ You will be given:
 OR 
 { "status": "fail", "feedback": "The baseline correction failed; plot shows slope." }
 """
+
+PLANNING_KNOWLEDGE_TO_SKILL_INSTRUCTIONS = """You are an expert scientific research strategist. \
+You need to convert accumulated knowledge into a structured, reusable skill document for experimental planning.
+
+**Skill Name:** {skill_name}
+**Domain:** {domain}
+
+**Source Knowledge:**
+{knowledge_text}
+
+**Source Planning Details:**
+{planning_details}
+
+**Instructions:**
+Organize the knowledge into exactly five sections. Each section should contain actionable, \
+specific guidance derived from the source knowledge. Use markdown formatting.
+
+## overview
+Describe what domain/technique this skill covers, what types of experiments it applies to, \
+and when to use it.
+
+## planning
+List strategy constraints, recommended parameter ranges, protocols, safety rules, \
+and setup considerations. Include any user-specified corrections or preferences.
+
+## implementation
+Describe experimental protocols, equipment configurations, code patterns, or processing \
+steps that have proven effective. Include specific parameter values that worked.
+
+## interpretation
+Provide reference values, expected ranges, success criteria, and how to interpret \
+experimental outcomes. Include quantitative benchmarks from the key findings.
+
+## validation
+Define quality criteria, acceptable tolerance ranges, failure indicators, and sanity checks. \
+Include any corrections from user feedback.
+
+Output ONLY the skill document content in markdown, starting with `## overview`. \
+Do not wrap in code blocks."""
+
+PLANNING_SKILL_UPDATE_INSTRUCTIONS = """You are an expert scientific research strategist. \
+You need to update an existing skill document with new knowledge while preserving what is already correct.
+
+**Skill Name:** {skill_name}
+
+**Existing Skill Content:**
+{existing_skill}
+
+**New Knowledge to Incorporate:**
+{new_knowledge}
+
+**Instructions:**
+1. Review the existing skill content carefully.
+2. Integrate the new findings into the appropriate sections.
+3. Do NOT remove existing content unless the new knowledge explicitly contradicts it.
+4. When there is a conflict, prefer the newer knowledge but note the discrepancy.
+5. Maintain the five-section structure (overview, planning, implementation, interpretation, validation).
+6. Add new quantitative details, parameter ranges, or heuristics from the new knowledge.
+
+Output ONLY the updated skill document content in markdown, starting with `## overview`. \
+Do not wrap in code blocks."""
