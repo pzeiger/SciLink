@@ -143,26 +143,41 @@ def run_spectral_unmixing(
 
 def create_energy_axis(n_channels: int, system_info: dict = None) -> tuple[np.ndarray, str, bool]:
     """
-    Create energy axis from system_info if available, otherwise use channel indices.
+    Create energy axis from system_info.
+
+    Raises ValueError when energy_range is missing, None, or incomplete
+    because a physical energy axis is required for meaningful hyperspectral
+    analysis.
     """
-    if system_info and "energy_range" in system_info:
-        energy_info = system_info["energy_range"]
-        
-        if "start" in energy_info and "end" in energy_info:
-            start = energy_info["start"]
-            end = energy_info["end"]
-            units = energy_info.get("units", "eV")
-            
-            energy_axis = np.linspace(start, end, n_channels)
-            xlabel = f"Energy ({units})"
-            has_energy_info = True
-            return energy_axis, xlabel, has_energy_info
-            
-    # Fallback: channel indices
-    energy_axis = np.arange(n_channels)
-    xlabel = "Channel"
-    has_energy_info = False
-    return energy_axis, xlabel, has_energy_info
+    if not system_info or "energy_range" not in system_info:
+        raise ValueError(
+            "Energy axis information is required for hyperspectral analysis. "
+            "Metadata must include 'energy_range' with 'start' and 'end' values "
+            "(and optionally 'units')."
+        )
+
+    energy_info = system_info["energy_range"]
+
+    if not energy_info or not isinstance(energy_info, dict):
+        raise ValueError(
+            "energy_range in metadata is empty or invalid. "
+            "It must be a dict with 'start' and 'end' keys "
+            "(e.g. {\"start\": 0, \"end\": 50, \"units\": \"eV\"})."
+        )
+
+    if "start" not in energy_info or "end" not in energy_info:
+        raise ValueError(
+            f"energy_range is incomplete: {energy_info}. "
+            "Both 'start' and 'end' are required."
+        )
+
+    start = energy_info["start"]
+    end = energy_info["end"]
+    units = energy_info.get("units", "eV")
+
+    energy_axis = np.linspace(start, end, n_channels)
+    xlabel = f"Energy ({units})"
+    return energy_axis, xlabel, True
 
 
 def convert_energy_to_indices(
@@ -1066,9 +1081,7 @@ def apply_spectral_slice(
     Slices hyperspectral data based on an energy range.
     Uses the *original* data as the base and returns an updated system_info.
     """
-    energy_axis, _, has_info = create_energy_axis(original_hspy_data.shape[2], system_info)
-    if not has_info:
-        raise ValueError("Cannot apply spectral slice: No energy axis information found in metadata.")
+    energy_axis, _, _ = create_energy_axis(original_hspy_data.shape[2], system_info)
         
     if energy_range is None or len(energy_range) != 2:
         raise ValueError(f"Invalid energy_range: {energy_range}")

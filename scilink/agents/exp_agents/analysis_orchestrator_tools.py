@@ -2590,7 +2590,15 @@ class AnalysisOrchestratorTools:
                     "status": "error",
                     "message": "No metadata loaded. Use load_metadata or convert_metadata first."
                 })
-            
+
+            # Treat empty/whitespace-only instruction as clearing custom preprocessing
+            if not instruction or not instruction.strip():
+                self.orch.current_metadata.pop("custom_processing_instruction", None)
+                return json.dumps({
+                    "status": "success",
+                    "message": "Custom preprocessing instruction cleared (empty instruction)."
+                })
+
             existing = self.orch.current_metadata.get("custom_processing_instruction")
 
             # Conflict detection
