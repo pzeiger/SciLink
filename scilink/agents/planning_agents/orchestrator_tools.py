@@ -98,7 +98,7 @@ class OrchestratorTools:
     def _parse_result_input(self, result_data: str):
         """
         Helper to parse result_data into appropriate format.
-        
+
         Returns:
             - String (text input)
             - String (single file path)
@@ -106,35 +106,30 @@ class OrchestratorTools:
         """
         if len(result_data) < 500:  # Reasonable path length
             try:
-                # Check if it's a single file path
-                path = Path(result_data.strip())
-                if path.exists() and path.is_file():
-                    print(f"    (Detected file path: {path.name})")
-                    return str(path)
-                
                 # Check if it's comma-separated file paths
                 if ',' in result_data:
                     paths = [p.strip() for p in result_data.split(',')]
                     valid_paths = []
                     for p in paths:
-                        p_obj = Path(p)
-                        if p_obj.exists():
-                            valid_paths.append(p)
-                    
+                        resolved, error = self._resolve_data_path(p)
+                        if not error:
+                            valid_paths.append(resolved)
+
                     if valid_paths:
                         print(f"    (Detected {len(valid_paths)} file paths)")
                         return valid_paths
-                    else:
-                        # Treat as text if no valid paths found
-                        text_preview = result_data[:100] + "..." if len(result_data) > 100 else result_data
-                        print(f"    (Processing as text: '{text_preview}')")
-                        return result_data
-                else:
-                    # Not a valid path - treat as text
-                    text_preview = result_data[:100] + "..." if len(result_data) > 100 else result_data
-                    print(f"    (Processing text input: '{text_preview}')")
-                    return result_data
-                    
+
+                # Check if it's a single file path (try session-aware resolution)
+                resolved, error = self._resolve_data_path(result_data.strip())
+                if not error and Path(resolved).is_file():
+                    print(f"    (Detected file path: {Path(resolved).name})")
+                    return str(resolved)
+
+                # Not a valid path - treat as text
+                text_preview = result_data[:100] + "..." if len(result_data) > 100 else result_data
+                print(f"    (Processing text input: '{text_preview}')")
+                return result_data
+
             except (OSError, ValueError, RuntimeError):
                 # Not a valid path - treat as text
                 text_preview = result_data[:100] + "..." if len(result_data) > 100 else result_data
@@ -146,6 +141,52 @@ class OrchestratorTools:
             print(f"    (Processing text input: '{text_preview}')")
             return result_data
         
+    def _collect_scalarizer_context(self, payload) -> list:
+        """Collect scalarizer metrics and plot for files that were already analyzed.
+
+        Checks whether any file path in *payload* has a corresponding entry in
+        ``self.orch.analyzed_files``.  If so, appends:
+        - The computed metrics from ``optimization_data.csv`` as a text summary
+        - The scalarizer debug plot image path (if it exists)
+
+        Returns a list of extra items to append to the refinement payload
+        (may be empty).
+        """
+        paths = payload if isinstance(payload, list) else [payload]
+        extras = []
+        seen_bo = False
+
+        for item in paths:
+            if not isinstance(item, str):
+                continue
+
+            abs_path = str(Path(item).resolve())
+            if abs_path not in self.orch.analyzed_files:
+                continue
+
+            # Append computed metrics from optimization_data.csv (once)
+            if not seen_bo and self.orch.bo_data_path.exists():
+                try:
+                    df = pd.read_csv(self.orch.bo_data_path)
+                    summary = (
+                        f"SCALARIZER ANALYSIS RESULTS (computed metrics):\n"
+                        f"{df.to_string(index=False)}"
+                    )
+                    extras.append(summary)
+                    seen_bo = True
+                    print(f"    📊 Attached scalarizer metrics ({len(df)} rows)")
+                except Exception:
+                    pass
+
+            # Append debug plot if it exists
+            stem = Path(item).stem
+            plot_path = self.orch.base_dir / "scalarizer_outputs" / f"debug_{stem}.png"
+            if plot_path.exists():
+                extras.append(str(plot_path))
+                print(f"    📈 Attached scalarizer plot: {plot_path.name}")
+
+        return extras
+
     def _resolve_knowledge_paths(self, knowledge_paths: str | None) -> list[str] | None:
         """Resolve knowledge paths with fallback to orchestrator's knowledge_dir.
 
@@ -822,10 +863,18 @@ class OrchestratorTools:
             - Comma-separated files: "./data.csv,./plot.png"
             """
             print(f"  ⚡ Tool: Refining Plan based on Results...")
-            
+
             # Parse input - handle both single paths and comma-separated lists
             payload = self._parse_result_input(result_data)
-            
+
+            # Enrich with scalarizer metrics and plot if the file was already analyzed
+            extras = self._collect_scalarizer_context(payload)
+            if extras:
+                if isinstance(payload, list):
+                    payload.extend(extras)
+                else:
+                    payload = [payload] + extras
+
             try:
                 plan = self.orch.planner.refine_plan(
                     results=payload,
