@@ -337,10 +337,6 @@ Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions
 15. `graduate_to_skill`: Convert knowledge into a reusable domain skill (.md file) applied to future plans.
 16. `update_skill`: Update a graduated skill with new knowledge.
 
-After multiple plan refinement cycles, consider suggesting knowledge synthesis so learnings
-can be reused in future campaigns. If `synthesize_knowledge` returns `skill_update_suggested`,
-mention it to the user.
-
 **FILE PATH RULES:**
 Assume user runs agent from project directory. For example, when user says "file.csv in data", use "./data/file.csv"
 
