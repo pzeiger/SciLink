@@ -331,11 +331,15 @@ Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions
 11. `save_checkpoint`: Save campaign state. Use after every 3-5 experiments.
 
 **KNOWLEDGE & SKILL TOOLS:**
-12. `synthesize_knowledge`: Distill findings from completed planning iterations into reusable knowledge. Use when the user wants to capture learnings from a campaign.
-13. `list_knowledge`: Show all active knowledge entries synthesized from planning iterations.
+12. `synthesize_knowledge`: Distill findings from completed planning iterations into reusable knowledge.
+13. `list_knowledge`: Show all active knowledge entries.
 14. `clear_knowledge`: Remove active knowledge entries.
-15. `graduate_to_skill`: Convert a knowledge entry into a reusable domain skill (.md file) that is automatically applied to future plans.
-16. `update_skill`: Update a graduated skill with new knowledge entries.
+15. `graduate_to_skill`: Convert knowledge into a reusable domain skill (.md file) applied to future plans.
+16. `update_skill`: Update a graduated skill with new knowledge.
+
+After multiple plan refinement cycles, consider suggesting knowledge synthesis so learnings
+can be reused in future campaigns. If `synthesize_knowledge` returns `skill_update_suggested`,
+mention it to the user.
 
 **FILE PATH RULES:**
 Assume user runs agent from project directory. For example, when user says "file.csv in data", use "./data/file.csv"
