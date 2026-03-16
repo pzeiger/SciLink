@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import pandas as pd
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -577,6 +578,26 @@ class PlanningOrchestratorAgent:
         if self.knowledge_dir:
             planner_kwargs["kb_base_path"] = str(self.knowledge_dir / "default_kb")
         self.planner = PlanningAgent(**planner_kwargs)
+
+        # Literature & Molecules agents (orchestrator-level tools)
+        self.lit_agent = None
+        self.mol_agent = None
+        if futurehouse_api_key or os.getenv("FUTUREHOUSE_API_KEY"):
+            from ..lit_agents.literature_agent import LiteratureSearchAgent
+            from ..lit_agents.molecules_agent import MoleculesAgent
+            from ..lit_agents.optimize_query import optimize_search_query
+            fh_key = futurehouse_api_key or os.getenv("FUTUREHOUSE_API_KEY")
+            try:
+                self.lit_agent = LiteratureSearchAgent(fh_key, max_wait_time=3000)
+                logging.info("✅ Orchestrator: Literature Search Agent initialized.")
+            except Exception as e:
+                logging.warning(f"⚠️ Failed to initialize Literature Agent: {e}")
+            try:
+                self.mol_agent = MoleculesAgent(fh_key, max_wait_time=3000)
+                logging.info("✅ Orchestrator: Molecules Agent initialized.")
+            except Exception as e:
+                logging.warning(f"⚠️ Failed to initialize Molecules Agent: {e}")
+
         self.scalarizer = ScalarizerAgent(
             api_key=api_key,
             model_name=model_name,

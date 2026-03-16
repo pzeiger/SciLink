@@ -19,6 +19,7 @@ def _natural_sort_key(s):
 
 from .parser_utils import write_experiments_to_disk
 from .instruct import BO_OBJECTIVE_DISTILL_PROMPT
+from ..lit_agents.optimize_query import optimize_search_query, is_molecule_design_objective
 
 
 class OrchestratorTools:
@@ -364,13 +365,158 @@ class OrchestratorTools:
             parameters={}
         )
         
+        # --- LITERATURE SEARCH TOOL ---
+        def search_literature(objective: str, search_type: str = "hypothesis_context"):
+            """
+            Searches scientific literature using the FutureHouse Edison API.
+            Call this BEFORE generate_initial_plan to enrich the plan with
+            external literature context.
+            """
+            if not self.orch.lit_agent:
+                return json.dumps({
+                    "status": "error",
+                    "message": "Literature search not available (no FutureHouse API key configured)"
+                })
+
+            valid_types = ("hypothesis_context", "economic_data", "fitting_models")
+            if search_type not in valid_types:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Invalid search_type '{search_type}'. Must be one of: {', '.join(valid_types)}"
+                })
+
+            print(f"  ⚡ Tool: Searching literature ({search_type}) for '{objective[:80]}...'")
+
+            try:
+                clean_query = optimize_search_query(
+                    objective=objective, model=self.orch.planner.model
+                )
+
+                search_methods = {
+                    "hypothesis_context": self.orch.lit_agent.search_for_hypothesis_context,
+                    "economic_data": self.orch.lit_agent.search_for_economic_data,
+                    "fitting_models": self.orch.lit_agent.search_for_fitting_models,
+                }
+                lit_res = search_methods[search_type](clean_query)
+
+                if lit_res['status'] != 'success':
+                    return json.dumps({
+                        "status": lit_res['status'],
+                        "message": lit_res.get('message', 'Literature search did not succeed')
+                    })
+
+                # Save to file
+                lit_path = self.orch.base_dir / "literature_search.md"
+                with open(lit_path, 'w') as f:
+                    f.write("# Literature Search Results\n\n")
+                    f.write(lit_res['content'])
+
+                print(f"  ✅ Literature search completed. Saved to {lit_path.name}")
+
+                return json.dumps({
+                    "status": "success",
+                    "file_path": str(lit_path),
+                    "content_preview": lit_res['content'][:500] + "..." if len(lit_res['content']) > 500 else lit_res['content'],
+                    "hint": "Pass file_path as literature_context to generate_initial_plan()"
+                })
+
+            except Exception as e:
+                logging.error(f"Literature search error: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=search_literature,
+            name="search_literature",
+            description=(
+                "Searches scientific literature via FutureHouse Edison API. "
+                "Call BEFORE generate_initial_plan() to enrich the plan with external context. "
+                "Pass the returned file_path as literature_context to generate_initial_plan()."
+            ),
+            parameters={
+                "objective": {"type": "string", "description": "Research objective or question to search for"},
+                "search_type": {
+                    "type": "string",
+                    "description": "Type of search: 'hypothesis_context' (default, for planning), 'economic_data' (for TEA), or 'fitting_models' (for curve fitting)",
+                    "enum": ["hypothesis_context", "economic_data", "fitting_models"]
+                }
+            },
+            required=["objective"]
+        )
+
+        # --- MOLECULES QUERY TOOL ---
+        def query_molecules(objective: str):
+            """
+            Queries the FutureHouse Molecules agent for molecular design,
+            synthesis planning, or cheminformatics tasks.
+            Call this BEFORE generate_initial_plan() when the objective
+            involves molecular design or discovery.
+            """
+            if not self.orch.mol_agent:
+                return json.dumps({
+                    "status": "error",
+                    "message": "Molecules agent not available (no FutureHouse API key configured)"
+                })
+
+            # Guard: only proceed for genuine molecule design objectives
+            if not is_molecule_design_objective(objective, self.orch.planner.model):
+                return json.dumps({
+                    "status": "skipped",
+                    "message": "Objective does not appear to involve molecular design or synthesis planning. Skipping molecules query."
+                })
+
+            print(f"  ⚡ Tool: Querying MOLECULES agent for '{objective[:80]}...'")
+
+            try:
+                mol_res = self.orch.mol_agent.query(objective)
+
+                if mol_res['status'] != 'success':
+                    return json.dumps({
+                        "status": mol_res['status'],
+                        "message": mol_res.get('message', 'Molecules query did not succeed')
+                    })
+
+                # Save to file
+                mol_path = self.orch.base_dir / "molecule_design.md"
+                with open(mol_path, 'w') as f:
+                    f.write("# Molecular Design & Synthesis Planning Results\n\n")
+                    f.write(mol_res['content'])
+
+                print(f"  ✅ Molecules query completed. Saved to {mol_path.name}")
+
+                return json.dumps({
+                    "status": "success",
+                    "file_path": str(mol_path),
+                    "content_preview": mol_res['content'][:500] + "..." if len(mol_res['content']) > 500 else mol_res['content'],
+                    "hint": "Pass file_path as molecule_context to generate_initial_plan()"
+                })
+
+            except Exception as e:
+                logging.error(f"Molecules query error: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=query_molecules,
+            name="query_molecules",
+            description=(
+                "Queries the FutureHouse Molecules agent for molecular design, synthesis planning, "
+                "or cheminformatics. Call BEFORE generate_initial_plan() when the objective involves "
+                "molecule design or discovery. Pass the returned file_path as molecule_context."
+            ),
+            parameters={
+                "objective": {"type": "string", "description": "Molecular design or synthesis objective"}
+            },
+            required=["objective"]
+        )
+
         # 1. GENERATE INITIAL PLAN
         def generate_initial_plan(
             specific_objective: str = None,
             knowledge_paths: str = None,
             primary_data_set: str = None,
             additional_context: str = None,
-            skill: str = None
+            skill: str = None,
+            literature_context: str = None,
+            molecule_context: str = None
         ):
             """
             Generates experimental plan (science strategy only, no code).
@@ -459,8 +605,35 @@ class OrchestratorTools:
             # Resolve skill: use provided value or fall back to orchestrator's active skill
             effective_skill = skill or getattr(self.orch, '_active_skill', None)
 
+            # Build external_context from literature/molecule files or raw text
+            external_context_parts = []
+            saved_extras = []
+            if literature_context:
+                lp = Path(literature_context)
+                if lp.is_file():
+                    lit_text = lp.read_text()
+                    external_context_parts.append(lit_text)
+                    saved_extras.append(str(lp))
+                    print(f"    📚 Literature context from: {lp.name}")
+                else:
+                    external_context_parts.append(literature_context)
+            if molecule_context:
+                mp = Path(molecule_context)
+                if mp.is_file():
+                    mol_text = mp.read_text()
+                    external_context_parts.append(
+                        "## Molecular Design & Synthesis Planning\n" + mol_text
+                    )
+                    saved_extras.append(str(mp))
+                    print(f"    🧪 Molecule context from: {mp.name}")
+                else:
+                    external_context_parts.append(
+                        "## Molecular Design & Synthesis Planning\n" + molecule_context
+                    )
+
+            ext_ctx = "\n\n".join(external_context_parts) if external_context_parts else None
+
             try:
-                # Call the new generate_plan method (not propose_experiments!)
                 plan = self.orch.planner.generate_plan(
                     objective=obj,
                     knowledge_paths=knowledge_list,
@@ -468,38 +641,32 @@ class OrchestratorTools:
                     additional_context=context_dict,
                     enable_human_feedback=self._get_human_feedback_enabled(),
                     reset_state=False,
-                    skill=effective_skill
+                    skill=effective_skill,
+                    external_context=ext_ctx
                 )
 
                 # Store skill on orchestrator for downstream tools
                 if effective_skill:
                     self.orch._active_skill = effective_skill
-                
+
                 if plan.get("error"):
                     return json.dumps({
                         "status": "error",
                         "message": plan.get("error")
                     })
-                
+
                 # Save
                 output_path = self.orch.base_dir / "plan.json"
                 with open(output_path, 'w') as f:
                     json.dump(plan, f, indent=2)
 
-                # Save literature and molecule design results as separate files
-                saved_extras = []
-                if plan.get("literature_search"):
+                # If literature came from the deprecated internal path, save it
+                if not literature_context and plan.get("literature_search"):
                     lit_path = self.orch.base_dir / "literature_search.md"
                     with open(lit_path, 'w') as f:
                         f.write("# Literature Search Results\n\n")
                         f.write(plan["literature_search"])
                     saved_extras.append(str(lit_path))
-                if plan.get("molecule_design"):
-                    mol_path = self.orch.base_dir / "molecule_design.md"
-                    with open(mol_path, 'w') as f:
-                        f.write("# Molecular Design & Synthesis Planning Results\n\n")
-                        f.write(plan["molecule_design"])
-                    saved_extras.append(str(mol_path))
 
                 # Generate HTML
                 from .html_generator import HTMLReportGenerator
@@ -545,7 +712,9 @@ class OrchestratorTools:
                 "knowledge_paths": {"type": "string", "description": "Comma-separated paths to papers/reports/docs folders"},
                 "primary_data_set": {"type": "string", "description": "Path to experimental data file or folder"},
                 "additional_context": {"type": "string", "description": "Lab constraints, equipment, reagents, budget, etc."},
-                "skill": {"type": "string", "description": "Domain skill name or path to custom .md skill file"}
+                "skill": {"type": "string", "description": "Domain skill name or path to custom .md skill file"},
+                "literature_context": {"type": "string", "description": "File path or text from search_literature() tool. Provides external scientific literature context."},
+                "molecule_context": {"type": "string", "description": "File path or text from query_molecules() tool. Provides molecular design / synthesis context."}
             },
             required=[]
         )
@@ -723,7 +892,8 @@ class OrchestratorTools:
             focus_topic: str = None,
             knowledge_paths: str = None,
             primary_data_set: str = None,
-            additional_context: str = None
+            additional_context: str = None,
+            literature_context: str = None
         ):
             """Performs Technoeconomic Analysis (TEA)."""
             obj = focus_topic if focus_topic else self.orch.objective
@@ -780,11 +950,18 @@ class OrchestratorTools:
                         })
             
             try:
+                # Resolve literature context
+                ext_ctx = None
+                if literature_context:
+                    lp = Path(literature_context)
+                    ext_ctx = lp.read_text() if lp.is_file() else literature_context
+
                 res = self.orch.planner.perform_technoeconomic_analysis(
                     objective=obj,
                     knowledge_paths=knowledge_list,
                     primary_data_set=primary_dataset,
-                    output_json_path=str(self.orch.base_dir / "tea_analysis.json")
+                    output_json_path=str(self.orch.base_dir / "tea_analysis.json"),
+                    external_context=ext_ctx
                 )
                 
                 if res.get("error"):
@@ -841,22 +1018,31 @@ class OrchestratorTools:
                 "additional_context": {
                     "type": "string",
                     "description": "Any other relevant context (constraints, requirements, etc.)"
+                },
+                "literature_context": {
+                    "type": "string",
+                    "description": "File path or text from search_literature(search_type='economic_data'). Provides external economic literature context."
                 }
             },
             required=[]
         )
-        
+
         # 4. REFINE PLAN (based on results)
-        def refine_plan_with_results(result_data: str, use_literature_rag: bool = False):
+        def refine_plan_with_results(
+            result_data: str,
+            use_literature_rag: bool = False,
+            literature_context: str = None,
+            molecule_context: str = None
+        ):
             """
             Refines the experimental plan (science strategy only) based on results.
-            
+
             Use this for:
             - Strategic pivots or failures
-            - Qualitative observations  
+            - Qualitative observations
             - Visual analysis of plots/images
             - When experiments didn't go as expected
-            
+
             Supports multiple input formats:
             - Text: "Yield was 12%, precipitation observed"
             - File path: "./data.csv" or "./plot.png"
@@ -875,11 +1061,25 @@ class OrchestratorTools:
                 else:
                     payload = [payload] + extras
 
+            # Build external context from literature/molecule files or raw text
+            ext_parts = []
+            if literature_context:
+                lp = Path(literature_context)
+                ext_parts.append(lp.read_text() if lp.is_file() else literature_context)
+                print(f"    📚 Literature context provided")
+            if molecule_context:
+                mp = Path(molecule_context)
+                mol_text = mp.read_text() if mp.is_file() else molecule_context
+                ext_parts.append("## Molecular Design & Synthesis Planning\n" + mol_text)
+                print(f"    🧪 Molecule context provided")
+            ext_ctx = "\n\n".join(ext_parts) if ext_parts else None
+
             try:
                 plan = self.orch.planner.refine_plan(
                     results=payload,
                     enable_human_feedback=self._get_human_feedback_enabled(),
-                    use_literature_rag=use_literature_rag
+                    use_literature_rag=use_literature_rag,
+                    external_context=ext_ctx
                 )
                 
                 if plan.get("error"):
@@ -930,8 +1130,16 @@ class OrchestratorTools:
                     "description": "Experimental results (text, file path, or comma-separated files)"
                 },
                 "use_literature_rag": {
-                    "type": "boolean", 
-                    "description": "Search knowledge base for relevant literature context. Default: false."
+                    "type": "boolean",
+                    "description": "Search local knowledge base for relevant context. Default: false."
+                },
+                "literature_context": {
+                    "type": "string",
+                    "description": "File path or text from search_literature() tool. Provides external scientific literature context for refinement."
+                },
+                "molecule_context": {
+                    "type": "string",
+                    "description": "File path or text from query_molecules() tool. Provides molecular design / synthesis context for refinement."
                 }
             },
             required=["result_data"]

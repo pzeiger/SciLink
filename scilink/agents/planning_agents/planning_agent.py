@@ -30,9 +30,10 @@ from ._deprecation import normalize_params
 from .base_agent import BaseAgent
 from .knowledge_base import KnowledgeBase
 
+import warnings
+
 from ..lit_agents.literature_agent import LiteratureSearchAgent
-from ..lit_agents.molecules_agent import MoleculesAgent
-from ..lit_agents.optimize_query import optimize_search_query, is_molecule_design_objective
+from ..lit_agents.optimize_query import optimize_search_query
 
 from .rag_engine import (
     perform_science_rag,
@@ -158,21 +159,16 @@ class PlanningAgent(BaseAgent):
         self._api_key = api_key
         self.generation_config = None
 
+        # Literature agent (deprecated — prefer orchestrator's search_literature tool)
         self.lit_agent = None
-        self.mol_agent = None
         if futurehouse_api_key or os.getenv("FUTUREHOUSE_API_KEY"):
             try:
                 self.lit_agent = LiteratureSearchAgent(futurehouse_api_key, max_wait_time=3000)
-                logging.info("✅ Literature Search Agent initialized.")
+                logging.info("✅ Literature Search Agent initialized (deprecated fallback).")
             except Exception as e:
                 logging.warning(f"⚠️ Failed to initialize Literature Agent: {e}")
-            try:
-                self.mol_agent = MoleculesAgent(futurehouse_api_key, max_wait_time=3000)
-                logging.info("✅ Molecules Agent initialized.")
-            except Exception as e:
-                logging.warning(f"⚠️ Failed to initialize Molecules Agent: {e}")
         else:
-            logging.info("ℹ️ No FutureHouse API key provided. Literature search and molecule design will be skipped.")
+            logging.info("ℹ️ No FutureHouse API key provided. Literature search will be skipped.")
                     
         # --- Dual KnowledgeBase Initialization ---
         base_path = Path(kb_base_path)
@@ -411,7 +407,8 @@ class PlanningAgent(BaseAgent):
                     image_descriptions: Optional[List[str]] = None,
                     enable_human_feedback: bool = True,
                     reset_state: bool = False,
-                    skill: Optional[str] = None) -> Dict[str, Any]:
+                    skill: Optional[str] = None,
+                    external_context: Optional[str] = None) -> Dict[str, Any]:
         """
         Generate experimental plan (science only, no implementation code/protocol).
 
@@ -440,6 +437,9 @@ class PlanningAgent(BaseAgent):
                 hypothesis generation. Defaults to True.
             reset_state: If True, clears existing state and starts fresh.
                 If False, appends to the current research session.
+            external_context: Pre-fetched external context (e.g. from
+                orchestrator's search_literature/query_molecules tools).
+                When provided, skips internal literature search.
 
         Returns:
             Dict containing the experimental plan with keys:
@@ -507,38 +507,23 @@ class PlanningAgent(BaseAgent):
                 ctx_string += f"## {header}\n{content}\n\n"
             ctx_string = ctx_string.strip() if ctx_string else None
         
-        # Literature search
-        lit_context = ""
-        if self.lit_agent:
-            print(f"  - 🌍 Querying literature...")
+        # External context: prefer caller-provided, fall back to deprecated internal lit search
+        if not external_context and self.lit_agent:
+            warnings.warn(
+                "Internal literature search in PlanningAgent is deprecated. "
+                "Use the orchestrator's search_literature() tool instead.",
+                DeprecationWarning, stacklevel=2
+            )
+            print(f"  - 🌍 Querying literature (deprecated internal path)...")
             lit_res = self.lit_agent.search_for_hypothesis_context(
                 optimize_search_query(objective=objective, model=self.model)
             )
             if lit_res['status'] == 'success':
-                lit_context = lit_res['content']
+                external_context = lit_res['content']
                 print(f"  - ✅ Literature search completed.")
             else:
                 print(f"  - ⚠️ Literature search {lit_res['status']}: {lit_res.get('message', '')}")
-
-        # Molecule design (only if objective involves molecular design/synthesis)
-        mol_context = ""
-        if self.mol_agent and is_molecule_design_objective(objective, self.model):
-            print(f"  - 🧪 Querying MOLECULES agent for synthesis/design...")
-            mol_res = self.mol_agent.query(objective)
-            if mol_res['status'] == 'success':
-                mol_context = mol_res['content']
-                print(f"  - ✅ MOLECULES query completed.")
-            else:
-                print(f"  - ⚠️ MOLECULES query {mol_res['status']}: {mol_res.get('message', '')}")
-
-        # Combine external contexts
-        external_context = ""
-        if lit_context:
-            external_context += lit_context
-        if mol_context:
-            if external_context:
-                external_context += "\n\n"
-            external_context += "## Molecular Design & Synthesis Planning\n" + mol_context
+                external_context = ""
 
         # Build skill context for plan generation
         skill_planning_context = self._build_skill_context("planning")
@@ -560,10 +545,8 @@ class PlanningAgent(BaseAgent):
             skill_context=skill_planning_context
         )
 
-        if lit_context:
-            res["literature_search"] = lit_context
-        if mol_context:
-            res["molecule_design"] = mol_context
+        if external_context:
+            res["literature_search"] = external_context
 
         self._log_action(
             action="perform_science_rag",
@@ -571,8 +554,7 @@ class PlanningAgent(BaseAgent):
                 "objective": objective,
                 "knowledge_paths": knowledge_paths,
                 "has_primary_data": primary_data_set is not None,
-                "has_literature": bool(lit_context),
-                "has_molecule_design": bool(mol_context)
+                "has_external_context": bool(external_context)
             },
             result=res,
             rationale=res.get("proposed_experiments", [{}])[0].get("justification") if res.get("proposed_experiments") else None
@@ -949,17 +931,21 @@ class PlanningAgent(BaseAgent):
                     results: Any,
                     enable_human_feedback: bool = True,
                     state_file_path: Optional[str] = None,
-                    use_literature_rag: bool = False) -> Dict[str, Any]:
+                    use_literature_rag: bool = False,
+                    external_context: Optional[str] = None) -> Dict[str, Any]:
         """
         Refines the experimental plan (science strategy only) based on new results.
-        
+
         Args:
             results: Experimental outcomes (text, dict, file path, or list of files/images)
             enable_human_feedback: If True, pauses for strategy review
             state_file_path: Optional path to restore state from checkpoint
-            use_literature_rag: If True, searches knowledge base for context relevant 
+            use_literature_rag: If True, searches knowledge base for context relevant
                            to the results. Defaults to False for faster iteration.
-            
+            external_context: Pre-fetched external context (e.g. from
+                orchestrator's search_literature/query_molecules tools).
+                Merged with any local KB hits from use_literature_rag.
+
         Returns:
             Dict with refined plan (proposed_experiments)
         """
@@ -1010,23 +996,31 @@ Select the most appropriate strategy:
 5. **SCIENTIFIC FAILURE:** If hypothesis is disproven, propose new approach.
 """
         
-        # --- 3. RESULT-AWARE RAG ---
-        new_literature_context = None
-        
+        # --- 3. RESULT-AWARE CONTEXT ---
+        context_parts = []
+
+        # External context from orchestrator tools (literature/molecules)
+        if external_context:
+            context_parts.append(external_context)
+            print(f"  - 📚 Using external context ({len(external_context)} chars)")
+
+        # Local KB RAG (optional, additive)
         if use_literature_rag:
             if self.kb_docs.index and self.kb_docs.index.ntotal > 0:
                 search_query = f"Implications and causes of: {consolidated_feedback[:400]}"
-                print(f"  - 🔍 Searching literature for context on results...")
+                print(f"  - 🔍 Searching local KB for context on results...")
                 hits = self.kb_docs.retrieve(search_query, top_k=3)
                 if hits:
-                    new_literature_context = "\n---\n".join([c['text'] for c in hits])
+                    context_parts.append("\n---\n".join([c['text'] for c in hits]))
                     print(f"    -> Found {len(hits)} relevant document chunks.")
                 else:
                     print(f"    -> No relevant documents found.")
             else:
                 print(f"  - ℹ️  Literature RAG requested but no docs KB available.")
-        else:
-            print(f"  - ℹ️  Skipping literature RAG (use_literature_rag=False)")
+        elif not external_context:
+            print(f"  - ℹ️  No external context or literature RAG for refinement")
+
+        new_literature_context = "\n\n".join(context_parts) if context_parts else None
         
         # --- 4. GENERATE REFINED PLAN ---
         if new_literature_context:
@@ -1626,7 +1620,8 @@ Select the most appropriate strategy:
                                         primary_data_set: Optional[Union[str, Dict[str, str]]] = None,
                                         image_paths: Optional[List[str]] = None,
                                         image_descriptions: Optional[List[str]] = None,
-                                        output_json_path: Optional[str] = None) -> Dict[str, Any]:
+                                        output_json_path: Optional[str] = None,
+                                        external_context: Optional[str] = None) -> Dict[str, Any]:
         """
         Performs technoeconomic analysis (TEA) using Dual-KB retrieval.
 
@@ -1742,10 +1737,15 @@ Select the most appropriate strategy:
             )
             return error_result
         
-        # 3. Literature Search
-        lit_context = ""
-        if self.lit_agent:
-            print(f"  - 🌍 Querying literature for TEA context...")
+        # 3. External context: prefer caller-provided, fall back to deprecated internal lit
+        lit_context = external_context or ""
+        if not lit_context and self.lit_agent:
+            warnings.warn(
+                "Internal literature search in PlanningAgent is deprecated. "
+                "Use the orchestrator's search_literature() tool instead.",
+                DeprecationWarning, stacklevel=2
+            )
+            print(f"  - 🌍 Querying literature for TEA context (deprecated internal path)...")
             lit_res = self.lit_agent.search_for_economic_data(
                 optimize_search_query(objective=objective, model=self.model)
             )

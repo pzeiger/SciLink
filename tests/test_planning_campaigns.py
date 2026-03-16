@@ -1038,6 +1038,305 @@ def graduated_skill_contains_data_driven_content():
     return ok, detail
 
 
+# ===== GROUP 9: Literature & Molecules as Orchestrator Tools =====
+
+@_test
+def search_literature_tool_available():
+    """search_literature tool is registered and callable on the orchestrator."""
+    d = _tmp()
+    o = PlanningOrchestratorAgent(**_orch(d))
+    has_tool = "search_literature" in o.tools.functions_map
+    has_schema = any(
+        s["function"]["name"] == "search_literature"
+        for s in o.tools.openai_schemas
+    )
+    shutil.rmtree(d, True)
+    ok = has_tool and has_schema
+    return ok, f"in_functions_map={has_tool}, in_schemas={has_schema}"
+
+
+@_test
+def query_molecules_tool_available():
+    """query_molecules tool is registered and callable on the orchestrator."""
+    d = _tmp()
+    o = PlanningOrchestratorAgent(**_orch(d))
+    has_tool = "query_molecules" in o.tools.functions_map
+    has_schema = any(
+        s["function"]["name"] == "query_molecules"
+        for s in o.tools.openai_schemas
+    )
+    shutil.rmtree(d, True)
+    ok = has_tool and has_schema
+    return ok, f"in_functions_map={has_tool}, in_schemas={has_schema}"
+
+
+@_test
+def generate_plan_accepts_literature_and_molecule_context():
+    """generate_initial_plan schema includes literature_context and molecule_context params."""
+    d = _tmp()
+    o = PlanningOrchestratorAgent(**_orch(d))
+    schema = next(
+        (s for s in o.tools.openai_schemas
+         if s["function"]["name"] == "generate_initial_plan"),
+        None
+    )
+    shutil.rmtree(d, True)
+    props = schema["function"]["parameters"]["properties"] if schema else {}
+    has_lit = "literature_context" in props
+    has_mol = "molecule_context" in props
+    ok = has_lit and has_mol
+    return ok, f"literature_context={has_lit}, molecule_context={has_mol}"
+
+
+@_test
+def generate_plan_with_external_context_skips_internal_lit():
+    """When external_context is provided, PlanningAgent skips internal literature search."""
+    import warnings
+    d = _tmp()
+    o = PlanningOrchestratorAgent(**_orch(d))
+
+    fake_context = "## External Literature\nHCl leaching of NdFeB at 4-6M achieves >90% REE recovery."
+
+    # Call generate_plan directly with external_context
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        plan = o.planner.generate_plan(
+            objective="Recover Nd from NdFeB magnets using HCl leaching",
+            external_context=fake_context,
+            enable_human_feedback=False
+        )
+        # Should NOT emit deprecation warning (external_context was provided)
+        deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)
+                                and "deprecated" in str(x.message).lower()]
+
+    shutil.rmtree(d, True)
+
+    has_plan = plan is not None and plan.get("proposed_experiments") is not None
+    no_deprecation = len(deprecation_warnings) == 0
+    # The external context should flow through to literature_search key
+    has_ext = plan.get("literature_search") == fake_context
+    ok = has_plan and no_deprecation and has_ext
+    return ok, f"has_plan={has_plan}, no_deprecation={no_deprecation}, has_ext={has_ext}"
+
+
+@_test
+def generate_plan_with_literature_file():
+    """generate_initial_plan reads literature_context from file and passes to planner."""
+    d = _tmp()
+    o = PlanningOrchestratorAgent(**_orch(d))
+
+    # Write a fake literature file (simulates search_literature output)
+    lit_path = o.base_dir / "literature_search.md"
+    lit_path.write_text(
+        "# Literature Search Results\n\n"
+        "HCl leaching at 4-6M achieves >90% Nd recovery from NdFeB magnets. "
+        "Temperature above 60C accelerates dissolution but increases Fe co-extraction."
+    )
+
+    result_json = o.tools.execute_tool(
+        "generate_initial_plan",
+        specific_objective="Recover Nd and Dy from NdFeB magnet feedstock via HCl leaching",
+        literature_context=str(lit_path)
+    )
+    result = json.loads(result_json)
+    shutil.rmtree(d, True)
+
+    has_plan = result.get("status") == "success" and result.get("num_experiments", 0) > 0
+    ok = has_plan
+    return ok, f"status={result.get('status')}, experiments={result.get('num_experiments')}"
+
+
+@_test
+def generate_plan_with_molecule_file():
+    """generate_initial_plan reads molecule_context from file and passes to planner."""
+    d = _tmp()
+    o = PlanningOrchestratorAgent(**_orch(d))
+
+    # Write a fake molecules file (simulates query_molecules output)
+    mol_path = o.base_dir / "molecule_design.md"
+    mol_path.write_text(
+        "# Molecular Design Results\n\n"
+        "Suggested MOF linker: 2,5-dihydroxyterephthalic acid with amine functionalization. "
+        "Predicted CO2 uptake: 4.2 mmol/g at 298K, 1 bar."
+    )
+
+    result_json = o.tools.execute_tool(
+        "generate_initial_plan",
+        specific_objective="Synthesize and test novel MOF linkers for CO2 capture",
+        molecule_context=str(mol_path)
+    )
+    result = json.loads(result_json)
+    shutil.rmtree(d, True)
+
+    has_plan = result.get("status") == "success" and result.get("num_experiments", 0) > 0
+    ok = has_plan
+    return ok, f"status={result.get('status')}, experiments={result.get('num_experiments')}"
+
+
+@_test
+def tea_with_literature_context_direct():
+    """run_economic_analysis accepts literature_context param."""
+    d = _tmp()
+    o = PlanningOrchestratorAgent(**_orch(d))
+
+    # Write a fake literature file with economic data
+    lit_path = o.base_dir / "literature_search.md"
+    lit_path.write_text(
+        "# Literature Search Results\n\n"
+        "Global NdFeB magnet recycling market valued at $2.1B (2025). "
+        "Nd spot price ~$120/kg, Dy ~$350/kg. "
+        "HCl leaching + selective precipitation achieves 92% REE purity at $45/kg processing cost."
+    )
+
+    result_json = o.tools.execute_tool(
+        "run_economic_analysis",
+        focus_topic="Economic viability of NdFeB magnet recycling via HCl leaching",
+        literature_context=str(lit_path)
+    )
+    result = json.loads(result_json)
+    shutil.rmtree(d, True)
+
+    ok = result.get("status") == "success"
+    return ok, f"status={result.get('status')}, result_keys={list(result.keys())[:5]}"
+
+
+@_test
+def refine_plan_with_literature_context():
+    """refine_plan_with_results accepts literature_context and passes it to the planner."""
+    d = _tmp()
+    data_dir = d / "data"
+    data_dir.mkdir()
+    _feedstock_csv(data_dir / "feedstock.csv")
+
+    o = PlanningOrchestratorAgent(**_orch(d, data_dir=data_dir))
+
+    # Write a fake literature file to avoid Edison calls during initial plan
+    init_lit = o.base_dir / "init_literature.md"
+    init_lit.write_text("# Literature\n\nHCl leaching at 4-6M recovers >90% Nd from NdFeB.")
+
+    # Generate initial plan (with literature_context to skip deprecated internal path)
+    o.tools.execute_tool(
+        "generate_initial_plan",
+        specific_objective="HCl leaching of NdFeB for Nd recovery",
+        literature_context=str(init_lit)
+    )
+
+    # Write a fake literature file for refinement context
+    lit_path = o.base_dir / "literature_search.md"
+    lit_path.write_text(
+        "# Literature Search Results\n\n"
+        "Recent studies show adding H2O2 as oxidant during HCl leaching "
+        "increases Nd/Fe selectivity by 3x (Zhang et al., 2025). "
+        "Optimal H2O2:HCl ratio is 0.1:1 at 40C."
+    )
+
+    # Refine with literature context
+    result_json = o.tools.execute_tool(
+        "refine_plan_with_results",
+        result_data="Nd recovery was 72% but Fe co-extraction was 65%, selectivity too low.",
+        literature_context=str(lit_path)
+    )
+    result = json.loads(result_json)
+    shutil.rmtree(d, True)
+
+    ok = result.get("status") == "success" and result.get("num_experiments", 0) > 0
+    return ok, f"status={result.get('status')}, experiments={result.get('num_experiments')}"
+
+
+@_test
+def refine_plan_schema_has_context_params():
+    """refine_plan_with_results schema includes literature_context and molecule_context."""
+    d = _tmp()
+    o = PlanningOrchestratorAgent(**_orch(d))
+    schema = next(
+        (s for s in o.tools.openai_schemas
+         if s["function"]["name"] == "refine_plan_with_results"),
+        None
+    )
+    shutil.rmtree(d, True)
+    props = schema["function"]["parameters"]["properties"] if schema else {}
+    has_lit = "literature_context" in props
+    has_mol = "molecule_context" in props
+    ok = has_lit and has_mol
+    return ok, f"literature_context={has_lit}, molecule_context={has_mol}"
+
+
+@_test
+def lit_search_then_plan_via_chat():
+    """LLM orchestrator calls search_literature then generate_initial_plan (1 Edison lit call).
+
+    Requires FUTUREHOUSE_API_KEY. If absent, the LLM should still produce a plan
+    (falling back to generate_initial_plan without literature context).
+    """
+    d = _tmp()
+    o = PlanningOrchestratorAgent(**_orch(d))
+    r = o.chat(
+        "First use the search_literature tool to find literature about HCl leaching "
+        "of NdFeB magnets for rare earth recovery. Then use generate_initial_plan "
+        "with the literature_context from those results to create an experimental plan."
+    )
+    shutil.rmtree(d, True)
+
+    state = o.planner.state or {}
+    has_plan = state.get("current_plan") is not None
+    n_exp = len(state.get("current_plan", {}).get("proposed_experiments", []))
+    ok = has_plan and n_exp > 0
+    return ok, f"experiments={n_exp}, response={r[:200]}"
+
+
+@_test
+def molecules_then_plan_via_chat():
+    """LLM orchestrator calls query_molecules then generate_initial_plan (1 Edison mol call).
+
+    Requires FUTUREHOUSE_API_KEY. If absent, the LLM should still produce a plan.
+    """
+    d = _tmp()
+    o = PlanningOrchestratorAgent(**_orch(d))
+    r = o.chat(
+        "Use the query_molecules tool for designing novel MOF linkers with high CO2 "
+        "adsorption for direct air capture. Then use generate_initial_plan with the "
+        "molecule_context from those results to create a synthesis and testing plan."
+    )
+    shutil.rmtree(d, True)
+
+    state = o.planner.state or {}
+    has_plan = state.get("current_plan") is not None
+    n_exp = len(state.get("current_plan", {}).get("proposed_experiments", []))
+    ok = has_plan and n_exp > 0
+    return ok, f"experiments={n_exp}, response={r[:200]}"
+
+
+@_test
+def molecules_then_refine_via_chat():
+    """LLM orchestrator calls query_molecules then refine_plan_with_results (1 Edison mol call).
+
+    Tests the full refinement path with molecule context from the orchestrator tool.
+    Requires FUTUREHOUSE_API_KEY. If absent, plan refinement should still succeed.
+    """
+    d = _tmp()
+    o = PlanningOrchestratorAgent(**_orch(d))
+
+    # Step 1: generate a plan for MOF synthesis
+    o.chat(
+        "Generate a plan to synthesize and test MOF-based sorbents for CO2 capture."
+    )
+
+    # Step 2: refine with molecules context
+    r = o.chat(
+        "Initial MOF synthesis gave low crystallinity. "
+        "Use the query_molecules tool to search for alternative linkers with better "
+        "self-assembly properties, then use refine_plan_with_results with those "
+        "molecule_context results and the text feedback: "
+        "'MOF crystallinity was only 40%, need linkers with stronger coordination geometry.'"
+    )
+    shutil.rmtree(d, True)
+
+    state = o.planner.state or {}
+    iterations = state.get("iteration_index", 0)
+    ok = iterations >= 2
+    return ok, f"iterations={iterations}, response={r[:200]}"
+
+
 @_test
 def constraint_adjustment_preserves_unrelated_steps():
     """Adjusting for one constraint should not rewrite unrelated experimental steps."""
@@ -1080,7 +1379,29 @@ def constraint_adjustment_preserves_unrelated_steps():
 
 
 # ---------------------------------------------------------------------------
+# Test tags — Edison tests require FUTUREHOUSE_API_KEY and are slow (~30-60 min)
+# ---------------------------------------------------------------------------
+
+_EDISON_TESTS = {
+    "lit_search_then_plan_via_chat",
+    "molecules_then_plan_via_chat",
+    "molecules_then_refine_via_chat",
+}
+
+
+def _is_edison(fn):
+    return fn.__name__ in _EDISON_TESTS
+
+
+# ---------------------------------------------------------------------------
 # Runner
+#
+# Usage:
+#   python tests/test_planning_campaigns.py              # all tests (default)
+#   python tests/test_planning_campaigns.py --fast       # skip Edison (slow) tests
+#   python tests/test_planning_campaigns.py --edison     # only Edison tests
+#   python tests/test_planning_campaigns.py --all        # all tests (explicit)
+#   python tests/test_planning_campaigns.py 1 3 7        # by number
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -1094,11 +1415,19 @@ if __name__ == "__main__":
     print(f"API key: {_API_KEY[:10]}...")
     print(f"Embedding key: {_EMBEDDING_API_KEY[:10]}...")
 
-    if len(sys.argv) > 1:
-        indices = [int(a) - 1 for a in sys.argv[1:]]
-        to_run = [TESTS[i] for i in indices]
-    else:
+    args = sys.argv[1:]
+    if "--fast" in args:
+        to_run = [t for t in TESTS if not _is_edison(t)]
+        print(f"Mode: --fast (skipping {len(_EDISON_TESTS)} Edison tests)")
+    elif "--edison" in args:
+        to_run = [t for t in TESTS if _is_edison(t)]
+        print(f"Mode: --edison ({len(to_run)} slow tests, requires FUTUREHOUSE_API_KEY)")
+    elif "--all" in args or not args:
         to_run = TESTS
+        print(f"Mode: --all ({len(TESTS)} tests)")
+    else:
+        indices = [int(a) - 1 for a in args]
+        to_run = [TESTS[i] for i in indices]
 
     results = {}
     for fn in to_run:
