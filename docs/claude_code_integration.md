@@ -7,9 +7,9 @@ SciLink can run as an MCP (Model Context Protocol) server, making its analysis a
 ### 1. Install SciLink with MCP support
 
 ```bash
-pip install -e ".[mcp]"          # MCP server only
-pip install -e ".[ui,mcp]"       # MCP server + Streamlit UI
-pip install -e ".[all]"          # everything (UI + MCP + simulation)
+pip install -e .                 # includes MCP support
+pip install -e ".[ui]"           # MCP + Streamlit UI
+pip install -e ".[all]"          # everything (UI + simulation)
 ```
 
 ### 2a. Claude Code — register the MCP server
@@ -95,6 +95,9 @@ scilink-mcp --mode both --transport sse --port 8000  # SSE
 | `scilink_get_metadata_schema` | View required/optional metadata fields |
 | `scilink_list_knowledge` | List active knowledge entries |
 | `scilink_clear_knowledge` | Remove knowledge entries |
+| `scilink_graduate_to_skill` | Convert a knowledge entry into a reusable skill |
+| `scilink_update_skill` | Update an existing graduated skill with new knowledge |
+| `scilink_save_file` | Save text content to a file in the session directory |
 
 ### Planning tools
 
@@ -115,6 +118,14 @@ Available with `--mode plan` or `--mode both`:
 | `scilink_plan_save_checkpoint` | Save planning session state |
 | `scilink_discard_plan` | Discard the current plan |
 | `scilink_show_directory_guide` | Show project directory structure |
+| `scilink_plan_read_file` | Read a file from the workspace |
+| `scilink_adjust_plan_for_constraints` | Adjust plan for implementation constraints |
+| `scilink_plan_save_file` | Save text content to the session directory |
+| `scilink_plan_synthesize_knowledge` | Distill findings from planning iterations into knowledge |
+| `scilink_plan_list_knowledge` | List active knowledge entries |
+| `scilink_plan_clear_knowledge` | Remove knowledge entries |
+| `scilink_plan_graduate_to_skill` | Convert knowledge into a reusable skill |
+| `scilink_plan_update_skill` | Update an existing graduated skill |
 
 ### Session management tools
 

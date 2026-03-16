@@ -98,6 +98,15 @@ orch.disconnect_mcp_server("arxiv")
 orch.disconnect_all_mcp_servers()
 ```
 
+The `PlanningOrchestratorAgent` also supports `connect_mcp_server` with the same API:
+
+```python
+from scilink.agents.planning_agents.planning_orchestrator import PlanningOrchestratorAgent
+
+orch = PlanningOrchestratorAgent(...)
+count = orch.connect_mcp_server("arxiv", command=["python", "-m", "arxiv_mcp_server"])
+```
+
 ## Example: arXiv paper search
 
 ```bash
@@ -149,7 +158,7 @@ If an external tool name collides with a built-in tool, it's automatically prefi
 ## Requirements
 
 ```bash
-pip install scilink
+pip install -e .
 ```
 
-The `mcp` package is included in the default SciLink installation.
+The `mcp` package is included in the base SciLink installation — no extra flags needed.
