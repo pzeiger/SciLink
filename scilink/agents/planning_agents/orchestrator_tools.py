@@ -405,10 +405,10 @@ class OrchestratorTools:
                         "message": lit_res.get('message', 'Literature search did not succeed')
                     })
 
-                # Save to file
-                lit_path = self.orch.base_dir / "literature_search.md"
+                # Save to file (distinct per search_type to avoid overwrites)
+                lit_path = self.orch.base_dir / f"literature_search_{search_type}.md"
                 with open(lit_path, 'w') as f:
-                    f.write("# Literature Search Results\n\n")
+                    f.write(f"# Literature Search Results ({search_type})\n\n")
                     f.write(lit_res['content'])
 
                 print(f"  ✅ Literature search completed. Saved to {lit_path.name}")
@@ -955,6 +955,7 @@ class OrchestratorTools:
                 if literature_context:
                     lp = Path(literature_context)
                     ext_ctx = lp.read_text() if lp.is_file() else literature_context
+                    print(f"    📚 Literature context from: {lp.name if lp.is_file() else 'inline text'}")
 
                 res = self.orch.planner.perform_technoeconomic_analysis(
                     objective=obj,
