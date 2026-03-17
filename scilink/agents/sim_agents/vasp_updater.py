@@ -33,8 +33,12 @@ KNOWN_FIXES = [
     },
     {
         "pattern": r"BRMIX: very serious problems",
-        "diagnosis": "Charge density mixing failure, reducing mixing parameters",
-        "incar_fixes": {"AMIX": "0.1", "BMIX": "0.01", "AMIX_MAG": "0.2", "BMIX_MAG": "0.01"},
+        "diagnosis": "Charge density mixing failure — reducing mixing parameters and increasing NELM",
+        "incar_fixes": {
+            "AMIX": "0.1", "BMIX": "0.01",
+            "AMIX_MAG": "0.2", "BMIX_MAG": "0.01",
+            "NELM": "200",
+        },
         "add_to_allowed": True,
     },
     {
@@ -53,6 +57,18 @@ KNOWN_FIXES = [
         "incar_fixes": None,  # Handled by _fix_nbands
         "special_handler": "_fix_nbands",
         "add_to_allowed": True,
+    },
+    {
+        "pattern": r"electronic self-consistency was not achieved|number of electronic SC.*reached",
+        "diagnosis": "Electronic SCF did not converge within NELM steps — increasing NELM and switching algorithm",
+        "incar_fixes": {"NELM": "200", "ALGO": "All"},
+        "add_to_allowed": True,
+    },
+    {
+        "pattern": r"ZBRENT: fatal error in bracketing",
+        "diagnosis": "Ionic step bracketing failed — restarting from CONTCAR with reduced step size",
+        "incar_fixes": {"POTIM": "0.1", "IBRION": "1"},
+        "special_handler": "_fix_zbrent",
     },
 ]
 
@@ -210,6 +226,47 @@ class VaspUpdater:
 
         return "\n".join(new_lines)
 
+    def _fix_zbrent(self, vasp_log: str, incar_txt: str) -> Dict[str, str]:
+        """
+        Handle ZBRENT bracketing failure.
+
+        The best fix is usually to restart from CONTCAR. This handler
+        doesn't modify the INCAR (that's done by incar_fixes) but
+        copies CONTCAR to POSCAR if both exist in the same directory.
+
+        Returns empty dict since INCAR fixes are handled by incar_fixes.
+        Logs the CONTCAR copy action.
+        """
+        return {}
+
+    def _copy_contcar_to_poscar(self, calc_dir: str) -> bool:
+        """
+        Copy CONTCAR to POSCAR for restarting a calculation.
+        Returns True if successful.
+        """
+        import shutil
+        contcar = Path(calc_dir) / "CONTCAR"
+        poscar = Path(calc_dir) / "POSCAR"
+        poscar_backup = Path(calc_dir) / "POSCAR.orig"
+
+        if not contcar.exists():
+            self.logger.warning("No CONTCAR found — cannot restart from last geometry")
+            return False
+
+        # Check CONTCAR is not empty
+        if contcar.stat().st_size < 10:
+            self.logger.warning("CONTCAR is empty or too small — cannot use for restart")
+            return False
+
+        # Backup original POSCAR
+        if poscar.exists() and not poscar_backup.exists():
+            shutil.copy2(str(poscar), str(poscar_backup))
+            self.logger.info(f"Backed up POSCAR → POSCAR.orig")
+
+        shutil.copy2(str(contcar), str(poscar))
+        self.logger.info("Copied CONTCAR → POSCAR for restart")
+        return True
+
     def refine_inputs(
         self,
         poscar_path: str,
@@ -224,7 +281,7 @@ class VaspUpdater:
         Refine VASP inputs based on error output.
 
         Tries deterministic fixes first. Only calls the LLM for
-        errors not matched by any known pattern.
+        errors not matched by known patterns.
 
         Parameters
         ----------
@@ -235,7 +292,7 @@ class VaspUpdater:
         kpoints_path : str
             Path to current KPOINTS file.
         vasp_log : str
-            VASP stdout/stderr log content.
+            VASP stdout/stderr log content. Can combine multiple log files.
         original_request : str
             Original description of the calculation.
         skill : str, optional
@@ -249,19 +306,23 @@ class VaspUpdater:
         # Layer 1: Deterministic fixes
         det = self._try_deterministic_fixes(vasp_log, incar_txt)
 
+        # Handle CONTCAR restart for ZBRENT
+        contcar_copied = False
+        if re.search(r"ZBRENT: fatal error", vasp_log, re.IGNORECASE):
+            calc_dir = str(Path(poscar_path).parent)
+            contcar_copied = self._copy_contcar_to_poscar(calc_dir)
+
         if det["fixes"] and not det["remaining_errors"]:
-            # All errors resolved deterministically — no LLM needed
             self.logger.info(
                 f"All errors resolved deterministically: {det['diagnoses']}"
             )
             corrected_incar = self._apply_fixes_to_incar(incar_txt, det["fixes"])
 
-            # Apply project config if provided
             if config:
                 config_result = config.apply_to_incar(corrected_incar)
                 corrected_incar = config_result["incar"]
 
-            return {
+            result = {
                 "status": "success",
                 "method": "deterministic",
                 "suggested_incar": corrected_incar,
@@ -271,6 +332,13 @@ class VaspUpdater:
                     "fixes_applied": det["fixes"],
                 },
             }
+
+            if contcar_copied:
+                result["explanation"]["contcar_restart"] = (
+                    "Copied CONTCAR → POSCAR to restart from last converged geometry"
+                )
+
+            return result
 
         # Apply deterministic fixes before sending to LLM
         working_incar = incar_txt
@@ -282,13 +350,11 @@ class VaspUpdater:
             )
 
         # Layer 2: LLM for remaining errors
-        # Build allowed-keys guard, including keys added by deterministic fixes
         allowed_keys = [
             line.split('=')[0].strip()
             for line in working_incar.splitlines()
             if '=' in line and not line.strip().startswith('#')
         ]
-        # Add any keys that deterministic fixes flagged as needing addition
         for key in det["add_to_allowed"]:
             if key not in allowed_keys:
                 allowed_keys.append(key)
@@ -301,7 +367,6 @@ class VaspUpdater:
 
         snippet = "\n".join(det["remaining_errors"])
 
-        # Pull out VASP advice
         advice_match = re.search(
             r"please specify ([A-Za-z0-9_,\s]+?) in the INCAR file",
             snippet,
@@ -315,7 +380,6 @@ class VaspUpdater:
                 f"{advice_params}.\n\n"
             )
 
-        # Tell the LLM what was already fixed
         already_fixed = ""
         if det["fixes"]:
             fixes_desc = "\n".join(
@@ -349,14 +413,13 @@ class VaspUpdater:
         )
 
         if vasp_res.get("status") != "success":
-            # LLM failed — return deterministic fixes if we have any
             if det["fixes"]:
                 corrected_incar = working_incar
                 if config:
                     config_result = config.apply_to_incar(corrected_incar)
                     corrected_incar = config_result["incar"]
 
-                return {
+                result = {
                     "status": "partial",
                     "method": "deterministic_only",
                     "suggested_incar": corrected_incar,
@@ -368,9 +431,15 @@ class VaspUpdater:
                         "remaining_errors": det["remaining_errors"],
                     },
                 }
+                if contcar_copied:
+                    result["explanation"]["contcar_restart"] = (
+                        "Copied CONTCAR → POSCAR to restart from last converged geometry"
+                    )
+                return result
+
             return {"status": "error", "message": vasp_res.get("message", "")}
 
-        return {
+        result = {
             "status": "success",
             "method": "deterministic+llm" if det["fixes"] else "llm",
             "suggested_incar": vasp_res["incar"],
@@ -381,3 +450,8 @@ class VaspUpdater:
                 "llm_explanation": vasp_res.get("explanation", ""),
             },
         }
+        if contcar_copied:
+            result["explanation"]["contcar_restart"] = (
+                "Copied CONTCAR → POSCAR to restart from last converged geometry"
+            )
+        return result
