@@ -52,7 +52,7 @@ def render_file_preview(file_path: Path) -> None:
             df = pd.read_csv(file_path, sep=sep)
             st.dataframe(df)
         except Exception:
-            st.code(file_path.read_text()[:5000], language="text")
+            st.code(file_path.read_text()[:100000], language="text")
         return
 
     # NumPy
@@ -85,12 +85,12 @@ def render_file_preview(file_path: Path) -> None:
         ".jl": "julia",
     }
     if suffix in _code_langs:
-        st.code(file_path.read_text()[:10000], language=_code_langs[suffix])
+        st.code(file_path.read_text()[:100000], language=_code_langs[suffix])
         return
 
     # Plain text fallback
     if suffix in (".txt", ".md", ".log"):
-        st.code(file_path.read_text()[:10000], language="text")
+        st.code(file_path.read_text()[:100000], language="text")
         return
 
     st.info(f"No preview available for `{suffix}` files.")
