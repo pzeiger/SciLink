@@ -14,8 +14,10 @@ from .excel_parser import parse_adaptive_excel
 
 # Match these to the extensions you check in planning_agent.py
 SUPPORTED_EXTENSIONS = {
-    '.py', '.java', '.r', '.cpp', '.h', '.js', '.json', 
-    '.csv', '.txt', '.md', '.pdf'
+    '.py', '.java', '.r', '.cpp', '.h', '.js', '.json',
+    '.csv', '.txt', '.md', '.pdf',
+    '.xlsx', '.xls',
+    '.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.gif'
 }
 
 def get_files_from_directory(directory_path: str) -> List[str]:
