@@ -290,22 +290,20 @@ class HTMLReportGenerator:
                 </div>
                 <div class="card-body">{content_html}"""
 
-            if i < len(results):
-                res_data = results[i].get('data_summary', '')
-                try:
-                    if isinstance(res_data, str) and (res_data.strip().startswith('{') or res_data.strip().startswith('[')):
-                        res_data = json.dumps(json.loads(res_data), indent=2)
-                except: pass
-                
-                # Apply markdown parser to results too, in case the result log contains a table
-                formatted_result = self._markdown_to_html(str(res_data))
-                
-                html_content += f"""
+            # Show a minimal results reference for experiment cards
+            if not is_tea:
+                plan_iter = plan.get('iteration', None)
+                matching_result = next(
+                    (r for r in results if r.get('iteration') == plan_iter),
+                    None
+                )
+                if matching_result:
+                    raw_input = matching_result.get('raw_input', '')
+                    html_content += f"""
                     <div class="result-box">
-                        <div style="font-weight:bold; margin-bottom:10px;">📊 Results Received:</div>
-                        <div style="font-family: monospace; font-size: 0.9em;">{formatted_result}</div>
+                        <div>📊 <strong>Results received:</strong> <code>{html.escape(str(raw_input))}</code></div>
                     </div>
-                """
+                    """
 
             html_content += "</div></div>"
 
