@@ -5,7 +5,7 @@ from pathlib import Path
 MODEL_OPTIONS = [
     "gemini-3.1-pro-preview",
     "claude-opus-4-6",
-    "gpt-5.2",
+    "gpt-5.4",
 ]
 
 EMBEDDING_MODEL_OPTIONS = [
