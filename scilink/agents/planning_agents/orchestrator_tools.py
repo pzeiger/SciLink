@@ -1347,48 +1347,41 @@ class OrchestratorTools:
                 print(f"       Inputs: {inputs}")
                 print(f"       Targets: {targets}")
             
-            # Determine script to use
-            schema_changed = (
-                inputs and targets and (
-                    set(inputs) != set(self.orch.expected_input_columns or [])
-                    or set(targets) != set(self.orch.expected_target_columns or [])
-                )
+            # Determine script to use.
+            # Strategy: if a locked script exists, always try it first. If it
+            # fails on the new data (e.g., different columns), auto-regenerate.
+            # This prevents false schema-change triggers from LLM-supplied
+            # target names that don't exactly match stored names.
+            has_locked_script = (
+                self.orch.active_scalarizer_script
+                and Path(self.orch.active_scalarizer_script).exists()
             )
-            if force_regenerate or schema_changed:
+            if force_regenerate:
                 script_to_use = None
-                if schema_changed:
-                    print(f"    🔄 Schema changed — regenerating analysis script")
-                else:
-                    print(f"    🔄 Force regenerate: Creating new analysis script")
+                print(f"    🔄 Force regenerate: Creating new analysis script")
+            elif has_locked_script:
+                script_to_use = self.orch.active_scalarizer_script
+                print(f"    (Consistency Mode: Using cached script)")
             else:
-                script_to_use = self.orch.active_scalarizer_script if (
-                    self.orch.active_scalarizer_script and Path(self.orch.active_scalarizer_script).exists()
-                ) else None
+                script_to_use = None
+                print(f"    (Discovery Mode: Generating new script)")
 
-                if script_to_use:
-                    print(f"    (Consistency Mode: Using cached script)")
-                else:
-                    print(f"    (Discovery Mode: Generating new script)")
-            
             # Pass schema to experiment context
             current_plan = self.orch.planner.state.get("current_plan", {})
             exp_context = current_plan.get("proposed_experiments", [{}])[0] if current_plan else {}
-            
-            # Inject schema requirements into context
-            if inputs and targets:
+
+            # Inject schema requirements into context (only when generating new script)
+            role_hints = None
+            if inputs and targets and not has_locked_script:
                 exp_context = exp_context.copy() if exp_context else {}
                 exp_context["_schema_requirements"] = {
                     "input_columns": inputs,
                     "target_columns": targets,
                     "optimization_type": "multi-objective" if len(targets) > 1 else "single-objective"
                 }
-            
-            try:
-                # Pass user-specified schema as hints so scalarizer can classify
-                role_hints = None
-                if inputs and targets:
-                    role_hints = {"inputs": inputs, "targets": targets}
+                role_hints = {"inputs": inputs, "targets": targets}
 
+            try:
                 res = self.orch.scalarizer.scalarize(
                     data_path=file_path,
                     objective_query=enhanced_objective,
@@ -1397,12 +1390,19 @@ class OrchestratorTools:
                     enable_human_review=self._get_human_feedback_enabled(),
                     column_role_hints=role_hints
                 )
-                
+
                 if res["status"] != "success":
+                    hint = "Try force_regenerate=True if the data format has changed"
+                    if script_to_use:
+                        hint = (
+                            "The locked analysis script failed on this file. "
+                            "If the data format has changed, use force_regenerate=True "
+                            "to create a new script."
+                        )
                     return json.dumps({
                         "status": "error",
                         "message": res.get('error', 'Analysis failed'),
-                        "hint": "Try force_regenerate=True if requirements changed"
+                        "hint": hint
                     })
 
                 # Validate sidecar conditions match script output
