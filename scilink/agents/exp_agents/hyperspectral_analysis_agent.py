@@ -707,7 +707,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "analysis_images": iteration_state.get("analysis_images", []),
                     "refinement_decision": iteration_state.get("refinement_decision", {}),
                     "depth": current_task["depth"],
-                    "custom_analysis_metadata": iteration_state.get("custom_analysis_metadata")
+                    "custom_analysis_metadata_list": iteration_state.get("custom_analysis_metadata_list")
                 }
                 all_completed_results.append(result_summary)
 
