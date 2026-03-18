@@ -974,13 +974,16 @@ class PlanningAgent(BaseAgent):
         # --- 1. PARSE RESULTS (Use utility function) ---
         consolidated_feedback, loaded_images = parse_multimodal_results(results)
         
-        # Update State History
+        # Update State History — store the parsed content so knowledge
+        # synthesis can access full experimental outcomes without relying
+        # on chat history (which may be compressed in long campaigns).
         self.state["experimental_results"].append({
             "iteration": executed_plan_idx,
             "timestamp": datetime.now().isoformat(),
-            "data_summary": str(results)
+            "data_summary": consolidated_feedback,
+            "raw_input": str(results)
         })
-        self.state["iteration_index"] += 1 
+        self.state["iteration_index"] += 1
         next_plan_idx = self.state["iteration_index"]
         
         # --- 2. BUILD FEEDBACK PROMPT ---

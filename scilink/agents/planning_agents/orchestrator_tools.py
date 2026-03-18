@@ -3146,6 +3146,7 @@ class OrchestratorTools:
 
             planner_state = self.orch.planner.state if self.orch.planner.state else {}
             plan_history = planner_state.get("plan_history", [])
+            experimental_results = planner_state.get("experimental_results", [])
             feedback_history = planner_state.get("human_feedback_history", [])
             results = []
             missing_ids = []
@@ -3168,6 +3169,17 @@ class OrchestratorTools:
                                 parts.append(f"Steps: {'; '.join(steps)}")
                             parts.append(f"Justification: {exp.get('justification', '')}")
                             parts.append(f"Expected outcome: {exp.get('expected_outcome', '')}")
+
+                    # Include experimental results/outcomes for this iteration
+                    matching_results = [
+                        r for r in experimental_results
+                        if str(r.get("iteration")) == str(pid)
+                    ]
+                    for exp_result in matching_results:
+                        data_summary = exp_result.get("data_summary", "")
+                        if data_summary:
+                            parts.append(f"--- Experimental Outcome (iteration {pid}) ---")
+                            parts.append(data_summary)
 
                     # Collect human feedback entries relevant to this iteration
                     user_feedback_parts = []
