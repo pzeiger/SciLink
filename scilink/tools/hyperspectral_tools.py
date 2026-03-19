@@ -1136,62 +1136,53 @@ def save_image_bytes(image_bytes: bytes, output_dir: str, filename: str, logger:
 
 def estimate_global_snr(hspy_data: np.ndarray) -> float:
     """
-    Estimates SNR using the standard deviation of spectral derivatives.
+    Estimates SNR using median absolute deviation (MAD) of spectral
+    derivatives.  MAD is robust to outlier channels caused by sharp
+    spectral features (edges, narrow peaks) that would inflate a
+    std-based estimate and make clean data look noisy.
+
     Returns a float (e.g., 50.0 is clean, 3.0 is noisy).
     """
-    # Flatten spatial dims: (Pixels, Energy)
     h, w, c = hspy_data.shape
     flat_data = hspy_data.reshape(-1, c)
-    
-    # 1. Estimate Signal Strength (Mean of global average spectrum)
-    signal_mean = np.mean(flat_data)
-    if signal_mean <= 0: return 0.0
 
-    # 2. Estimate Noise (Std Dev of the derivative)
-    noise_est = np.std(np.diff(flat_data, axis=1)) / np.sqrt(2)
-    
-    if noise_est <= 0: return 100.0 # Perfect signal
+    # 1. Signal strength — median of the global average spectrum.
+    #    Median is robust to a small number of extreme-intensity
+    #    channels (e.g. one huge peak) that would inflate the mean
+    #    and make noisy data look cleaner than it is.
+    signal_mean = np.median(flat_data)
+    if signal_mean <= 0:
+        return 0.0
+
+    # 2. Noise estimate — MAD of channel-to-channel differences.
+    #    MAD ≈ 0.6745 * σ for Gaussian noise, so we convert back.
+    diffs = np.diff(flat_data, axis=1)
+    mad = np.median(np.abs(diffs - np.median(diffs)))
+    noise_est = (mad / 0.6745) / np.sqrt(2)
+
+    if noise_est <= 0:
+        return 100.0  # Perfect signal
 
     return float(signal_mean / noise_est)
 
 
 def get_optimal_analysis_data(hspy_data: np.ndarray) -> tuple[np.ndarray, str]:
     """
-    Decides between Raw vs. PCA-Cleaned data based on SNR.
+    Returns the raw data together with an estimated SNR so that
+    downstream code generators can decide how to handle noise.
+
+    Previous versions applied PCA denoising here, but that could
+    silently remove real spectral features (sharp peaks, fine
+    structure) that the custom code was specifically asked to model.
     """
     snr = estimate_global_snr(hspy_data)
-    
-    # 1. PRISTINE DATA (SNR > 50)
     if snr >= 50.0:
-        return hspy_data, f"Raw Data (High Quality, SNR={snr:.1f})"
-        
-    # 2. THE MIDDLE GROUND (SNR 15 - 50) 
+        quality = "High"
     elif snr >= 15.0:
-        threshold = 0.999 
-        method = "PCA (Gentle)"
-        
-    # 3. STANDARD NOISE (SNR 5 - 15)
+        quality = "Medium"
     elif snr >= 5.0:
-        threshold = 0.99
-        method = "PCA (Standard)"
-
-    # 4. HIGH NOISE (SNR < 5)
+        quality = "Low"
     else:
-        threshold = 0.90
-        method = "PCA (Aggressive)"
-        
-    try:
-        h, w, c = hspy_data.shape
-        flat = hspy_data.reshape(-1, c)
-        
-        # Determine N components dynamically based on variance
-        pca = PCA(n_components=threshold)
-        transformed = pca.fit_transform(flat)
-        reconstructed = pca.inverse_transform(transformed).reshape(h, w, c)
-        
-        n_kept = pca.n_components_
-        note = f"Denoised (SNR={snr:.1f}). Applied {method} (Kept {n_kept} comps, {threshold*100}% variance)."
-        return reconstructed, note
-        
-    except Exception as e:
-        return hspy_data, f"Raw Data (Denoising failed: {e})"
+        quality = "Very Low"
+    note = f"Raw Data ({quality} quality, SNR≈{snr:.1f})"
+    return hspy_data, note

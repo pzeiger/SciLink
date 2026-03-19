@@ -201,9 +201,7 @@ Write a function `analyze_feature(data, axis)` that:
 
 ### ADDITIONAL NOTES
 The variable `hspy_data` passed to your function contains: **{processing_note}**.
-However, even with pre-processing, experimental data often contains high-frequency shot noise (jitter).
-If you are performing derivative-based operations (like `find_peaks` or `curve_fit`), it is advisable to apply a light smoothing filter
-(e.g., `gaussian_filter(..., sigma=1-2)`) to ensure convergence.
+If performing derivative-based operations (like `find_peaks` or `curve_fit`) on noisy data, consider applying appropriate smoothing to ensure convergence.
 {hints_section}
 ### REQUIRED RETURN FORMAT
 {{
