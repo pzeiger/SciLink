@@ -18,12 +18,13 @@ EMBEDDING_MODEL_OPTIONS = [
 APP_MODES = [
     {"key": "analyze", "label": "Analyze", "description": "Multi-modal data analysis"},
     {"key": "plan",    "label": "Plan",    "description": "Experimental design & optimization"},
-    # {"key": "simulate", "label": "Simulate", "description": "MD/DFT simulations"},
+    {"key": "simulate", "label": "Simulate", "description": "Submit and monitor DFT/MD simulations"},
 ]
 
 SESSION_DIR_PREFIXES = {
     "analyze": "analysis_session",
     "plan": "planning_session",
+    "simulate": "simulation_session",
 }
 
 # ── File extensions ──────────────────────────────────────────────

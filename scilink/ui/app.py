@@ -2,14 +2,9 @@
 
 import base64
 import builtins
-import logging
 import re
 import threading
 from pathlib import Path
-
-# Suppress Streamlit's own st.components.v1.html deprecation warnings
-# (emitted internally by Streamlit 1.56+, not by our code).
-logging.getLogger("streamlit.deprecation_util").setLevel(logging.ERROR)
 
 import streamlit as st
 
@@ -19,6 +14,7 @@ from scilink.ui.components.chat_uploads import render_pre_chat_uploads
 from scilink.ui.components.file_viewer import render_file_preview
 from scilink.ui.components.tools_agents import render_tools_agents_tab
 from scilink.ui.components.skills import render_skills_tab
+from scilink.ui.components.simulations import render_simulations_tab
 from scilink.ui.output_capture import AgentStoppedError, OutputCapture
 from scilink.ui.theme import inject_theme
 from scilink.ui.config import AVATAR_USER, AVATAR_AGENT, APP_MODES, SESSION_DIR_PREFIXES
@@ -361,7 +357,7 @@ if not st.session_state.agent_initialized:
             st.session_state.app_mode = "analyze"
         _mode_map = {m["key"]: m for m in APP_MODES}
         st.markdown('<div class="mode-selector-anchor"></div>', unsafe_allow_html=True)
-        _, _mc1, _mc2, _ = st.columns([2, 1, 1, 2])
+        _, _mc1, _mc2, _mc3, _ = st.columns([1.5, 1, 1, 1, 1.5])
         with _mc1:
             _atype = "primary" if st.session_state.app_mode == "analyze" else "secondary"
             if st.button("Analyze", type=_atype, use_container_width=True, key="mode_analyze"):
@@ -371,6 +367,11 @@ if not st.session_state.agent_initialized:
             _ptype = "primary" if st.session_state.app_mode == "plan" else "secondary"
             if st.button("Plan", type=_ptype, use_container_width=True, key="mode_plan"):
                 st.session_state.app_mode = "plan"
+                st.rerun()
+        with _mc3:
+            _stype = "primary" if st.session_state.app_mode == "simulate" else "secondary"
+            if st.button("Simulate", type=_stype, use_container_width=True, key="mode_simulate"):
+                st.session_state.app_mode = "simulate"
                 st.rerun()
         _cur_desc = _mode_map[st.session_state.app_mode]["description"]
         st.markdown(
@@ -417,348 +418,386 @@ if not st.session_state.agent_initialized:
             "LLM-powered agents for scientific research automation</p>",
             unsafe_allow_html=True,
         )
+        # ── Simulate mode: direct launch (no agent needed) ───
+        if st.session_state.app_mode == "simulate":
+            st.markdown(
+                '<p style="text-align:center;color:#6B7A8C;font-size:0.95em;'
+                'margin-top:8px;margin-bottom:20px">'
+                'Connect to your cluster via SSH — no agent initialization required.'
+                '</p>',
+                unsafe_allow_html=True,
+            )
+            _, _lc, _ = st.columns([1, 1, 1])
+            with _lc:
+                if st.button(
+                    "🖥️ Launch Simulations",
+                    type="primary",
+                    use_container_width=True,
+                    key="launch_simulate",
+                ):
+                    st.session_state.agent_initialized = True
+                    st.rerun()
+            st.stop()
+
     st.stop()
 
 
 # ══════════════════════════════════════════════════════════════════
 # Active session — Chat + File Explorer tabs
 # ══════════════════════════════════════════════════════════════════
-chat_tab, files_tab, tools_tab, skills_tab = st.tabs(["Chat", "File Explorer", "Tools", "Skills"])
+# ══════════════════════════════════════════════════════════════════
+# Active session — Chat + File Explorer tabs
+# ══════════════════════════════════════════════════════════════════
 
-# ── Chat tab ─────────────────────────────────────────────────────
-with chat_tab:
-    # Show a prominent upload zone until the chat conversation starts
-    if not st.session_state.chat_messages:
-        render_pre_chat_uploads(_start_task)
+if st.session_state.app_mode == "simulate":
+    # ── Simulate mode: no agent, just HPC UI ─────────────────
+    sim_tab, terminal_note = st.tabs(["Simulations", "About"])
+    with sim_tab:
+        render_simulations_tab()
+    with terminal_note:
+        st.markdown(
+            "### Simulation Mode\n\n"
+            "You're running in **simulation-only** mode — no analysis or "
+            "planning agent is active.\n\n"
+            "Switch to **Analyze** or **Plan** from the sidebar to use "
+            "the full agent framework alongside HPC simulations."
+        )
+else:
+    # ── Analyze / Plan modes: full agent UI ──────────────────
+    chat_tab, files_tab, tools_tab, skills_tab, sim_tab = st.tabs(
+        ["Chat", "File Explorer", "Tools", "Skills", "Simulations"]
+    )
 
-    _avatars = {"user": AVATAR_USER, "assistant": AVATAR_AGENT}
-    for msg in st.session_state.chat_messages:
-        with st.chat_message(msg["role"], avatar=_avatars.get(msg["role"])):
-            # Escape tildes outside LaTeX blocks to prevent Markdown strikethrough
-            _content = _escape_tildes(msg["content"]) if msg["role"] == "assistant" else msg["content"]
-            st.markdown(_content)
-            for img_path in msg.get("images", []):
-                try:
-                    _img_name = Path(img_path).stem
-                    # Show a readable caption for scalarizer debug plots
-                    if _img_name.startswith("debug_"):
-                        _sample = _img_name[len("debug_"):]
-                        st.image(img_path, caption=f"Sample fit: {_sample}")
-                    else:
-                        st.image(img_path)
-                except Exception:
-                    st.caption(f"(image not found: {img_path})")
-            for html_path in msg.get("html_reports", []):
-                p = Path(html_path)
-                if p.exists():
-                    with st.expander(f"Report: {p.name}"):
-                        st.iframe(
-                            p.read_text(encoding="utf-8"),
-                            height=600,
+    # ── Chat tab ─────────────────────────────────────────────────────
+    with chat_tab:
+        # Show a prominent upload zone until the chat conversation starts
+        if not st.session_state.chat_messages:
+            render_pre_chat_uploads(_start_task)
+    
+        _avatars = {"user": AVATAR_USER, "assistant": AVATAR_AGENT}
+        for msg in st.session_state.chat_messages:
+            with st.chat_message(msg["role"], avatar=_avatars.get(msg["role"])):
+                # Escape tildes outside LaTeX blocks to prevent Markdown strikethrough
+                _content = _escape_tildes(msg["content"]) if msg["role"] == "assistant" else msg["content"]
+                st.markdown(_content)
+                for img_path in msg.get("images", []):
+                    try:
+                        _img_name = Path(img_path).stem
+                        # Show a readable caption for scalarizer debug plots
+                        if _img_name.startswith("debug_"):
+                            _sample = _img_name[len("debug_"):]
+                            st.image(img_path, caption=f"Sample fit: {_sample}")
+                        else:
+                            st.image(img_path)
+                    except Exception:
+                        st.caption(f"(image not found: {img_path})")
+                for html_path in msg.get("html_reports", []):
+                    p = Path(html_path)
+                    if p.exists():
+                        with st.expander(f"Report: {p.name}"):
+                            st.iframe(
+                                p.read_text(encoding="utf-8"),
+                                height=600,
+                            )
+                        st.download_button(
+                            f"Download {p.name}",
+                            data=p.read_bytes(),
+                            file_name=p.name,
+                            mime="text/html",
+                            key=f"dl_html_{html_path}",
                         )
-                    st.download_button(
-                        f"Download {p.name}",
-                        data=p.read_bytes(),
-                        file_name=p.name,
-                        mime="text/html",
-                        key=f"dl_html_{html_path}",
-                    )
-            if msg.get("verbose"):
-                with st.expander("Verbose output"):
-                    st.code(msg["verbose"], language="text")
-
-    # ── Agent monitoring fragment ─────────────────────────────────
-    # Uses @st.fragment to rerun only this section (not the full page)
-    # when the agent is working.  run_every="1s" polls the background
-    # thread; scope="app" escalates to a full rerun when needed.
-    task: ChatTask = st.session_state.chat_task
-    _needs_polling = task.is_running and task.feedback_request is None
-    _monitor_interval = "1s" if _needs_polling else None
-
-    @st.fragment(run_every=_monitor_interval)
-    def _agent_monitor():
+                if msg.get("verbose"):
+                    with st.expander("Verbose output"):
+                        st.code(msg["verbose"], language="text")
+    
+        # ── Agent monitoring fragment ─────────────────────────────────
+        # Uses @st.fragment to rerun only this section (not the full page)
+        # when the agent is working.  run_every="1s" polls the background
+        # thread; scope="app" escalates to a full rerun when needed.
         task: ChatTask = st.session_state.chat_task
-
-        # ── 1. Completion — append result, full rerun to render it ──
-        if not task.is_running and (task.result is not None or task.error is not None):
-            content = task.result if task.result is not None else f"Error: {task.error}"
-            # Strip markdown image tags with local file paths — images are
-            # rendered separately via st.image() from _find_new_images()
-            import re
-            content = re.sub(r"!\[[^\]]*\]\([^)]+\)\n?", "", content).strip()
-            new_images = _find_new_images()
-            new_reports = _find_new_html_reports()
-            # When an HTML report is present it already embeds the
-            # relevant figures — skip showing raw images separately
-            # to avoid duplicate clutter (matches curve fitting UX).
-            st.session_state.chat_messages.append({
-                "role": "assistant",
-                "content": content,
-                "images": [] if new_reports else new_images,
-                "html_reports": new_reports,
-                "verbose": task.verbose_log or "",
-            })
-            st.session_state.chat_task = ChatTask()
-            st.rerun(scope="app")
-            return
-
-        # ── 2. Feedback — render review UI, wait for user action ────
-        if task.is_running and task.feedback_request is not None:
-            req: FeedbackRequest = task.feedback_request
-
-            # Cache preview images so fragment reruns don't lose them.
-            # Only mark the preview images themselves as known (not ALL
-            # images on disk) so that per-component plots generated
-            # before this feedback step still appear on completion.
-            #   • curve fitting  → *review*.png  (fit preview)
-            #   • hyperspectral  → *Summary_Grid*.jpeg  (NMF/PCA grid)
-            if "_feedback_preview_images" not in st.session_state:
-                previews = _find_feedback_preview_images()
-                st.session_state._feedback_preview_images = previews
-                for img in previews:
-                    st.session_state.known_images.add(img)
-            for img_path in st.session_state._feedback_preview_images:
-                st.image(img_path)
-
-            # Show generated code files during code review
-            _ctx_tail_early = (req.context or "")[-1500:]
-            if "CODE REVIEW" in _ctx_tail_early or "Review files in" in _ctx_tail_early:
-                if "_code_review_files" not in st.session_state:
-                    st.session_state._code_review_files = _find_code_review_files()
-                code_files = st.session_state._code_review_files
-                if code_files:
-                    for fname, content in code_files:
-                        with st.expander(f"📄 {fname}", expanded=len(code_files) == 1):
-                            st.code(content, language="python")
-
-            if req.context:
-                import html as _html
+        _needs_polling = task.is_running and task.feedback_request is None
+        _monitor_interval = "1s" if _needs_polling else None
+    
+        @st.fragment(run_every=_monitor_interval)
+        def _agent_monitor():
+            task: ChatTask = st.session_state.chat_task
+    
+            # ── 1. Completion — append result, full rerun to render it ──
+            if not task.is_running and (task.result is not None or task.error is not None):
+                content = task.result if task.result is not None else f"Error: {task.error}"
+                # Strip markdown image tags with local file paths — images are
+                # rendered separately via st.image() from _find_new_images()
                 import re
-
-                display_ctx = req.context
-                lines = display_ctx.split("\n")
-                # Find the last separator block (===…) followed by a
-                # non-empty content line — this is the start of the
-                # review section (e.g. fit result or plan summary).
-                start = 0
-                for i, line in enumerate(lines):
-                    if line.strip().startswith("=" * 20) and i + 1 < len(lines) and lines[i + 1].strip():
-                        start = i
-                if start:
-                    display_ctx = "\n".join(lines[start:])
-                # Strip === separator lines
-                display_ctx = re.sub(r"^[=]{10,}\s*$", "", display_ctx, flags=re.MULTILINE)
-                # Strip whitespace-only lines (so they count as truly blank)
-                display_ctx = re.sub(r"^[ \t]+$", "", display_ctx, flags=re.MULTILINE)
-                # Collapse all runs of blank lines into a single newline
-                display_ctx = re.sub(r"\n{2,}", "\n", display_ctx).strip()
-                # Re-insert one blank line before each section header
-                # (lines starting with an emoji) for visual breathing room,
-                # but not between header and its body.
-                display_ctx = re.sub(
-                    r"\n(?=[\U0001f300-\U0001fAFF\u2600-\u27BF\u2700-\u27BF])",
-                    "\n\n",
-                    display_ctx,
-                )
-                # Add an extra blank line after the top-level title
-                # (e.g. "📋 PROPOSED FITTING PLAN" or "📊 FIRST SPECTRUM FIT RESULT")
-                display_ctx = re.sub(
-                    r"^(.+(?:PLAN|RESULT|REVIEW).*)$",
-                    r"\1\n",
-                    display_ctx,
-                    count=1,
-                    flags=re.MULTILINE,
-                )
-                escaped_ctx = _html.escape(display_ctx)
-                # Estimate height: ~20px per line, clamped to 150-400px
-                n_lines = escaped_ctx.count("\n") + 1
-                box_h = max(150, min(400, n_lines * 20 + 32))
-                st.iframe(
-                    f'<pre style="background:#1e1e1e;margin:0;'
-                    f"border:1px solid #333;border-radius:6px;"
-                    f"padding:12px 16px;font-family:monospace;"
-                    f"font-size:13px;color:#e0e0e0;"
-                    f"white-space:pre-wrap;word-wrap:break-word;"
-                    f'overflow-y:auto;line-height:1.5">'
-                    f"{escaped_ctx}</pre>",
-                    height=box_h,
-                )
-
-            # Adapt labels based on the type of input prompt.
-            # Only check the tail of the context (last ~1500 chars) since
-            # the buffer accumulates all stdout from the session.
-            _ctx_tail = (req.context or "")[-1500:]
-            _prompt = req.prompt or ""
-            _is_keep_revert = "revert to original" in _ctx_tail.lower()
-            if "Context" in _prompt or "MISSING METADATA" in _ctx_tail:
-                _input_label = "Describe your data (optional):"
-                _submit_label = "Submit description"
-                _accept_label = "Skip (let agent guess)"
-            elif "CODE REVIEW" in _ctx_tail or "Review files in" in _ctx_tail:
-                _input_label = "Your code feedback (optional):"
-                _submit_label = "Request changes"
-                _accept_label = "Approve code"
-            elif "REQUESTING FEEDBACK" in _ctx_tail or "Review the plan" in _ctx_tail:
-                _input_label = "Your plan feedback (optional):"
-                _submit_label = "Request changes"
-                _accept_label = "Approve plan"
-            elif "SCALARIZER REVIEW" in _ctx_tail:
-                _input_label = "Your extraction feedback (optional):"
-                _submit_label = "Request changes"
-                _accept_label = "Approve extraction"
-            else:
-                _input_label = "Your feedback (optional):"
-                _submit_label = "Submit feedback"
-                _accept_label = "Accept as-is"
-
-            # Keep/revert prompt: show two simple buttons, no text area
-            if _is_keep_revert:
-                col_keep, col_revert = st.columns(2)
-                with col_keep:
-                    if st.button("Keep user-guided fit", type="primary", width="stretch"):
-                        req.response = "keep"
-                        req.event.set()
-                        st.session_state.pop("_feedback_preview_images", None)
-                        st.session_state.pop("_code_review_files", None)
-                        st.rerun(scope="app")
-                with col_revert:
-                    if st.button("Revert to original fit", type="primary", width="stretch"):
-                        req.response = ""
-                        req.event.set()
-                        st.session_state.pop("_feedback_preview_images", None)
-                        st.session_state.pop("_code_review_files", None)
-                        st.rerun(scope="app")
-            else:
-                feedback = st.text_area(
-                    _input_label,
-                    key="feedback_input",
-                )
-                col_submit, col_accept = st.columns(2)
-                with col_submit:
-                    if st.button(_submit_label, type="primary", disabled=not feedback.strip(),
-                                 width="stretch"):
-                        req.response = feedback.strip()
-                        req.event.set()
-                        st.session_state.pop("_feedback_preview_images", None)
-                        st.session_state.pop("_code_review_files", None)
-                        st.rerun(scope="app")
-                with col_accept:
-                    if st.button(_accept_label, type="primary", width="stretch"):
-                        req.response = ""
-                        req.event.set()
-                        st.session_state.pop("_feedback_preview_images", None)
-                        st.session_state.pop("_code_review_files", None)
-                        st.rerun(scope="app")
-            return
-
-        # ── 3. Live monitoring — fragment auto-reruns, no blocking ──
-        if task.is_running:
-            _spin_col, _stop_col = st.columns([1, 0.07], vertical_alignment="center")
-            with _spin_col:
-                _vibe = st.session_state.get("vibe_theme", "Professional")
-                _spinner_icons = {
-                    "Professional": "\u2022",
-                    "Positivity boost": "\U0001f43e",
-                    "Space nerd": "\U0001f4e1",
-                }
-                _icon = _spinner_icons.get(_vibe, "\u2022")
-                _cls = "agent-spinner-heart" if _vibe != "Professional" else "agent-spinner-dot"
-                st.markdown(
-                    '<div class="agent-spinner-container">'
-                    f'  <span class="{_cls}">{_icon}</span>'
-                    f'  <span class="{_cls}">{_icon}</span>'
-                    f'  <span class="{_cls}">{_icon}</span>'
-                    '  <span class="agent-spinner-label">Agent is working...</span>'
-                    '</div>',
-                    unsafe_allow_html=True,
-                )
-            with _stop_col:
-                if st.button("■", type="secondary", key="stop_agent_btn",
-                             help="Stop agent"):
-                    task.stopped = True
-                    task.is_running = False
-                    # Signal the agent thread to raise AgentStoppedError
-                    # on its next print() call, then capture the log.
-                    if task.live_capture:
-                        task.live_capture.request_stop()
-                        task.verbose_log = task.live_capture.getvalue()
-                    else:
-                        task.verbose_log = ""
-                    task.live_capture = None
-                    # Unblock any pending feedback wait
-                    if task.feedback_request is not None:
-                        task.feedback_request.response = ""
-                        task.feedback_request.event.set()
-                        task.feedback_request = None
-                    _stop_label = (
-                        "Planning stopped by user."
-                        if st.session_state.app_mode == "plan"
-                        else "Analysis stopped by user."
-                    )
-                    st.session_state.chat_messages.append({
-                        "role": "assistant",
-                        "content": _stop_label,
-                        "verbose": task.verbose_log,
-                    })
-                    st.session_state.chat_task = ChatTask()
-                    st.rerun(scope="app")
-            live = ""
-            if task.live_capture is not None:
-                try:
-                    live = task.live_capture.getvalue()
-                except Exception:
-                    pass
-            if live:
-                show = st.toggle("Show verbose output", key="live_verbose_toggle")
-                # Force-restyle the toggle track in light mode (BaseWeb
-                # uses inline styles that CSS cannot override).
-                if st.session_state.get("theme_mode", "dark") == "light":
-                    st.iframe("""<script>
-(function(){
-    var doc = window.parent.document;
-    var OFF = '#90A4AE', ON = '#6200EE';
-    function fix(){
-        doc.querySelectorAll('label').forEach(function(lbl){
-            var txt = lbl.textContent || '';
-            if (txt.indexOf('verbose') < 0 && txt.indexOf('Verbose') < 0) return;
-            lbl.querySelectorAll('div').forEach(function(d){
-                var w = d.getBoundingClientRect().width;
-                if (w > 28 && w < 80) {
-                    var inp = lbl.querySelector('input');
-                    var on = inp && inp.checked;
-                    d.style.setProperty('background-color', on ? ON : OFF, 'important');
-                }
-            });
-        });
-    }
-    fix();
-    new MutationObserver(fix).observe(doc.body,
-        {childList:true, subtree:true, attributes:true, attributeFilter:['aria-checked','checked']});
-})();
-</script>""", height=1)
-                if show:
+                content = re.sub(r"!\[[^\]]*\]\([^)]+\)\n?", "", content).strip()
+                new_images = _find_new_images()
+                new_reports = _find_new_html_reports()
+                # When an HTML report is present it already embeds the
+                # relevant figures — skip showing raw images separately
+                # to avoid duplicate clutter (matches curve fitting UX).
+                st.session_state.chat_messages.append({
+                    "role": "assistant",
+                    "content": content,
+                    "images": [] if new_reports else new_images,
+                    "html_reports": new_reports,
+                    "verbose": task.verbose_log or "",
+                })
+                st.session_state.chat_task = ChatTask()
+                st.rerun(scope="app")
+                return
+    
+            # ── 2. Feedback — render review UI, wait for user action ────
+            if task.is_running and task.feedback_request is not None:
+                req: FeedbackRequest = task.feedback_request
+    
+                # Cache preview images so fragment reruns don't lose them.
+                # Only mark the preview images themselves as known (not ALL
+                # images on disk) so that per-component plots generated
+                # before this feedback step still appear on completion.
+                #   • curve fitting  → *review*.png  (fit preview)
+                #   • hyperspectral  → *Summary_Grid*.jpeg  (NMF/PCA grid)
+                if "_feedback_preview_images" not in st.session_state:
+                    previews = _find_feedback_preview_images()
+                    st.session_state._feedback_preview_images = previews
+                    for img in previews:
+                        st.session_state.known_images.add(img)
+                for img_path in st.session_state._feedback_preview_images:
+                    st.image(img_path)
+    
+                # Show generated code files during code review
+                _ctx_tail_early = (req.context or "")[-1500:]
+                if "CODE REVIEW" in _ctx_tail_early or "Review files in" in _ctx_tail_early:
+                    if "_code_review_files" not in st.session_state:
+                        st.session_state._code_review_files = _find_code_review_files()
+                    code_files = st.session_state._code_review_files
+                    if code_files:
+                        for fname, content in code_files:
+                            with st.expander(f"📄 {fname}", expanded=len(code_files) == 1):
+                                st.code(content, language="python")
+    
+                if req.context:
                     import html as _html
-
-                    tail = "\n".join(live.split("\n")[-200:])
-                    escaped = _html.escape(tail)
-                    st.iframe(
-                        f'<pre style="height:280px;overflow-y:auto;margin:0;'
-                        f"background:#1e1e1e;padding:8px;border-radius:4px;"
-                        f"border:1px solid #333;font-family:monospace;"
-                        f"font-size:13px;white-space:pre-wrap;"
-                        f'color:#e0e0e0" id="log">{escaped}</pre>'
-                        f"<script>var e=document.getElementById('log');"
-                        f"e.scrollTop=e.scrollHeight;</script>",
-                        height=300,
+                    import re
+    
+                    display_ctx = req.context
+                    lines = display_ctx.split("\n")
+                    # Find the last separator block (===…) followed by a
+                    # non-empty content line — this is the start of the
+                    # review section (e.g. fit result or plan summary).
+                    start = 0
+                    for i, line in enumerate(lines):
+                        if line.strip().startswith("=" * 20) and i + 1 < len(lines) and lines[i + 1].strip():
+                            start = i
+                    if start:
+                        display_ctx = "\n".join(lines[start:])
+                    # Strip === separator lines
+                    display_ctx = re.sub(r"^[=]{10,}\s*$", "", display_ctx, flags=re.MULTILINE)
+                    # Strip whitespace-only lines (so they count as truly blank)
+                    display_ctx = re.sub(r"^[ \t]+$", "", display_ctx, flags=re.MULTILINE)
+                    # Collapse all runs of blank lines into a single newline
+                    display_ctx = re.sub(r"\n{2,}", "\n", display_ctx).strip()
+                    # Re-insert one blank line before each section header
+                    # (lines starting with an emoji) for visual breathing room,
+                    # but not between header and its body.
+                    display_ctx = re.sub(
+                        r"\n(?=[\U0001f300-\U0001fAFF\u2600-\u27BF\u2700-\u27BF])",
+                        "\n\n",
+                        display_ctx,
                     )
-
-    _agent_monitor()
-
+                    # Add an extra blank line after the top-level title
+                    # (e.g. "📋 PROPOSED FITTING PLAN" or "📊 FIRST SPECTRUM FIT RESULT")
+                    display_ctx = re.sub(
+                        r"^(.+(?:PLAN|RESULT|REVIEW).*)$",
+                        r"\1\n",
+                        display_ctx,
+                        count=1,
+                        flags=re.MULTILINE,
+                    )
+                    escaped_ctx = _html.escape(display_ctx)
+                    # Estimate height: ~20px per line, clamped to 150-400px
+                    n_lines = escaped_ctx.count("\n") + 1
+                    box_h = max(150, min(400, n_lines * 20 + 32))
+                    st.iframe( 
+                        f'<pre style="background:#1e1e1e;margin:0;'
+                        f"border:1px solid #333;border-radius:6px;"
+                        f"padding:12px 16px;font-family:monospace;"
+                        f"font-size:13px;color:#e0e0e0;"
+                        f"white-space:pre-wrap;word-wrap:break-word;"
+                        f'overflow-y:auto;line-height:1.5">'
+                        f"{escaped_ctx}</pre>",
+                        height=box_h,
+                    )
+    
+                # Adapt labels based on the type of input prompt.
+                # Only check the tail of the context (last ~1500 chars) since
+                # the buffer accumulates all stdout from the session.
+                _ctx_tail = (req.context or "")[-1500:]
+                _prompt = req.prompt or ""
+                _is_keep_revert = "revert to original" in _ctx_tail.lower()
+                if "Context" in _prompt or "MISSING METADATA" in _ctx_tail:
+                    _input_label = "Describe your data (optional):"
+                    _submit_label = "Submit description"
+                    _accept_label = "Skip (let agent guess)"
+                elif "CODE REVIEW" in _ctx_tail or "Review files in" in _ctx_tail:
+                    _input_label = "Your code feedback (optional):"
+                    _submit_label = "Request changes"
+                    _accept_label = "Approve code"
+                elif "REQUESTING FEEDBACK" in _ctx_tail or "Review the plan" in _ctx_tail:
+                    _input_label = "Your plan feedback (optional):"
+                    _submit_label = "Request changes"
+                    _accept_label = "Approve plan"
+                elif "SCALARIZER REVIEW" in _ctx_tail:
+                    _input_label = "Your extraction feedback (optional):"
+                    _submit_label = "Request changes"
+                    _accept_label = "Approve extraction"
+                else:
+                    _input_label = "Your feedback (optional):"
+                    _submit_label = "Submit feedback"
+                    _accept_label = "Accept as-is"
+    
+                # Keep/revert prompt: show two simple buttons, no text area
+                if _is_keep_revert:
+                    col_keep, col_revert = st.columns(2)
+                    with col_keep:
+                        if st.button("Keep user-guided fit", type="primary", width="stretch"):
+                            req.response = "keep"
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                    with col_revert:
+                        if st.button("Revert to original fit", type="primary", width="stretch"):
+                            req.response = ""
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                else:
+                    feedback = st.text_area(
+                        _input_label,
+                        key="feedback_input",
+                    )
+                    col_submit, col_accept = st.columns(2)
+                    with col_submit:
+                        if st.button(_submit_label, type="primary", disabled=not feedback.strip(),
+                                     width="stretch"):
+                            req.response = feedback.strip()
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                    with col_accept:
+                        if st.button(_accept_label, type="primary", width="stretch"):
+                            req.response = ""
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                return
+    
+            # ── 3. Live monitoring — fragment auto-reruns, no blocking ──
+            if task.is_running:
+                _spin_col, _stop_col = st.columns([1, 0.07], vertical_alignment="center")
+                with _spin_col:
+                    _vibe = st.session_state.get("vibe_theme", "Professional")
+                    _spinner_icons = {
+                        "Professional": "\u2022",
+                        "Positivity boost": "\U0001f43e",
+                        "Space nerd": "\U0001f4e1",
+                    }
+                    _icon = _spinner_icons.get(_vibe, "\u2022")
+                    _cls = "agent-spinner-heart" if _vibe != "Professional" else "agent-spinner-dot"
+                    st.markdown(
+                        '<div class="agent-spinner-container">'
+                        f'  <span class="{_cls}">{_icon}</span>'
+                        f'  <span class="{_cls}">{_icon}</span>'
+                        f'  <span class="{_cls}">{_icon}</span>'
+                        '  <span class="agent-spinner-label">Agent is working...</span>'
+                        '</div>',
+                        unsafe_allow_html=True,
+                    )
+                with _stop_col:
+                    if st.button("■", type="secondary", key="stop_agent_btn",
+                                 help="Stop agent"):
+                        task.stopped = True
+                        task.is_running = False
+                        # Signal the agent thread to raise AgentStoppedError
+                        # on its next print() call, then capture the log.
+                        if task.live_capture:
+                            task.live_capture.request_stop()
+                            task.verbose_log = task.live_capture.getvalue()
+                        else:
+                            task.verbose_log = ""
+                        task.live_capture = None
+                        # Unblock any pending feedback wait
+                        if task.feedback_request is not None:
+                            task.feedback_request.response = ""
+                            task.feedback_request.event.set()
+                            task.feedback_request = None
+                        _stop_label = (
+                            "Planning stopped by user."
+                            if st.session_state.app_mode == "plan"
+                            else "Analysis stopped by user."
+                        )
+                        st.session_state.chat_messages.append({
+                            "role": "assistant",
+                            "content": _stop_label,
+                            "verbose": task.verbose_log,
+                        })
+                        st.session_state.chat_task = ChatTask()
+                        st.rerun(scope="app")
+                live = ""
+                if task.live_capture is not None:
+                    try:
+                        live = task.live_capture.getvalue()
+                    except Exception:
+                        pass
+                if live:
+                    show = st.toggle("Show verbose output", key="live_verbose_toggle")
+                    # Force-restyle the toggle track in light mode (BaseWeb
+                    # uses inline styles that CSS cannot override).
+                    if st.session_state.get("theme_mode", "dark") == "light":
+                        st.iframe("""<script>
+    (function(){
+        var doc = window.parent.document;
+        var OFF = '#90A4AE', ON = '#6200EE';
+        function fix(){
+            doc.querySelectorAll('label').forEach(function(lbl){
+                var txt = lbl.textContent || '';
+                if (txt.indexOf('verbose') < 0 && txt.indexOf('Verbose') < 0) return;
+                lbl.querySelectorAll('div').forEach(function(d){
+                    var w = d.getBoundingClientRect().width;
+                    if (w > 28 && w < 80) {
+                        var inp = lbl.querySelector('input');
+                        var on = inp && inp.checked;
+                        d.style.setProperty('background-color', on ? ON : OFF, 'important');
+                    }
+                });
+            });
+        }
+        fix();
+        new MutationObserver(fix).observe(doc.body,
+            {childList:true, subtree:true, attributes:true, attributeFilter:['aria-checked','checked']});
+    })();
+    </script>""", height=0)
+                    if show:
+                        import html as _html
+    
+                        tail = "\n".join(live.split("\n")[-200:])
+                        escaped = _html.escape(tail)
+                        st.iframe( 
+                            f'<pre style="height:280px;overflow-y:auto;margin:0;'
+                            f"background:#1e1e1e;padding:8px;border-radius:4px;"
+                            f"border:1px solid #333;font-family:monospace;"
+                            f"font-size:13px;white-space:pre-wrap;"
+                            f'color:#e0e0e0" id="log">{escaped}</pre>'
+                            f"<script>var e=document.getElementById('log');"
+                            f"e.scrollTop=e.scrollHeight;</script>",
+                            height=300,
+                        )
+    
+        _agent_monitor()
+    
     # ── Auto-dispatch uploads ────────────────────────────────────
-    # Build the upload preamble from pending file paths and stash it
-    # in session state.  It persists across reruns until a message is
-    # actually dispatched, so the user can type an objective in the
-    # chat box and have it merged with the upload context.
     if not task.is_running:
         data_path = st.session_state.pop("pending_auto_examine", None)
         meta_path = st.session_state.pop("pending_auto_load_metadata", None)
@@ -786,12 +825,13 @@ with chat_tab:
         _chat_placeholder = "Message the analysis agent..."
     else:
         _chat_placeholder = "Upload data and click Analyze to start"
-    _chat_disabled = task.is_running or (not _has_conversation and st.session_state.app_mode != "plan")
-    user_text = st.chat_input(_chat_placeholder, disabled=_chat_disabled)
 
+    _chat_disabled = task.is_running or (
+        not _has_conversation and st.session_state.app_mode != "plan"
+    )
+    user_text = st.chat_input(_chat_placeholder, disabled=_chat_disabled)
     _upload_preamble = st.session_state.pop("_upload_preamble", None)
 
-    # Merge upload preamble with user text (if both exist)
     if _upload_preamble and user_text:
         prompt = f"{_upload_preamble}\n\nAdditional context from user: {user_text}"
     elif _upload_preamble:
@@ -804,145 +844,149 @@ with chat_tab:
     if prompt:
         st.session_state.chat_messages.append({"role": "user", "content": prompt})
         _start_task(prompt)
-
-# ── File Explorer tab ────────────────────────────────────────────
-
-_FILE_TYPE_ICONS = {
-    ".png": "🖼", ".jpg": "🖼", ".jpeg": "🖼", ".tif": "🖼", ".tiff": "🖼",
-    ".csv": "📊", ".tsv": "📊", ".xlsx": "📊",
-    ".json": "📋", ".npy": "🔢",
-    ".html": "📄", ".txt": "📝", ".md": "📝", ".log": "📝",
-    ".py": "🐍",
-}
-
-
-def _discover_sessions(current_session_dir: str | None) -> list[tuple[str, Path]]:
-    """Return (display_label, path) for session directories matching the current mode."""
-    if current_session_dir is None:
-        return []
-    parent = Path(current_session_dir).parent
-    app_mode = st.session_state.app_mode or "analyze"
-    prefix = SESSION_DIR_PREFIXES.get(app_mode, "analysis_session")
-    sessions = sorted(
-        parent.glob(f"{prefix}_*"),
-        key=lambda p: p.name,
-        reverse=True,
-    )
-    current = Path(current_session_dir)
-    result: list[tuple[str, Path]] = []
-    for s in sessions:
-        # Parse timestamp from directory name like <prefix>_20260223_201729
-        parts = s.name.removeprefix(f"{prefix}_")
-        try:
-            label = f"{parts[:4]}-{parts[4:6]}-{parts[6:8]} {parts[9:11]}:{parts[11:13]}:{parts[13:15]}"
-        except (IndexError, ValueError):
-            label = s.name
-        if s.resolve() == current.resolve():
-            label += " (current)"
-        result.append((label, s))
-    return result
-
-
-def _format_size(size_bytes: int) -> str:
-    """Format file size in human-readable form."""
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    elif size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.1f} KB"
-    else:
-        return f"{size_bytes / (1024 * 1024):.1f} MB"
-
-
-with files_tab:
-    sessions = _discover_sessions(st.session_state.session_dir)
-    if not sessions:
-        st.info("Start a session first to browse output files.")
-    else:
-        labels = [s[0] for s in sessions]
-        paths = [s[1] for s in sessions]
-        selected_idx = st.selectbox(
-            "Session",
-            range(len(labels)),
-            format_func=lambda i: labels[i],
-            key="session_selector",
+    
+    # ── File Explorer tab ────────────────────────────────────────────
+    
+    _FILE_TYPE_ICONS = {
+        ".png": "🖼", ".jpg": "🖼", ".jpeg": "🖼", ".tif": "🖼", ".tiff": "🖼",
+        ".csv": "📊", ".tsv": "📊", ".xlsx": "📊",
+        ".json": "📋", ".npy": "🔢",
+        ".html": "📄", ".txt": "📝", ".md": "📝", ".log": "📝",
+        ".py": "🐍",
+    }
+    
+    
+    def _discover_sessions(current_session_dir: str | None) -> list[tuple[str, Path]]:
+        """Return (display_label, path) for session directories matching the current mode."""
+        if current_session_dir is None:
+            return []
+        parent = Path(current_session_dir).parent
+        app_mode = st.session_state.app_mode or "analyze"
+        prefix = SESSION_DIR_PREFIXES.get(app_mode, "analysis_session")
+        sessions = sorted(
+            parent.glob(f"{prefix}_*"),
+            key=lambda p: p.name,
+            reverse=True,
         )
-        session_path = paths[selected_idx]
-        tree_col, preview_col = st.columns([1, 2])
-
-        # Clear selected file when switching sessions
-        sel = st.session_state.get("selected_preview_file")
-        if sel and not str(sel).startswith(str(session_path)):
-            st.session_state.selected_preview_file = None
-
-        with tree_col:
-            st.subheader("Session Files")
-
-            all_files = list(session_path.rglob("*"))
-            has_files = any(f.is_file() for f in all_files)
-
-            if not has_files:
-                st.caption("No files found yet.")
-            else:
-                def _render_dir(dir_path: Path, depth: int = 0) -> None:
-                    """Render directory tree using expanders."""
-                    items = sorted(dir_path.iterdir(), key=lambda p: (p.is_file(), p.name))
-                    dirs = [i for i in items if i.is_dir()]
-                    files = [i for i in items if i.is_file()]
-
-                    for d in dirs:
-                        child_count = sum(1 for _ in d.rglob("*") if _.is_file())
-                        if child_count == 0:
-                            continue
-                        with st.expander(f"📁 {d.name} ({child_count})", expanded=(depth == 0)):
-                            _render_dir(d, depth + 1)
-
-                    def _truncate_name(name: str, max_len: int = 25) -> str:
-                        stem, suffix = Path(name).stem, Path(name).suffix
-                        if len(name) <= max_len:
-                            return name
-                        keep = max_len - len(suffix) - 1
-                        return stem[:keep] + "\u2026" + suffix
-
-                    def _render_files(file_list: list[Path]) -> None:
-                        for f in file_list:
-                            icon = _FILE_TYPE_ICONS.get(f.suffix.lower(), "📄")
-                            size = _format_size(f.stat().st_size)
-                            is_sel = st.session_state.get("selected_preview_file") == str(f)
-                            btn_type = "primary" if is_sel else "secondary"
-                            display_name = _truncate_name(f.name)
-                            if st.button(
-                                f"{icon}  {display_name}  ({size})",
-                                key=f"fbtn_{f.relative_to(session_path)}",
-                                use_container_width=True,
-                                type=btn_type,
-                                help=f.name,
-                            ):
-                                st.session_state.selected_preview_file = str(f)
-                                st.rerun()
-
-                    if files and depth == 0:
-                        with st.expander(f"📄 Session ({len(files)})", expanded=True):
+        current = Path(current_session_dir)
+        result: list[tuple[str, Path]] = []
+        for s in sessions:
+            # Parse timestamp from directory name like <prefix>_20260223_201729
+            parts = s.name.removeprefix(f"{prefix}_")
+            try:
+                label = f"{parts[:4]}-{parts[4:6]}-{parts[6:8]} {parts[9:11]}:{parts[11:13]}:{parts[13:15]}"
+            except (IndexError, ValueError):
+                label = s.name
+            if s.resolve() == current.resolve():
+                label += " (current)"
+            result.append((label, s))
+        return result
+    
+    
+    def _format_size(size_bytes: int) -> str:
+        """Format file size in human-readable form."""
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        elif size_bytes < 1024 * 1024:
+            return f"{size_bytes / 1024:.1f} KB"
+        else:
+            return f"{size_bytes / (1024 * 1024):.1f} MB"
+    
+    
+    with files_tab:
+        sessions = _discover_sessions(st.session_state.session_dir)
+        if not sessions:
+            st.info("Start a session first to browse output files.")
+        else:
+            labels = [s[0] for s in sessions]
+            paths = [s[1] for s in sessions]
+            selected_idx = st.selectbox(
+                "Session",
+                range(len(labels)),
+                format_func=lambda i: labels[i],
+                key="session_selector",
+            )
+            session_path = paths[selected_idx]
+            tree_col, preview_col = st.columns([1, 2])
+    
+            # Clear selected file when switching sessions
+            sel = st.session_state.get("selected_preview_file")
+            if sel and not str(sel).startswith(str(session_path)):
+                st.session_state.selected_preview_file = None
+    
+            with tree_col:
+                st.subheader("Session Files")
+    
+                all_files = list(session_path.rglob("*"))
+                has_files = any(f.is_file() for f in all_files)
+    
+                if not has_files:
+                    st.caption("No files found yet.")
+                else:
+                    def _render_dir(dir_path: Path, depth: int = 0) -> None:
+                        """Render directory tree using expanders."""
+                        items = sorted(dir_path.iterdir(), key=lambda p: (p.is_file(), p.name))
+                        dirs = [i for i in items if i.is_dir()]
+                        files = [i for i in items if i.is_file()]
+    
+                        for d in dirs:
+                            child_count = sum(1 for _ in d.rglob("*") if _.is_file())
+                            if child_count == 0:
+                                continue
+                            with st.expander(f"📁 {d.name} ({child_count})", expanded=(depth == 0)):
+                                _render_dir(d, depth + 1)
+    
+                        def _truncate_name(name: str, max_len: int = 25) -> str:
+                            stem, suffix = Path(name).stem, Path(name).suffix
+                            if len(name) <= max_len:
+                                return name
+                            keep = max_len - len(suffix) - 1
+                            return stem[:keep] + "\u2026" + suffix
+    
+                        def _render_files(file_list: list[Path]) -> None:
+                            for f in file_list:
+                                icon = _FILE_TYPE_ICONS.get(f.suffix.lower(), "📄")
+                                size = _format_size(f.stat().st_size)
+                                is_sel = st.session_state.get("selected_preview_file") == str(f)
+                                btn_type = "primary" if is_sel else "secondary"
+                                display_name = _truncate_name(f.name)
+                                if st.button(
+                                    f"{icon}  {display_name}  ({size})",
+                                    key=f"fbtn_{f.relative_to(session_path)}",
+                                    use_container_width=True,
+                                    type=btn_type,
+                                    help=f.name,
+                                ):
+                                    st.session_state.selected_preview_file = str(f)
+                                    st.rerun()
+    
+                        if files and depth == 0:
+                            with st.expander(f"📄 Session ({len(files)})", expanded=True):
+                                _render_files(files)
+                        else:
                             _render_files(files)
-                    else:
-                        _render_files(files)
-
-                _render_dir(session_path)
-
-        selected_file = None
-        sel_path = st.session_state.get("selected_preview_file")
-        if sel_path:
-            selected_file = Path(sel_path)
-
-        with preview_col:
-            if selected_file and selected_file.exists():
-                render_file_preview(selected_file)
-            else:
-                st.caption("Select a file to preview.")
-
-# ── Tools tab ────────────────────────────────────────────────────
-with tools_tab:
-    render_tools_agents_tab()
-
-# ── Skills tab ───────────────────────────────────────────────────
-with skills_tab:
-    render_skills_tab()
+    
+                    _render_dir(session_path)
+    
+            selected_file = None
+            sel_path = st.session_state.get("selected_preview_file")
+            if sel_path:
+                selected_file = Path(sel_path)
+    
+            with preview_col:
+                if selected_file and selected_file.exists():
+                    render_file_preview(selected_file)
+                else:
+                    st.caption("Select a file to preview.")
+    
+    # ── Tools tab ────────────────────────────────────────────────────
+    with tools_tab:
+        render_tools_agents_tab()
+    
+    # ── Skills tab ───────────────────────────────────────────────────
+    with skills_tab:
+        render_skills_tab()
+    
+    # ── Simulations tab ──────────────────────────────────────────────
+    with sim_tab:
+        render_simulations_tab()
