@@ -353,7 +353,9 @@ def generate_tleap_script(
 
     # Ions
     if neutralize:
-        lines += ["addIonsRand SYS Na+ 0 Cl- 0", ""]
+        lines.append("addIonsRand SYS Na+ 0")
+        lines.append("addIonsRand SYS Cl- 0")
+        lines.append("")
 
     # Save (absolute paths)
     prmtop = os.path.join(working_dir, f"{output_prefix}.prmtop")
