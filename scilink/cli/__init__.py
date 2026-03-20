@@ -1,5 +1,4 @@
 """SciLink CLI interface."""
-
 # Main CLI entry point
 from .main import main
 
@@ -7,6 +6,6 @@ from .main import main
 from . import plan
 from . import simulate
 from . import analyze
+from . import prepare_ff
 
-
-__all__ = ['main', 'plan', 'simulate', 'analyze']
+__all__ = ['main', 'plan', 'simulate', 'analyze', 'prepare-ff']

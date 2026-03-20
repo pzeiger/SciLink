@@ -136,8 +136,6 @@ class LAMMPSAnalysisAgent:
         # Initialize script executor
         self.executor = ScriptExecutor(
             timeout=executor_timeout,
-            enforce_sandbox=enforce_sandbox,
-            allow_unsafe_override=False
         )
         
         # Detect container environment

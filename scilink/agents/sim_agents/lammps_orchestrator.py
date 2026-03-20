@@ -1139,93 +1139,198 @@ class LAMMPSOrchestrator:
                           research_goal: Optional[str] = None,
                           api_key: Optional[str] = None,
                           model_name: str = "gemini-3-pro-preview",
-                          base_url: Optional[str] = None) -> Tuple[str, Optional[Dict]]:
+                          base_url: Optional[str] = None,
+                          small_molecule_info: Optional[List[Dict]] = None,
+                          solvate: bool = False,
+                          box_buffer: float = 10.0,
+                          neutralize: bool = True,
+                          prefer_amber: bool = True) -> Tuple[str, Optional[Dict]]:
         """
         Prepare LAMMPS data file from PDB or verify existing data file.
-        Now includes automatic charge assignment via ForceFieldAgent.
+        
+        When AmberTools are available and prefer_amber=True, uses the AMBER
+        pipeline (antechamber → tleap → ParmEd) which produces a self-contained
+        data file with all coefficients and charges. Falls back to VMD + LLM
+        parameterization if AmberTools are not available.
         
         Args:
             input_file: Path to input structure file (PDB, LAMMPS data, etc.)
             working_dir: Working directory
-            box_dimensions: Box size in Angstroms (only used if converting PDB)
-            vmd_path: Path to VMD executable (only needed for PDB conversion)
+            box_dimensions: Box size in Angstroms (only used for VMD conversion)
+            vmd_path: Path to VMD executable (only needed for VMD fallback)
             force_reconvert: Force reconversion even if data file exists
             assign_charges: Whether to assign charges using ForceFieldAgent
-            research_goal: Research goal (used for charge assignment)
+            research_goal: Research goal
             api_key: API key for ForceFieldAgent
             model_name: Model name for ForceFieldAgent
             base_url: Base URL for ForceFieldAgent
+            small_molecule_info: Non-standard residues for antechamber
+                [{"pdb": <path>, "name": "LIG", "charge": 0}, ...]
+            solvate: Add solvent box (AMBER pipeline only)
+            box_buffer: Solvent buffer distance in Angstroms (AMBER pipeline)
+            neutralize: Add counter-ions (AMBER pipeline)
+            prefer_amber: Try AMBER pipeline before VMD (default True)
             
         Returns:
             Tuple of (path to LAMMPS data file, force field info dict or None)
         """
-        from .force_field_agent import ForceFieldAgent  # Import here to avoid circular imports
-        
+        from .force_field_agent import ForceFieldAgent
+    
         input_path = Path(input_file)
-        
+    
         if not input_path.exists():
             raise FileNotFoundError(f"Input file not found: {input_file}")
-        
+    
         force_field_info = None
-        
-        # Check if it's already a LAMMPS data file
+    
+        # ────────────────────────────────────────────────────────────
+        # Case 1: Already a LAMMPS data file
+        # ────────────────────────────────────────────────────────────
         if input_path.suffix.lower() in ['.lammps', '.data', '.lmp']:
             logging.info(f"✓ Input is already a LAMMPS data file: {input_file}")
             data_file = str(input_path)
-            
-        # If PDB, convert using VMD
-        elif input_path.suffix.lower() == '.pdb':
-            logging.info(f"📄 Input is a PDB file, conversion needed")
-            
-            # Check if converted data file already exists
-            output_file = Path(working_dir) / f"{input_path.stem}.data"
-            
-            if output_file.exists() and not force_reconvert:
-                logging.info(f"✓ Converted data file already exists: {output_file}")
-                data_file = str(output_file)
-            else:
-                # Convert PDB to LAMMPS data file
-                logging.info(f"🔄 Converting PDB to LAMMPS data file...")
-                
-                # Get VMD path
-                if vmd_path is None:
-                    vmd_path = os.getenv('VMD_PATH')
-                    if vmd_path is None:
-                        converter_temp = VMDLAMMPSConverter()
-                        vmd_path = converter_temp.vmd_path
-                
-                if not vmd_path:
-                    raise RuntimeError("VMD executable not found")
-                
-                # Initialize converter
-                converter = VMDLAMMPSConverter(
-                    vmd_path=vmd_path,
-                    working_dir=working_dir
-                )
-                
-                data_file = converter.convert(
-                    pdb_file=str(input_path),
-                    output_file=str(output_file),
-                    box_dimensions=box_dimensions,
-                    options={
-                        'autobonds': True,
-                        'retypebonds': True,
-                        'guessangles': True,
-                        'guess_dihedrals': True,
-                        'guess_impropers': True,
-                        'style': 'full',
-                        'atom_style': 'full',
-                        'center_system': True
-                    }
-                )
-                logging.info(f"✓ Successfully converted PDB to data file: {data_file}")
-        else:
+    
+            # Still run charge assignment if requested and no coefficients present
+            if assign_charges:
+                try:
+                    ff_agent = ForceFieldAgent(
+                        working_dir=working_dir,
+                        api_key=api_key,
+                        model_name=model_name,
+                        base_url=base_url
+                    )
+                    force_field_info = ff_agent.complete_parameterization(
+                        pdb_file=None,
+                        data_file=data_file,
+                        research_goal=research_goal or "Molecular dynamics simulation"
+                    )
+                    if force_field_info["status"] == "success":
+                        data_file = force_field_info["output_files"]["charged_data_file"]
+                except Exception as e:
+                    logging.warning(f"Charge assignment failed for existing data file: {e}")
+    
+            return data_file, force_field_info
+    
+        # ────────────────────────────────────────────────────────────
+        # Case 2: PDB file — try AMBER pipeline first, then VMD fallback
+        # ────────────────────────────────────────────────────────────
+        if input_path.suffix.lower() != '.pdb':
             raise ValueError(f"Unsupported input format: {input_path.suffix}")
-        
-        # Assign charges if requested
+    
+        logging.info(f"📄 Input is a PDB file: {input_file}")
+    
+        # Check if output already exists
+        output_file = Path(working_dir) / f"{input_path.stem}.data"
+        if output_file.exists() and not force_reconvert:
+            logging.info(f"✓ Converted data file already exists: {output_file}")
+            return str(output_file), None
+    
+        # ── Try AMBER pipeline ───────────────────────────────────
+        if prefer_amber:
+            try:
+                from ...tools.amber_tools import check_amber_tools
+                tools_status = check_amber_tools()
+            except ImportError:
+                tools_status = {"available": False, "missing": ["amber_tools module"]}
+    
+            if tools_status["available"]:
+                logging.info("🧪 AmberTools available — using AMBER pipeline")
+                try:
+                    ff_agent = ForceFieldAgent(
+                        working_dir=working_dir,
+                        api_key=api_key,
+                        model_name=model_name,
+                        base_url=base_url,
+                        skill="amber"
+                    )
+    
+                    # Step 1: Select force field
+                    selection = ff_agent.select_force_field(
+                        pdb_file=str(input_path),
+                        research_goal=research_goal or "Molecular dynamics simulation"
+                    )
+    
+                    # Step 2: Acquire parameters via AMBER pipeline
+                    force_field_info = ff_agent.acquire_parameters(
+                        selection_info=selection,
+                        pdb_file=str(input_path),
+                        small_molecule_info=small_molecule_info,
+                        solvate=solvate,
+                        box_buffer=box_buffer,
+                        neutralize=neutralize,
+                    )
+    
+                    if force_field_info.get("pipeline") == "amber":
+                        data_file = force_field_info["data_file"]
+                        logging.info(f"✅ AMBER pipeline produced: {data_file}")
+    
+                        # Generate the LAMMPS input header (style commands)
+                        param_files = ff_agent.generate_lammps_parameters(
+                            parameter_info=force_field_info,
+                            data_file=data_file,
+                        )
+                        force_field_info["output_files"] = {
+                            "charged_data_file": data_file,
+                            "parameter_files": param_files,
+                        }
+                        force_field_info["status"] = "success"
+    
+                        return data_file, force_field_info
+                    else:
+                        logging.info(
+                            "AMBER skill active but pipeline not used "
+                            "(FF may not be AMBER-family). Falling through to VMD."
+                        )
+    
+                except Exception as e:
+                    logging.warning(f"⚠️ AMBER pipeline failed: {e}")
+                    logging.info("Falling back to VMD + LLM parameterization")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                logging.info(
+                    f"AmberTools not available (missing: {tools_status.get('missing', [])}). "
+                    f"Using VMD + LLM parameterization."
+                )
+    
+        # ── VMD fallback ─────────────────────────────────────────
+        logging.info(f"🔄 Converting PDB to LAMMPS data file via VMD...")
+    
+        if vmd_path is None:
+            vmd_path = os.getenv('VMD_PATH')
+            if vmd_path is None:
+                converter_temp = VMDLAMMPSConverter()
+                vmd_path = converter_temp.vmd_path
+    
+        if not vmd_path:
+            raise RuntimeError(
+                "Neither AmberTools nor VMD available for PDB conversion. "
+                "Install one:\n"
+                "  conda install -c conda-forge ambertools parmed\n"
+                "  OR set VMD_PATH environment variable"
+            )
+    
+        converter = VMDLAMMPSConverter(
+            vmd_path=vmd_path,
+            working_dir=working_dir
+        )
+    
+        data_file = converter.convert(
+            pdb_file=str(input_path),
+            output_file=str(output_file),
+            box_dimensions=box_dimensions,
+            options={
+                'autobonds': True, 'retypebonds': True,
+                'guessangles': True, 'guess_dihedrals': True,
+                'guess_impropers': True, 'style': 'full',
+                'atom_style': 'full', 'center_system': True
+            }
+        )
+        logging.info(f"✓ VMD conversion complete: {data_file}")
+    
+        # Assign charges via LLM (VMD doesn't set charges)
         if assign_charges:
-            logging.info(f"⚡ Assigning partial charges using ForceFieldAgent...")
-            
+            logging.info(f"⚡ Assigning charges using ForceFieldAgent (LLM)...")
             try:
                 ff_agent = ForceFieldAgent(
                     working_dir=working_dir,
@@ -1233,25 +1338,20 @@ class LAMMPSOrchestrator:
                     model_name=model_name,
                     base_url=base_url
                 )
-                
-                # Run complete parameterization
                 force_field_info = ff_agent.complete_parameterization(
-                    pdb_file=str(input_path) if input_path.suffix.lower() == '.pdb' else None,
+                    pdb_file=str(input_path),
                     data_file=data_file,
                     research_goal=research_goal or "Molecular dynamics simulation"
                 )
-                
                 if force_field_info["status"] == "success":
-                    # Use the charged data file
                     data_file = force_field_info["output_files"]["charged_data_file"]
-                    logging.info(f"✓ Charges assigned successfully: {data_file}")
+                    logging.info(f"✓ Charges assigned: {data_file}")
                 else:
-                    logging.warning(f"⚠️ Charge assignment had issues: {force_field_info.get('errors', [])}")
-                    
+                    logging.warning(f"⚠️ Charge assignment issues: {force_field_info.get('errors', [])}")
             except Exception as e:
                 logging.error(f"❌ Charge assignment failed: {e}")
-                logging.warning("Continuing with uncharged data file (simulation may fail)")
-        
+                logging.warning("Continuing with uncharged data file")
+    
         return data_file, force_field_info
 
     @classmethod
@@ -1269,36 +1369,45 @@ class LAMMPSOrchestrator:
                   force_reconvert: bool = False,
                   assign_charges: bool = True,
                   stage_timeout: int = 14400,
+                  small_molecule_info: Optional[List[Dict]] = None,
+                  solvate: bool = False,
+                  box_buffer: float = 10.0,
+                  neutralize: bool = True,
+                  prefer_amber: bool = True,
                   **kwargs) -> Dict:
         """
-        Quick run with automatic file format detection, conversion, and charge assignment.
+        Quick run with automatic file format detection, conversion, and parameterization.
+        
+        When AmberTools are available and the input is a PDB, automatically uses the
+        AMBER pipeline (antechamber → tleap → ParmEd) for production-quality parameters.
+        Falls back to VMD + LLM parameterization otherwise.
         """
         os.makedirs(working_dir, exist_ok=True)
-        
-        logging.info("="*80)
+    
+        logging.info("=" * 80)
         logging.info("LAMMPS ORCHESTRATOR - QUICK RUN")
-        logging.info("="*80)
-        
-        # Get API config from kwargs
+        logging.info("=" * 80)
+    
         api_key = kwargs.get('api_key') or os.getenv("GOOGLE_API_KEY")
         model_name = kwargs.get('model_name', "gemini-3-pro-preview")
         base_url = kwargs.get('base_url')
-        
-        # Step 1: Prepare data file WITH charge assignment
-        logging.info("\n📋 Step 1: Preparing data file and assigning charges...")
-        
+    
+        # Step 1: Prepare data file
+        logging.info("\n📋 Step 1: Preparing data file...")
+    
         conversion_info = {
             'input_file': input_file,
             'input_type': Path(input_file).suffix,
             'converted': False,
             'charges_assigned': False,
+            'pipeline': None,
             'conversion_time': None
         }
-        
+    
         try:
-            import time
-            start_time = time.time()
-            
+            import time as _time
+            start_time = _time.time()
+    
             prepared_data_file, force_field_info = cls._prepare_data_file(
                 input_file=input_file,
                 working_dir=working_dir,
@@ -1309,21 +1418,36 @@ class LAMMPSOrchestrator:
                 research_goal=research_goal,
                 api_key=api_key,
                 model_name=model_name,
-                base_url=base_url
+                base_url=base_url,
+                small_molecule_info=small_molecule_info,
+                solvate=solvate,
+                box_buffer=box_buffer,
+                neutralize=neutralize,
+                prefer_amber=prefer_amber,
             )
-            
-            conversion_time = time.time() - start_time
-            
+    
+            conversion_time = _time.time() - start_time
+    
+            # Detect which pipeline was used
+            pipeline_used = "unknown"
+            if force_field_info:
+                if force_field_info.get("pipeline") == "amber":
+                    pipeline_used = "amber"
+                elif force_field_info.get("status") == "success":
+                    pipeline_used = "vmd+llm"
+    
             conversion_info.update({
                 'prepared_file': prepared_data_file,
                 'converted': (Path(prepared_data_file).name != Path(input_file).name),
-                'charges_assigned': assign_charges and force_field_info is not None,
+                'charges_assigned': force_field_info is not None,
+                'pipeline': pipeline_used,
                 'conversion_time': conversion_time,
                 'force_field_info': force_field_info
             })
-            
-            logging.info(f"✓ Data preparation completed in {conversion_time:.2f} seconds")
-            
+    
+            logging.info(f"✓ Data preparation completed in {conversion_time:.2f}s")
+            logging.info(f"  Pipeline: {pipeline_used}")
+    
         except Exception as e:
             logging.error(f"❌ Data file preparation failed: {e}")
             return {
@@ -1334,10 +1458,10 @@ class LAMMPSOrchestrator:
                 'conversion_info': conversion_info,
                 'error': str(e)
             }
-        
+    
         # Step 2: Initialize orchestrator
         logging.info("\n🔧 Step 2: Initializing orchestrator...")
-        
+    
         try:
             orchestrator = cls(
                 working_dir=working_dir,
@@ -1358,25 +1482,23 @@ class LAMMPSOrchestrator:
                 'conversion_info': conversion_info,
                 'error': str(e)
             }
-        
+    
         # Step 3: Run simulation
         logging.info("\n🚀 Step 3: Running simulation stages...")
-        
-        # Pass force field files if available
+    
         force_field_files = None
         if force_field_info and force_field_info.get("status") == "success":
             param_files = force_field_info.get("output_files", {}).get("parameter_files", {})
             if param_files:
                 force_field_files = param_files
-        
+    
         results = orchestrator.run_supervised_simulation(
             data_file=prepared_data_file,
             research_goal=research_goal,
             force_field_files=force_field_files,
             run_final_analysis=run_final_analysis
         )
-        
-        # Add conversion info to results
+    
         results['conversion_info'] = conversion_info
-        
+    
         return results

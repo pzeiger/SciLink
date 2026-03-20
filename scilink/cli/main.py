@@ -139,7 +139,12 @@ def main():
         from scilink.cli.simulate import main as simulate_main
         sys.argv = [sys.argv[0] + ' simulate'] + sys.argv[2:]
         return simulate_main()
-    
+
+    elif command == 'prepare-ff':
+        from scilink.cli.prepare_ff import main as prepare_ff_main
+        sys.argv = [sys.argv[0] + ' prepare-ff'] + sys.argv[2:]
+        return prepare_ff_main()
+
     elif command == 'analyze':
         from scilink.cli.analyze import main as analyze_main
         sys.argv = [sys.argv[0] + ' analyze'] + sys.argv[2:]
@@ -183,7 +188,10 @@ Available Commands:
                 
   simulate      Simulation agents for MD, DFT, LAMMPS, VASP workflows
                 (Coming soon)
-                
+
+  prepare-ff    Force field agent for generating LAMMPS force field and 
+                data files with AMBER
+
   analyze       Analysis agents for microscopy, spectroscopy, and
                 experimental data processing
                 (Coming soon)
@@ -199,6 +207,7 @@ Examples:
   scilink plan --model gemini-2.0-flash-exp # Use different model
   scilink simulate --help                   # See simulation options
   scilink analyze --help                    # See analysis options
+  scilink prepare-ff --help                 # See force field options
 
 Get Help:
   scilink <command> --help                  # Command-specific help
