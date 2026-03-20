@@ -86,31 +86,137 @@ class LAMMPSSimulationAgent:
         """
         Integrate force field parameter files into the LAMMPS script.
         
-        Handles cases where files may already be in the working directory.
+        Handles both AMBER-style files (styles only, must come BEFORE read_data)
+        and LLM-generated files (coefficients, must come AFTER read_data) by
+        reading the file and classifying each command.
         """
         if not force_field_files:
             return script_text
     
+        # Commands that must appear BEFORE read_data
+        BEFORE_READ_DATA = {
+            "units", "atom_style", "dimension", "boundary",
+            "pair_style", "bond_style", "angle_style", "dihedral_style", "improper_style",
+            "kspace_style", "special_bonds", "pair_modify",
+        }
+    
+        # Commands that must appear AFTER read_data
+        AFTER_READ_DATA = {
+            "pair_coeff", "bond_coeff", "angle_coeff", "dihedral_coeff", "improper_coeff",
+            "set", "mass", "group", "velocity",
+        }
+    
         lines = script_text.split('\n')
     
-        # Find the position to insert force field parameters (after read_data)
-        insert_pos = 0
+        # Find read_data line
+        read_data_pos = None
         for i, line in enumerate(lines):
-            if "read_data" in line:
-                insert_pos = i + 1
+            if line.strip().startswith("read_data"):
+                read_data_pos = i
                 break
     
-        # Fallback: find first non-comment, non-empty line
-        if insert_pos == 0:
+        if read_data_pos is None:
+            # No read_data found — insert everything at top after comments
+            insert_pos = 0
             for i, line in enumerate(lines):
                 stripped = line.strip()
                 if stripped and not stripped.startswith("#"):
                     insert_pos = i
                     break
+            self.logger.warning("No read_data found in script — inserting FF at top")
     
-        insertion = ["", "# Include force field parameters"]
+        # Process each force field file
+        before_lines = ["", "# ── Force field styles (before read_data) ──"]
+        after_lines = ["", "# ── Force field parameters (after read_data) ──"]
+        has_before = False
+        has_after = False
         included_files = []
     
+        for name, ff_path in force_field_files.items():
+            ff_path_str = str(ff_path)
+            if not os.path.exists(ff_path_str):
+                # Try working directory
+                local_path = os.path.join(self.working_dir, os.path.basename(ff_path_str))
+                if os.path.exists(local_path):
+                    ff_path_str = local_path
+                else:
+                    self.logger.warning(f"Force field file not found: {ff_path_str}")
+                    continue
+    
+            self.logger.info(f"Integrating force field file: {ff_path_str}")
+            included_files.append(ff_path_str)
+    
+            try:
+                with open(ff_path_str, 'r') as f:
+                    ff_lines = f.readlines()
+            except Exception as e:
+                self.logger.warning(f"Could not read {ff_path_str}: {e}")
+                continue
+    
+            for ff_line in ff_lines:
+                stripped = ff_line.strip()
+    
+                # Skip empty lines and comments
+                if not stripped or stripped.startswith("#"):
+                    continue
+    
+                # Get the command keyword (first word)
+                keyword = stripped.split()[0].lower()
+    
+                # Skip read_data in ff file — the run script handles that
+                if keyword == "read_data":
+                    self.logger.info(f"Skipping read_data in {name} (handled by run script)")
+                    continue
+    
+                # Classify
+                if keyword in BEFORE_READ_DATA:
+                    before_lines.append(stripped)
+                    has_before = True
+                elif keyword in AFTER_READ_DATA:
+                    after_lines.append(stripped)
+                    has_after = True
+                else:
+                    # Unknown command — put after read_data to be safe
+                    after_lines.append(stripped)
+                    has_after = True
+    
+        if not included_files:
+            self.logger.warning("No force field files were successfully integrated")
+            return script_text
+    
+        # Build the new script
+        new_lines = []
+    
+        if read_data_pos is not None:
+            # Insert BEFORE lines right before read_data
+            for i, line in enumerate(lines):
+                if i == read_data_pos and has_before:
+                    new_lines.extend(before_lines)
+                    new_lines.append("")
+                new_lines.append(line)
+                if i == read_data_pos and has_after:
+                    new_lines.extend(after_lines)
+                    new_lines.append("")
+        else:
+            # No read_data — put everything at insert_pos
+            for i, line in enumerate(lines):
+                if i == insert_pos:
+                    if has_before:
+                        new_lines.extend(before_lines)
+                        new_lines.append("")
+                    if has_after:
+                        new_lines.extend(after_lines)
+                        new_lines.append("")
+                new_lines.append(line)
+    
+        self.logger.info(
+            f"Integrated {len(included_files)} FF file(s): "
+            f"{len(before_lines)-2 if has_before else 0} style commands before read_data, "
+            f"{len(after_lines)-2 if has_after else 0} coeff commands after read_data"
+        )
+    
+        return '\n'.join(new_lines)
+
         def safe_copy_file(source: str, dest_dir: Path, preferred_name: Optional[str] = None) -> Optional[str]:
             """
             Safely copy a file to destination directory.

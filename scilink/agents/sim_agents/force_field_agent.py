@@ -533,13 +533,141 @@ Provide a brief summary of what the results mean and any actions needed.
         except Exception:
             return ""
 
+    def _detect_tip4p_types(self, data_file: str) -> Optional[Dict[str, int]]:
+        """
+        Detect TIP4P atom types (O, H, M) from a LAMMPS data file.
+    
+        The virtual site (M/EP) is identified by its near-zero mass.
+        O and H are identified by mass (~16 and ~1) among types that
+        appear in 3- or 4-atom water molecules.
+    
+        Returns:
+            {"O": type_id, "H": type_id, "M": type_id, "M_dist": float}
+            or None if TIP4P types can't be identified.
+        """
+        masses = {}       # type_id -> mass
+        type_names = {}   # type_id -> comment name
+    
+        try:
+            with open(data_file) as f:
+                lines = f.readlines()
+    
+            # Parse Masses section
+            in_masses = False
+            for line in lines:
+                stripped = line.strip()
+                if stripped == "Masses" or stripped.startswith("Masses"):
+                    in_masses = True
+                    continue
+                if in_masses:
+                    if not stripped:
+                        continue
+                    if stripped[0].isalpha() and not stripped[0].isdigit():
+                        break  # Hit next section
+                    if stripped.startswith("#"):
+                        continue
+                    parts = stripped.split()
+                    if len(parts) >= 2:
+                        try:
+                            type_id = int(parts[0])
+                            mass = float(parts[1])
+                            masses[type_id] = mass
+                            # Extract name from comment
+                            if "#" in stripped:
+                                name = stripped.split("#")[1].strip().split()[0]
+                                type_names[type_id] = name
+                        except (ValueError, IndexError):
+                            continue
+    
+            if not masses:
+                return None
+    
+            # Identify types by mass
+            o_type = None   # mass ~16
+            h_type = None   # mass ~1
+            m_type = None   # mass ~0 (virtual site)
+    
+            for type_id, mass in masses.items():
+                name = type_names.get(type_id, "").upper()
+    
+                # Virtual site: mass is 0 or near-zero
+                if mass < 0.1:
+                    m_type = type_id
+                    continue
+    
+                # Oxygen: mass ~15.999
+                if 15.0 < mass < 17.0:
+                    # Prefer water-oxygen names over other oxygens
+                    if o_type is None:
+                        o_type = type_id
+                    elif name in ("OW", "O_W", "OH2", "OT"):
+                        o_type = type_id  # Override with water-specific type
+    
+                # Hydrogen: mass ~1.008
+                if 0.5 < mass < 2.0:
+                    if h_type is None:
+                        h_type = type_id
+                    elif name in ("HW", "H_W", "HT"):
+                        h_type = type_id  # Override with water-specific type
+    
+            if m_type is None:
+                self.logger.info("No virtual site (mass ~0) found — not a TIP4P system")
+                return None
+    
+            if o_type is None or h_type is None:
+                self.logger.warning(
+                    f"Found virtual site (type {m_type}) but could not identify "
+                    f"O and H types for TIP4P"
+                )
+                return None
+    
+            # Determine M-site distance from water model
+            # These are the standard distances for common TIP4P variants
+            m_name = type_names.get(m_type, "").upper()
+            tip4p_distances = {
+                "TIP4P":     0.15,
+                "TIP4PEW":   0.125,
+                "TIP4P2005": 0.1546,
+                "TIP4PFB":   0.10527,
+                "TIP4PICE":  0.1577,
+            }
+    
+            # Try to guess from type name
+            m_dist = 0.125  # Default to TIP4P-Ew (most common)
+            for model, dist in tip4p_distances.items():
+                if model in m_name or any(
+                    model in type_names.get(t, "").upper()
+                    for t in [o_type, h_type, m_type]
+                ):
+                    m_dist = dist
+                    break
+    
+            self.logger.info(
+                f"Detected TIP4P types: O={o_type} ({type_names.get(o_type, '?')}), "
+                f"H={h_type} ({type_names.get(h_type, '?')}), "
+                f"M={m_type} ({type_names.get(m_type, '?')}), dist={m_dist}"
+            )
+    
+            return {
+                "O": o_type,
+                "H": h_type,
+                "M": m_type,
+                "M_dist": m_dist,
+            }
+    
+        except Exception as e:
+            self.logger.warning(f"Could not detect TIP4P types: {e}")
+            return None
+
     def _generate_amber_input_header(
         self, data_file: str, ff_info: Dict[str, Any]
     ) -> str:
-        """Generate LAMMPS input header for AMBER data file."""
+        """Generate LAMMPS force field style commands for AMBER data file."""
         ff_name = ff_info.get("force_field", "AMBER")
         water = ff_info.get("compatible_water_model", "TIP3P")
-
+        water_lower = water.lower().replace("-", "").replace(" ", "")
+    
+        # Detect which interaction types exist in the data file
         has = {"bonds": False, "angles": False, "dihedrals": False, "impropers": False}
         try:
             with open(data_file) as f:
@@ -551,21 +679,51 @@ Provide a brief summary of what the results mean and any actions needed.
                             has[key] = int(parts[0]) > 0
         except Exception:
             has = {k: True for k in has}
-
+    
+        tip4p_variants = {"tip4p", "tip4pew", "tip4p2005", "tip4pfb", "tip4pice"}
+        is_tip4p = water_lower in tip4p_variants
+    
         lines = [
-            f"# LAMMPS input — {ff_name} via AMBER pipeline",
+            f"# LAMMPS force field styles for {ff_name}",
             f"# Water model: {water}",
             f"# Generated by ForceFieldAgent (skill: {self.skill_name})",
+            f"# Include BEFORE read_data in run script",
             "",
+            "# ── Universal AMBER settings ──",
             "units real",
             "atom_style full",
-            "",
-            "pair_style lj/charmm/coul/long 10.0 12.0",
-            "pair_modify mix arithmetic",
-            "kspace_style pppm 1.0e-5",
             "special_bonds amber",
+            "pair_modify mix arithmetic",
+            "",
+            "# ── Interaction styles ──",
+        ]
+    
+        if is_tip4p:
+            tip4p = self._detect_tip4p_types(data_file)
+            if tip4p:
+                lines += [
+                    f"# TIP4P water: O=type {tip4p['O']}, H=type {tip4p['H']}, "
+                    f"M=type {tip4p['M']}, dist={tip4p['M_dist']}",
+                    f"pair_style lj/cut/tip4p/long "
+                    f"{tip4p['O']} {tip4p['H']} {tip4p['M']} {tip4p['M_dist']} 10.0 12.0",
+                ]
+            else:
+                lines += [
+                    f"# WARNING: TIP4P water selected but could not auto-detect types",
+                    f"# Replace <O> <H> <M> <dist> with actual type IDs from data file",
+                    f"pair_style lj/cut/tip4p/long <O> <H> <M> <dist> 10.0 12.0",
+                ]
+        else:
+            lines += [
+                f"# 3-site water ({water})",
+                f"pair_style lj/charmm/coul/long 10.0 12.0",
+            ]
+    
+        lines += [
+            "kspace_style pppm 1.0e-5",
             "",
         ]
+    
         if has["bonds"]:
             lines.append("bond_style harmonic")
         if has["angles"]:
@@ -574,7 +732,8 @@ Provide a brief summary of what the results mean and any actions needed.
             lines.append("dihedral_style fourier")
         if has["impropers"]:
             lines.append("improper_style cvff")
-        lines += ["", f"read_data {data_file}", ""]
+        lines.append("")
+    
         return "\n".join(lines)
 
     def _validate_amber_lammps_data(self, data_file: str) -> Dict[str, Any]:
