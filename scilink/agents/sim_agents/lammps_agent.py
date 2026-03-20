@@ -88,48 +88,50 @@ class LAMMPSSimulationAgent:
         
         Two strategies:
         1. AMBER-style files (styles only, no coefficients):
-           → Remove duplicate style commands from script, insert 'include' BEFORE read_data
+           → Copy to working dir, remove duplicate style commands from script,
+             insert 'include' BEFORE read_data
         2. LLM-generated files (coefficients):
            → Insert coefficient commands AFTER read_data
         """
         if not force_field_files:
             return script_text
-    
+
         # Commands that define styles (before read_data)
         STYLE_COMMANDS = {
             "units", "atom_style", "dimension", "boundary",
             "pair_style", "bond_style", "angle_style", "dihedral_style", "improper_style",
             "kspace_style", "special_bonds", "pair_modify",
         }
-    
+
         # Commands that define parameters (after read_data)
         COEFF_COMMANDS = {
             "pair_coeff", "bond_coeff", "angle_coeff", "dihedral_coeff", "improper_coeff",
             "set", "mass", "group", "velocity",
         }
-    
-        # ── Read and classify each FF file ────────────────────────────
-        styles_only_files = []    # Files with ONLY style commands → include before read_data
-        coeff_files = []          # Files with coeff commands → inline after read_data
+
+        # ── Resolve and classify each FF file ─────────────────────────
+        styles_only_files = []    # (resolved_path, basename) for include
         coeff_lines = []          # Collected coefficient lines
-    
+
         for name, ff_path in force_field_files.items():
             ff_path_str = str(ff_path)
+
+            # Resolve the file path
             if not os.path.exists(ff_path_str):
-                local_path = os.path.join(self.working_dir, os.path.basename(ff_path_str))
+                local_path = os.path.join(str(self.working_dir), os.path.basename(ff_path_str))
                 if os.path.exists(local_path):
                     ff_path_str = local_path
                 else:
                     self.logger.warning(f"Force field file not found: {ff_path_str}")
                     continue
-    
+
             try:
                 with open(ff_path_str, 'r') as f:
                     ff_content = f.readlines()
             except Exception as e:
                 self.logger.warning(f"Could not read {ff_path_str}: {e}")
                 continue
-    
+
             # Classify: does this file have any coeff commands?
             has_styles = False
             has_coeffs = False
@@ -144,14 +146,18 @@ class LAMMPSSimulationAgent:
                     has_styles = True
                 elif keyword in COEFF_COMMANDS:
                     has_coeffs = True
-    
+
             if has_styles and not has_coeffs:
-                # Pure style file (AMBER pipeline) → use include
-                styles_only_files.append(ff_path_str)
+                # Pure style file (AMBER pipeline) → copy to working dir, use include
+                dest_path = Path(self.working_dir) / os.path.basename(ff_path_str)
+                if str(Path(ff_path_str).resolve()) != str(dest_path.resolve()):
+                    shutil.copy2(ff_path_str, dest_path)
+                    self.logger.info(f"Copied FF file to working dir: {dest_path}")
+                styles_only_files.append(str(dest_path.name))
                 self.logger.info(f"FF file '{name}' is styles-only → will use 'include'")
+
             elif has_coeffs:
                 # Has coefficients → inline after read_data
-                coeff_files.append(ff_path_str)
                 self.logger.info(f"FF file '{name}' has coefficients → will inline after read_data")
                 for line in ff_content:
                     stripped = line.strip()
@@ -162,48 +168,46 @@ class LAMMPSSimulationAgent:
                         coeff_lines.append(stripped)
             else:
                 self.logger.warning(f"FF file '{name}' has no recognized commands — skipping")
-    
-        if not styles_only_files and not coeff_files:
+
+        if not styles_only_files and not coeff_lines:
             self.logger.warning("No force field files were successfully integrated")
             return script_text
-    
+
         # ── Rebuild the script ────────────────────────────────────────
         lines = script_text.split('\n')
-    
+
         # Find read_data line
         read_data_pos = None
         for i, line in enumerate(lines):
             if line.strip().startswith("read_data"):
                 read_data_pos = i
                 break
-    
+
         if read_data_pos is None:
             self.logger.warning("No read_data found in script")
             return script_text
-    
+
         # If we have styles-only files, remove duplicate style commands
-        # from the LLM-generated script and replace with 'include'
         if styles_only_files:
             cleaned_lines = []
             removed_count = 0
-            for i, line in enumerate(lines):
+            for line in lines:
                 stripped = line.strip()
                 if not stripped or stripped.startswith("#"):
                     cleaned_lines.append(line)
                     continue
                 keyword = stripped.split()[0].lower()
                 if keyword in STYLE_COMMANDS:
-                    # Remove — the include file handles this
                     removed_count += 1
                     continue
                 cleaned_lines.append(line)
-    
+
             if removed_count > 0:
                 self.logger.info(
                     f"Removed {removed_count} duplicate style commands "
                     f"(handled by include file)"
                 )
-    
+
             # Re-find read_data position in cleaned script
             lines = cleaned_lines
             read_data_pos = None
@@ -211,7 +215,7 @@ class LAMMPSSimulationAgent:
                 if line.strip().startswith("read_data"):
                     read_data_pos = i
                     break
-    
+
         # Build final script
         new_lines = []
         for i, line in enumerate(lines):
@@ -219,119 +223,25 @@ class LAMMPSSimulationAgent:
             if i == read_data_pos and styles_only_files:
                 new_lines.append("")
                 new_lines.append("# ── Force field styles (from AMBER pipeline) ──")
-                for ff_path in styles_only_files:
-                    # Use relative path if in same directory
-                    ff_basename = os.path.basename(ff_path)
+                for ff_basename in styles_only_files:
                     new_lines.append(f"include {ff_basename}")
                 new_lines.append("")
-    
+
             new_lines.append(line)
-    
+
             # Insert coefficients AFTER read_data
             if i == read_data_pos and coeff_lines:
                 new_lines.append("")
                 new_lines.append("# ── Force field parameters ──")
                 new_lines.extend(coeff_lines)
                 new_lines.append("")
-    
+
         self.logger.info(
             f"Integrated FF files: {len(styles_only_files)} include(s) before read_data, "
             f"{len(coeff_lines)} coeff commands after read_data"
         )
-    
-        return '\n'.join(new_lines)
 
-        def safe_copy_file(source: str, dest_dir: Path, preferred_name: Optional[str] = None) -> Optional[str]:
-            """
-            Safely copy a file to destination directory.
-            Returns the filename to use in the include statement, or None if failed.
-            """
-            if not source or not os.path.exists(source):
-                self.logger.warning(f"Source file does not exist: {source}")
-                return None
-            
-            source_path = Path(source).resolve()
-            
-            # Determine destination filename
-            if preferred_name:
-                dest_name = preferred_name if preferred_name.endswith('.lammps') else f"{preferred_name}.lammps"
-            else:
-                dest_name = source_path.name
-            
-            dest_path = (dest_dir / dest_name).resolve()
-            
-            # Check if source and destination are the same file
-            try:
-                if source_path.samefile(dest_path):
-                    self.logger.info(f"File already in working directory: {dest_name}")
-                    return dest_name
-            except (OSError, FileNotFoundError):
-                # samefile can fail if dest doesn't exist yet, which is fine
-                pass
-            
-            # Check if destination already exists with same content
-            if dest_path.exists():
-                try:
-                    if source_path.read_bytes() == dest_path.read_bytes():
-                        self.logger.info(f"Identical file already exists: {dest_name}")
-                        return dest_name
-                except Exception:
-                    pass
-                
-                # Destination exists but is different - create unique name
-                base = dest_path.stem
-                suffix = dest_path.suffix or '.lammps'
-                counter = 1
-                while dest_path.exists():
-                    dest_name = f"{base}_{counter}{suffix}"
-                    dest_path = dest_dir / dest_name
-                    counter += 1
-            
-            # Copy the file
-            try:
-                shutil.copy2(str(source_path), str(dest_path))
-                self.logger.info(f"Copied {source_path.name} to {dest_path}")
-                return dest_name
-            except shutil.SameFileError:
-                # This shouldn't happen after our checks, but handle it anyway
-                self.logger.info(f"File already in place: {dest_name}")
-                return dest_path.name
-            except Exception as e:
-                self.logger.error(f"Failed to copy {source}: {e}")
-                return None
-    
-        # Process main force field file
-        if "main" in force_field_files:
-            main_source = force_field_files["main"]
-            filename = safe_copy_file(main_source, self.working_dir)
-            if filename:
-                insertion.append(f"include {filename}")
-                included_files.append(filename)
-    
-        # Process additional force field files
-        additional = force_field_files.get("additional", {})
-        if isinstance(additional, dict):
-            for name, path in additional.items():
-                if path:
-                    filename = safe_copy_file(path, self.working_dir, preferred_name=name)
-                    if filename and filename not in included_files:
-                        insertion.append(f"include {filename}")
-                        included_files.append(filename)
-        elif isinstance(additional, str):
-            # Handle case where additional is a single file path string
-            filename = safe_copy_file(additional, self.working_dir)
-            if filename and filename not in included_files:
-                insertion.append(f"include {filename}")
-                included_files.append(filename)
-    
-        # Only add insertion if we actually have files to include
-        if len(insertion) > 2:  # More than just the header comments
-            insertion.append("")
-            updated_lines = lines[:insert_pos] + insertion + lines[insert_pos:]
-            return '\n'.join(updated_lines)
-        else:
-            self.logger.warning("No force field files were successfully integrated")
-            return script_text
+        return '\n'.join(new_lines)
 
     def generate_simulation(self,
                               data_file: str,
