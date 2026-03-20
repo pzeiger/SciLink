@@ -10,3 +10,8 @@ scilink analyze
 ```
 
 And follow the instructions/hints to launch the analysis.
+
+To generate an example AMBER force field, run
+```bash 
+scilink prepare-ff --test --solvate --goal "Test solvated system"
+```
