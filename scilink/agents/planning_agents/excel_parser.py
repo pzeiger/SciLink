@@ -133,34 +133,9 @@ def parse_adaptive_excel(file_path: str, context_path: Optional[str] = None, row
             }
             all_chunks.append(summary_chunk)
             
-            # 4.2 Create "Data Chunks" by batching rows
-            num_batches = 0
-            for i in range(0, total_rows, row_chunk_size):
-                df_batch = df.iloc[i : i + row_chunk_size]
-                markdown_table = df_batch.to_markdown(index=False)
-                
-                chunk_text = f"""
-### {title}
-#### Data Rows {i + 1} to {i + len(df_batch)}
-
-{markdown_table}
-                """.strip()
-                
-                data_chunk = {
-                    'text': chunk_text,
-                    'metadata': {
-                        'source': file_path,
-                        'context_source': context_path if context_path else "N/A",
-                        'content_type': 'data_rows',
-                        'start_row': i + 1,
-                        'end_row': i + len(df_batch),
-                        'page': 1 
-                    }
-                }
-                all_chunks.append(data_chunk)
-                num_batches += 1
-            
-            print(f"    - ✅ Created 1 summary + {num_batches} data chunks.")
+            # Large tabular data is best accessed via code execution (scalarizer),
+            # not RAG retrieval. Only the summary chunk is embedded.
+            print(f"    - ✅ Created 1 summary chunk (row data accessed via code execution).")
         
         return all_chunks
 

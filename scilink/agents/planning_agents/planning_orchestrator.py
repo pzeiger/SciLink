@@ -289,6 +289,23 @@ Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions
      clear implementation incompatibilities.
 
 **DATA TOOLS:**
+
+**DATA INSPECTION WORKFLOW:**
+When data files are provided, use `read_file` FIRST to inspect the contents. Based on what you see:
+- **Clean, straightforward tabular data** (clear column names, consistent units, no preprocessing needed)
+  → pass directly to `run_economic_analysis` or `generate_initial_plan` as `primary_data_set`.
+  These tools parse the data file internally.
+- **Messy/complex tabular data** (description rows mixed with data, coded column names,
+  mixed units, complex structure requiring pivoting or filtering) → use `query_knowledge_data`
+  to extract and clean the relevant data, then pass the answer as `additional_context`.
+- **Non-tabular data** (.txt, .json) → TEA/planning only parse CSV/Excel. If the content
+  is short, pass the relevant data as `additional_context`. If too complex, ask the user for guidance.
+- **Multi-run experimental results** (many rows of varying conditions, needs metric extraction
+  for Bayesian optimization or plan refinement) → use `analyze_file` to extract scalar metrics.
+
+To inspect or query data files before deciding on a workflow, use `read_file` and
+`query_knowledge_data` — not `analyze_file`.
+
 7. `list_workspace_files`: Shows session folder contents (generated plans, analysis scripts, checkpoints, etc.)
 8. `analyze_file`: Use this for RAW DATA files (CSV, XLSX, TXT) to calculate metrics via code.
     - Designed for experimental results that feed the optimization loop (analyze → BO → iterate).
@@ -320,6 +337,18 @@ Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions
     - Use instead of calling `analyze_file` in a loop when files share the same data structure.
 9. `reset_analysis_logic`: Destroys all analysis data, scripts, and BO history. Use ONLY when the
     user explicitly asks to start over. Do NOT use as error recovery — use `force_regenerate=True` instead.
+9b. `query_knowledge_data`: Query knowledge data files with natural language.
+    - For reference databases loaded as knowledge files (composition tables, property databases).
+    - Generates a Python script, executes it, returns the answer.
+    - NOT for experimental results feeding optimization — use analyze_file for that.
+    - If file_name omitted, lists available queryable files.
+    - **IMPORTANT**: Query answers are only visible to YOU (the orchestrator).
+      Downstream tools (TEA, planning, refinement) cannot see them unless you pass
+      them via `additional_context`.
+    - Examples:
+      * query_knowledge_data(query="average Li concentration in Permian Basin", file_name="PWSdatabase.xlsx")
+      * query_knowledge_data(query="top 10 samples by TDS")
+      * query_knowledge_data(query="how many unique basins are represented?")
 
 **OPTIMIZATION TOOLS:**
 10. `run_optimization`: Mathematical parameter suggestions via Bayesian Optimization.
@@ -361,8 +390,9 @@ Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions
       → omit experimental_budget (default behavior)
       
 11. `save_checkpoint`: Save campaign state. Use after every 3-5 experiments.
-12. `read_file`: Read and return the contents of a file (JSON, text, scripts, logs, protocols).
-    Use to inspect any file without triggering analysis pipelines.
+12. `read_file`: Read and preview any file (JSON, text, CSV, Excel, scripts, logs, protocols).
+    Use to inspect data files BEFORE deciding which tool to use next.
+    Renders Excel/CSV as formatted tables (max 50 rows × 40 columns).
     Do not re-read files whose contents were just returned by another tool.
 
 **KNOWLEDGE & SKILL TOOLS:**

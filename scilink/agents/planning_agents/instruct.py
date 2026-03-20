@@ -304,12 +304,12 @@ Analyze the 4-panel diagnostic dashboard.
    - For **higher-dimensional problems**: A 2D slice through the two most important parameters is shown (other parameters held at the candidate values). Check that the candidate star sits near a peak, not in a flat/low region.
    - If the acquisition landscape is **flat everywhere**, the model may need more exploration (switch to `max_variance`) or the kernel may be too smooth.
    - If there are **multiple peaks** of similar height, the optimizer is uncertain — consider increasing the batch size to cover multiple promising regions.
-4. **Sensitivity (Bot-Right):** Which parameter has the longest bar? This is the most important driver. If all bars are similar, no single parameter dominates.
+4. **Sensitivity (Bot-Right):** First-order Sobol indices showing how much of the output variance each parameter explains. The longest bar explains the most variance. If actual Sobol values are provided below, use those exact numbers — do NOT estimate from the bar chart. If all values are near zero (<0.05), the model lacks confidence in parameter importance — report this honestly rather than naming a "dominant" parameter.
 
 **OUTPUT JSON:**
 {
   "status": "pass" | "fail",
-  "reason": "Residuals are small and within uncertainty bands. Acquisition function shows a clear peak near the candidate, confirming exploitation of a promising region. Sensitivity shows Temperature is the dominant factor.",
+  "reason": "Residuals are small and within uncertainty bands. Acquisition function shows a clear peak near the candidate. Sobol indices: [use actual values if provided].",
   "suggested_adjustments": { "kernel": "matern_1.5" } (Only if fail)
 }
 """
@@ -713,3 +713,30 @@ You need to update an existing skill document with new knowledge while preservin
 
 Output ONLY the updated skill document content in markdown, starting with `## overview`. \
 Do not wrap in code blocks."""
+
+
+KNOWLEDGE_QUERY_CODEGEN_PROMPT = """Complete the Python script below to answer a question about a data file.
+
+DATA FILE: {file_path}
+SHAPE: {rows} rows x {cols} columns
+COLUMNS: {columns}
+DTYPES:
+{dtypes}
+FIRST 10 ROWS:
+{head}
+
+QUESTION: {query}
+
+Complete ONLY the middle section (marked TODO) of this script. Output just the pandas code, nothing else.
+
+```
+import pandas as pd, json
+df = {read_instruction}
+# --- TODO: write 1-5 lines of pandas to compute the answer ---
+
+# --- END TODO ---
+print(json.dumps({{"answer": answer, "summary": summary}}))
+```
+
+Your output must define two variables: `answer` (the result) and `summary` (a one-sentence string description).
+Output ONLY the TODO lines, no imports, no print, no explanation."""

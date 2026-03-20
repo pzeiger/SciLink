@@ -677,17 +677,19 @@ class SingleObjectiveOptimizer:
         ax_sens = axes[1, 1]
         top_dim_idx = 0
         sorted_idx = np.arange(self.input_dim)  # default: original order
+        sensitivity_data = {}
         try:
             names, scores = self._compute_sensitivity()
             sorted_idx = np.argsort(scores)[::-1]
             top_dim_idx = sorted_idx[0]
-            
+            sensitivity_data = {names[i]: round(scores[i], 4) for i in sorted_idx}
+
             y_pos = np.arange(len(names))
             ax_sens.barh(y_pos, [scores[i] for i in sorted_idx], align='center', color='skyblue')
             ax_sens.set_yticks(y_pos)
             ax_sens.set_yticklabels([names[i] for i in sorted_idx])
             ax_sens.invert_yaxis()
-            ax_sens.set_xlabel('Sobol Index (Impact on Mean)')
+            ax_sens.set_xlabel('First-Order Sobol Index')
             ax_sens.set_title("4. Model Sensitivity")
         except Exception as e:
             ax_sens.text(0.5, 0.5, f"Analysis Error: {str(e)}", ha='center')
@@ -792,6 +794,7 @@ class SingleObjectiveOptimizer:
         ax_acq.grid(True, alpha=0.3)
 
         fig.tight_layout(); fig.savefig(save_path); plt.close(fig)
+        return sensitivity_data
 
 
 class MultiObjectiveOptimizer:

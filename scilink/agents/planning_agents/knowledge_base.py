@@ -97,9 +97,11 @@ class KnowledgeBase:
         
         print(f"  - Generating embeddings for {len(texts_to_embed)} chunks using '{self.embedding_model_name}'...")
         
+        total_batches = (len(texts_to_embed) + batch_size - 1) // batch_size
         for i in range(0, len(texts_to_embed), batch_size):
             batch_texts = texts_to_embed[i:i + batch_size]
-            
+            batch_num = i // batch_size
+
             max_retries = 3
             delay = 5 # seconds
             for attempt in range(max_retries):
@@ -110,7 +112,7 @@ class KnowledgeBase:
                         task_type="RETRIEVAL_DOCUMENT" # Ignored by OpenAI wrapper, used by Google
                     )
                     all_embeddings.extend(response['embedding'])
-                    print(f"    - Embedded batch {i//batch_size + 1}/{(len(texts_to_embed) + batch_size - 1)//batch_size}")
+                    print(f"    - Embedded batch {batch_num + 1}/{total_batches}")
                     time.sleep(1) # Small delay to respect API rate limits
                     break # Success
                 except RateLimitError as e:

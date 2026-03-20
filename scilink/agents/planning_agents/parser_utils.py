@@ -464,7 +464,13 @@ def parse_multimodal_results(results: Any) -> Tuple[str, List]:
         text_output = ""
         
         # If it's a file path (skip strings that are too long or contain newlines)
-        if isinstance(item, str) and len(item) <= 1024 and "\n" not in item and Path(item).exists():
+        def _is_file_path(s: str) -> bool:
+            try:
+                return len(s) <= 260 and "\n" not in s and Path(s).exists()
+            except OSError:
+                return False
+
+        if isinstance(item, str) and _is_file_path(item):
             path = Path(item)
             suffix = path.suffix.lower()
             

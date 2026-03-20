@@ -69,6 +69,15 @@ def render_file_preview(file_path: Path) -> None:
             st.error(f"Could not load .npy file: {exc}")
         return
 
+    # HTML reports — render as interactive HTML
+    if suffix == ".html":
+        st.components.v1.html(
+            file_path.read_text(encoding="utf-8"),
+            height=600,
+            scrolling=True,
+        )
+        return
+
     # Source code
     _code_langs = {
         ".py": "python",

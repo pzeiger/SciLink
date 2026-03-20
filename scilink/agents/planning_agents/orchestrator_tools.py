@@ -18,7 +18,7 @@ def _natural_sort_key(s):
     return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', str(s))]
 
 from .parser_utils import write_experiments_to_disk
-from .instruct import BO_OBJECTIVE_DISTILL_PROMPT
+from .instruct import BO_OBJECTIVE_DISTILL_PROMPT, KNOWLEDGE_QUERY_CODEGEN_PROMPT
 from ..lit_agents.optimize_query import optimize_search_query, is_molecule_design_objective
 
 
@@ -1033,7 +1033,8 @@ class OrchestratorTools:
             result_data: str,
             use_literature_rag: bool = False,
             literature_context: str = None,
-            molecule_context: str = None
+            molecule_context: str = None,
+            additional_context: str = None
         ):
             """
             Refines the experimental plan (science strategy only) based on results.
@@ -1079,6 +1080,9 @@ class OrchestratorTools:
                 mol_text = mp.read_text() if mp.is_file() else molecule_context
                 ext_parts.append("## Molecular Design & Synthesis Planning\n" + mol_text)
                 print(f"    🧪 Molecule context provided")
+            if additional_context:
+                ext_parts.append(f"## Additional Context\n{additional_context}")
+                print(f"    ℹ️  Additional context provided")
             ext_ctx = "\n\n".join(ext_parts) if ext_parts else None
 
             try:
@@ -1105,7 +1109,7 @@ class OrchestratorTools:
                 html_path = self.orch.base_dir / "plan.html"
                 generator = HTMLReportGenerator(self.orch.planner.state)
                 generator.generate(str(html_path))
-                
+
                 return json.dumps({
                     "status": "success",
                     "iteration": plan.get('iteration'),
@@ -1147,6 +1151,10 @@ class OrchestratorTools:
                 "molecule_context": {
                     "type": "string",
                     "description": "File path or text from query_molecules() tool. Provides molecular design / synthesis context for refinement."
+                },
+                "additional_context": {
+                    "type": "string",
+                    "description": "Extra context (e.g., reference data from query_knowledge_data, constraints, observations) to inform refinement."
                 }
             },
             required=["result_data"]
@@ -3081,19 +3089,59 @@ class OrchestratorTools:
                     "message": f"Not a file: {file_path}"
                 })
 
-            # Size guard
-            size_mb = path.stat().st_size / (1024 * 1024)
-            if size_mb > 5:
-                return json.dumps({
-                    "status": "error",
-                    "message": f"File too large ({size_mb:.1f} MB). Use analyze_file for large data files."
-                })
-
             try:
-                if path.suffix.lower() == ".json":
+                ext = path.suffix.lower()
+
+                # Size guard — skip for Excel/CSV since we cap at 50 rows × 40 cols
+                if ext not in ('.xlsx', '.xls', '.csv'):
+                    size_mb = path.stat().st_size / (1024 * 1024)
+                    if size_mb > 5:
+                        return json.dumps({
+                            "status": "error",
+                            "message": f"File too large ({size_mb:.1f} MB)."
+                        })
+
+                if ext == ".json":
                     with open(path, 'r', encoding='utf-8') as f:
                         data = json.load(f)
                     content = json.dumps(data, indent=2)
+                elif ext in ('.xlsx', '.xls', '.csv'):
+                    MAX_PREVIEW_ROWS = 100
+                    MAX_PREVIEW_COLS = 40
+                    MAX_PREVIEW_CHARS = 30000
+                    if ext == '.csv':
+                        df_preview = pd.read_csv(path, nrows=MAX_PREVIEW_ROWS)
+                        with open(path) as _f:
+                            total_rows = sum(1 for _ in _f) - 1
+                    else:
+                        df_preview = pd.read_excel(path, nrows=MAX_PREVIEW_ROWS)
+                        try:
+                            import openpyxl
+                            _wb = openpyxl.load_workbook(path, read_only=True)
+                            total_rows = _wb.active.max_row - 1
+                            _wb.close()
+                        except Exception:
+                            total_rows = len(df_preview)
+                    total_cols = len(df_preview.columns)
+                    display_df = df_preview.iloc[:, :MAX_PREVIEW_COLS]
+                    preview_text = display_df.to_string()
+                    # Adaptive row reduction if output exceeds char budget
+                    if len(preview_text) > MAX_PREVIEW_CHARS and len(display_df) > 5:
+                        ratio = MAX_PREVIEW_CHARS / len(preview_text)
+                        fewer_rows = max(5, int(len(display_df) * ratio))
+                        display_df = display_df.iloc[:fewer_rows]
+                        preview_text = display_df.to_string()
+                        if len(preview_text) > MAX_PREVIEW_CHARS:
+                            preview_text = preview_text[:MAX_PREVIEW_CHARS] + "\n... (truncated)"
+                    shown_rows = len(display_df)
+                    shown_cols = len(display_df.columns)
+                    trunc_parts = []
+                    if shown_rows < total_rows:
+                        trunc_parts.append(f"first {shown_rows} rows")
+                    if shown_cols < total_cols:
+                        trunc_parts.append(f"first {shown_cols} columns")
+                    trunc = f" (showing {', '.join(trunc_parts)})" if trunc_parts else ""
+                    content = f"Shape: {total_rows} rows × {total_cols} columns{trunc}\n\n{preview_text}"
                 else:
                     with open(path, 'r', encoding='utf-8', errors='replace') as f:
                         lines = f.readlines()
@@ -3134,6 +3182,287 @@ class OrchestratorTools:
                 }
             },
             required=["file_path"]
+        )
+
+        # =====================================================================
+        # KNOWLEDGE DATA QUERY TOOL
+        # =====================================================================
+
+        QUERYABLE_EXTENSIONS = {'.xlsx', '.xls', '.csv'}
+
+        def _inspect_knowledge_file(file_path: str) -> dict:
+            """Return a format-agnostic diagnostic snapshot of a data file."""
+            p = Path(file_path)
+            ext = p.suffix.lower()
+
+            if ext in ('.xlsx', '.xls'):
+                df = pd.read_excel(file_path, nrows=10)
+                read_instr = f"pd.read_excel('{file_path}')"
+                fmt = "excel"
+            elif ext == '.csv':
+                df = pd.read_csv(file_path, nrows=10)
+                read_instr = f"pd.read_csv('{file_path}')"
+                fmt = "csv"
+            else:
+                return {"error": f"Unsupported format: {ext}"}
+
+            # Get actual row count without loading full file
+            if ext in ('.xlsx', '.xls'):
+                try:
+                    import openpyxl
+                    wb = openpyxl.load_workbook(file_path, read_only=True)
+                    total_rows = wb.active.max_row - 1
+                    wb.close()
+                except Exception:
+                    total_rows = "unknown"
+            else:
+                with open(file_path) as f:
+                    total_rows = sum(1 for _ in f) - 1
+
+            return {
+                "format": fmt,
+                "shape": (total_rows, len(df.columns)),
+                "columns": list(df.columns),
+                "dtypes": df.dtypes.to_string(),
+                "head": df.to_string(),
+                "read_instruction": read_instr,
+            }
+
+        def _discover_queryable_files() -> list:
+            """Scan knowledge directories for queryable data files."""
+            search_dirs = set()
+            # User-specified knowledge folder (or kb_storage/ default)
+            if self.orch.knowledge_dir and Path(self.orch.knowledge_dir).exists():
+                search_dirs.add(Path(self.orch.knowledge_dir))
+            # Session knowledge dir (where UI uploads go)
+            session_kdir = Path(self.orch.base_dir) / "knowledge"
+            if session_kdir.exists():
+                search_dirs.add(session_kdir)
+
+            if not search_dirs:
+                return []
+            found = {}
+            for kdir in search_dirs:
+                for f in kdir.rglob("*"):
+                    if f.is_file() and f.suffix.lower() in QUERYABLE_EXTENSIONS:
+                        found[f.name] = {"name": f.name, "path": str(f)}
+            return sorted(found.values(), key=lambda x: x["name"])
+
+        def _resolve_knowledge_data_file(file_name: str):
+            """Resolve a file name to a path in the knowledge directory."""
+            from difflib import get_close_matches
+            candidates = _discover_queryable_files()
+            if not candidates:
+                return None, json.dumps({
+                    "status": "error",
+                    "message": "No queryable data files found in knowledge directory."
+                })
+            names = [c["name"] for c in candidates]
+            path_map = {c["name"]: c["path"] for c in candidates}
+
+            # Exact match
+            if file_name in path_map:
+                return path_map[file_name], None
+
+            # Stem match (without extension)
+            stem = Path(file_name).stem
+            for n in names:
+                if Path(n).stem == stem:
+                    return path_map[n], None
+
+            # Fuzzy match
+            matches = get_close_matches(file_name, names, n=3, cutoff=0.5)
+            if matches:
+                suggestion = ", ".join(matches)
+                return None, json.dumps({
+                    "status": "error",
+                    "message": f"File '{file_name}' not found. Did you mean: {suggestion}?",
+                    "available_files": names
+                })
+
+            return None, json.dumps({
+                "status": "error",
+                "message": f"File '{file_name}' not found.",
+                "available_files": names
+            })
+
+        def _extract_code_block(text: str) -> str:
+            """Extract Python code from LLM response."""
+            # Try ```python blocks
+            match = re.search(r'```python\s*\n(.*?)```', text, re.DOTALL)
+            if match:
+                return match.group(1).strip()
+            # Try generic ``` blocks
+            match = re.search(r'```\s*\n(.*?)```', text, re.DOTALL)
+            if match:
+                return match.group(1).strip()
+            # Prompt ends with open ```python — response may be code followed by ```
+            match = re.search(r'^(.*?)```', text, re.DOTALL)
+            if match and 'import ' in match.group(1):
+                return match.group(1).strip()
+            # Try raw code starting with import
+            for line in text.split('\n'):
+                if line.strip().startswith('import '):
+                    idx = text.index(line)
+                    # Strip any trailing ``` if present
+                    code = text[idx:].strip()
+                    code = re.sub(r'\n```\s*$', '', code)
+                    return code
+            # Last resort: if entire response looks like code (has import somewhere)
+            if 'import ' in text and 'print(' in text:
+                return re.sub(r'\n```\s*$', '', text.strip())
+            return ""
+
+        def query_knowledge_data(query: str, file_name: str = None) -> str:
+            """Query a knowledge data file with natural language."""
+            import subprocess
+
+            print(f"  ⚡ Tool: Querying knowledge data: '{query[:80]}...'")
+
+            # 1. Discover queryable files
+            queryable = _discover_queryable_files()
+            if not queryable:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No queryable data files (.csv, .xlsx) found in knowledge directory."
+                })
+
+            # 2. Resolve target file
+            if file_name is None:
+                if len(queryable) == 1:
+                    target_path = queryable[0]["path"]
+                    print(f"    - Auto-selected: {queryable[0]['name']}")
+                else:
+                    return json.dumps({
+                        "status": "file_selection_needed",
+                        "message": "Multiple data files found. Specify file_name.",
+                        "available_files": [f["name"] for f in queryable]
+                    })
+            else:
+                target_path, error = _resolve_knowledge_data_file(file_name)
+                if error:
+                    return error
+
+            # 3. Inspect file
+            try:
+                info = _inspect_knowledge_file(target_path)
+                if "error" in info:
+                    return json.dumps({"status": "error", "message": info["error"]})
+            except Exception as e:
+                return json.dumps({"status": "error", "message": f"Failed to read file: {e}"})
+
+            # 4. Build prompt
+            prompt = KNOWLEDGE_QUERY_CODEGEN_PROMPT.format(
+                file_path=target_path,
+                file_format=info["format"],
+                rows=info["shape"][0],
+                cols=info["shape"][1],
+                columns=info["columns"],
+                dtypes=info["dtypes"],
+                head=info["head"],
+                read_instruction=info["read_instruction"],
+                query=query,
+            )
+
+            # 5. Generate and execute (with 1 retry)
+            scripts_dir = Path(self.orch.base_dir) / "knowledge_query_scripts"
+            scripts_dir.mkdir(parents=True, exist_ok=True)
+
+            last_error = None
+            for attempt in range(2):
+                current_prompt = prompt
+                if last_error:
+                    current_prompt += f"\n\n**PREVIOUS ERROR:** {last_error}\nFix the script."
+
+                # Generate code
+                try:
+                    response = self.orch.planner.model.generate_content(
+                        [current_prompt],
+                        generation_config={"max_output_tokens": 1024, "temperature": 0.0},
+                    )
+                    # LLM returns only the computation lines; wrap in scaffold
+                    body = _extract_code_block(response.text) or response.text.strip()
+                    # Strip any markdown fences the LLM may have added
+                    body = re.sub(r'^```\w*\s*', '', body)
+                    body = re.sub(r'\s*```$', '', body)
+                    code = (
+                        f"import pandas as pd, json\n"
+                        f"df = {info['read_instruction']}\n"
+                        f"{body}\n"
+                        f"print(json.dumps({{\"answer\": answer, \"summary\": summary}}))\n"
+                    )
+                except Exception as e:
+                    return json.dumps({"status": "error", "message": f"Code generation failed: {e}"})
+
+                # Write and execute script
+                script_path = scripts_dir / f"kq_{Path(target_path).stem}_{abs(hash(query)) % 10000:04d}.py"
+                script_path.write_text(code)
+                print(f"    - Running: {script_path.name} (attempt {attempt + 1})")
+
+                try:
+                    result = subprocess.run(
+                        ["python", str(script_path)],
+                        capture_output=True, text=True, timeout=60,
+                    )
+                    if result.returncode != 0:
+                        last_error = result.stderr.strip()[-500:]
+                        continue
+
+                    json_match = re.search(r'\{.*\}', result.stdout.strip(), re.DOTALL)
+                    if not json_match:
+                        last_error = f"No JSON in output: {result.stdout[:300]}"
+                        continue
+
+                    answer_data = json.loads(json_match.group(0))
+
+                    # Truncate large results
+                    answer_str = json.dumps(answer_data.get("answer", ""))
+                    if len(answer_str) > 5000:
+                        answer_data["answer"] = str(answer_data["answer"])[:5000] + "... (truncated)"
+
+                    print(f"    - ✅ Query answered successfully.")
+                    return json.dumps({
+                        "status": "success",
+                        "query": query,
+                        "file": Path(target_path).name,
+                        "answer": answer_data.get("answer"),
+                        "summary": answer_data.get("summary", ""),
+                        "details": answer_data.get("details"),
+                        "script_path": str(script_path),
+                    })
+
+                except subprocess.TimeoutExpired:
+                    last_error = "Script timed out (60s limit)."
+                    continue
+                except json.JSONDecodeError as e:
+                    last_error = f"Invalid JSON in output: {e}"
+                    continue
+
+            return json.dumps({
+                "status": "error",
+                "message": f"Query failed after 2 attempts.",
+                "last_error": last_error,
+            })
+
+        self._register_tool(
+            func=query_knowledge_data,
+            name="query_knowledge_data",
+            description=(
+                "Query a knowledge data file with natural language. "
+                "Generates and executes a Python script to answer questions about "
+                "reference datasets loaded as knowledge files."
+            ),
+            parameters={
+                "query": {
+                    "type": "string",
+                    "description": "Natural language question about the data"
+                },
+                "file_name": {
+                    "type": "string",
+                    "description": "Name of knowledge file to query (e.g., 'PWSdatabase.xlsx'). If omitted, lists available files."
+                }
+            },
+            required=["query"]
         )
 
         # =====================================================================

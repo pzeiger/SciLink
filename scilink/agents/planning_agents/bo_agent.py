@@ -1011,10 +1011,11 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         step_num = len(history) + 1
         n_initial = history[0]["data_points"] if history and "data_points" in history[0] else len(df)
         plot_path = f"{output_dir}/step_{step_num}.png"
+        sensitivity_data = {}
         if is_moo:
             optimizer.generate_diagnostics(save_path=plot_path)
         else:
-            optimizer.generate_diagnostics(next_x_batch, df[target_cols[0]].values.tolist(), save_path=plot_path, n_initial=n_initial)
+            sensitivity_data = optimizer.generate_diagnostics(next_x_batch, df[target_cols[0]].values.tolist(), save_path=plot_path, n_initial=n_initial) or {}
 
         # 5b. Acquisition Function Plot & Data (SOO only)
         acq_plot_path = None
@@ -1050,6 +1051,12 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         # 6. Inspection
         print("  - 👀 BO Agent: Inspecting visuals...")
         visual_prompt = BO_VISUAL_INSPECTION_MOO_PROMPT if is_moo else BO_VISUAL_INSPECTION_PROMPT
+        if sensitivity_data:
+            sobol_text = "\n".join(f"  {k}: {v}" for k, v in sensitivity_data.items())
+            visual_prompt += (
+                f"\n\nACTUAL SOBOL INDEX VALUES (use these exact numbers, "
+                f"do not estimate from the bar chart):\n{sobol_text}"
+            )
         try:
             img = PIL_Image.open(plot_path)
             insp_resp = self.model.generate_content([visual_prompt, img], generation_config=self.generation_config)
