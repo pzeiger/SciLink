@@ -86,26 +86,88 @@ class LAMMPSSimulationAgent:
         """
         Integrate force field parameter files into the LAMMPS script.
         
-        Handles both AMBER-style files (styles only, must come BEFORE read_data)
-        and LLM-generated files (coefficients, must come AFTER read_data) by
-        reading the file and classifying each command.
+        Two strategies:
+        1. AMBER-style files (styles only, no coefficients):
+           → Remove duplicate style commands from script, insert 'include' BEFORE read_data
+        2. LLM-generated files (coefficients):
+           → Insert coefficient commands AFTER read_data
         """
         if not force_field_files:
             return script_text
     
-        # Commands that must appear BEFORE read_data
-        BEFORE_READ_DATA = {
+        # Commands that define styles (before read_data)
+        STYLE_COMMANDS = {
             "units", "atom_style", "dimension", "boundary",
             "pair_style", "bond_style", "angle_style", "dihedral_style", "improper_style",
             "kspace_style", "special_bonds", "pair_modify",
         }
     
-        # Commands that must appear AFTER read_data
-        AFTER_READ_DATA = {
+        # Commands that define parameters (after read_data)
+        COEFF_COMMANDS = {
             "pair_coeff", "bond_coeff", "angle_coeff", "dihedral_coeff", "improper_coeff",
             "set", "mass", "group", "velocity",
         }
     
+        # ── Read and classify each FF file ────────────────────────────
+        styles_only_files = []    # Files with ONLY style commands → include before read_data
+        coeff_files = []          # Files with coeff commands → inline after read_data
+        coeff_lines = []          # Collected coefficient lines
+    
+        for name, ff_path in force_field_files.items():
+            ff_path_str = str(ff_path)
+            if not os.path.exists(ff_path_str):
+                local_path = os.path.join(self.working_dir, os.path.basename(ff_path_str))
+                if os.path.exists(local_path):
+                    ff_path_str = local_path
+                else:
+                    self.logger.warning(f"Force field file not found: {ff_path_str}")
+                    continue
+    
+            try:
+                with open(ff_path_str, 'r') as f:
+                    ff_content = f.readlines()
+            except Exception as e:
+                self.logger.warning(f"Could not read {ff_path_str}: {e}")
+                continue
+    
+            # Classify: does this file have any coeff commands?
+            has_styles = False
+            has_coeffs = False
+            for line in ff_content:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                keyword = stripped.split()[0].lower()
+                if keyword == "read_data":
+                    continue
+                if keyword in STYLE_COMMANDS:
+                    has_styles = True
+                elif keyword in COEFF_COMMANDS:
+                    has_coeffs = True
+    
+            if has_styles and not has_coeffs:
+                # Pure style file (AMBER pipeline) → use include
+                styles_only_files.append(ff_path_str)
+                self.logger.info(f"FF file '{name}' is styles-only → will use 'include'")
+            elif has_coeffs:
+                # Has coefficients → inline after read_data
+                coeff_files.append(ff_path_str)
+                self.logger.info(f"FF file '{name}' has coefficients → will inline after read_data")
+                for line in ff_content:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    keyword = stripped.split()[0].lower()
+                    if keyword in COEFF_COMMANDS:
+                        coeff_lines.append(stripped)
+            else:
+                self.logger.warning(f"FF file '{name}' has no recognized commands — skipping")
+    
+        if not styles_only_files and not coeff_files:
+            self.logger.warning("No force field files were successfully integrated")
+            return script_text
+    
+        # ── Rebuild the script ────────────────────────────────────────
         lines = script_text.split('\n')
     
         # Find read_data line
@@ -116,103 +178,65 @@ class LAMMPSSimulationAgent:
                 break
     
         if read_data_pos is None:
-            # No read_data found — insert everything at top after comments
-            insert_pos = 0
-            for i, line in enumerate(lines):
-                stripped = line.strip()
-                if stripped and not stripped.startswith("#"):
-                    insert_pos = i
-                    break
-            self.logger.warning("No read_data found in script — inserting FF at top")
-    
-        # Process each force field file
-        before_lines = ["", "# ── Force field styles (before read_data) ──"]
-        after_lines = ["", "# ── Force field parameters (after read_data) ──"]
-        has_before = False
-        has_after = False
-        included_files = []
-    
-        for name, ff_path in force_field_files.items():
-            ff_path_str = str(ff_path)
-            if not os.path.exists(ff_path_str):
-                # Try working directory
-                local_path = os.path.join(self.working_dir, os.path.basename(ff_path_str))
-                if os.path.exists(local_path):
-                    ff_path_str = local_path
-                else:
-                    self.logger.warning(f"Force field file not found: {ff_path_str}")
-                    continue
-    
-            self.logger.info(f"Integrating force field file: {ff_path_str}")
-            included_files.append(ff_path_str)
-    
-            try:
-                with open(ff_path_str, 'r') as f:
-                    ff_lines = f.readlines()
-            except Exception as e:
-                self.logger.warning(f"Could not read {ff_path_str}: {e}")
-                continue
-    
-            for ff_line in ff_lines:
-                stripped = ff_line.strip()
-    
-                # Skip empty lines and comments
-                if not stripped or stripped.startswith("#"):
-                    continue
-    
-                # Get the command keyword (first word)
-                keyword = stripped.split()[0].lower()
-    
-                # Skip read_data in ff file — the run script handles that
-                if keyword == "read_data":
-                    self.logger.info(f"Skipping read_data in {name} (handled by run script)")
-                    continue
-    
-                # Classify
-                if keyword in BEFORE_READ_DATA:
-                    before_lines.append(stripped)
-                    has_before = True
-                elif keyword in AFTER_READ_DATA:
-                    after_lines.append(stripped)
-                    has_after = True
-                else:
-                    # Unknown command — put after read_data to be safe
-                    after_lines.append(stripped)
-                    has_after = True
-    
-        if not included_files:
-            self.logger.warning("No force field files were successfully integrated")
+            self.logger.warning("No read_data found in script")
             return script_text
     
-        # Build the new script
-        new_lines = []
+        # If we have styles-only files, remove duplicate style commands
+        # from the LLM-generated script and replace with 'include'
+        if styles_only_files:
+            cleaned_lines = []
+            removed_count = 0
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    cleaned_lines.append(line)
+                    continue
+                keyword = stripped.split()[0].lower()
+                if keyword in STYLE_COMMANDS:
+                    # Remove — the include file handles this
+                    removed_count += 1
+                    continue
+                cleaned_lines.append(line)
     
-        if read_data_pos is not None:
-            # Insert BEFORE lines right before read_data
+            if removed_count > 0:
+                self.logger.info(
+                    f"Removed {removed_count} duplicate style commands "
+                    f"(handled by include file)"
+                )
+    
+            # Re-find read_data position in cleaned script
+            lines = cleaned_lines
+            read_data_pos = None
             for i, line in enumerate(lines):
-                if i == read_data_pos and has_before:
-                    new_lines.extend(before_lines)
-                    new_lines.append("")
-                new_lines.append(line)
-                if i == read_data_pos and has_after:
-                    new_lines.extend(after_lines)
-                    new_lines.append("")
-        else:
-            # No read_data — put everything at insert_pos
-            for i, line in enumerate(lines):
-                if i == insert_pos:
-                    if has_before:
-                        new_lines.extend(before_lines)
-                        new_lines.append("")
-                    if has_after:
-                        new_lines.extend(after_lines)
-                        new_lines.append("")
-                new_lines.append(line)
+                if line.strip().startswith("read_data"):
+                    read_data_pos = i
+                    break
+    
+        # Build final script
+        new_lines = []
+        for i, line in enumerate(lines):
+            # Insert includes BEFORE read_data
+            if i == read_data_pos and styles_only_files:
+                new_lines.append("")
+                new_lines.append("# ── Force field styles (from AMBER pipeline) ──")
+                for ff_path in styles_only_files:
+                    # Use relative path if in same directory
+                    ff_basename = os.path.basename(ff_path)
+                    new_lines.append(f"include {ff_basename}")
+                new_lines.append("")
+    
+            new_lines.append(line)
+    
+            # Insert coefficients AFTER read_data
+            if i == read_data_pos and coeff_lines:
+                new_lines.append("")
+                new_lines.append("# ── Force field parameters ──")
+                new_lines.extend(coeff_lines)
+                new_lines.append("")
     
         self.logger.info(
-            f"Integrated {len(included_files)} FF file(s): "
-            f"{len(before_lines)-2 if has_before else 0} style commands before read_data, "
-            f"{len(after_lines)-2 if has_after else 0} coeff commands after read_data"
+            f"Integrated FF files: {len(styles_only_files)} include(s) before read_data, "
+            f"{len(coeff_lines)} coeff commands after read_data"
         )
     
         return '\n'.join(new_lines)
