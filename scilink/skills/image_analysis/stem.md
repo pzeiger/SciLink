@@ -9,8 +9,7 @@ a dark background. Applicable to any crystalline material (perovskites,
 2D materials, semiconductors, oxides, metals) viewed along a zone axis.
 This skill covers atomic column detection, sub-pixel position refinement,
 lattice parameter extraction, sublattice separation, point defect
-identification, and local structural variation analysis via sliding
-FFT/NMF decomposition.
+identification, and local structural variation analysis.
 
 ## planning
 
@@ -48,36 +47,6 @@ metadata), or use a cluster validity metric (silhouette score, BIC)
 if unknown. Don't use geometric offset computation from lattice
 vectors — it fails most of the time.
 
-**Sliding FFT + NMF for structural variation:** When the image contains
-a sufficient number of atoms to produce a clear FFT signal, run the
-sliding FFT + NMF tool to detect any symmetry-breaking defects, phase
-boundaries, ordering transitions, or other structural inhomogeneities.
-Run this early in the pipeline — its findings should inform column
-detection and analysis. For example, if NMF reveals distinct structural
-domains, analyze each domain's columns separately with appropriate
-parameters. Usage:
-```python
-from scilink.tools.fft_nmf import SlidingFFTNMF
-# Try a range of components and pick the best decomposition
-for n in [2, 3, 4]:
-    fft_nmf = SlidingFFTNMF(n_components=n)
-    components, abundances = fft_nmf.fit_transform(image_2d)
-    # Check if components are meaningfully different
-```
-Do not hardcode `n_components` — the number of structurally distinct
-regions depends on the image. Try 2-4 and assess whether additional
-components capture real spatial variation or just noise. If all
-abundance maps look spatially uniform (low coefficient of variation),
-NMF is not revealing anything useful — proceed with standard analysis
-without FFT guidance. Only use NMF results to inform the analysis when
-they show clear spatial structure (distinct domains, boundaries, bands).
-
-Save components and abundance maps as .npy files. Render each component
-(local FFT pattern) and its corresponding abundance map (spatial
-distribution) as PNGs only if they reveal meaningful structural
-variation. The component image shows *what* the local structure looks
-like; the abundance map shows *where* it occurs.
-
 ## analysis
 
 Column detection typically involves: normalization, background
@@ -85,9 +54,7 @@ subtraction (when needed), LoG blob detection, and 2D Gaussian
 refinement for sub-pixel precision. Lattice parameters can be extracted
 from nearest-neighbor distances of detected positions. Filter
 detections by rejecting peaks with low amplitude or poor Gaussian fit
-quality. If using sliding FFT + NMF, run it early so findings can
-inform column detection (e.g., separate domains, adjust parameters
-per region).
+quality.
 
 **Lattice fitting:**
 Use the median nearest-neighbor distance (not mean — robust to
@@ -113,13 +80,6 @@ structure.
   expected position. If fitted amplitude exceeds 25% of the sublattice
   median, it is not a true vacancy.
 
-**Sliding FFT + NMF (when used):**
-Run on the full image early in the pipeline. Save as .npy:
-`nmf_components.npy` and `nmf_abundances.npy`. Render as PNG any
-component + abundance map pair that reveals spatial variation in
-local structure. Include these visualizations alongside the main
-atom detection visualization.
-
 ## interpretation
 
 **HAADF intensity and atomic number:** In HAADF-STEM, image intensity
@@ -140,13 +100,6 @@ to the average structure) and (b) deviation from the known ideal
 lattice (true strain relative to bulk). Least-squares lattice fitting
 absorbs the mean strain into the fitted vectors — use known bulk lattice
 constants when available to quantify absolute strain.
-
-**NMF components:** Each NMF component represents a distinct local
-FFT pattern. Interpret by examining the component image (which spatial
-frequencies are present) and its abundance map (where this pattern
-dominates). Possible interpretations include: different crystallographic
-phases, domain orientations, stacking sequences, ordering variants, or
-regions of varying crystalline quality.
 
 **Vacancy concentration:** Typical vacancy concentrations in pristine
 crystalline materials are 0.01-1%. Concentrations above 5-10% in an
