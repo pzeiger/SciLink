@@ -171,6 +171,90 @@ def _append_objective_context(prompt: list, state: dict) -> None:
     )
 
 
+def _append_subagent_context(prompt: list, state: dict) -> None:
+    """Append FFT/SAM sub-agent preprocessing results to an LLM prompt.
+
+    Includes text summaries, visualization thumbnails, and available
+    array file paths with shapes so the LLM can plan accordingly.
+    """
+    fft = state.get("fft_preprocessing")
+    if fft:
+        prompt.append("\n## FFT/NMF Preprocessing Results")
+        prompt.append(
+            "The image was analyzed with sliding FFT + NMF decomposition "
+            "before your analysis. Use these findings to inform your "
+            "approach if relevant."
+        )
+        if fft.get("detailed_analysis"):
+            prompt.append(f"\n**Findings:**\n{fft['detailed_analysis']}")
+        claims = fft.get("scientific_claims", [])
+        if claims:
+            prompt.append("\n**Key claims:**")
+            for c in claims[:5]:
+                prompt.append(f"- {c.get('claim', '')}")
+
+        if fft.get("visualization_bytes"):
+            prompt.append("\n**FFT/NMF abundance map:**")
+            prompt.append({
+                "mime_type": "image/jpeg",
+                "data": fft["visualization_bytes"],
+            })
+
+        paths = fft.get("array_paths", {})
+        shapes = fft.get("array_shapes", {})
+        if paths:
+            prompt.append("\n**Available arrays in working directory:**")
+            for name, path in paths.items():
+                shape = shapes.get(name, "unknown")
+                if "components" in name:
+                    desc = "each component is a local FFT power spectrum pattern"
+                elif "abundances" in name:
+                    desc = "spatial weight map showing where each component is dominant"
+                else:
+                    desc = ""
+                prompt.append(f"- `{name}` shape {shape} — {desc}")
+
+    sam = state.get("sam_preprocessing")
+    if sam:
+        prompt.append("\n## SAM Segmentation Preprocessing Results")
+        prompt.append(
+            "The image was segmented using the Segment Anything Model "
+            "before your analysis. Use these findings to inform your "
+            "approach if relevant."
+        )
+        if sam.get("detailed_analysis"):
+            prompt.append(f"\n**Findings:**\n{sam['detailed_analysis']}")
+        if sam.get("particle_count") is not None:
+            prompt.append(f"\n**Particle count:** {sam['particle_count']}")
+        claims = sam.get("scientific_claims", [])
+        if claims:
+            prompt.append("\n**Key claims:**")
+            for c in claims[:5]:
+                prompt.append(f"- {c.get('claim', '')}")
+
+        if sam.get("visualization_bytes"):
+            prompt.append("\n**SAM segmentation overlay:**")
+            prompt.append({
+                "mime_type": "image/jpeg",
+                "data": sam["visualization_bytes"],
+            })
+
+        paths = sam.get("array_paths", {})
+        shapes = sam.get("array_shapes", {})
+        if paths:
+            prompt.append("\n**Available files in working directory:**")
+            for name, path in paths.items():
+                shape = shapes.get(name, "")
+                if "label_map" in name:
+                    desc = "0=background, 1..K=particle IDs (sorted by area)"
+                elif "statistics" in name:
+                    desc = "per-particle area, centroid, circularity, aspect ratio, solidity"
+                else:
+                    desc = ""
+                shape_str = f" shape {shape}" if shape else ""
+                prompt.append(f"- `{name}`{shape_str} — {desc}")
+
+
 class AnalyzeImageController:
     """Compute image statistics and create initial thumbnail."""
 
@@ -482,6 +566,7 @@ class ImagePlanningController:
         _append_auxiliary_context(prompt, state)
         _append_skill_context(prompt, state, "planning")
         _append_prior_knowledge_context(prompt, state)
+        _append_subagent_context(prompt, state)
 
         # Series context: use scout data if available, otherwise basic notice
         num_images = state.get("num_images", 1)
@@ -638,6 +723,7 @@ class ImagePlanningController:
         _append_auxiliary_context(prompt, state)
         _append_skill_context(prompt, state, "planning")
         _append_prior_knowledge_context(prompt, state)
+        _append_subagent_context(prompt, state)
 
         # Include current series plan and scout data in refinement context
         if state.get("series_analysis_plan"):
@@ -987,6 +1073,18 @@ Your guidance: '''
                 "Use it to inform your implementation.\n\n"
                 + skill_sections["analysis"]
             )
+
+        # Add sub-agent preprocessing array paths
+        for key in ("fft_preprocessing", "sam_preprocessing"):
+            preproc = state.get(key)
+            if preproc and preproc.get("array_paths"):
+                source = "FFT/NMF" if "fft" in key else "SAM"
+                lines = [f"## {source} Preprocessing Arrays (available in working directory)"]
+                for name, path in preproc["array_paths"].items():
+                    shape = preproc.get("array_shapes", {}).get(name, "")
+                    shape_str = f" shape {shape}" if shape else ""
+                    lines.append(f"- `{name}`{shape_str}")
+                context_parts.append("\n".join(lines))
 
         prompt = self.script_instructions.format(
             analysis_approach=config.get("analysis_approach", "Analyze the image"),
@@ -4200,6 +4298,7 @@ Return JSON with:
         _append_auxiliary_context(prompt_parts, state)
         _append_skill_context(prompt_parts, state, "interpretation")
         _append_prior_knowledge_context(prompt_parts, state)
+        _append_subagent_context(prompt_parts, state)
 
         try:
             response = self.model.generate_content(
@@ -4343,6 +4442,7 @@ Return JSON with:
         _append_auxiliary_context(prompt_parts, state)
         _append_skill_context(prompt_parts, state, "interpretation")
         _append_prior_knowledge_context(prompt_parts, state)
+        _append_subagent_context(prompt_parts, state)
 
         try:
             response = self.model.generate_content(
