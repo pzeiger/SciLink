@@ -3734,11 +3734,16 @@ class OrchestratorTools:
                         [current_prompt],
                         generation_config={"max_output_tokens": 1024, "temperature": 0.0},
                     )
-                    # LLM returns only the computation lines; wrap in scaffold
-                    body = _extract_code_block(response.text) or response.text.strip()
-                    # Strip any markdown fences the LLM may have added
-                    body = re.sub(r'^```\w*\s*', '', body)
-                    body = re.sub(r'\s*```$', '', body)
+                    # LLM returns JSON: {"code": "...TODO lines..."}
+                    from .parser_utils import parse_json_from_response
+                    result, parse_error = parse_json_from_response(response)
+                    if parse_error or not result or "code" not in result:
+                        # Fallback: treat response as raw code
+                        body = _extract_code_block(response.text) or response.text.strip()
+                        body = re.sub(r'^```\w*\s*', '', body)
+                        body = re.sub(r'\s*```$', '', body)
+                    else:
+                        body = result["code"]
                     code = (
                         f"import pandas as pd, json\n"
                         f"df = {info['read_instruction']}\n"

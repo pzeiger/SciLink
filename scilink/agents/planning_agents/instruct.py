@@ -727,7 +727,7 @@ FIRST 10 ROWS:
 
 QUESTION: {query}
 
-Complete ONLY the middle section (marked TODO) of this script. Output just the pandas code, nothing else.
+Complete ONLY the middle section (marked TODO) of this script.
 
 ```
 import pandas as pd, json
@@ -739,7 +739,9 @@ print(json.dumps({{"answer": answer, "summary": summary}}))
 ```
 
 Your output must define two variables: `answer` (the result) and `summary` (a one-sentence string description).
-Output ONLY the TODO lines, no imports, no print, no explanation."""
+Return a JSON object with a single key "code" containing ONLY the TODO lines as a string.
+No imports, no print, no explanation.
+Example: {{"code": "answer = df['col'].mean()\\nsummary = \\"Average value is \\" + str(answer)"}}"""
 
 
 KNOWLEDGE_QUERY_DIRECTORY_CODEGEN_PROMPT = """Complete the TODO section of the script below to answer a question about a directory of files.
