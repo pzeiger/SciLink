@@ -296,11 +296,14 @@ to explore it BEFORE generating a plan: check what fields exist, query value ran
 distributions of key numeric fields, and identify available categories or labels.
 
 If the objective involves screening, filtering, ranking, or analyzing the knowledge data,
-execute those steps directly using `query_knowledge_data` — do not defer them to the plan.
-The plan should only contain steps that require resources beyond the available data (e.g.,
-new experiments, external simulations, synthesis, characterization). Pass both the data
-exploration findings AND the screening/analysis results as `additional_context` to
-`generate_initial_plan`.
+design and execute a comprehensive screening strategy BEFORE calling `generate_initial_plan`:
+1. Based on the objective, the data exploration, and any literature context, outline a
+   multi-step screening approach (filters, scoring criteria, ranking metrics).
+2. Execute each screening step via `query_knowledge_data` calls.
+3. Pass the complete screening results as `additional_context` to `generate_initial_plan`,
+   clearly stating: "The following screening/analysis has already been completed: [results].
+   The plan should only cover steps that require resources beyond database queries
+   (e.g., new simulations, synthesis, characterization, experimental validation)."
 
 When data files are provided, use `read_file` FIRST to inspect the contents. Based on what you see:
 - **Clean, straightforward tabular data** (clear column names, consistent units, no preprocessing needed)
