@@ -48,6 +48,10 @@ from ...skills.loader import load_skill
 from .instruct import (
     IMAGE_ANALYSIS_INTERPRETATION_INSTRUCTIONS,
     IMAGE_ANALYSIS_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS,
+    IMAGE_ANALYSIS_PLANNING_INSTRUCTIONS,
+    IMAGE_ANALYSIS_TIER1_SUFFIX,
+    IMAGE_ANALYSIS_TIER2_PLANNING_INSTRUCTIONS,
+    IMAGE_ANALYSIS_TIER2_DECISION_INSTRUCTIONS,
 )
 
 
@@ -172,6 +176,8 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Sub-agent preprocessing
         use_fft: bool = False,
         use_sam: bool = False,
+        # Analysis depth
+        analysis_depth: str = "auto",
         # Quality control settings
         max_approach_retries: int = 3,
         outlier_sigma: float = 2.0,
@@ -215,6 +221,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Sub-agent preprocessing flags
         self.use_fft = use_fft
         self.use_sam = use_sam
+        self.analysis_depth = analysis_depth
         self._model_name = model_name
 
         # Optional literature agent
@@ -637,6 +644,12 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # Sub-agent preprocessing results
             "fft_preprocessing": subagent_state.get("fft_preprocessing"),
             "sam_preprocessing": subagent_state.get("sam_preprocessing"),
+            # Tier-aware planning
+            "planning_instructions_override": (
+                IMAGE_ANALYSIS_PLANNING_INSTRUCTIONS + IMAGE_ANALYSIS_TIER1_SUFFIX
+                if self.analysis_depth != "basic"
+                else None
+            ),
             # Pipeline state
             "analysis_images": [
                 {"label": "Original Image", "data": original_image_bytes}
@@ -696,23 +709,115 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "output_directory": str(self.output_dir),
             }
 
-        # Compile results
-        final_results = self._compile_results(state)
+        # Compile Tier 1 results
+        tier1_results = self._compile_results(state)
+        tier1_state = state
 
-        # Save final results
+        # Save Tier 1 results
+        self._save_analysis_scripts(state)
+
+        # ================================================================
+        # TIER 2: Deep analysis (conditional)
+        # ================================================================
+        tier2_results = None
+        run_tier2 = False
+
+        if self.analysis_depth == "deep":
+            run_tier2 = True
+            self.logger.info("\n--- TIER 2: Forced (analysis_depth='deep') ---")
+        elif self.analysis_depth == "auto" and tier1_results["status"] == "success":
+            tier2_decision = self._evaluate_tier2_needed(
+                tier1_results, objective
+            )
+            if tier2_decision and tier2_decision.get("tier2_needed"):
+                run_tier2 = True
+                self.logger.info(
+                    f"\n--- TIER 2: {tier2_decision.get('suggested_focus', 'deeper analysis')} ---"
+                )
+            else:
+                self.logger.info(
+                    "\n--- TIER 2: Skipped (not warranted by Tier 1 findings) ---"
+                )
+
+        if run_tier2:
+            tier2_state = self._build_tier2_state(
+                tier1_state, tier1_results,
+                first_image, original_image_bytes, image_statistics,
+                handled_system_info, series_metadata, hints, objective,
+                skill_state, aux_state, subagent_state,
+                image_paths, image_stack, input_type,
+                num_images, is_single_image, first_image_name,
+                tier2_decision if self.analysis_depth == "auto" else None,
+            )
+
+            # Create Tier 2 pipeline (same factory, different instructions)
+            tier2_pipeline = create_unified_image_analysis_pipeline(
+                model=self.model,
+                logger=self.logger,
+                generation_config=self.generation_config,
+                safety_settings=self.safety_settings,
+                parse_fn=self._parse_llm_response,
+                store_fn=self._store_analysis_images,
+                image_to_bytes_fn=image_to_thumbnail_bytes,
+                montage_fn=create_image_montage,
+                executor=self.executor,
+                output_dir=str(self.output_dir),
+                literature_agent=self.literature_agent,
+                enable_human_feedback=self.enable_human_feedback,
+                max_approach_retries=effective_max_retries,
+                outlier_sigma=effective_outlier_sigma,
+                max_verification_iterations=self.max_verification_iterations,
+            )
+
+            # Execute Tier 2 pipeline
+            for i, controller in enumerate(tier2_pipeline, 1):
+                step_name = controller.__class__.__name__
+                self.logger.info(
+                    f"\n--- TIER 2 STEP {i}: {step_name} ---\n"
+                )
+                try:
+                    tier2_state = controller.execute(tier2_state)
+                    if tier2_state.get("error_dict"):
+                        self.logger.error(
+                            f"Tier 2 failed at {step_name}: "
+                            f"{tier2_state['error_dict']}"
+                        )
+                        break
+                except Exception as e:
+                    self.logger.error(
+                        f"Tier 2 step {step_name} raised exception: {e}"
+                    )
+                    tier2_state["error_dict"] = {
+                        "error": f"Tier 2 step failed: {step_name}",
+                        "details": str(e),
+                    }
+                    break
+
+            if not tier2_state.get("error_dict"):
+                tier2_results = self._compile_results(tier2_state)
+                self._save_analysis_scripts(tier2_state)
+
+        # Merge results
+        if tier2_results and tier2_results["status"] == "success":
+            final_results = self._merge_tiered_results(
+                tier1_results, tier2_results
+            )
+        else:
+            final_results = tier1_results
+
+        # Save final merged results
         results_path = self.output_dir / "analysis_results.json"
         with open(results_path, "w") as f:
             serializable = self._make_serializable(final_results)
             json.dump(serializable, f, indent=2, default=str)
 
-        # Save analysis scripts for reproducibility
-        self._save_analysis_scripts(state)
-
         self.logger.info("")
         self.logger.info("ANALYSIS COMPLETE")
         self.logger.info(f"   Results: {results_path}")
-        if state.get("report_path"):
-            self.logger.info(f"   Report: {state['report_path']}")
+        if tier2_results:
+            self.logger.info("   Tier 2 deep analysis: included")
+        if tier1_state.get("report_path"):
+            self.logger.info(f"   Report: {tier1_state['report_path']}")
 
         flagged = final_results.get("flagged_images", [])
         if flagged:
@@ -725,6 +830,8 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "num_images": num_images,
                 "input_type": input_type,
                 "series_metadata": series_metadata,
+                "analysis_depth": self.analysis_depth,
+                "tier2_ran": tier2_results is not None,
             },
             result=(
                 final_results.get("summary")
@@ -857,6 +964,157 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         if saved:
             self.logger.info(f"   Scripts: {scripts_dir} ({len(saved)} file(s))")
+
+    def _evaluate_tier2_needed(
+        self, tier1_results: dict, objective: Optional[str]
+    ) -> Optional[dict]:
+        """Ask the LLM whether Tier 2 deep analysis is warranted."""
+        features = tier1_results.get("extracted_features", {})
+        claims = tier1_results.get("scientific_claims", [])
+
+        features_str = json.dumps(features, indent=2, default=str)
+        if len(features_str) > 3000:
+            features_str = features_str[:3000] + "\n... (truncated)"
+
+        claims_str = "\n".join(
+            f"- {c.get('claim', '')}" for c in claims[:5]
+        ) or "No claims generated."
+
+        prompt = IMAGE_ANALYSIS_TIER2_DECISION_INSTRUCTIONS.format(
+            tier1_summary=tier1_results.get("detailed_analysis", "")[:2000],
+            tier1_features=features_str,
+            tier1_claims=claims_str,
+            objective=objective or "General image analysis",
+        )
+
+        try:
+            response = self.model.generate_content(prompt)
+            result, error = self._parse_llm_response(response)
+            if error or not result:
+                self.logger.warning(f"Tier 2 decision failed: {error}")
+                return None
+            return result
+        except Exception as e:
+            self.logger.warning(f"Tier 2 decision error: {e}")
+            return None
+
+    def _build_tier2_state(
+        self, tier1_state, tier1_results,
+        first_image, original_image_bytes, image_statistics,
+        handled_system_info, series_metadata, hints, objective,
+        skill_state, aux_state, subagent_state,
+        image_paths, image_stack, input_type,
+        num_images, is_single_image, first_image_name,
+        tier2_decision=None,
+    ) -> dict:
+        """Build state dict for Tier 2 pipeline run."""
+        # Collect Tier 1 output files
+        tier1_files = []
+        for f in self.output_dir.rglob("*.npy"):
+            tier1_files.append(str(f))
+        for f in self.output_dir.rglob("*.json"):
+            tier1_files.append(str(f))
+        for f in self.output_dir.rglob("*.png"):
+            tier1_files.append(str(f))
+
+        features = tier1_results.get("extracted_features", {})
+        claims = tier1_results.get("scientific_claims", [])
+
+        features_str = json.dumps(features, indent=2, default=str)
+        if len(features_str) > 3000:
+            features_str = features_str[:3000] + "\n... (truncated)"
+
+        claims_str = "\n".join(
+            f"- {c.get('claim', '')}" for c in claims[:5]
+        ) or "No claims."
+
+        files_str = "\n".join(f"- {f}" for f in tier1_files[:20])
+
+        # Build Tier 2 planning instructions
+        tier2_instructions = IMAGE_ANALYSIS_TIER2_PLANNING_INSTRUCTIONS.format(
+            tier1_summary=tier1_results.get("detailed_analysis", "")[:2000],
+            tier1_features=features_str,
+            tier1_claims=claims_str,
+            tier1_files=files_str,
+        )
+
+        if tier2_decision and tier2_decision.get("suggested_focus"):
+            tier2_instructions += (
+                f"\n\n**Suggested focus:** {tier2_decision['suggested_focus']}"
+            )
+
+        return {
+            # Input data (same as Tier 1)
+            "image_paths": image_paths,
+            "image_stack": image_stack,
+            "input_type": input_type,
+            "num_images": num_images,
+            "is_single_image": is_single_image,
+            # System info
+            "system_info": handled_system_info,
+            "series_metadata": series_metadata or {},
+            "analysis_hints": hints,
+            "analysis_objective": objective,
+            # Auxiliary
+            **aux_state,
+            # Skill
+            **skill_state,
+            # Prior knowledge
+            "prior_knowledge": tier1_state.get("prior_knowledge", []),
+            # Sub-agent results
+            "fft_preprocessing": subagent_state.get("fft_preprocessing"),
+            "sam_preprocessing": subagent_state.get("sam_preprocessing"),
+            # First image
+            "image_path": (
+                image_paths[0] if image_paths else first_image_name
+            ),
+            "image_data": first_image,
+            "original_image_bytes": original_image_bytes,
+            "image_statistics": image_statistics,
+            # Tier 2 planning instructions override
+            "planning_instructions_override": tier2_instructions,
+            # Pipeline state
+            "analysis_images": [
+                {"label": "Original Image", "data": original_image_bytes}
+            ],
+            "result_json": {},
+            "error_dict": None,
+        }
+
+    def _merge_tiered_results(
+        self, tier1: dict, tier2: dict
+    ) -> dict:
+        """Merge Tier 1 and Tier 2 results into a unified output."""
+        merged = tier1.copy()
+
+        # Merge extracted features (Tier 2 overwrites on conflict)
+        t1_features = tier1.get("extracted_features", {})
+        t2_features = tier2.get("extracted_features", {})
+        if t1_features or t2_features:
+            merged_features = {}
+            merged_features.update(t1_features)
+            merged_features.update(t2_features)
+            merged["extracted_features"] = merged_features
+
+        # Combine claims (deduplicate by claim text)
+        t1_claims = tier1.get("scientific_claims", [])
+        t2_claims = tier2.get("scientific_claims", [])
+        seen = {c.get("claim", "") for c in t1_claims}
+        for c in t2_claims:
+            if c.get("claim", "") not in seen:
+                t1_claims.append(c)
+                seen.add(c.get("claim", ""))
+        merged["scientific_claims"] = t1_claims
+
+        # Use Tier 2 detailed analysis if available (more comprehensive)
+        if tier2.get("detailed_analysis"):
+            merged["detailed_analysis"] = tier2["detailed_analysis"]
+
+        # Keep both tier results for traceability
+        merged["tier1_results"] = tier1
+        merged["tier2_results"] = tier2
+
+        return merged
 
     def _compile_results(self, state: dict) -> Dict[str, Any]:
         """Compile results into a consistent output structure."""

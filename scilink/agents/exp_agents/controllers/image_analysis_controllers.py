@@ -477,6 +477,10 @@ class ImagePlanningController:
         self.enable_human_feedback = enable_human_feedback
         self.max_iterations = max_iterations
 
+    def _get_instructions(self, state: dict) -> str:
+        """Return planning instructions, using state override if present."""
+        return state.get("planning_instructions_override", self.instructions)
+
     def _display_plan(self, state: dict) -> None:
         is_single = state.get("is_single_image", True)
         num_images = state.get("num_images", 1)
@@ -551,7 +555,7 @@ class ImagePlanningController:
 
     def _plan_analysis(self, state: dict) -> dict:
         prompt = [
-            self.instructions,
+            self._get_instructions(state),
             "\n## Image",
             {"mime_type": "image/jpeg", "data": state["original_image_bytes"]},
             "\n## Image Statistics\n" + json.dumps(state["image_statistics"], indent=2),
@@ -706,7 +710,7 @@ class ImagePlanningController:
         )
 
         prompt = [
-            self.instructions,
+            self._get_instructions(state),
             "\n## Image",
             {"mime_type": "image/jpeg", "data": state["original_image_bytes"]},
             "\n## Image Statistics\n" + json.dumps(state["image_statistics"], indent=2),

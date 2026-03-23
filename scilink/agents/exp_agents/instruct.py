@@ -2611,6 +2611,96 @@ analysis is always preferred over a complex one with marginal benefit.
 """
 
 
+IMAGE_ANALYSIS_TIER1_SUFFIX = """
+
+**IMPORTANT: Foundational analysis only.**
+Focus on detecting and measuring the primary features in the image.
+Produce reliable basic statistics (counts, sizes, positions, intensities,
+lattice parameters). Do NOT attempt advanced analysis (strain mapping,
+defect classification, sublattice-resolved measurements, displacement
+fields) — that will be handled in a follow-up step if warranted by
+your findings.
+
+Keep the pipeline simple and robust. A successful basic analysis that
+captures all features is more valuable than an ambitious pipeline that
+fails.
+"""
+
+
+IMAGE_ANALYSIS_TIER2_PLANNING_INSTRUCTIONS = """You are an expert image analyst performing a targeted follow-up analysis.
+
+A foundational analysis of this image has already been completed.
+The results are summarized below. Based on these findings, plan a
+focused follow-up analysis that investigates the most scientifically
+interesting aspects of the data.
+
+**Tier 1 Results:**
+{tier1_summary}
+
+**Tier 1 Extracted Features:**
+{tier1_features}
+
+**Tier 1 Scientific Claims:**
+{tier1_claims}
+
+**Available Tier 1 outputs in working directory:**
+{tier1_files}
+
+Your follow-up analysis can load and build on these outputs. Focus on
+the single most scientifically valuable analysis that the Tier 1
+results suggest — do not try to do everything.
+
+**Output Format:**
+```json
+{{
+    "observations": "What the Tier 1 results reveal and what warrants deeper investigation",
+    "analysis_approach": "What you will do in this follow-up",
+    "processing_pipeline": "Step-by-step sequence for the follow-up analysis",
+    "features_to_extract": ["feature1", "feature2"],
+    "quality_criteria": "How to verify the follow-up analysis worked",
+    "expected_outputs": ["output1.png"],
+    "literature_query": "null"
+}}
+```
+"""
+
+
+IMAGE_ANALYSIS_TIER2_DECISION_INSTRUCTIONS = """You are evaluating whether a foundational image analysis warrants deeper follow-up analysis.
+
+**Tier 1 Results:**
+{tier1_summary}
+
+**Tier 1 Extracted Features:**
+{tier1_features}
+
+**Tier 1 Scientific Claims:**
+{tier1_claims}
+
+**Analysis Objective:** {objective}
+
+Based on the Tier 1 findings, decide whether a deeper follow-up
+analysis would produce scientifically meaningful additional insights.
+
+Answer YES if the Tier 1 results reveal:
+- Multiple distinct feature populations worth separating (e.g., bimodal intensity suggesting sublattices)
+- Spatial patterns or gradients worth quantifying (e.g., size gradient, intensity variation)
+- Anomalous regions worth characterizing (e.g., dark bands, displaced features)
+- The stated objective requires analysis beyond basic detection and measurement
+
+Answer NO if:
+- Tier 1 already fully addresses the objective
+- The image shows uniform, featureless structure with nothing to investigate further
+- Tier 1 quality is too poor to build on (detection failed, lattice fit unreliable)
+
+Return JSON:
+{{
+    "tier2_needed": true/false,
+    "reasoning": "why deeper analysis is or isn't warranted",
+    "suggested_focus": "what the follow-up should investigate (if needed)"
+}}
+"""
+
+
 IMAGE_ANALYSIS_SERIES_REGIME_SUPPLEMENT = """
 ## Series Analysis Planning
 
