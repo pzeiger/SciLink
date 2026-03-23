@@ -62,34 +62,33 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
     Unified Image Analysis Agent for general-purpose scientific image analysis.
 
-    ALL analysis follows the series processing pattern:
-    - Single image analysis = series of 1
-    - Multiple images = standard series processing
-    - Numpy array stack = series processing
-
     The LLM plans the analysis approach, writes custom Python code using
     scikit-image, OpenCV, scipy, scikit-learn, etc., executes it in a
     sandboxed environment, and verifies quality through visual inspection
     and quantitative metrics.
 
-    Quality control:
-    - LLM verification loop (n iterations) to catch and fix issues automatically
-    - Human feedback for additional refinement (if enabled)
-    - Automatic approach retry when quality is inadequate
-    - Statistical outlier detection for series (may indicate interesting physics)
-    - Adaptive refit of flagged images with independent approach selection
-    - Consistency pass to align refitted approaches when a majority agrees
+    Two-tier analysis pipeline:
+    - Tier 1: Foundational analysis (detection, basic measurements)
+    - Tier 2: Deep analysis (sublattice separation, strain mapping, etc.)
+      conditionally triggered based on Tier 1 findings
+    - Controlled via ``analysis_depth``: "auto" (LLM decides), "basic"
+      (Tier 1 only), or "deep" (always run both)
 
-    For series analysis, the analysis approach is carefully selected on a
-    representative image and then LOCKED for consistent analysis across all
-    images. When the locked approach fails on some images, the adaptive
-    refit step re-analyzes those images independently.
+    Optional sub-agent preprocessing:
+    - ``use_fft=True``: Run FFTMicroscopyAnalysisAgent before planning
+      to detect structural variation (domains, phase boundaries)
+    - ``use_sam=True``: Run SAMMicroscopyAnalysisAgent before planning
+      to provide particle segmentation context
+
+    Series support:
+    - Single image = series of 1
+    - Analysis approach is locked after planning for series consistency
+    - Adaptive refit of flagged images with independent approach
 
     Security:
-    - This agent executes LLM-generated Python code for image analysis
-    - A sandbox check is performed at initialization
-    - If no sandbox (Docker/VM/Colab) is detected, user is prompted to confirm
-    - Use UNSAFE_EXECUTION_OK=true environment variable to bypass in CI/CD
+    - Executes LLM-generated Python code in a sandbox
+    - Sandbox check at initialization (Docker/VM/Colab)
+    - Use UNSAFE_EXECUTION_OK=true to bypass in CI/CD
 
     Args:
         api_key: LLM API key
@@ -98,6 +97,9 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         output_dir: Output directory
         futurehouse_api_key: FutureHouse API key for literature
         use_literature: Enable literature search (default: False)
+        use_fft: Run FFT sub-agent as preprocessing (default: False)
+        use_sam: Run SAM sub-agent as preprocessing (default: False)
+        analysis_depth: "auto" (default), "basic", or "deep"
         enable_human_feedback: Enable feedback loop
         executor_timeout: Script timeout in seconds
         max_approach_retries: Max alternative approaches to try (default: 3)
@@ -110,18 +112,24 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Single image
         result = agent.analyze("image.tif")
 
-        # Multiple images (series)
-        result = agent.analyze(["img1.tif", "img2.tif", "img3.tif"])
-
-        # Numpy stack
-        result = agent.analyze(my_image_stack)
-
-        # With metadata and hints
+        # With metadata and objective
         result = agent.analyze(
             "image.tif",
             system_info={"sample": "steel alloy", "instrument": "SEM"},
-            hints="Focus on grain boundaries"
+            objective="Measure grain size distribution"
         )
+
+        # Two-tier: basic detection only
+        agent = ImageAnalysisAgent(api_key="...", analysis_depth="basic")
+
+        # Two-tier: always run deep analysis
+        agent = ImageAnalysisAgent(api_key="...", analysis_depth="deep")
+
+        # With FFT sub-agent preprocessing
+        agent = ImageAnalysisAgent(api_key="...", use_fft=True)
+
+        # With domain skill
+        result = agent.analyze("image.tif", skill="atomic_stem")
 
         # Series with metadata
         result = agent.analyze(
@@ -132,27 +140,6 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "unit": "K"
             }
         )
-
-        # With auxiliary data for context
-        result = agent.analyze(
-            "sem_image.tif",
-            auxiliary_data="eds_spectrum.csv",
-            auxiliary_label="EDS spectrum from same region"
-        )
-
-        # With domain skill
-        result = agent.analyze("image.tif", skill="my_skill.md")
-
-        # Custom quality settings
-        agent = ImageAnalysisAgent(
-            api_key="...",
-            max_approach_retries=5,         # Try more alternatives
-            outlier_sigma=3.0,              # Less aggressive outlier detection
-            max_verification_iterations=3   # Fewer verification passes
-        )
-
-        # Get measurement recommendations
-        recommendations = agent.recommend_measurements(analysis_result=result)
 
     Raises:
         RuntimeError: If sandbox check fails and user declines to proceed.
@@ -472,9 +459,10 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         Returns:
             Dict with status, detailed_analysis, scientific_claims,
-            analysis_approach, extracted_features, output_directory,
-            and for series: individual_results, trend_analysis,
-            flagged_images
+            analysis_approach, extracted_features, output_directory.
+            For series: individual_results, trend_analysis, flagged_images.
+            When Tier 2 runs: tier1_results, tier2_results sub-dicts
+            for traceability.
         """
         # Use provided overrides or fall back to instance defaults
         effective_max_retries = (
