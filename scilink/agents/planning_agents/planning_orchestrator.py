@@ -296,14 +296,21 @@ to explore it BEFORE generating a plan: check what fields exist, query value ran
 distributions of key numeric fields, and identify available categories or labels.
 
 If the objective involves screening, filtering, ranking, or analyzing the knowledge data,
-design and execute a comprehensive screening strategy BEFORE calling `generate_initial_plan`:
-1. Based on the objective, the data exploration, and any literature context, outline a
-   multi-step screening approach (filters, scoring criteria, ranking metrics).
-2. Execute each screening step via `query_knowledge_data` calls.
-3. Pass the complete screening results as `additional_context` to `generate_initial_plan`,
-   clearly stating: "The following screening/analysis has already been completed: [results].
-   The plan should only cover steps that require resources beyond database queries
-   (e.g., new simulations, synthesis, characterization, experimental validation)."
+you MUST execute the screening yourself BEFORE calling `generate_initial_plan`. Do NOT
+delegate screening to the plan — anything you can answer by querying the database must be
+done now. Specifically:
+1. Based on the objective, the data exploration, and any literature context, decide on a
+   comprehensive suite of screening criteria that goes beyond summarizing basic stats —
+   include multi-step filters, composite scoring formulas, and ranking metrics.
+2. Execute each filter and ranking step via `query_knowledge_data` calls.
+3. Save the screening results to a file using `save_file` (e.g., a CSV of ranked candidates
+   with all relevant properties) so the results persist for downstream use.
+4. Pass the screening summary as `additional_context` to `generate_initial_plan`, clearly
+   stating: "The following database screening has already been completed and produced [N]
+   candidates (saved to [filename]): [summary of filters applied and results].
+   The plan should NOT repeat any database screening steps. It should only cover steps
+   that require resources beyond the database (e.g., new simulations, synthesis,
+   characterization, experimental validation)."
 
 When data files are provided, use `read_file` FIRST to inspect the contents. Based on what you see:
 - **Clean, straightforward tabular data** (clear column names, consistent units, no preprocessing needed)
