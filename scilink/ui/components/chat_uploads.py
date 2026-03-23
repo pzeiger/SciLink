@@ -126,7 +126,7 @@ def _render_planning_uploads(start_task_fn) -> None:
         knowledge_folder = st.text_input(
             "or paste folder path",
             key="knowledge_folder_path",
-            placeholder="/path/to/papers/",
+            placeholder="/path/to/papers/ or /path/to/database/",
             label_visibility="collapsed",
         )
 

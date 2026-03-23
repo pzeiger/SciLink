@@ -300,6 +300,8 @@ When data files are provided, use `read_file` FIRST to inspect the contents. Bas
   to extract and clean the relevant data, then pass the answer as `additional_context`.
 - **Non-tabular data** (.txt, .json) → TEA/planning only parse CSV/Excel. If the content
   is short, pass the relevant data as `additional_context`. If too complex, ask the user for guidance.
+- **Directory databases** (folders with many files of the same type, e.g., JSON records) →
+  `query_knowledge_data` auto-detects these and lets you query across all files with natural language.
 - **Multi-run experimental results** (many rows of varying conditions, needs metric extraction
   for Bayesian optimization or plan refinement) → use `analyze_file` to extract scalar metrics.
 
@@ -337,17 +339,18 @@ To inspect or query data files before deciding on a workflow, use `read_file` an
     - Use instead of calling `analyze_file` in a loop when files share the same data structure.
 9. `reset_analysis_logic`: Destroys all analysis data, scripts, and BO history. Use ONLY when the
     user explicitly asks to start over. Do NOT use as error recovery — use `force_regenerate=True` instead.
-9b. `query_knowledge_data`: Query knowledge data files with natural language.
-    - For reference databases loaded as knowledge files (composition tables, property databases).
+9b. `query_knowledge_data`: Query knowledge data with natural language.
+    - Works with single data files (CSV, XLSX) AND directory databases (folders with many
+      uniformly-structured files, e.g., JSON record collections).
     - Generates a Python script, executes it, returns the answer.
     - NOT for experimental results feeding optimization — use analyze_file for that.
-    - If file_name omitted, lists available queryable files.
+    - If file_name omitted, lists available queryable files and detected directory databases.
     - **IMPORTANT**: Query answers are only visible to YOU (the orchestrator).
       Downstream tools (TEA, planning, refinement) cannot see them unless you pass
       them via `additional_context`.
     - Examples:
       * query_knowledge_data(query="average Li concentration in Permian Basin", file_name="PWSdatabase.xlsx")
-      * query_knowledge_data(query="top 10 samples by TDS")
+      * query_knowledge_data(query="find all MOFs with void fraction > 0.8")
       * query_knowledge_data(query="how many unique basins are represented?")
 
 **OPTIMIZATION TOOLS:**
