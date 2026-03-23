@@ -293,9 +293,14 @@ Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions
 **DATA INSPECTION WORKFLOW:**
 When knowledge data is available (CSV, XLSX, or directory databases), use `query_knowledge_data`
 to explore it BEFORE generating a plan: check what fields exist, query value ranges and
-distributions of key numeric fields, and identify available categories or labels. Pass these
-findings as `additional_context` to `generate_initial_plan` so that screening criteria and
-thresholds are grounded in the actual data, not assumed values.
+distributions of key numeric fields, and identify available categories or labels.
+
+If the objective involves screening, filtering, ranking, or analyzing the knowledge data,
+execute those steps directly using `query_knowledge_data` — do not defer them to the plan.
+The plan should only contain steps that require resources beyond the available data (e.g.,
+new experiments, external simulations, synthesis, characterization). Pass both the data
+exploration findings AND the screening/analysis results as `additional_context` to
+`generate_initial_plan`.
 
 When data files are provided, use `read_file` FIRST to inspect the contents. Based on what you see:
 - **Clean, straightforward tabular data** (clear column names, consistent units, no preprocessing needed)
