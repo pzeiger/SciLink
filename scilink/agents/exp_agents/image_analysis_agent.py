@@ -74,12 +74,6 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     - Controlled via ``analysis_depth``: "auto" (LLM decides), "basic"
       (Tier 1 only), or "deep" (always run both)
 
-    Optional sub-agent preprocessing:
-    - ``use_fft=True``: Run FFTMicroscopyAnalysisAgent before planning
-      to detect structural variation (domains, phase boundaries)
-    - ``use_sam=True``: Run SAMMicroscopyAnalysisAgent before planning
-      to provide particle segmentation context
-
     Series support:
     - Single image = series of 1
     - Analysis approach is locked after planning for series consistency
@@ -97,8 +91,6 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         output_dir: Output directory
         futurehouse_api_key: FutureHouse API key for literature
         use_literature: Enable literature search (default: False)
-        use_fft: Run FFT sub-agent as preprocessing (default: False)
-        use_sam: Run SAM sub-agent as preprocessing (default: False)
         analysis_depth: "auto" (default), "basic", or "deep"
         enable_human_feedback: Enable feedback loop
         executor_timeout: Script timeout in seconds
@@ -124,9 +116,6 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         # Two-tier: always run deep analysis
         agent = ImageAnalysisAgent(api_key="...", analysis_depth="deep")
-
-        # With FFT sub-agent preprocessing
-        agent = ImageAnalysisAgent(api_key="...", use_fft=True)
 
         # With domain skill
         result = agent.analyze("image.tif", skill="atomic_stem")
@@ -160,9 +149,6 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         enable_human_feedback: bool = True,
         executor_timeout: int = 300,
         max_wait_time: int = 1000,
-        # Sub-agent preprocessing
-        use_fft: bool = False,
-        use_sam: bool = False,
         # Analysis depth
         analysis_depth: str = "auto",
         # Quality control settings
@@ -205,11 +191,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         self.executor = ScriptExecutor(timeout=executor_timeout)
 
-        # Sub-agent preprocessing flags
-        self.use_fft = use_fft
-        self.use_sam = use_sam
         self.analysis_depth = analysis_depth
-        self._model_name = model_name
 
         # Optional literature agent
         self.literature_agent = None
@@ -225,183 +207,6 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     logger.error(f"Literature agent failed: {e}")
             else:
                 logger.warning("use_literature=True but no API key provided")
-
-    def _run_subagent_preprocessing(
-        self, data, system_info, first_image
-    ) -> dict:
-        """Run FFT and/or SAM sub-agents as preprocessing.
-
-        Returns dict with ``fft_preprocessing`` and/or ``sam_preprocessing``
-        entries, or empty dict if neither is enabled.
-        """
-        result = {}
-
-        if self.use_fft:
-            self.logger.info("Running FFT/NMF sub-agent preprocessing...")
-            try:
-                from .fft_microscopy_agent import FFTMicroscopyAnalysisAgent
-
-                fft_agent = FFTMicroscopyAnalysisAgent(
-                    api_key=self.api_key,
-                    model_name=self._model_name,
-                    base_url=self.base_url,
-                    output_dir=str(self.output_dir / "fft_preprocessing"),
-                    enable_human_feedback=False,
-                )
-                fft_result = fft_agent.analyze(data, system_info=system_info)
-
-                if fft_result.get("status") == "success":
-                    # Save arrays to working directory
-                    fft_out = Path(fft_result.get("output_directory", ""))
-                    array_paths = {}
-                    for name in ("components", "abundances"):
-                        src = fft_out / f"{name}.npy"
-                        if src.exists():
-                            dst = self.output_dir / f"fft_{name}.npy"
-                            import shutil
-                            shutil.copy2(src, dst)
-                            array_paths[f"fft_{name}.npy"] = str(dst)
-
-                    # Get shape info for the script
-                    shapes = {}
-                    for key, path in array_paths.items():
-                        arr = np.load(path)
-                        shapes[key] = list(arr.shape)
-
-                    # Render visualization thumbnail
-                    viz_bytes = None
-                    viz_path = fft_out / "analysis_visualization.png"
-                    if not viz_path.exists():
-                        # Try common FFT output names
-                        for candidate in fft_out.glob("*.png"):
-                            viz_path = candidate
-                            break
-                    if viz_path.exists():
-                        viz_bytes = image_to_thumbnail_bytes(
-                            np.array(__import__("PIL").Image.open(viz_path)),
-                            max_dim=512,
-                        )
-
-                    result["fft_preprocessing"] = {
-                        "detailed_analysis": fft_result.get(
-                            "detailed_analysis", ""
-                        ),
-                        "scientific_claims": fft_result.get(
-                            "scientific_claims", []
-                        ),
-                        "n_components": fft_result.get("n_components"),
-                        "output_directory": str(fft_out),
-                        "visualization_bytes": viz_bytes,
-                        "array_paths": array_paths,
-                        "array_shapes": shapes,
-                    }
-                    self.logger.info(
-                        f"   FFT preprocessing complete: "
-                        f"{fft_result.get('n_components', '?')} components"
-                    )
-                else:
-                    self.logger.warning(
-                        f"   FFT preprocessing failed: "
-                        f"{fft_result.get('error', 'unknown')}"
-                    )
-            except Exception as e:
-                self.logger.warning(f"   FFT preprocessing error: {e}")
-
-        if self.use_sam:
-            self.logger.info("Running SAM sub-agent preprocessing...")
-            try:
-                from .sam_microscopy_agent import SAMMicroscopyAnalysisAgent
-
-                sam_agent = SAMMicroscopyAnalysisAgent(
-                    api_key=self.api_key,
-                    model_name=self._model_name,
-                    base_url=self.base_url,
-                    output_dir=str(self.output_dir / "sam_preprocessing"),
-                    enable_human_feedback=False,
-                )
-                sam_result = sam_agent.analyze(data, system_info=system_info)
-
-                if sam_result.get("status") == "success":
-                    array_paths = {}
-                    shapes = {}
-
-                    # Build label map from particle masks
-                    h, w = first_image.shape[:2]
-                    label_map = np.zeros((h, w), dtype=np.int32)
-                    particles = sam_result.get("statistics", {}).get(
-                        "particles", []
-                    )
-                    # Try getting particles from the raw result
-                    if not particles:
-                        sam_out = Path(
-                            sam_result.get("output_directory", "")
-                        )
-                        # The SAM agent stores raw results internally;
-                        # try individual_results for the first image
-                        indiv = sam_result.get("individual_results", [])
-                        if indiv:
-                            particles = indiv[0].get("particles", [])
-
-                    for p in particles:
-                        mask = p.get("mask")
-                        pid = p.get("id", 0)
-                        if mask is not None and pid > 0:
-                            label_map[mask] = pid
-
-                    label_path = self.output_dir / "sam_label_map.npy"
-                    np.save(label_path, label_map)
-                    array_paths["sam_label_map.npy"] = str(label_path)
-                    shapes["sam_label_map.npy"] = list(label_map.shape)
-
-                    # Save statistics as JSON
-                    stats_path = self.output_dir / "sam_statistics.json"
-                    stats = sam_result.get("statistics", {})
-                    with open(stats_path, "w") as f:
-                        json.dump(stats, f, indent=2, default=str)
-                    array_paths["sam_statistics.json"] = str(stats_path)
-
-                    # Render visualization thumbnail
-                    viz_bytes = None
-                    sam_out = Path(sam_result.get("output_directory", ""))
-                    for candidate in sam_out.glob("*.png"):
-                        try:
-                            viz_bytes = image_to_thumbnail_bytes(
-                                np.array(
-                                    __import__("PIL").Image.open(candidate)
-                                ),
-                                max_dim=512,
-                            )
-                            break
-                        except Exception:
-                            continue
-
-                    result["sam_preprocessing"] = {
-                        "detailed_analysis": sam_result.get(
-                            "detailed_analysis", ""
-                        ),
-                        "scientific_claims": sam_result.get(
-                            "scientific_claims", []
-                        ),
-                        "particle_count": sam_result.get("particle_count"),
-                        "statistics": stats,
-                        "output_directory": str(sam_out),
-                        "visualization_bytes": viz_bytes,
-                        "array_paths": array_paths,
-                        "array_shapes": shapes,
-                    }
-                    self.logger.info(
-                        f"   SAM preprocessing complete: "
-                        f"{sam_result.get('particle_count', '?')} particles"
-                    )
-                else:
-                    self.logger.warning(
-                        f"   SAM preprocessing failed: "
-                        f"{sam_result.get('error', 'unknown')}"
-                    )
-            except Exception as e:
-                self.logger.warning(f"   SAM preprocessing error: {e}")
-
-        return result
 
     def _get_initial_state_fields(self) -> dict:
         """Return initial state fields for the agent."""
@@ -590,13 +395,6 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     f"   Skill '{skill}' not found — proceeding without domain skill"
                 )
 
-        # Run sub-agent preprocessing (FFT/SAM) if enabled
-        subagent_state = {}
-        if self.use_fft or self.use_sam:
-            subagent_state = self._run_subagent_preprocessing(
-                data, system_info, first_image
-            )
-
         # Extract series metadata from system_info if not provided explicitly
         handled_system_info = self._handle_system_info(system_info)
         handled_system_info, series_metadata = self._extract_series_metadata(
@@ -630,8 +428,8 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "original_image_bytes": original_image_bytes,
             "image_statistics": image_statistics,
             # Sub-agent preprocessing results
-            "fft_preprocessing": subagent_state.get("fft_preprocessing"),
-            "sam_preprocessing": subagent_state.get("sam_preprocessing"),
+            "fft_preprocessing": None,
+            "sam_preprocessing": None,
             # Tier-aware planning
             "planning_instructions_override": (
                 IMAGE_ANALYSIS_PLANNING_INSTRUCTIONS + IMAGE_ANALYSIS_TIER1_SUFFIX
@@ -747,7 +545,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 tier1_state, tier1_results,
                 first_image, original_image_bytes, image_statistics,
                 handled_system_info, series_metadata, hints, objective,
-                skill_state, aux_state, subagent_state,
+                skill_state, aux_state,
                 image_paths, image_stack, input_type,
                 num_images, is_single_image, first_image_name,
                 tier2_decision if self.analysis_depth == "auto" else None,
@@ -1005,7 +803,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self, tier1_state, tier1_results,
         first_image, original_image_bytes, image_statistics,
         handled_system_info, series_metadata, hints, objective,
-        skill_state, aux_state, subagent_state,
+        skill_state, aux_state,
         image_paths, image_stack, input_type,
         num_images, is_single_image, first_image_name,
         tier2_decision=None,
@@ -1065,8 +863,8 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # Prior knowledge
             "prior_knowledge": tier1_state.get("prior_knowledge", []),
             # Sub-agent results
-            "fft_preprocessing": subagent_state.get("fft_preprocessing"),
-            "sam_preprocessing": subagent_state.get("sam_preprocessing"),
+            "fft_preprocessing": None,
+            "sam_preprocessing": None,
             # First image
             "image_path": (
                 image_paths[0] if image_paths else first_image_name
