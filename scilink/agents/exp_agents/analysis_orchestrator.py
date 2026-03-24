@@ -73,6 +73,7 @@ _CO_PILOT_DIRECTIVE = """
 **SINGLE-TOOL EXECUTION RULE:**
 1. **EXECUTE ONE TOOL**: Call only ONE tool per response.
 2. **OBSERVE OUTPUT**: Wait for results before suggesting next steps.
+3. **Exception**: When data and metadata are both available, you may chain examine_data + load_metadata + select_agent in one response.
 
 **METADATA REQUIREMENT:**
 - ALWAYS ensure metadata is available before analysis
@@ -226,6 +227,12 @@ examine_data returns data_type:
 4. `select_agent`
 5. `run_analysis`
 6. Present results
+7. If `run_analysis` returns `tier2_suggested: true` (ImageAnalysisAgent only):
+   - Show the Tier 1 results and visualization to the user
+   - Ask: "Deeper analysis is recommended: [focus]. Proceed / Skip / Provide guidance?"
+   - If proceed: call `run_analysis` again with Tier 1 findings as `prior_knowledge`
+     and Tier 1 output directory path in `hints`
+   - If user provides guidance: include it in `hints` for the second call
 
 **BEHAVIOR:**
 - If disambiguation_needed=true in examine_data result, ASK the user before selecting agent

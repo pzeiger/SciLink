@@ -596,7 +596,10 @@ class ImagePlanningController:
 
         state["observations"] = result.get("observations", "")
         state["analysis_approach"] = result.get("analysis_approach", "Image analysis")
-        state["processing_pipeline"] = result.get("processing_pipeline", "Standard processing")
+        pipeline = result.get("processing_pipeline", "Standard processing")
+        if isinstance(pipeline, list):
+            pipeline = " -> ".join(str(s) for s in pipeline)
+        state["processing_pipeline"] = pipeline
         state["features_to_extract"] = result.get("features_to_extract", [])
         state["quality_criteria"] = result.get("quality_criteria", "Visual inspection")
         state["expected_outputs"] = result.get("expected_outputs", [])
@@ -759,7 +762,10 @@ class ImagePlanningController:
 
         state["observations"] = result.get("observations", state.get("observations", ""))
         state["analysis_approach"] = result.get("analysis_approach", state.get("analysis_approach"))
-        state["processing_pipeline"] = result.get("processing_pipeline", state.get("processing_pipeline"))
+        pipeline = result.get("processing_pipeline", state.get("processing_pipeline"))
+        if isinstance(pipeline, list):
+            pipeline = " -> ".join(str(s) for s in pipeline)
+        state["processing_pipeline"] = pipeline
         state["features_to_extract"] = result.get("features_to_extract", state.get("features_to_extract", []))
         state["quality_criteria"] = result.get("quality_criteria", state.get("quality_criteria"))
         state["expected_outputs"] = result.get("expected_outputs", state.get("expected_outputs", []))
@@ -1616,6 +1622,15 @@ Estimate Completeness, Precision, and Plausibility separately, then average.
 
 ---
 
+## PLAN AWARENESS
+
+The processing pipeline listed above is the LOCKED analysis plan. \
+Your suggested fixes should work within the planned method — recommend \
+parameter adjustments, preprocessing improvements, or cleanup steps. \
+Do not recommend replacing the core analysis method with a different one.
+
+---
+
 ## RESPONSE FORMAT
 
 Return JSON:
@@ -2194,26 +2209,6 @@ Return JSON with:
                                     f"(score = {best_score:.2f})"
                                 )
 
-                    # Human feedback opportunity (if enabled)
-                    user_accepted = False
-                    if (
-                        self.enable_human_feedback
-                        and best_result
-                        and best_result.get("visualization_bytes")
-                    ):
-                        user_feedback = self._get_user_feedback_on_result(
-                            state, best_result, best_score
-                        )
-
-                        if user_feedback:
-                            best_result, best_score = self._apply_user_feedback(
-                                state, user_feedback, best_result, best_score,
-                                image_data, data_path, image_name, image_idx,
-                                all_attempts,
-                            )
-                        else:
-                            user_accepted = True
-
             # --- Check if quality is acceptable ---
             if best_score >= quality_threshold:
                 self.logger.info(
@@ -2227,16 +2222,6 @@ Return JSON with:
                     f"{quality_threshold})"
                 )
 
-                if user_accepted:
-                    self.logger.info(
-                        "   User accepted result - skipping alternative attempts"
-                    )
-                    best_result["user_accepted"] = True
-                    best_result["quality_warning"] = (
-                        f"Quality score = {best_score:.2f} below threshold "
-                        f"{quality_threshold} (user accepted)"
-                    )
-                    return best_result
         else:
             self.logger.error(
                 f"   Initial analysis failed: "
@@ -2247,7 +2232,6 @@ Return JSON with:
                 "score": 0,
                 "result": result,
             })
-            user_accepted = False
 
         # --- Alternative approach retries ---
         current_config = state.get("locked_analysis_config", {}).copy()

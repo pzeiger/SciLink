@@ -499,30 +499,36 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self._save_analysis_scripts(state)
 
         # ================================================================
-        # TIER 2: Deep analysis (conditional)
+        # TIER 2: Evaluate and optionally run
         # ================================================================
         tier2_results = None
-        run_tier2 = False
 
-        if self.analysis_depth == "deep":
-            run_tier2 = True
-            self.logger.info("\n🔬 TIER 2: Forced (analysis_depth='deep')")
-        elif self.analysis_depth == "auto" and tier1_results["status"] == "success":
+        if self.analysis_depth == "auto" and tier1_results["status"] == "success":
+            # Evaluate whether Tier 2 is recommended — return suggestion
+            # to the caller (orchestrator) without running Tier 2
             tier2_decision = self._evaluate_tier2_needed(
                 tier1_results, objective
             )
             if tier2_decision and tier2_decision.get("tier2_needed"):
-                run_tier2 = True
+                tier1_results["tier2_suggested"] = True
+                tier1_results["tier2_suggested_focus"] = tier2_decision.get(
+                    "suggested_focus", "deeper analysis"
+                )
                 self.logger.info(
-                    f"\n🔬 TIER 2: {tier2_decision.get('suggested_focus', 'deeper analysis')}"
+                    f"\n🔬 Tier 2 recommended: "
+                    f"{tier1_results['tier2_suggested_focus']}"
                 )
             else:
+                tier1_results["tier2_suggested"] = False
                 self.logger.info(
-                    "\n📊 TIER 2: Skipped (not warranted by Tier 1 findings)"
+                    "\n📊 Tier 2: not warranted by Tier 1 findings"
                 )
 
-        if run_tier2:
-            # Preserve Tier 1 outputs before Tier 2 overwrites them
+        elif self.analysis_depth == "deep" and tier1_results["status"] == "success":
+            # Run both tiers internally (autonomous/batch mode)
+            self.logger.info("\n🔬 TIER 2: Running (analysis_depth='deep')")
+
+            # Preserve Tier 1 outputs
             import shutil
             tier1_dir = self.output_dir / "tier1"
             tier1_dir.mkdir(exist_ok=True)
@@ -537,17 +543,17 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 elif item.is_file():
                     shutil.copy2(item, dst)
             self.logger.info(f"   📂 Tier 1 outputs preserved in {tier1_dir}")
+
+            # Build Tier 2 state and run
             tier2_state = self._build_tier2_state(
-                tier1_state, tier1_results,
+                state, tier1_results,
                 first_image, original_image_bytes, image_statistics,
                 handled_system_info, series_metadata, hints, objective,
                 skill_state, aux_state,
                 image_paths, image_stack, input_type,
                 num_images, is_single_image, first_image_name,
-                tier2_decision if self.analysis_depth == "auto" else None,
             )
 
-            # Create Tier 2 pipeline (same factory, different instructions)
             tier2_pipeline = create_unified_image_analysis_pipeline(
                 model=self.model,
                 logger=self.logger,
@@ -566,7 +572,6 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 max_verification_iterations=self.max_verification_iterations,
             )
 
-            # Execute Tier 2 pipeline
             for i, controller in enumerate(tier2_pipeline, 1):
                 step_name = controller.__class__.__name__
                 self.logger.info(
@@ -838,6 +843,13 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         if tier2_decision and tier2_decision.get("suggested_focus"):
             tier2_instructions += (
                 f"\n\n**Suggested focus:** {tier2_decision['suggested_focus']}"
+            )
+
+        # Include user guidance from CO_PILOT mode if provided
+        user_guidance = tier1_state.get("tier2_user_guidance")
+        if user_guidance:
+            tier2_instructions += (
+                f"\n\n**User guidance:** {user_guidance}"
             )
 
         return {

@@ -2775,21 +2775,6 @@ change the analysis methods themselves (e.g., don't replace Otsu with adaptive t
 **Available Libraries:** numpy, scipy (ndimage, signal, optimize), scikit-image (skimage), \
 opencv-python (cv2), matplotlib, Pillow (PIL), scikit-learn (sklearn), pandas, json
 
-**Available Tool: Sliding FFT + NMF decomposition** (for detecting local structural variations):
-```python
-from scilink.tools.fft_nmf import SlidingFFTNMF
-fft_nmf = SlidingFFTNMF(n_components=3)
-components, abundances = fft_nmf.fit_transform(image_2d)
-# components: (n_components, fft_h, fft_w) — local FFT patterns
-# abundances: (1, n_components, grid_y, grid_x) — spatial maps of each pattern
-```
-Use this when you need to detect spatially varying periodicity, domain boundaries, \
-local lattice distortions, or structural phase changes across the image. Each NMF \
-component represents a distinct local diffraction pattern, and its abundance map \
-shows where that pattern is dominant. Save components and abundances as .npy files. \
-Include FFT/NMF results in the visualization and JSON output only if they reveal \
-meaningful structural variation — omit if the image is structurally uniform.
-
 **Requirements:**
 1. Load image: use `np.load(path)` for .npy, or `cv2.imread(path, cv2.IMREAD_UNCHANGED)` \
 for standard formats (remember cv2 loads BGR — convert to RGB if color)
@@ -2861,11 +2846,14 @@ Check:
 domain expertise (if provided)?
 
 Allow reasonable implementation-level variation (variable naming, library choice for the \
-same operation). A deviation is **justified** in two cases:
+same operation). A deviation is **justified** in these cases:
 1. It is obvious from the image properties that the plan cannot work as written.
 2. The script adjusts numerical parameters (thresholds, sigma values, filter criteria) \
-to achieve reasonable results, while keeping the same methods and pipeline structure. \
-The script's "summary" field should explain the adjustment.
+to achieve reasonable results, while keeping the same methods and pipeline structure.
+3. The script adds minor preprocessing/postprocessing steps (hole filling, small object \
+removal, morphological cleanup) that support the core methods without changing their \
+input/output contract.
+The script's "summary" field should explain any adjustment.
 Changing the analysis method (e.g., replacing LoG with Hough circles) is NOT a justified \
 deviation — that requires a new plan via the retry pipeline.
 

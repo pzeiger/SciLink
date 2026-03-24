@@ -1929,7 +1929,18 @@ class AnalysisOrchestratorTools:
                 
                 # === Format response ===
                 if result.get("status") == "success":
-                    return json.dumps({
+                    # Find main visualization
+                    viz_path = None
+                    for candidate in analysis_output_dir.rglob("*_analysis.png"):
+                        viz_path = str(candidate)
+                        break
+                    if not viz_path:
+                        for candidate in analysis_output_dir.rglob("*.png"):
+                            if "report" not in candidate.name.lower():
+                                viz_path = str(candidate)
+                                break
+
+                    response = {
                         "status": "success",
                         "analysis_id": analysis_id,
                         "agent_used": self.AGENT_NAMES.get(agent_id),
@@ -1938,8 +1949,22 @@ class AnalysisOrchestratorTools:
                         "claims_count": len(result.get("scientific_claims", [])),
                         "full_result_available": True,
                         "note": f"All outputs saved to: {analysis_output_dir}",
-                        "next_steps": "Use assess_novelty to check literature for these claims, or get_recommendations for follow-up experiments."
-                    })
+                        "next_steps": "Use assess_novelty to check literature for these claims, or get_recommendations for follow-up experiments.",
+                    }
+                    if viz_path:
+                        response["visualization_path"] = viz_path
+                    if result.get("tier2_suggested"):
+                        response["tier2_suggested"] = True
+                        response["tier2_suggested_focus"] = result.get(
+                            "tier2_suggested_focus", "deeper analysis"
+                        )
+                        response["next_steps"] = (
+                            f"Deeper analysis recommended: {result.get('tier2_suggested_focus', '')}. "
+                            "Ask the user whether to proceed with Tier 2 analysis, skip it, or provide guidance. "
+                            "To run Tier 2, call run_analysis again on the same data with the Tier 1 findings "
+                            "as prior_knowledge and the output directory path in hints."
+                        )
+                    return json.dumps(response)
                 else:
                     return json.dumps({
                         "status": "error",
