@@ -296,7 +296,7 @@ class ScriptExecutor:
 
         temp_script_file = None
         try:
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, dir=os.getcwd()) as tf:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, dir=os.getcwd(), encoding='utf-8') as tf:
                 tf.write(script_content)
                 temp_script_file = tf.name
 
@@ -305,7 +305,7 @@ class ScriptExecutor:
                 env['MP_API_KEY'] = self.mp_api_key
 
             proc = subprocess.Popen(
-                ['python', os.path.basename(temp_script_file)],
+                [sys.executable, os.path.basename(temp_script_file)],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, env=env,
             )
