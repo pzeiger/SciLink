@@ -15,7 +15,7 @@ SciLink provides three complementary agent systems that cover the full scientifi
 | System | Purpose | Key Capabilities |
 |--------|---------|------------------|
 | **Planning Agents** | Experimental design & optimization | Hypothesis generation, Bayesian optimization, literature-aware planning |
-| **Analysis Agents** | Multi-modal data analysis | Microscopy, spectroscopy, particle segmentation, curve fitting |
+| **Analysis Agents** | Multi-modal data analysis | Image analysis, spectroscopy, hyperspectral datacubes, curve fitting |
 | **Simulation Agents** | Computational modeling | DFT calculations, classical MD (LAMMPS), structure recommendations |
 
 All systems support three autonomy levels:
@@ -106,7 +106,7 @@ plan = planner.propose_experiments(
     primary_data_set={"file_path": "./composition_data.xlsx"}
 )
 
-# Analyze microscopy data
+# Analyze image data
 analyzer = AnalysisOrchestratorAgent(analysis_mode=AnalysisMode.SUPERVISED)
 result = analyzer.chat("Analyze ./stem_image.tif and generate scientific claims")
 ```
@@ -183,7 +183,7 @@ Add domain-specific analysis guidance via Markdown skill files:
 scilink analyze --skills ./raman_skill.md ./ftir_skill.md
 ```
 
-Built-in skills are available for curve fitting (XPS, Raman, etc.) and hyperspectral analysis (EELS, etc.).
+Built-in skills are available for image analysis (atomic-resolution STEM, etc.), curve fitting (XPS, Raman, etc.), and hyperspectral analysis (EELS, etc.).
 
 ### Custom Agents
 
@@ -311,18 +311,18 @@ The Analysis Agents module provides automated scientific data analysis across mu
 
 ```
 AnalysisOrchestratorAgent (main coordinator)
-├── FFTMicroscopyAnalysisAgent (ID: 0)
-├── SAMMicroscopyAnalysisAgent (ID: 1)
-├── HyperspectralAnalysisAgent (ID: 2)
-└── CurveFittingAgent (ID: 3)
+├── CurveFittingAgent (ID: 0)
+├── ImageAnalysisAgent (ID: 1)
+└── HyperspectralAnalysisAgent (ID: 2)
 ```
 
 | ID | Agent | Use Case |
 |----|-------|----------|
-| 0 | **FFTMicroscopyAnalysisAgent** | Microstructure via FFT/NMF — grains, phases, atomic-resolution |
-| 1 | **SAMMicroscopyAnalysisAgent** | Particle segmentation — counting, size distributions |
+| 0 | **CurveFittingAgent** | 1D fitting — XRD, UV-Vis, PL, DSC, TGA, kinetics |
+| 1 | **ImageAnalysisAgent** | All image types — microscopy, SEM, TEM, AFM, optical. Handles atomic resolution, grains, particles, textures, defects, morphology |
 | 2 | **HyperspectralAnalysisAgent** | Spectroscopic datacubes — EELS-SI, EDS, Raman imaging |
-| 3 | **CurveFittingAgent** | 1D fitting — XRD, UV-Vis, PL, DSC, kinetics |
+
+**ImageAnalysisAgent** uses a two-tier pipeline: Tier 1 performs foundational detection and measurement, while Tier 2 (triggered automatically or on demand) handles deeper analysis such as strain mapping, sublattice separation, or defect classification. The `analysis_depth` parameter controls this behavior (`"auto"`, `"basic"`, or `"deep"`).
 
 ## CLI Usage
 
@@ -341,13 +341,13 @@ $ scilink analyze --data ./stem_image.tif
 
 🤖 Agent: ⚡ Examining data at ./stem_image.tif...
   • Type: microscopy, Shape: 2048 x 2048
-  • Suggested agents: FFTMicroscopyAnalysisAgent (0) or SAMMicroscopyAnalysisAgent (1)
+  • Suggested agent: ImageAnalysisAgent (1)
 
 👤 You: Run the analysis
 
 🤖 Agent: ⚡ Running analysis...
-  The HAADF-STEM image reveals MoS2 with predominantly 2H phase structure.
-  FFT analysis identified four distinct spatial frequency patterns...
+  Tier 1: Detected atomic columns with two distinct intensity populations.
+  Tier 2 recommended — sublattice separation and displacement field analysis.
   **Scientific Claims Generated:** 3
 ```
 
@@ -368,8 +368,7 @@ $ scilink analyze --data ./stem_image.tif
 ```python
 from scilink.agents.exp_agents import (
     AnalysisOrchestratorAgent, AnalysisMode,
-    FFTMicroscopyAnalysisAgent, SAMMicroscopyAnalysisAgent,
-    HyperspectralAnalysisAgent, CurveFittingAgent
+    ImageAnalysisAgent, HyperspectralAnalysisAgent, CurveFittingAgent
 )
 
 # Using the orchestrator
@@ -379,15 +378,22 @@ orchestrator = AnalysisOrchestratorAgent(
 )
 response = orchestrator.chat("Examine ./data/sample.tif")
 
-# Direct agent usage
-agent = CurveFittingAgent(output_dir="./curve_output", use_literature=True)
+# Direct image analysis with two-tier pipeline
+agent = ImageAnalysisAgent(analysis_depth="auto")
 result = agent.analyze(
-    "pl_spectrum.csv",
-    system_info={"experiment": {"technique": "Photoluminescence"}},
-    hints="Focus on band-edge emission"
+    "stem_image.tif",
+    system_info={"experiment": {"technique": "HAADF-STEM"}},
+    objective="Identify crystal phases and defects"
 )
 
-# Series with trend analysis
+# Image series with outlier detection
+result = agent.analyze(
+    ["img_001.tif", "img_002.tif", "img_003.tif"],
+    series_metadata={"variable": "dose", "values": [1e14, 1e15, 1e16], "unit": "ions/cm²"}
+)
+
+# Curve fitting
+agent = CurveFittingAgent(output_dir="./curve_output", use_literature=True)
 result = agent.analyze(
     ["pl_300K.csv", "pl_350K.csv", "pl_400K.csv"],
     series_metadata={"variable": "temperature", "values": [300, 350, 400], "unit": "K"}
