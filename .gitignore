@@ -178,3 +178,16 @@ cython_debug/
 *.tar.gz
 *.err
 *.out
+
+# External databases
+CoREMOF*/
+
+# Session outputs
+planning_session_*/
+analysis_*/
+campaign_outputs/
+image_analysis_output/
+kb_storage/
+
+# Test outputs
+test_*/

@@ -18,7 +18,11 @@ def _natural_sort_key(s):
     return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', str(s))]
 
 from .parser_utils import write_experiments_to_disk
-from .instruct import BO_OBJECTIVE_DISTILL_PROMPT, KNOWLEDGE_QUERY_CODEGEN_PROMPT
+from .instruct import (
+    BO_OBJECTIVE_DISTILL_PROMPT,
+    KNOWLEDGE_QUERY_CODEGEN_PROMPT,
+    KNOWLEDGE_QUERY_DIRECTORY_CODEGEN_PROMPT,
+)
 from ..lit_agents.optimize_query import optimize_search_query, is_molecule_design_objective
 
 
@@ -3190,6 +3194,126 @@ class OrchestratorTools:
 
         QUERYABLE_EXTENSIONS = {'.xlsx', '.xls', '.csv'}
 
+        DIR_DB_MIN_FILES = 10  # minimum same-extension files to treat as database
+
+        def _summarize_json_value(value, max_str_len=200):
+            """Return a compact string representation of a JSON value."""
+            if value is None:
+                return "null"
+            if isinstance(value, bool):
+                return str(value).lower()
+            if isinstance(value, (int, float)):
+                return str(value)
+            if isinstance(value, str):
+                if len(value) > max_str_len:
+                    return json.dumps(value[:100]) + f"... ({len(value)} chars)"
+                return json.dumps(value)
+            if isinstance(value, list):
+                if len(value) == 0:
+                    return "list (0 items)"
+                first = _summarize_json_value(value[0], max_str_len=80)
+                return f"list ({len(value)} items, first: {first})"
+            if isinstance(value, dict):
+                keys = list(value.keys())
+                return f"dict ({len(keys)} keys: {keys[:5]})"
+            return repr(value)[:100]
+
+        def _summarize_json_file(file_path: str) -> str:
+            """Parse a JSON file and return a compact summary showing all keys."""
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                lines = ["{"]
+                for k, v in data.items():
+                    lines.append(f"  {json.dumps(k)}: {_summarize_json_value(v)},")
+                lines.append("}")
+                return "\n".join(lines)
+            elif isinstance(data, list):
+                if len(data) == 0:
+                    return "[]  (empty list)"
+                summary = f"list of {len(data)} items\n"
+                if isinstance(data[0], dict):
+                    summary += "First item:\n"
+                    lines = ["{"]
+                    for k, v in data[0].items():
+                        lines.append(f"  {json.dumps(k)}: {_summarize_json_value(v)},")
+                    lines.append("}")
+                    summary += "\n".join(lines)
+                else:
+                    summary += f"First item: {_summarize_json_value(data[0])}"
+                return summary
+            return repr(data)[:2000]
+
+        def _inspect_directory(dir_path: str) -> dict:
+            """Summarize directory contents for LLM-driven querying."""
+            from collections import Counter
+
+            p = Path(dir_path)
+            files_by_ext = Counter()
+            all_files = {}  # ext -> sorted list of filenames
+
+            for f in p.iterdir():
+                if f.is_file() and not f.name.startswith('.'):
+                    ext = f.suffix.lower()
+                    files_by_ext[ext] += 1
+                    all_files.setdefault(ext, []).append(f.name)
+
+            # Sort filenames for each extension
+            for ext in all_files:
+                all_files[ext].sort()
+
+            total = sum(files_by_ext.values())
+
+            # Pick dominant extension for sampling
+            if not files_by_ext:
+                return {
+                    "directory": str(p),
+                    "files_by_extension": {},
+                    "total_files": 0,
+                    "sample_files": [],
+                    "all_filenames_sample": [],
+                }
+
+            # Sample files from each extension that has >= DIR_DB_MIN_FILES
+            # For smaller groups, sample one file; this gives the LLM visibility
+            # into all file types in the directory.
+            sample_files = []  # list of {"name", "content", "ext"}
+            sampled_exts = []
+            for ext, count in files_by_ext.most_common():
+                if count < DIR_DB_MIN_FILES:
+                    continue
+                sampled_exts.append(ext)
+                names_for_ext = all_files[ext]
+                # Pick one representative file per extension
+                sample_name = names_for_ext[len(names_for_ext) // 2]
+                fp = p / sample_name
+                try:
+                    if ext == '.json':
+                        content = _summarize_json_file(str(fp))
+                    else:
+                        size = fp.stat().st_size
+                        with open(fp, 'r', encoding='utf-8', errors='replace') as fh:
+                            if size > 50_000:
+                                content = fh.read(50_000)
+                                content += f"\n... (truncated, {size} bytes total)"
+                            else:
+                                content = fh.read()
+                except Exception as e:
+                    content = f"(error reading file: {e})"
+                sample_files.append({"name": sample_name, "content": content, "ext": ext})
+
+            # Collect first 20 filenames from the most common extension
+            dominant_ext = files_by_ext.most_common(1)[0][0]
+
+            return {
+                "directory": str(p),
+                "files_by_extension": dict(files_by_ext.most_common()),
+                "total_files": total,
+                "extensions": sampled_exts,
+                "sample_files": sample_files,
+                "all_filenames_sample": all_files[dominant_ext][:20],
+            }
+
         def _inspect_knowledge_file(file_path: str) -> dict:
             """Return a format-agnostic diagnostic snapshot of a data file."""
             p = Path(file_path)
@@ -3229,7 +3353,9 @@ class OrchestratorTools:
             }
 
         def _discover_queryable_files() -> list:
-            """Scan knowledge directories for queryable data files."""
+            """Scan knowledge directories for queryable data files and directory databases."""
+            from collections import Counter
+
             search_dirs = set()
             # User-specified knowledge folder (or kb_storage/ default)
             if self.orch.knowledge_dir and Path(self.orch.knowledge_dir).exists():
@@ -3241,34 +3367,79 @@ class OrchestratorTools:
 
             if not search_dirs:
                 return []
+
             found = {}
+            dir_db_dirs = set()  # directories detected as databases
+
+            # --- Detect directory databases ---
+            # Check each search dir and its immediate subdirectories
+            dirs_to_check = list(search_dirs)
+            for kdir in search_dirs:
+                for child in kdir.iterdir():
+                    if child.is_dir() and not child.name.startswith('.'):
+                        dirs_to_check.append(child)
+
+            for d in dirs_to_check:
+                ext_counts = Counter()
+                for f in d.iterdir():
+                    if f.is_file() and not f.name.startswith('.'):
+                        ext_counts[f.suffix.lower()] += 1
+                # If any extension has enough files, treat whole directory as database
+                db_exts = {ext: count for ext, count in ext_counts.items()
+                           if count >= DIR_DB_MIN_FILES}
+                if db_exts:
+                    parts = ", ".join(f"{c} {e}" for e, c in sorted(db_exts.items()))
+                    display_name = f"{d.name} ({parts} files)"
+                    found[display_name] = {
+                        "name": display_name,
+                        "path": str(d),
+                        "type": "directory",
+                    }
+                    dir_db_dirs.add(d)
+
+            # --- Discover single queryable files ---
             for kdir in search_dirs:
                 for f in kdir.rglob("*"):
                     if f.is_file() and f.suffix.lower() in QUERYABLE_EXTENSIONS:
-                        found[f.name] = {"name": f.name, "path": str(f)}
+                        # Skip files inside a detected database directory
+                        if any(f.parent == dd for dd in dir_db_dirs):
+                            continue
+                        found[f.name] = {"name": f.name, "path": str(f), "type": "file"}
+
             return sorted(found.values(), key=lambda x: x["name"])
 
         def _resolve_knowledge_data_file(file_name: str):
-            """Resolve a file name to a path in the knowledge directory."""
+            """Resolve a file name to a path in the knowledge directory.
+
+            Returns (target, error) where target is either:
+            - a file path string (for single files)
+            - a dict with "type": "directory" (for directory databases)
+            """
             from difflib import get_close_matches
             candidates = _discover_queryable_files()
             if not candidates:
                 return None, json.dumps({
                     "status": "error",
-                    "message": "No queryable data files found in knowledge directory."
+                    "message": "No queryable data files or directories found in knowledge directory."
                 })
             names = [c["name"] for c in candidates]
-            path_map = {c["name"]: c["path"] for c in candidates}
+            entry_map = {c["name"]: c for c in candidates}
+
+            def _return_entry(name):
+                entry = entry_map[name]
+                if entry.get("type") == "directory":
+                    return entry, None
+                return entry["path"], None
 
             # Exact match
-            if file_name in path_map:
-                return path_map[file_name], None
+            if file_name in entry_map:
+                return _return_entry(file_name)
 
-            # Stem match (without extension)
+            # Stem match (without extension) — only for file entries
             stem = Path(file_name).stem
             for n in names:
                 if Path(n).stem == stem:
-                    return path_map[n], None
+                    return _return_entry(n)
 
             # Fuzzy match
             matches = get_close_matches(file_name, names, n=3, cutoff=0.5)
@@ -3276,13 +3447,13 @@ class OrchestratorTools:
                 suggestion = ", ".join(matches)
                 return None, json.dumps({
                     "status": "error",
-                    "message": f"File '{file_name}' not found. Did you mean: {suggestion}?",
+                    "message": f"'{file_name}' not found. Did you mean: {suggestion}?",
                     "available_files": names
                 })
 
             return None, json.dumps({
                 "status": "error",
-                "message": f"File '{file_name}' not found.",
+                "message": f"'{file_name}' not found.",
                 "available_files": names
             })
 
@@ -3313,35 +3484,218 @@ class OrchestratorTools:
                 return re.sub(r'\n```\s*$', '', text.strip())
             return ""
 
+        def _build_directory_scaffold(info: dict) -> str:
+            """Build scaffold code with readers for each file type."""
+            dir_path = info["directory"]
+            lines = [
+                "import json, glob, os",
+                "from pathlib import Path",
+                "",
+                f"directory = {json.dumps(dir_path)}",
+            ]
+            # Add file lists and readers per extension
+            reader_map = {
+                '.json': (
+                    "def read_json(filepath):\n"
+                    "    with open(filepath, 'r') as f:\n"
+                    "        return json.load(f)"
+                ),
+                '.csv': (
+                    "import pandas as pd\n"
+                    "def read_csv(filepath):\n"
+                    "    return pd.read_csv(filepath)"
+                ),
+                '.tsv': (
+                    "import pandas as pd\n"
+                    "def read_tsv(filepath):\n"
+                    "    return pd.read_csv(filepath, sep='\\t')"
+                ),
+            }
+            default_reader = (
+                "def read_text(filepath):\n"
+                "    with open(filepath, 'r', encoding='utf-8', errors='replace') as f:\n"
+                "        return f.read()"
+            )
+
+            for ext in info["extensions"]:
+                count = info["files_by_extension"].get(ext, 0)
+                var_name = ext.lstrip('.') + "_files"
+                lines.append(f'{var_name} = sorted(glob.glob(os.path.join(directory, "*{ext}")))')
+                lines.append(f"# {count} {ext} files")
+            lines.append("")
+
+            added_readers = set()
+            for ext in info["extensions"]:
+                if ext in reader_map and ext not in added_readers:
+                    lines.append(reader_map[ext])
+                    added_readers.add(ext)
+                elif ext not in added_readers:
+                    lines.append(default_reader)
+                    added_readers.add('_text')
+            lines.append("")
+
+            return "\n".join(lines)
+
+        def _query_directory(dir_entry: dict, query: str) -> str:
+            """Query a directory database using LLM-generated code."""
+            import subprocess
+
+            dir_path = dir_entry["path"]
+            print(f"    - Inspecting directory: {dir_entry['name']}")
+
+            try:
+                info = _inspect_directory(dir_path)
+            except Exception as e:
+                return json.dumps({"status": "error", "message": f"Failed to inspect directory: {e}"})
+
+            if not info["sample_files"]:
+                return json.dumps({"status": "error", "message": "Directory is empty or unreadable."})
+
+            # Build scaffold and sample sections for prompt
+            scaffold = _build_directory_scaffold(info)
+            sample_sections = []
+            for s in info["sample_files"]:
+                sample_sections.append(f"--- {s['name']} ({s['ext']}) ---\n{s['content']}")
+            sample_text = "\nSAMPLE FILE CONTENTS:\n" + "\n\n".join(sample_sections) if sample_sections else ""
+
+            prompt = KNOWLEDGE_QUERY_DIRECTORY_CODEGEN_PROMPT.format(
+                directory=info["directory"],
+                files_by_extension=info["files_by_extension"],
+                total_files=info["total_files"],
+                filenames=info["all_filenames_sample"],
+                sample_sections=sample_text,
+                scaffold=scaffold,
+                query=query,
+            )
+
+            scripts_dir = Path(self.orch.base_dir) / "knowledge_query_scripts"
+            scripts_dir.mkdir(parents=True, exist_ok=True)
+
+            last_error = None
+            for attempt in range(2):
+                current_prompt = prompt
+                if last_error:
+                    current_prompt += f"\n\n**PREVIOUS ERROR:** {last_error}\nFix the script."
+
+                try:
+                    from .parser_utils import parse_json_from_response
+                    response = self.orch.planner.model.generate_content(
+                        [current_prompt],
+                        generation_config={"max_output_tokens": 8192, "temperature": 0.0},
+                    )
+                    # Log raw response for debugging
+                    raw_log_path = scripts_dir / f"kq_dir_raw_{abs(hash(query)) % 10000:04d}_a{attempt}.txt"
+                    raw_log_path.write_text(response.text)
+                    # LLM returns JSON: {"code": "...TODO lines..."}
+                    result, parse_error = parse_json_from_response(response)
+                    if parse_error or not result or "code" not in result:
+                        # Fallback: treat response as raw code
+                        body = _extract_code_block(response.text) or response.text.strip()
+                        body = re.sub(r'^```\w*\s*', '', body)
+                        body = re.sub(r'\s*```$', '', body)
+                    else:
+                        body = result["code"]
+                    code = (
+                        f"{scaffold}\n"
+                        f"{body}\n"
+                        f"print(json.dumps({{\"answer\": answer, \"summary\": summary}}))\n"
+                    )
+                except Exception as e:
+                    return json.dumps({"status": "error", "message": f"Code generation failed: {e}"})
+
+                script_path = scripts_dir / f"kq_dir_{Path(dir_path).name}_{abs(hash(query)) % 10000:04d}.py"
+                script_path.write_text(code)
+                print(f"    - Running: {script_path.name} (attempt {attempt + 1})")
+
+                try:
+                    result = subprocess.run(
+                        ["python", str(script_path)],
+                        capture_output=True, text=True, timeout=120,
+                    )
+                    if result.returncode != 0:
+                        last_error = result.stderr.strip()[-500:]
+                        continue
+
+                    # Parse the last valid JSON object from stdout
+                    # (LLM may print extra output before the json.dumps line)
+                    answer_data = None
+                    for line in reversed(result.stdout.strip().splitlines()):
+                        line = line.strip()
+                        if line.startswith('{') and line.endswith('}'):
+                            try:
+                                answer_data = json.loads(line)
+                                if "answer" in answer_data or "summary" in answer_data:
+                                    break
+                            except json.JSONDecodeError:
+                                continue
+                    if not answer_data:
+                        last_error = f"No valid JSON in output: {result.stdout[-300:]}"
+                        continue
+
+                    answer_str = json.dumps(answer_data.get("answer", ""))
+                    if len(answer_str) > 5000:
+                        answer_data["answer"] = str(answer_data["answer"])[:5000] + "... (truncated)"
+
+                    print(f"    - ✅ Directory query answered successfully.")
+                    return json.dumps({
+                        "status": "success",
+                        "query": query,
+                        "file": dir_entry["name"],
+                        "answer": answer_data.get("answer"),
+                        "summary": answer_data.get("summary", ""),
+                        "details": answer_data.get("details"),
+                        "script_path": str(script_path),
+                    })
+
+                except subprocess.TimeoutExpired:
+                    last_error = "Script timed out (120s limit)."
+                    continue
+                except json.JSONDecodeError as e:
+                    last_error = f"Invalid JSON in output: {e}"
+                    continue
+
+            return json.dumps({
+                "status": "error",
+                "message": "Directory query failed after 2 attempts.",
+                "last_error": last_error,
+            })
+
         def query_knowledge_data(query: str, file_name: str = None) -> str:
-            """Query a knowledge data file with natural language."""
+            """Query a knowledge data file or directory database with natural language."""
             import subprocess
 
             print(f"  ⚡ Tool: Querying knowledge data: '{query[:80]}...'")
 
-            # 1. Discover queryable files
+            # 1. Discover queryable files and directory databases
             queryable = _discover_queryable_files()
             if not queryable:
                 return json.dumps({
                     "status": "error",
-                    "message": "No queryable data files (.csv, .xlsx) found in knowledge directory."
+                    "message": "No queryable data files or directories found in knowledge directory."
                 })
 
-            # 2. Resolve target file
+            # 2. Resolve target
             if file_name is None:
                 if len(queryable) == 1:
-                    target_path = queryable[0]["path"]
-                    print(f"    - Auto-selected: {queryable[0]['name']}")
+                    target = queryable[0]
+                    print(f"    - Auto-selected: {target['name']}")
                 else:
                     return json.dumps({
                         "status": "file_selection_needed",
-                        "message": "Multiple data files found. Specify file_name.",
+                        "message": "Multiple queryable sources found. Specify file_name.",
                         "available_files": [f["name"] for f in queryable]
                     })
             else:
-                target_path, error = _resolve_knowledge_data_file(file_name)
+                target, error = _resolve_knowledge_data_file(file_name)
                 if error:
                     return error
+
+            # 2b. Branch: directory database vs single file
+            if isinstance(target, dict) and target.get("type") == "directory":
+                return _query_directory(target, query)
+
+            # Single file path — extract path string
+            target_path = target if isinstance(target, str) else target["path"]
 
             # 3. Inspect file
             try:
@@ -3380,11 +3734,16 @@ class OrchestratorTools:
                         [current_prompt],
                         generation_config={"max_output_tokens": 1024, "temperature": 0.0},
                     )
-                    # LLM returns only the computation lines; wrap in scaffold
-                    body = _extract_code_block(response.text) or response.text.strip()
-                    # Strip any markdown fences the LLM may have added
-                    body = re.sub(r'^```\w*\s*', '', body)
-                    body = re.sub(r'\s*```$', '', body)
+                    # LLM returns JSON: {"code": "...TODO lines..."}
+                    from .parser_utils import parse_json_from_response
+                    result, parse_error = parse_json_from_response(response)
+                    if parse_error or not result or "code" not in result:
+                        # Fallback: treat response as raw code
+                        body = _extract_code_block(response.text) or response.text.strip()
+                        body = re.sub(r'^```\w*\s*', '', body)
+                        body = re.sub(r'\s*```$', '', body)
+                    else:
+                        body = result["code"]
                     code = (
                         f"import pandas as pd, json\n"
                         f"df = {info['read_instruction']}\n"
@@ -3448,9 +3807,10 @@ class OrchestratorTools:
             func=query_knowledge_data,
             name="query_knowledge_data",
             description=(
-                "Query a knowledge data file with natural language. "
-                "Generates and executes a Python script to answer questions about "
-                "reference datasets loaded as knowledge files."
+                "Query knowledge data with natural language. Works with single "
+                "data files (CSV, XLSX) and directory databases (folders of "
+                "uniformly-structured files like JSON records). Generates and "
+                "executes a Python script to answer questions about the data."
             ),
             parameters={
                 "query": {

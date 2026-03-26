@@ -114,7 +114,7 @@ Supported Models:
         '--knowledge-dir',
         type=str,
         dest='knowledge_dir',
-        help='Path to papers/literature directory (optional)'
+        help='Path to papers/literature or file-based database directory (optional)'
     )
     
     parser.add_argument(
