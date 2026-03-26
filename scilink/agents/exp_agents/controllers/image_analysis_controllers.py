@@ -976,6 +976,7 @@ class UnifiedImageProcessingController:
     DEFAULT_MAX_APPROACH_RETRIES = 3
     DEFAULT_OUTLIER_SIGMA = 2.0
     DEFAULT_MAX_VERIFICATION_ITERATIONS = 3
+    DEFAULT_QUALITY_THRESHOLD = 0.8
 
     JUDGE_PROMPT = '''You are a scientific image analysis expert acting as a judge.
 
@@ -1032,6 +1033,9 @@ results are fundamentally flawed.
 4. Preprocessing issues (too much/too little filtering)
 
 Based on your visual inspection and the quality assessment, suggest an alternative analysis pipeline.
+
+**Required features:** Your alternative should extract these features for consistency with the rest of the series: {required_features}
+If a feature is physically unavailable (e.g., domains fully coalesced so individual count is meaningless), set its value to null and note the reason — do not fabricate values. You may add extra features.
 
 **Physics-first rule:** Before changing the pipeline drastically, first try improving the existing approach:
 1. Different thresholding method (e.g., adaptive instead of global, or different threshold level)
@@ -1100,6 +1104,7 @@ Your guidance: '''
         self.enable_human_feedback = enable_human_feedback
         self.outlier_sigma = outlier_sigma if outlier_sigma is not None else self.DEFAULT_OUTLIER_SIGMA
         self.max_verification_iterations = max_verification_iterations if max_verification_iterations is not None else self.DEFAULT_MAX_VERIFICATION_ITERATIONS
+        self.quality_threshold = self.DEFAULT_QUALITY_THRESHOLD
         self.conformance_instructions = conformance_instructions
 
     def _generate_analysis_script(self, state: dict, data_path: str, stats: dict) -> str:
@@ -1474,6 +1479,7 @@ Your guidance: '''
                 lines.append("")
             prev_section = "\n".join(lines)
 
+        required_features = config.get("features_to_extract", [])
         prompt_text = self.ALTERNATIVE_APPROACH_PROMPT.format(
             current_pipeline=config.get("processing_pipeline", "Unknown"),
             quality_score=current_result.get("_quality_score", 0.0),
@@ -1481,6 +1487,7 @@ Your guidance: '''
             image_stats=json.dumps(current_result.get("statistics", {}), indent=2),
             analysis_approach=config.get("analysis_approach", ""),
             previous_attempts_section=prev_section,
+            required_features=", ".join(required_features) if required_features else "same as original plan",
         )
 
         prompt_parts = [prompt_text]
@@ -1563,8 +1570,8 @@ Score: 0.0 (output is irrelevant) to 1.0 (directly answers the analysis goal).
 **quality_score = (Completeness + Correctness + Relevance) / 3**, rounded to 2 decimal places.
 
 ### Decision thresholds:
-- **quality_score >= 0.6** → is_acceptable: TRUE (good enough for scientific use)
-- **quality_score < 0.6** → is_acceptable: FALSE (needs improvement)
+- **quality_score >= {quality_threshold}** → is_acceptable: TRUE (good enough for scientific use)
+- **quality_score < {quality_threshold}** → is_acceptable: FALSE (needs improvement)
 
 ### Important:
 - Score against what you SEE in the images, not against what would be ideal.
@@ -1653,6 +1660,7 @@ Return JSON:
             quality_criteria=config.get("quality_criteria", "Visual inspection"),
             features=features_str,
             metrics=metrics_str,
+            quality_threshold=self.quality_threshold,
         )
 
         # Add history context
@@ -1950,7 +1958,7 @@ Return JSON with:
         all_attempts = []
         best_result = None
         best_score = -1.0
-        quality_threshold = 0.6  # Default quality score threshold
+        quality_threshold = self.quality_threshold
 
         # Anchor = first image overall OR first in a regime; gets full QC
         _is_anchor = image_idx == 0 or is_regime_anchor
@@ -2042,7 +2050,7 @@ Return JSON with:
                                 f"correctness={cr}, relevance={r}"
                             )
 
-                        if verification.get("is_acceptable", True):
+                        if best_score >= quality_threshold:
                             self.logger.info(
                                 f"   Analysis approved (score = {best_score:.2f})"
                             )
@@ -2125,13 +2133,14 @@ Return JSON with:
                                 "score": best_score,
                             })
 
-                            if final_verification.get("is_acceptable", True):
-                                v_score = final_verification.get(
-                                    "quality_score", best_score
-                                )
-                                if isinstance(v_score, (int, float)):
-                                    best_result["_quality_score"] = v_score
-                                    best_score = v_score
+                            v_score = final_verification.get(
+                                "quality_score", best_score
+                            )
+                            if isinstance(v_score, (int, float)):
+                                best_result["_quality_score"] = v_score
+                                best_score = v_score
+
+                            if best_score >= quality_threshold:
                                 self.logger.info(
                                     f"   Final analysis approved "
                                     f"(score = {best_score:.2f})"
@@ -2140,57 +2149,9 @@ Return JSON with:
                             else:
                                 self._log_verification_issues(final_verification)
 
-                        # Only call judge if still not approved
-                        if not analysis_was_approved and len(verification_attempts) > 1:
-                            judge_result = self._judge_select_best(
-                                verification_attempts
-                            )
-
-                            selected_index = judge_result.get("selected_index")
-                            is_acceptable = judge_result.get("acceptable", False)
-
-                            if selected_index is not None:
-                                idx = selected_index
-                                selected_attempt = verification_attempts[idx]
-                                best_result = selected_attempt["result"]
-                                best_score = selected_attempt["score"]
-                                state["locked_analysis_config"] = selected_attempt[
-                                    "config"
-                                ]
-
-                                if is_acceptable:
-                                    if judge_result.get("issues_with_selected"):
-                                        best_result["judge_note"] = judge_result[
-                                            "issues_with_selected"
-                                        ]
-                                    self.logger.info(
-                                        f"   Using judge-selected result "
-                                        f"(Attempt {idx + 1}, "
-                                        f"score = {best_score:.2f})"
-                                    )
-                                else:
-                                    best_result["judge_warning"] = (
-                                        f"Judge selected this as best available "
-                                        f"(score = {best_score:.2f}) but noted "
-                                        f"it does not meet acceptance criteria. "
-                                        f"Reason: {judge_result.get('reasoning', 'No reason provided')[:200]}"
-                                    )
-                                    self.logger.warning(
-                                        f"   Using judge-selected result "
-                                        f"(Attempt {idx + 1}, "
-                                        f"score = {best_score:.2f}) despite "
-                                        f"not meeting acceptance criteria"
-                                    )
-                            else:
-                                best_result["judge_warning"] = (
-                                    f"Judge could not select any acceptable result. "
-                                    f"Reason: {judge_result.get('reasoning', 'No reason provided')[:200]}"
-                                )
-                                self.logger.warning(
-                                    f"   Judge could not select any result - "
-                                    f"keeping current best "
-                                    f"(score = {best_score:.2f})"
-                                )
+                        # If verification loop exhausted without approval,
+                        # keep best result and let alternative approaches try next.
+                        # Judge is only called after all alternatives are exhausted.
 
             # --- Check if quality is acceptable ---
             if best_score >= quality_threshold:
@@ -2316,7 +2277,7 @@ Return JSON with:
                             alt_score = 0.0
 
                     # One re-analysis chance if below threshold
-                    if alt_score < quality_threshold and not alt_verification.get("is_acceptable"):
+                    if alt_score < quality_threshold:
                         self.logger.info(
                             f"   Score = {alt_score:.2f}, attempting one re-analysis..."
                         )
@@ -2472,6 +2433,39 @@ Return JSON with:
                         state["locked_analysis_config"] = original_config
                 else:
                     state["locked_analysis_config"] = original_config
+
+        # --- Judge: select best from all attempts if still below threshold ---
+        if best_score < quality_threshold and len(all_attempts) > 1:
+            self.logger.info(
+                "No result approved after all attempts - calling judge..."
+            )
+            judge_attempts = [
+                {
+                    "result": a.get("result", {}),
+                    "verification": a.get("verification", {}),
+                    "config": a.get("config", {}),
+                    "score": a.get("score", 0),
+                }
+                for a in all_attempts
+            ]
+            judge_result = self._judge_select_best(judge_attempts)
+
+            selected_index = judge_result.get("selected_index")
+            if selected_index is not None:
+                idx = selected_index
+                selected = all_attempts[idx]
+                best_result = selected["result"]
+                best_score = selected["score"]
+                if selected.get("config"):
+                    state["locked_analysis_config"] = selected["config"]
+                self.logger.info(
+                    f"   Judge selected attempt {idx + 1} "
+                    f"(score = {best_score:.2f})"
+                )
+                if judge_result.get("reasoning"):
+                    best_result["judge_reasoning"] = judge_result[
+                        "reasoning"
+                    ][:500]
 
         # --- Summarize plan history ---
         used_alternative = best_result and best_result.get("_winning_config")

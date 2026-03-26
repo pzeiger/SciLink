@@ -661,8 +661,8 @@ class AnalysisOrchestratorTools:
                     if csv_files:
                         result["data_type"] = "tabular_series"
                         result["series_count"] = len(csv_files)
-                        result["suggested_agents"] = [3]  # CurveFitting
-                        result["primary_suggestion"] = 3
+                        result["suggested_agents"] = [0]  # CurveFitting
+                        result["primary_suggestion"] = 0
                         result["data_files"] = sorted([f.name for f in csv_files[:10]])
                         if len(csv_files) > 10:
                             result["data_files"].append(f"... and {len(csv_files) - 10} more")
@@ -671,11 +671,31 @@ class AnalysisOrchestratorTools:
                     elif npy_files:
                         # Check first NPY to determine type
                         first_npy = np.load(str(npy_files[0]))
-                        if first_npy.ndim <= 2:
+                        if first_npy.ndim == 1:
                             result["data_type"] = "tabular_series"
-                            result["suggested_agents"] = [3]
-                            result["primary_suggestion"] = 3
-                            result["note"] = f"Directory contains {len(npy_files)} NPY files (1D/2D data)"
+                            result["suggested_agents"] = [0]
+                            result["primary_suggestion"] = 0
+                            result["note"] = f"Directory contains {len(npy_files)} NPY files (1D data)"
+                        elif first_npy.ndim == 2:
+                            # Distinguish images from tabular data
+                            is_image = (
+                                min(first_npy.shape) >= 64
+                                and max(first_npy.shape) / min(first_npy.shape) <= 4
+                            )
+                            if is_image:
+                                result["data_type"] = "image_series"
+                                result["suggested_agents"] = [1]  # ImageAnalysis
+                                result["primary_suggestion"] = 1
+                                result["note"] = (
+                                    f"Directory contains {len(npy_files)} NPY files "
+                                    f"({first_npy.shape[0]}x{first_npy.shape[1]}, "
+                                    f"{first_npy.dtype}) — detected as image series"
+                                )
+                            else:
+                                result["data_type"] = "tabular_series"
+                                result["suggested_agents"] = [0]
+                                result["primary_suggestion"] = 0
+                                result["note"] = f"Directory contains {len(npy_files)} NPY files (2D tabular data)"
                         else:
                             result["data_type"] = "hyperspectral_series"
                             result["suggested_agents"] = [2]
@@ -690,8 +710,8 @@ class AnalysisOrchestratorTools:
                     elif image_files:
                         result["data_type"] = "image_series"
                         result["series_count"] = len(image_files)
-                        result["suggested_agents"] = [0, 1]  # FFT or SAM
-                        result["primary_suggestion"] = 0
+                        result["suggested_agents"] = [1]  # ImageAnalysis
+                        result["primary_suggestion"] = 1
                         result["data_files"] = sorted([f.name for f in image_files[:10]])
                         if len(image_files) > 10:
                             result["data_files"].append(f"... and {len(image_files) - 10} more")
@@ -721,7 +741,7 @@ class AnalysisOrchestratorTools:
                 # Determine data type based on extension and content
                 if extension in ['.tif', '.tiff', '.png', '.jpg', '.jpeg', '.bmp']:
                     result["data_type"] = "microscopy"
-                    result["suggested_agents"] = [0, 1]  # FFT or SAM
+                    result["suggested_agents"] = [1]  # ImageAnalysis
                     
                     # Try to load and get shape
                     try:
@@ -737,7 +757,7 @@ class AnalysisOrchestratorTools:
                             h, w = img.shape[:2]
                         
                         result["image_size"] = f"{w}x{h}"
-                        result["primary_suggestion"] = 0  # FFT (handles all microscopy including atomic)
+                        result["primary_suggestion"] = 1  # ImageAnalysis
                             
                     except Exception as e:
                         result["load_error"] = str(e)
@@ -750,8 +770,8 @@ class AnalysisOrchestratorTools:
                     
                     if data.ndim == 1:
                         result["data_type"] = "1d_data"
-                        result["suggested_agents"] = [3]  # CurveFitting
-                        result["primary_suggestion"] = 3
+                        result["suggested_agents"] = [0]  # CurveFitting
+                        result["primary_suggestion"] = 0
                         result["n_points"] = data.shape[0]
                         result["note"] = "Single 1D array - curve, spectrum, time series, etc."
                         
@@ -760,15 +780,15 @@ class AnalysisOrchestratorTools:
                         if data.shape[1] == 2:
                             # Single data with x,y columns
                             result["data_type"] = "1d_data"
-                            result["suggested_agents"] = [3]
-                            result["primary_suggestion"] = 3
+                            result["suggested_agents"] = [0]
+                            result["primary_suggestion"] = 0
                             result["n_points"] = data.shape[0]
                             result["note"] = "Single dataset with (x, y) columns"
                         elif data.shape[0] == 2:
                             # Single data with x,y rows
                             result["data_type"] = "1d_data"
-                            result["suggested_agents"] = [3]
-                            result["primary_suggestion"] = 3
+                            result["suggested_agents"] = [0]
+                            result["primary_suggestion"] = 0
                             result["n_points"] = data.shape[1]
                             result["note"] = "Single dataset with (x, y) rows"
                         elif data.shape[0] > 2 and data.shape[1] > 2:
@@ -777,16 +797,16 @@ class AnalysisOrchestratorTools:
                             if data.shape[0] < 100 and data.shape[1] > 100:
                                 # Likely N datasets of M points each
                                 result["data_type"] = "1d_series"
-                                result["suggested_agents"] = [3]
-                                result["primary_suggestion"] = 3
+                                result["suggested_agents"] = [0]
+                                result["primary_suggestion"] = 0
                                 result["series_count"] = data.shape[0]
                                 result["n_points"] = data.shape[1]
                                 result["note"] = f"Series of {data.shape[0]} datasets, each with {data.shape[1]} points"
                             elif data.shape[1] < 100 and data.shape[0] > 100:
                                 # Likely M points x N datasets (transposed)
                                 result["data_type"] = "1d_series"
-                                result["suggested_agents"] = [3]
-                                result["primary_suggestion"] = 3
+                                result["suggested_agents"] = [0]
+                                result["primary_suggestion"] = 0
                                 result["series_count"] = data.shape[1]
                                 result["n_points"] = data.shape[0]
                                 result["note"] = f"Series of {data.shape[1]} datasets, each with {data.shape[0]} points (may need transpose)"
@@ -810,12 +830,12 @@ class AnalysisOrchestratorTools:
                                 # Ambiguous - could be image or data matrix
                                 # Try to infer from metadata if available
                                 result["data_type"] = "2d_data_ambiguous"
-                                result["suggested_agents"] = [1, 3]
+                                result["suggested_agents"] = [0, 1]
                                 result["primary_suggestion"] = None  # No clear suggestion
                                 result["note"] = (
                                     f"Ambiguous 2D array ({data.shape[0]}x{data.shape[1]}). Could be:\n"
                                     f"  - Microscopy image → Agent 1 (ImageAnalysisAgent)\n"
-                                    f"  - Series of 1D data (rows or columns) → Agent 3 (CurveFittingAgent)\n"
+                                    f"  - Series of 1D data (rows or columns) → Agent 0 (CurveFittingAgent)\n"
                                     f"  - 2D spectral slice → Agent 2 (HyperspectralAnalysisAgent)\n"
                                     f"Check metadata or ask user to clarify."
                                 )
@@ -841,8 +861,8 @@ class AnalysisOrchestratorTools:
                 
                 elif extension in ['.csv', '.txt', '.tsv']:
                     result["data_type"] = "tabular"
-                    result["suggested_agents"] = [3]  # CurveFitting
-                    result["primary_suggestion"] = 3
+                    result["suggested_agents"] = [0]  # CurveFitting
+                    result["primary_suggestion"] = 0
                     
                     # Try to peek at the file and count rows
                     try:
@@ -1869,7 +1889,7 @@ class AnalysisOrchestratorTools:
                     }, f, indent=2)
 
                 # === Create agent with unique output directory ===
-                # NOTE: For code-executing agents (2, 3), this may prompt the user
+                # NOTE: Code-executing agents may prompt the user
                 # for sandbox approval and raise RuntimeError if declined.
                 try:
                     agent = self.orch.create_agent_for_analysis(agent_id, str(analysis_output_dir))

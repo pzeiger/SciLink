@@ -2747,8 +2747,8 @@ Add a `"series_analysis_plan"` field to your JSON response:
 **Rules:**
 - Every image index (0 through {num_images_minus_1}) must appear in exactly ONE regime.
 - Each regime must have at least one image.
-- Only use multiple regimes when you can clearly see different image character.
-- When in doubt, use a single approach — the adaptive refit step can recover individual failures later.
+- If you identify a transition point where the image character changes significantly and you cannot design a single pipeline that handles all regimes well, use separate regimes with pipelines tailored to each.
+- When a single pipeline can handle the full series, prefer one regime even if parameters vary.
 """
 
 
