@@ -479,8 +479,10 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     break
 
             except Exception as e:
+                import traceback
                 self.logger.error(
-                    f"❌ Pipeline step {step_name} raised exception: {e}"
+                    f"❌ Pipeline step {step_name} raised exception: {e}\n"
+                    f"{traceback.format_exc()}"
                 )
                 state["error_dict"] = {
                     "error": f"Pipeline step failed: {step_name}",

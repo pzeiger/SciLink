@@ -149,7 +149,7 @@ class AutomatedLLMRefinementController:
             {"mime_type": "image/jpeg", "data": overlay_bytes},
             f"\n\n**MORPHOLOGICAL STATISTICS:**\n{json.dumps(sam_stats, indent=2)}",
             f"\n\n**CURRENT PARAMETERS:**\n{json.dumps(current_params, indent=2)}",
-            history_context,
+            *([history_context] if history_context else []),
             "\n\nRespond with JSON containing:\n"
             "- \"decision\": \"accept\" or \"refine\"\n"
             "- \"reasoning\": your analysis of the segmentation quality\n"
