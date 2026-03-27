@@ -14,6 +14,7 @@ Replace the contents of scilink/tools/sam.py with this file.
 import json
 import os
 import logging
+from pathlib import Path
 import numpy as np
 from PIL import Image
 from datetime import datetime
@@ -60,9 +61,30 @@ def get_or_create_sam_model(params: dict) -> Any:
         return _SAM_MODEL_CACHE[cache_key]
     
     logger.info(f"Loading new SAM model: type={cache_key[1]}, device={cache_key[2]}")
-    
+
+    # Resolve checkpoint path to absolute to avoid re-downloading
+    # when scripts run from different working directories
+    checkpoint = params.get('checkpoint_path')
+    if checkpoint:
+        checkpoint = str(Path(checkpoint).resolve())
+    else:
+        # Default to a stable location rather than CWD-relative ./checkpoints/
+        model_type = params.get('model_type', 'vit_h')
+        default_dir = Path.home() / ".cache" / "scilink" / "checkpoints"
+        default_path = default_dir / f"sam_{model_type}.pth"
+        # Also check legacy location
+        legacy_path = Path("./checkpoints") / f"sam_{model_type}.pth"
+        if default_path.exists():
+            checkpoint = str(default_path)
+        elif legacy_path.resolve().exists():
+            checkpoint = str(legacy_path.resolve())
+        else:
+            # Will download to stable location
+            default_dir.mkdir(parents=True, exist_ok=True)
+            checkpoint = str(default_path)
+
     analyzer = ParticleAnalyzer(
-        checkpoint_path=params.get('checkpoint_path'),
+        checkpoint_path=checkpoint,
         model_type=params.get('model_type', 'vit_h'),
         device=params.get('device', 'auto')
     )

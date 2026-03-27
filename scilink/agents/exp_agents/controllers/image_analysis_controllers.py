@@ -1246,7 +1246,7 @@ class UnifiedImageProcessingController:
     DEFAULT_MAX_APPROACH_RETRIES = 3
     DEFAULT_OUTLIER_SIGMA = 2.0
     DEFAULT_MAX_VERIFICATION_ITERATIONS = 3
-    DEFAULT_QUALITY_THRESHOLD = 0.8
+    DEFAULT_QUALITY_THRESHOLD = 0.7
 
     JUDGE_PROMPT = '''You are a scientific image analysis expert acting as a judge.
 
@@ -1837,7 +1837,7 @@ Score: 0.0 (entirely wrong) to 1.0 (all output is correct).
 - Would a domain scientist find the results informative?
 Score: 0.0 (output is irrelevant) to 1.0 (directly answers the analysis goal).
 
-**quality_score = (Completeness + Correctness + Relevance) / 3**, rounded to 2 decimal places.
+**quality_score = 0.4 * Completeness + 0.4 * Correctness + 0.2 * Relevance**, rounded to 2 decimal places.
 
 ### Decision thresholds:
 - **quality_score >= {quality_threshold}** → is_acceptable: TRUE (good enough for scientific use)
@@ -2118,7 +2118,11 @@ Return JSON with the refined analysis approach:
                     print(f"   {k}: {v}")
 
         if not is_single:
-            print(f"\nThis analysis pipeline will be applied to all {num_images} images in the series.")
+            regime_name = state.get("_current_regime_name")
+            if regime_name:
+                print(f"\nThis analysis pipeline will be applied to all images in regime '{regime_name}'.")
+            else:
+                print(f"\nThis analysis pipeline will be applied to all {num_images} images in the series.")
 
         print("\n" + "-" * 60)
         print("Options:")
@@ -3239,6 +3243,7 @@ Return JSON with:
 
             # Temporarily set the config for this image
             state["locked_analysis_config"] = image_config
+            state["_current_regime_name"] = regime_name if regime_configs else None
 
             if is_single:
                 self.logger.info(f"Analyzing: {image_name}")

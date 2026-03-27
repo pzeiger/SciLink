@@ -2582,8 +2582,19 @@ analysis is always preferred over a complex one with marginal benefit.
 - Edge/boundary detection (Canny, Sobel, Laplacian of Gaussian)
 - Feature extraction (connected components, region properties, contour analysis)
   Note: connected component labeling cannot separate touching or overlapping objects —
-  they will be merged into single blobs. If objects touch or overlap, add a splitting
-  step (e.g., distance transform → watershed) after thresholding.
+  they will be merged into single blobs. If objects touch or overlap, use SAM instance
+  segmentation or add a splitting step (e.g., distance transform → watershed).
+- SAM instance segmentation — for images with touching/overlapping objects.
+  Use `from scilink.tools.sam import run_sam_analysis` in your script.
+  SAM detects individual object instances directly, even when they overlap.
+  Usage: `result = run_sam_analysis(image_array, params={"sam_parameters": "sensitive",
+    "min_area": 200, "max_area": 50000, "pruning_iou_threshold": 0.3})`
+  First arg must be a numpy array (not a file path). Adjust parameter values as needed.
+  Parameters: sam_parameters ('default'/'sensitive'/'ultra-permissive' detection sensitivity),
+    min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False),
+    pruning_iou_threshold (duplicate removal, lower = stricter, default 0.5).
+  Returns dict with "particles" (list with "mask", "area" per particle), "total_count", "masks".
+  Avoid Gaussian blur before SAM unless noise is very high.
 - Texture analysis (GLCM, local binary patterns, Gabor filters)
 - Morphological measurements (area, perimeter, circularity, aspect ratio, solidity)
 - Phase identification (intensity clustering, color-space segmentation)
@@ -2856,16 +2867,28 @@ change the analysis methods themselves (e.g., don't replace Otsu with adaptive t
 - Intensity range: [{intensity_min}, {intensity_max}]
 
 **Available Libraries:** numpy, scipy (ndimage, signal, optimize), scikit-image (skimage), \
-opencv-python (cv2), matplotlib, Pillow (PIL), scikit-learn (sklearn), pandas, json
+opencv-python (cv2), matplotlib, Pillow (PIL), scikit-learn (sklearn), pandas, json, \
+scilink.tools.sam — SAM instance segmentation for touching/overlapping objects. \
+`from scilink.tools.sam import run_sam_analysis`; \
+usage: `result = run_sam_analysis(image_array, params={{"sam_parameters": "sensitive", \
+"min_area": 200, "max_area": 50000, "pruning_iou_threshold": 0.3}})`. \
+First arg must be a numpy array (not a file path). Adjust parameter values as needed. \
+Parameters: sam_parameters ('default'/'sensitive'/'ultra-permissive' detection sensitivity), \
+min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False), \
+pruning_iou_threshold (duplicate removal, lower = stricter, default 0.5). \
+Returns dict with "particles" (list with "mask", "area" per particle), "total_count", "masks". \
+Avoid Gaussian blur before SAM unless noise is very high.
 
 **Requirements:**
 1. Load image: use `np.load(path)` for .npy, or `cv2.imread(path, cv2.IMREAD_UNCHANGED)` \
 for standard formats (remember cv2 loads BGR — convert to RGB if color)
 2. Implement the analysis pipeline
 3. Save visualization(s): `analysis_visualization.png` showing original image alongside \
-analysis results (e.g., segmentation overlay, detected features, extracted measurements). \
-Use subplots with clear labels. All visualizations must be saved to the current working \
-directory. Use `dpi=100` and limit to 6 subplots max to keep file size manageable.
+analysis results. Use subplots with clear labels. For segmentation tasks, the first subplot \
+MUST show the original image, and the second MUST show a segmentation overlay (original \
+image with colored semi-transparent masks and contour boundaries for each detected object). \
+All visualizations must be saved to the current working directory. Use `dpi=100` and limit \
+to 6 subplots max to keep file size manageable.
 4. Print results as JSON:
 ```python
 results = {{{{
@@ -2896,7 +2919,17 @@ IMAGE_ANALYSIS_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed image analysi
 ```
 
 **Available Libraries:** numpy, scipy (ndimage, signal, optimize), scikit-image (skimage), \
-opencv-python (cv2), matplotlib, Pillow (PIL), scikit-learn (sklearn), pandas, json
+opencv-python (cv2), matplotlib, Pillow (PIL), scikit-learn (sklearn), pandas, json, \
+scilink.tools.sam — SAM instance segmentation for touching/overlapping objects. \
+`from scilink.tools.sam import run_sam_analysis`; \
+usage: `result = run_sam_analysis(image_array, params={{"sam_parameters": "sensitive", \
+"min_area": 200, "max_area": 50000, "pruning_iou_threshold": 0.3}})`. \
+First arg must be a numpy array (not a file path). Adjust parameter values as needed. \
+Parameters: sam_parameters ('default'/'sensitive'/'ultra-permissive' detection sensitivity), \
+min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False), \
+pruning_iou_threshold (duplicate removal, lower = stricter, default 0.5). \
+Returns dict with "particles" (list with "mask", "area" per particle), "total_count", "masks". \
+Avoid Gaussian blur before SAM unless noise is very high.
 
 **CRITICAL:** Fix only the execution error. Do NOT change the analysis pipeline, feature \
 extraction approach, or the overall analysis strategy. The approach is locked for series consistency.
