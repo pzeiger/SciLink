@@ -2600,9 +2600,9 @@ Access channels via `image[:,:,0]`, `image[:,:,1]`, etc.
     "min_area": 200, "max_area": 50000, "pruning_iou_threshold": 0.3})`
   First arg must be a 2D grayscale numpy array (not a file path, not RGB). \
 For multi-channel images, pass a single channel (e.g., `image[:,:,0]`). Adjust parameter values as needed.
-  Parameters: sam_parameters ('default' for first attempt, 'sensitive' if default misses objects,
-    'ultra-permissive' for maximum detection),
-    min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False),
+  Always start with sam_parameters='default'. Only escalate to 'sensitive' in a retry if
+  'default' misses visible objects.
+  Parameters: min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False),
     pruning_iou_threshold (duplicate removal, lower = stricter, default 0.5).
   Returns dict with "particles" (list with "mask", "area" per particle), "total_count", "masks".
   Avoid Gaussian blur before SAM unless noise is very high.
@@ -2895,9 +2895,11 @@ scilink.tools.sam — SAM instance segmentation for touching/overlapping objects
 usage: `result = run_sam_analysis(image_array, params={{"sam_parameters": "default", \
 "min_area": 200, "max_area": 50000, "pruning_iou_threshold": 0.3}})`. \
 First arg must be a 2D grayscale numpy array (not a file path, not RGB). \
-For multi-channel images, pass a single channel (e.g., `image[:,:,0]`). Adjust parameter values as needed. \
-Parameters: sam_parameters ('default' for first attempt, 'sensitive' if default misses objects, \
-'ultra-permissive' for maximum detection), \
+For multi-channel images, pass a single channel (e.g., `image[:,:,0]`). \
+sam_parameters MUST be 'default' on the first attempt — only switch to 'sensitive' in a retry \
+after 'default' has been tried and missed objects. Other parameters (min_area, max_area, \
+pruning_iou_threshold, use_clahe) can be adjusted as needed. \
+Parameters: \
 min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False), \
 pruning_iou_threshold (duplicate removal, lower = stricter, default 0.5). \
 Returns dict with "particles" (list with "mask", "area" per particle), "total_count", "masks". \
@@ -2953,9 +2955,11 @@ scilink.tools.sam — SAM instance segmentation for touching/overlapping objects
 usage: `result = run_sam_analysis(image_array, params={{"sam_parameters": "default", \
 "min_area": 200, "max_area": 50000, "pruning_iou_threshold": 0.3}})`. \
 First arg must be a 2D grayscale numpy array (not a file path, not RGB). \
-For multi-channel images, pass a single channel (e.g., `image[:,:,0]`). Adjust parameter values as needed. \
-Parameters: sam_parameters ('default' for first attempt, 'sensitive' if default misses objects, \
-'ultra-permissive' for maximum detection), \
+For multi-channel images, pass a single channel (e.g., `image[:,:,0]`). \
+sam_parameters MUST be 'default' on the first attempt — only switch to 'sensitive' in a retry \
+after 'default' has been tried and missed objects. Other parameters (min_area, max_area, \
+pruning_iou_threshold, use_clahe) can be adjusted as needed. \
+Parameters: \
 min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False), \
 pruning_iou_threshold (duplicate removal, lower = stricter, default 0.5). \
 Returns dict with "particles" (list with "mask", "area" per particle), "total_count", "masks". \
