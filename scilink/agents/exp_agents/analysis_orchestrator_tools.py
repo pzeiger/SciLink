@@ -32,7 +32,7 @@ from .metadata_converter import (
     normalize_metadata_dict_with_llm,
 )
 from ..lit_agents import OwlLiteratureAgent, NoveltyScorer
-from ...skills.loader import list_skills, list_all_skills
+from ...skills.loader import list_skills, list_all_skills, load_skill
 
 def _build_skill_description(agent_registry: dict = None,
                               custom_skills: dict = None) -> str:
@@ -70,9 +70,17 @@ def _build_skill_description(agent_registry: dict = None,
         if supported:
             parts.append(f"Supported by: {', '.join(supported)}.")
 
-    # Auto-discover all built-in skill domains
+    # Auto-discover all built-in skill domains with descriptions
     for domain, names in list_all_skills().items():
-        parts.append(f"Built-in {domain} skills: {names}.")
+        skill_descs = []
+        for name in names:
+            try:
+                parsed = load_skill(name, domain=domain)
+                overview = parsed.get("overview", "").split("\n")[0].strip()
+                skill_descs.append(f"'{name}' — {overview}")
+            except Exception:
+                skill_descs.append(f"'{name}'")
+        parts.append(f"Built-in {domain} skills: {'; '.join(skill_descs)}.")
 
     if custom_skills:
         parts.append(f"Custom skills: {sorted(custom_skills.keys())}.")

@@ -1962,6 +1962,16 @@ Return JSON:
                 "data": state["original_image_bytes"]
             })
 
+        # Include domain-specific validation criteria from skill
+        skill_sections = state.get("skill_sections")
+        if skill_sections and skill_sections.get("validation"):
+            skill_name = state.get("skill_name", "domain skill")
+            prompt_parts.append(
+                f"\n\n**Domain Validation Criteria ({skill_name}):**\n"
+                "Use these criteria when scoring completeness and correctness.\n\n"
+                + skill_sections["validation"]
+            )
+
         try:
             response = self.model.generate_content(
                 contents=prompt_parts,
