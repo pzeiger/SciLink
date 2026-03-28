@@ -2846,7 +2846,9 @@ Only flag genuine problems that would cause incorrect results — do not redesig
 """
 
 
-IMAGE_ANALYSIS_SCRIPT_INSTRUCTIONS = """Write a Python script for image analysis.
+IMAGE_ANALYSIS_SCRIPT_INSTRUCTIONS = """Write a Python script to analyze a SINGLE image.
+The script processes exactly one image file — do not split, panel-detect, or loop over \
+multiple images. The pipeline will call this script separately for each image in a series.
 
 **Your Plan:**
 - Approach: {analysis_approach}
