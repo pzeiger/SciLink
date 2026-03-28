@@ -43,7 +43,12 @@ def _build_skill_description(agent_registry: dict = None,
     """
     import inspect
 
-    parts = ["Domain skill name or path to a custom .md skill file."]
+    parts = [
+        "Domain skill name or path to a custom .md skill file. "
+        "For image series, omit this unless the user explicitly requests a "
+        "specific skill — the ImageAnalysisAgent will scout representative "
+        "images first and auto-select a skill if one is relevant."
+    ]
 
     # Discover which agents support skills from their analyze() signature.
     # Registry entries use lazy class loading — resolve class_path if needed.

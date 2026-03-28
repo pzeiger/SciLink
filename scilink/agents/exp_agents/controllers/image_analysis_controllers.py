@@ -475,6 +475,79 @@ class ImageSeriesScoutController:
         return state
 
 
+class SkillSuggestionController:
+    """Auto-suggest a domain skill when none was explicitly provided.
+
+    Runs after scouting and before planning. Shows the LLM the image(s)
+    alongside a catalog of available skills and asks whether any is relevant.
+    No-op when a skill was already loaded (e.g. by the orchestrator or user).
+    """
+
+    def __init__(self, model, logger, generation_config, safety_settings,
+                 parse_fn, domain="image_analysis"):
+        self.model = model
+        self.logger = logger
+        self.generation_config = generation_config
+        self.safety_settings = safety_settings
+        self._parse = parse_fn
+        self.domain = domain
+
+    def execute(self, state: dict) -> dict:
+        if state.get("error_dict") or state.get("skill_sections"):
+            return state
+
+        from ....skills.loader import list_skills, load_skill
+
+        available = list_skills(domain=self.domain)
+        if not available:
+            return state
+
+        catalog, cache = [], {}
+        for name in available:
+            try:
+                parsed = load_skill(name, domain=self.domain)
+                cache[name] = parsed
+                catalog.append(f"- **{name}**: {parsed.get('overview', '').strip()}")
+            except Exception:
+                continue
+        if not catalog:
+            return state
+
+        self.logger.info("\n--- Skill Suggestion ---\n")
+
+        prompt = [
+            "Based on the image(s) below, decide whether any of these "
+            "domain skills is relevant.\n\n## Available Skills\n"
+            + "\n".join(catalog),
+        ]
+        image_bytes = (state.get("scout_montage_bytes")
+                       or state.get("original_image_bytes"))
+        if image_bytes:
+            prompt.append({"mime_type": "image/jpeg", "data": image_bytes})
+        prompt.append(
+            'Respond with JSON: {"skill": "<name>"} if clearly relevant, '
+            'or {"skill": null} if none applies.'
+        )
+
+        try:
+            resp = self.model.generate_content(
+                contents=prompt, generation_config=self.generation_config,
+                safety_settings=self.safety_settings,
+            )
+            result, _ = self._parse(resp)
+            suggested = (result or {}).get("skill")
+            if suggested and suggested in cache:
+                state["skill_name"] = cache[suggested]["name"]
+                state["skill_sections"] = cache[suggested]
+                print(f"  Auto-selected domain skill: {suggested}")
+            else:
+                self.logger.info("  No skill auto-selected")
+        except Exception as e:
+            self.logger.warning(f"  Skill suggestion failed: {e}")
+
+        return state
+
+
 class ImagePlanningController:
     """
     Plan image analysis approach via LLM, with optional human feedback.

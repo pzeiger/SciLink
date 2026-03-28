@@ -2763,6 +2763,15 @@ Add a `"series_analysis_plan"` field to your JSON response:
 - Each regime must have at least one image.
 - The pipeline is verified on the FIRST image of each regime and then locked — it is applied to all remaining images in that regime WITHOUT modification. If you identify a transition point, ask yourself: will the pipeline that works on the first image of this regime also work on the last? If not, split into separate regimes.
 - A single regime is appropriate only when the same locked pipeline will produce correct results on every image in that regime.
+
+**Series robustness:**
+Your pipeline will be locked and applied identically to every image in a regime. Design
+for the variation you see across the representative images, not just the one that looks
+cleanest. Prefer methods that adapt to per-image conditions (e.g., data-driven thresholds
+over hard-coded values, relative criteria over absolute ones). Avoid baking in parameters
+that depend on the specific intensity range, contrast, or feature density of a single image.
+If a step requires a fixed parameter, choose a value that is reasonable across the full
+range of variation visible in the series.
 """
 
 

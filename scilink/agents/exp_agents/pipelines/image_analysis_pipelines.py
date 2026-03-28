@@ -22,6 +22,7 @@ from typing import Callable, List, Any
 from ..controllers.image_analysis_controllers import (
     AnalyzeImageController,
     ImageSeriesScoutController,
+    SkillSuggestionController,
     ImagePlanningController,
     LiteratureSearchController,
     UnifiedImageProcessingController,
@@ -137,7 +138,18 @@ def create_unified_image_analysis_pipeline(
         )
     )
 
-    # Step 3: LLM planning with optional human feedback
+    # Step 3: Auto-suggest a domain skill if none was provided
+    pipeline.append(
+        SkillSuggestionController(
+            model=model,
+            logger=logger,
+            generation_config=generation_config,
+            safety_settings=safety_settings,
+            parse_fn=parse_fn,
+        )
+    )
+
+    # Step 4: LLM planning with optional human feedback
     pipeline.append(
         ImagePlanningController(
             model=model,
@@ -153,7 +165,7 @@ def create_unified_image_analysis_pipeline(
         )
     )
 
-    # Step 4: Literature search (runs once)
+    # Step 5: Literature search (runs once)
     pipeline.append(
         LiteratureSearchController(
             logger=logger,
@@ -162,7 +174,7 @@ def create_unified_image_analysis_pipeline(
         )
     )
 
-    # Step 5: Unified series processing with quality control
+    # Step 6: Unified series processing with quality control
     pipeline.append(
         UnifiedImageProcessingController(
             model=model,
@@ -184,7 +196,7 @@ def create_unified_image_analysis_pipeline(
         )
     )
 
-    # Step 6: Adaptive refit of flagged images
+    # Step 7: Adaptive refit of flagged images
     pipeline.append(
         ImageAdaptiveRefitController(
             model=model,
@@ -205,7 +217,7 @@ def create_unified_image_analysis_pipeline(
         )
     )
 
-    # Step 7: Conditional trend analysis (only for n>=2)
+    # Step 8: Conditional trend analysis (only for n>=2)
     pipeline.append(
         ConditionalImageTrendController(
             model=model,
@@ -219,7 +231,7 @@ def create_unified_image_analysis_pipeline(
         )
     )
 
-    # Step 8: Synthesis (adapts to single vs series)
+    # Step 9: Synthesis (adapts to single vs series)
     pipeline.append(
         UnifiedImageSynthesisController(
             model=model,
@@ -232,12 +244,12 @@ def create_unified_image_analysis_pipeline(
         )
     )
 
-    # Step 9: Store analysis results/images
+    # Step 10: Store analysis results/images
     pipeline.append(
         StoreAnalysisResultsController(logger, store_fn)
     )
 
-    # Step 10: Report generation (adapts to single vs series)
+    # Step 11: Report generation (adapts to single vs series)
     pipeline.append(
         GenerateImageReportController(logger, output_dir)
     )
