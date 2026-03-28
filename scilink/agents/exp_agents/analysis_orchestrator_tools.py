@@ -2103,11 +2103,21 @@ class AnalysisOrchestratorTools:
                 },
                 "auxiliary_data": {
                     "type": "string",
-                    "description": "Path to auxiliary dataset (1D curve or image) as context. Supported by CurveFitting and Hyperspectral agents."
+                    "description": (
+                        "Path to an auxiliary dataset (1D curve or image) as visual "
+                        "context for the analysis. Can also be a visualization from "
+                        "a prior analysis. Only use this when the datasets are "
+                        "genuinely related (same sample, same region, or "
+                        "complementary techniques) — do not chain unrelated analyses."
+                    )
                 },
                 "auxiliary_label": {
                     "type": "string",
-                    "description": "Description of auxiliary data, e.g. 'TGA curve collected simultaneously during DSC'"
+                    "description": (
+                        "Description of auxiliary data and its relationship to the "
+                        "primary dataset, e.g. 'TGA curve collected simultaneously "
+                        "during DSC' or 'SEM analysis of the same region'"
+                    )
                 },
                 "skill": {
                     "type": "string",
