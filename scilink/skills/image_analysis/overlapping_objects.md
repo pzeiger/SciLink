@@ -57,12 +57,15 @@ boundaries follow real inter-object edges.
 **SAM implementation (preferred):**
 Pass a 2D grayscale array (single channel). For multi-channel images, pass
 the most informative channel (e.g., `image[:,:,0]`). Do not convert to RGB.
+**Tune all numeric parameters to the image** — the values below are
+syntax examples only, not recommended defaults.
 ```
 from scilink.tools.sam import run_sam_analysis
 result = run_sam_analysis(image_array, params={
-    "sam_parameters": "default",
-    "min_area": 200, "max_area": 50000,
-    "pruning_iou_threshold": 0.3
+    "sam_parameters": "default",     # always start from here; try "sensitive" if objects are missed
+    "min_area": <tune>,              # minimum object area in pixels — set from image
+    "max_area": <tune>,              # maximum object area in pixels — set from image
+    "pruning_iou_threshold": <tune>  # masks with IoU above this are removed; lower = stricter, higher = keeps more overlapping objects
 })
 # Build labeled mask from SAM particles
 labeled = np.zeros(image_array.shape[:2], dtype=np.int32)

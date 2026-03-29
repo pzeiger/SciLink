@@ -1961,7 +1961,7 @@ Your response must be valid JSON:
 
 Focus on:
 - Are small particles being missed? → Lower min_area or use "sensitive" mode
-- Are large particles being fragmented? → Increase max_area or lower pruning_iou_threshold
+- Are large particles being fragmented? → Increase max_area or raise pruning_iou_threshold
 - Is contrast too low? → Enable use_clahe
 - Too many false detections? → Increase min_area or use "default" mode
 """
@@ -2597,13 +2597,15 @@ Access channels via `image[:,:,0]`, `image[:,:,1]`, etc.
   Use `from scilink.tools.sam import run_sam_analysis` in your script.
   SAM detects individual object instances directly, even when they overlap.
   Usage: `result = run_sam_analysis(image_array, params={"sam_parameters": "default",
-    "min_area": 200, "max_area": 50000, "pruning_iou_threshold": 0.3})`
+    "min_area": <set_from_image>, "max_area": <set_from_image>,
+    "pruning_iou_threshold": <set_from_image>})`
   First arg must be a 2D grayscale numpy array (not a file path, not RGB). \
-For multi-channel images, pass a single channel (e.g., `image[:,:,0]`). Adjust parameter values as needed.
+For multi-channel images, pass a single channel (e.g., `image[:,:,0]`).
+  Choose min_area/max_area based on expected object sizes in the image.
   Always start with sam_parameters='default'. Only escalate to 'sensitive' in a retry if
   'default' misses visible objects.
   Parameters: min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False),
-    pruning_iou_threshold (duplicate removal, lower = stricter, default 0.5).
+    pruning_iou_threshold (masks with IoU above this are removed; lower = stricter, higher = keeps more overlapping objects; default 0.5).
   Returns dict with "particles" (list with "mask", "area" per particle), "total_count", "masks".
   Avoid Gaussian blur before SAM unless noise is very high.
 - Texture analysis (GLCM, local binary patterns, Gabor filters)
@@ -2893,15 +2895,16 @@ opencv-python (cv2), matplotlib, Pillow (PIL), scikit-learn (sklearn), pandas, j
 scilink.tools.sam — SAM instance segmentation for touching/overlapping objects. \
 `from scilink.tools.sam import run_sam_analysis`; \
 usage: `result = run_sam_analysis(image_array, params={{"sam_parameters": "default", \
-"min_area": 200, "max_area": 50000, "pruning_iou_threshold": 0.3}})`. \
+"min_area": <set_from_plan>, "max_area": <set_from_plan>, \
+"pruning_iou_threshold": <set_from_plan>}})`. \
 First arg must be a 2D grayscale numpy array (not a file path, not RGB). \
 For multi-channel images, pass a single channel (e.g., `image[:,:,0]`). \
+Choose min_area/max_area based on expected object sizes in the image. \
 sam_parameters MUST be 'default' on the first attempt — only switch to 'sensitive' in a retry \
-after 'default' has been tried and missed objects. Other parameters (min_area, max_area, \
-pruning_iou_threshold, use_clahe) can be adjusted as needed. \
+after 'default' has been tried and missed objects. \
 Parameters: \
 min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False), \
-pruning_iou_threshold (duplicate removal, lower = stricter, default 0.5). \
+pruning_iou_threshold (masks with IoU above this are removed; lower = stricter, higher = keeps more overlapping objects; default 0.5). \
 Returns dict with "particles" (list with "mask", "area" per particle), "total_count", "masks". \
 Avoid Gaussian blur before SAM unless noise is very high.
 
@@ -2953,15 +2956,15 @@ opencv-python (cv2), matplotlib, Pillow (PIL), scikit-learn (sklearn), pandas, j
 scilink.tools.sam — SAM instance segmentation for touching/overlapping objects. \
 `from scilink.tools.sam import run_sam_analysis`; \
 usage: `result = run_sam_analysis(image_array, params={{"sam_parameters": "default", \
-"min_area": 200, "max_area": 50000, "pruning_iou_threshold": 0.3}})`. \
+"min_area": <set_from_plan>, "max_area": <set_from_plan>, \
+"pruning_iou_threshold": <set_from_plan>}})`. \
 First arg must be a 2D grayscale numpy array (not a file path, not RGB). \
 For multi-channel images, pass a single channel (e.g., `image[:,:,0]`). \
 sam_parameters MUST be 'default' on the first attempt — only switch to 'sensitive' in a retry \
-after 'default' has been tried and missed objects. Other parameters (min_area, max_area, \
-pruning_iou_threshold, use_clahe) can be adjusted as needed. \
+after 'default' has been tried and missed objects. \
 Parameters: \
 min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False), \
-pruning_iou_threshold (duplicate removal, lower = stricter, default 0.5). \
+pruning_iou_threshold (masks with IoU above this are removed; lower = stricter, higher = keeps more overlapping objects; default 0.5). \
 Returns dict with "particles" (list with "mask", "area" per particle), "total_count", "masks". \
 Avoid Gaussian blur before SAM unless noise is very high.
 
