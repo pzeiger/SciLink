@@ -9,11 +9,15 @@ logger = logging.getLogger(__name__)
 
 def load_curve_data(data_path: str) -> np.ndarray:
     """
-    Robustly loads curve data (X, Y) from text files.
-    Handles CSV, TSV, and whitespace separation automatically.
+    Robustly loads curve data (X, Y) from various file formats.
+    Handles .npy, CSV, TSV, and whitespace separation automatically.
     """
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"File not found: {data_path}")
+
+    # Native numpy format
+    if data_path.endswith('.npy'):
+        return np.load(data_path)
 
     attempts = [
         dict(),                                # whitespace-delimited, no header
