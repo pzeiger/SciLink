@@ -906,7 +906,24 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             f"- {c.get('claim', '')}" for c in claims[:5]
         ) or "No claims."
 
-        files_str = "\n".join(f"- {f}" for f in tier1_files[:20])
+        # Build file listing with array descriptions where available
+        saved_arrays = tier1_state.get("analysis_result", {}).get(
+            "saved_arrays", {}
+        )
+        file_lines = []
+        for f in tier1_files[:20]:
+            fname = Path(f).name
+            meta = saved_arrays.get(fname)
+            if meta:
+                desc = meta.get("description", "")
+                shape = meta.get("shape", "")
+                dtype = meta.get("dtype", "")
+                file_lines.append(
+                    f"- `{f}` — {desc} (shape={shape}, dtype={dtype})"
+                )
+            else:
+                file_lines.append(f"- {f}")
+        files_str = "\n".join(file_lines)
 
         # Build Tier 2 planning instructions
         tier2_instructions = IMAGE_ANALYSIS_TIER2_PLANNING_INSTRUCTIONS.format(

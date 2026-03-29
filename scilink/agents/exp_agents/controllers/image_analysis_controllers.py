@@ -1784,6 +1784,7 @@ Your guidance: '''
             "extracted_features": analysis_results.get("extracted_features", {}),
             "quality_metrics": analysis_results.get("quality_metrics", {}),
             "summary": analysis_results.get("summary"),
+            "saved_arrays": analysis_results.get("saved_arrays", {}),
             "visualization_path": str(viz_path) if viz_path.exists() else None,
             "visualization_bytes": viz_bytes,
             "statistics": stats,
@@ -3468,6 +3469,7 @@ Return JSON with:
                 ),
                 "quality_metrics": first_result.get("quality_metrics", {}),
                 "summary": first_result.get("summary"),
+                "saved_arrays": first_result.get("saved_arrays", {}),
             }
             state["final_script"] = first_result.get("script")
             state["final_viz_bytes"] = first_result.get("visualization_bytes")

@@ -2927,13 +2927,25 @@ For multi-channel images, show each channel as a separate grayscale subplot (do 
 display a 2-channel array directly with imshow). \
 All visualizations must be saved to the current working directory. Use `dpi=100` and limit \
 to 6 subplots max to keep file size manageable.
-4. Print results as JSON:
+4. Save key output arrays to the current working directory as `.npy` files. \
+At minimum save the primary detection/segmentation result (label map, binary \
+mask, or position array). Example: `np.save("analysis_labels.npy", label_map)`. \
+If you used SAM, build a combined integer label map from the per-particle masks \
+(background=0, particles labeled 1,2,3,...) and save that — do NOT save raw \
+per-particle boolean masks individually.
+5. Print results as JSON. Include a `saved_arrays` key describing every `.npy` \
+file you saved — each entry should have `description`, `shape`, and `dtype` so \
+follow-up analysis can load the right file without guessing. \
+Example entry: `"analysis_labels.npy": {{"description": "Integer label map, \
+23 grains labeled 1-23, background=0", "shape": [512, 512], "dtype": "int32"}}`. \
+The standard fields are:
 ```python
 results = {{{{
     "analysis_type": "description of what was done",
     "extracted_features": {{{{"feature_name": value, ...}}}},
     "quality_metrics": {{{{"metric_name": value, ...}}}},
-    "summary": "Key finding in one sentence"
+    "summary": "Key finding in one sentence",
+    "saved_arrays": {{{{...}}}}
 }}}}
 print(f"IMAGE_ANALYSIS_RESULTS_JSON:{{{{json.dumps(results)}}}}")
 ```
