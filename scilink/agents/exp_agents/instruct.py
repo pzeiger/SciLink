@@ -2646,7 +2646,27 @@ For multi-channel images, pass a single channel (e.g., `image[:,:,0]`).
 - Phase identification (intensity clustering, color-space segmentation)
 - Defect detection (template matching, anomaly detection, local contrast)
 - Spatial statistics (nearest-neighbor distances, pair correlation, Voronoi tessellation)
-- Frequency analysis (FFT, bandpass filtering)
+- Frequency analysis (FFT, bandpass filtering, power spectral density).
+  Prefer FFT-based methods for atomically resolved images where it is more meaningful
+  to learn about periodic structures, symmetries, or electronic patterns rather than
+  find every atom.
+- Sliding FFT/NMF decomposition — for images with periodic or quasi-periodic structures.
+  Use `from scilink.tools.fft_nmf import run_fft_nmf_analysis` in your script.
+  Procedure: slides a window across the image, computes the FFT power spectrum of each
+  patch (with Hamming windowing, log-magnitude, and central zoom), then runs NMF on the
+  stacked spectra to factorize them into a small set of spectral components (dominant
+  frequency patterns) and their spatial abundance maps (where each pattern is present).
+  Usage: `result = run_fft_nmf_analysis(image_array, params={"n_components": 4})`
+  First arg must be a 2D grayscale numpy array.
+  Parameters: window_size (pixels, default: auto), n_components (default: 4),
+    step_fraction (window overlap, default: 0.25).
+  Returns dict with "components" shape (n_components, fft_h, fft_w) — each component is
+    a 2D FFT power spectrum representing a dominant frequency pattern; "abundances" shape
+    (n_components, grid_h, grid_w) — spatial maps showing where each component is present
+    in the image; plus "n_components", "window_size", "grid_shape".
+  Choose window_size and n_components based on the physics of the problem — the spatial
+  scale of repeating features and the number of distinct patterns expected in the image
+  based on the material system and imaging conditions.
 
 **Commit to specific choices — do NOT hedge:**
 - State ONE segmentation method, not alternatives (write "Otsu thresholding" not "Otsu or adaptive")
@@ -2682,8 +2702,15 @@ fields) — that will be handled in a follow-up step if warranted by
 your findings.
 
 Keep the pipeline simple and robust. A successful basic analysis that
-captures all features is more valuable than an ambitious pipeline that
-fails.
+captures the main features is more valuable than an ambitious pipeline
+that fails.
+
+If no specific analysis objective was provided, focus on basic
+characterization: identify what structures are present, measure their
+primary properties (count, size, spacing, intensity), and report what
+you observe. Do not attempt to answer every possible scientific
+question about the image — Tier 2 can follow up on the most
+interesting findings.
 """
 
 

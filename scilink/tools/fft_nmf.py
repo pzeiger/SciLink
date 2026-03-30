@@ -244,3 +244,58 @@ class SlidingFFTNMF:
             print(f"Saved results to {output_dir}")
             
         return components, abundances
+
+
+def run_fft_nmf_analysis(image_array, params=None):
+    """Run sliding FFT + NMF decomposition on an image.
+
+    Convenience wrapper around :class:`SlidingFFTNMF` that mirrors the
+    ``run_sam_analysis`` API so generated scripts can call it directly.
+
+    Args:
+        image_array: 2D numpy array (grayscale image).
+        params: Optional dict with:
+            - window_size (int): Side length in pixels (default: auto).
+            - n_components (int): Number of NMF components (default: 4).
+            - step_fraction (float): Window step as fraction of window
+              size — 0.25 means 75 % overlap (default: 0.25).
+
+    Returns:
+        dict with ``components`` (n, h, w), ``abundances`` (n, gh, gw),
+        ``n_components``, ``window_size``, and ``grid_shape``.
+    """
+    params = params or {}
+    window_size = params.get("window_size")
+    n_components = params.get("n_components", 4)
+    step_fraction = params.get("step_fraction", 0.25)
+
+    kwargs = {"components": n_components}
+    if window_size is not None:
+        kwargs["window_size_x"] = window_size
+        kwargs["window_size_y"] = window_size
+        step = max(1, int(window_size * step_fraction))
+        kwargs["window_step_x"] = step
+        kwargs["window_step_y"] = step
+
+    analyzer = SlidingFFTNMF(**kwargs)
+
+    # Call pipeline steps directly to avoid stdout prints and
+    # unwanted file saves that analyze() does by default.
+    data = image_array.astype(float)
+    d_min, d_max = data.min(), data.max()
+    if d_max > d_min:
+        data = (data - d_min) / (d_max - d_min)
+    windows = analyzer.make_windows(data)
+    fft_data = analyzer.process_fft(windows)
+    components, abundances = analyzer.run_nmf(fft_data)
+
+    return {
+        "components": components,
+        "abundances": abundances,
+        "n_components": int(components.shape[0]),
+        "window_size": (analyzer.window_size_x, analyzer.window_size_y),
+        "grid_shape": (
+            analyzer.grid_shape[1],
+            analyzer.grid_shape[2],
+        ),
+    }
