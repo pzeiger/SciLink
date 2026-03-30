@@ -2297,6 +2297,39 @@ Return JSON:
 """
 
 
+CURVE_FITTING_PLAN_VALIDATION_PROMPT = """You are validating a curve fitting plan BEFORE it is executed.
+
+**Proposed Plan:**
+- Approach: {analysis_approach}
+- Model: {physical_model}
+- Parameters: {parameters_to_extract}
+- Strategy: {fitting_strategy}
+{regime_section}
+
+Examine the data plot below. Will this model produce a good fit for what you see?
+
+**CRITICAL:** If MANDATORY Domain Skill Rules are provided below, the plan MUST
+conform to them. A plan that contradicts mandatory skill rules is INVALID even
+if the data appears to suggest otherwise — the skill encodes validated domain
+expertise that should not be overridden at the planning stage. The fitting
+execution stage has its own mechanism (constraint annealing) to relax skill
+rules later if the data truly requires it.
+
+If the plan is sound and skill-conformant, return {{"valid": true}}.
+If you identify problems, return:
+{{{{
+    "valid": false,
+    "issues": ["list of specific problems"],
+    "physical_model": "revised model if needed",
+    "parameters_to_extract": ["revised params if needed"],
+    "fitting_strategy": "revised strategy if needed",
+    "series_analysis_plan": null
+}}}}
+Include series_analysis_plan only if this is a series with regimes that need revision.
+Only flag genuine problems — do not redesign a reasonable plan.
+"""
+
+
 FIT_QUALITY_ASSESSMENT_INSTRUCTIONS = """Evaluate this fit.
 
 **Approach:** {analysis_approach}

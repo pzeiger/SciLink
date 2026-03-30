@@ -845,6 +845,8 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 results["quality_warning"] = series_results[0]["quality_warning"]
                 results["attempted_models"] = series_results[0].get("attempted_models", [])
 
+            if series_results and series_results[0].get("quality_history"):
+                results["quality_history"] = series_results[0]["quality_history"]
 
         else:
             # Series: full structure with trends and flagged spectra
@@ -883,6 +885,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "adaptively_refitted": r.get("adaptively_refitted", False),
                     "original_r2": r.get("original_r2"),
                     "locked_model_type": r.get("locked_model_type"),
+                    "quality_history": r.get("quality_history"),
                 }
                 for r in series_results
             ]
