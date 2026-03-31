@@ -3554,6 +3554,7 @@ class AdaptiveRefitController:
                 result = self._fitting_helper._fit_with_quality_control(
                     state=refit_state, curve_data=curve_data, data_path=data_path,
                     spectrum_name=name, spectrum_idx=idx,
+                    is_regime_anchor=True,  # enable full verification for independent refit
                 )
             except Exception as e:
                 self.logger.error(f"  Consistency refit failed for {name}: {e}")
@@ -3663,6 +3664,7 @@ class AdaptiveRefitController:
                 refit_result = self._fitting_helper._fit_with_quality_control(
                     state=refit_state, curve_data=curve_data, data_path=data_path,
                     spectrum_name=name, spectrum_idx=idx,
+                    is_regime_anchor=True,  # enable full verification for independent refit
                 )
             except Exception as e:
                 self.logger.error(f"  Refit failed for {name}: {e}")
