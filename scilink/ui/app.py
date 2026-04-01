@@ -753,37 +753,53 @@ with chat_tab:
     _agent_monitor()
 
     # ── Auto-dispatch uploads ────────────────────────────────────
-    auto_prompt = None
+    # Build the upload preamble from pending file paths and stash it
+    # in session state.  It persists across reruns until a message is
+    # actually dispatched, so the user can type an objective in the
+    # chat box and have it merged with the upload context.
     if not task.is_running:
         data_path = st.session_state.pop("pending_auto_examine", None)
         meta_path = st.session_state.pop("pending_auto_load_metadata", None)
         if data_path and meta_path:
-            auto_prompt = (
+            st.session_state["_upload_preamble"] = (
                 f"I uploaded a data file at `{data_path}` "
                 f"and a metadata file at `{meta_path}`. "
                 f"Please examine the data and load the metadata."
             )
         elif data_path:
-            auto_prompt = (
+            st.session_state["_upload_preamble"] = (
                 f"I uploaded a data file at `{data_path}`. "
                 f"Please examine it."
             )
         elif meta_path:
-            auto_prompt = (
+            st.session_state["_upload_preamble"] = (
                 f"I uploaded a metadata file at `{meta_path}`. "
                 f"Please load it."
             )
 
-    if auto_prompt:
-        st.session_state.chat_messages.append({"role": "user", "content": auto_prompt})
-        _start_task(auto_prompt)
+    _has_conversation = bool(st.session_state.chat_messages)
+    if st.session_state.app_mode == "plan":
+        _chat_placeholder = "Message the planning agent..."
+    elif _has_conversation:
+        _chat_placeholder = "Message the analysis agent..."
+    else:
+        _chat_placeholder = "Upload data and click Analyze to start"
+    _chat_disabled = task.is_running or (not _has_conversation and st.session_state.app_mode != "plan")
+    user_text = st.chat_input(_chat_placeholder, disabled=_chat_disabled)
 
-    _chat_placeholder = (
-        "Message the planning agent..."
-        if st.session_state.app_mode == "plan"
-        else "Message the analysis agent..."
-    )
-    if prompt := st.chat_input(_chat_placeholder, disabled=task.is_running):
+    _upload_preamble = st.session_state.pop("_upload_preamble", None)
+
+    # Merge upload preamble with user text (if both exist)
+    if _upload_preamble and user_text:
+        prompt = f"{_upload_preamble}\n\nAdditional context from user: {user_text}"
+    elif _upload_preamble:
+        prompt = _upload_preamble
+    elif user_text:
+        prompt = user_text
+    else:
+        prompt = None
+
+    if prompt:
         st.session_state.chat_messages.append({"role": "user", "content": prompt})
         _start_task(prompt)
 
