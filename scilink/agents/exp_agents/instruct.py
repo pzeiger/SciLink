@@ -2709,6 +2709,11 @@ Keep the pipeline simple and robust. A successful basic analysis that
 captures the main features is more valuable than an ambitious pipeline
 that fails.
 
+If a specific analysis objective was provided, ensure your foundational
+analysis captures the features most relevant to that objective —
+detection, measurement, and statistics for the structures it concerns.
+Tier 2 can then build on these to perform deeper investigation.
+
 If no specific analysis objective was provided, focus on basic
 characterization: identify what structures are present, measure their
 primary properties (count, size, spacing, intensity), and report what

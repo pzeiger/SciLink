@@ -59,11 +59,22 @@ def build_verification_prompt_with_history(
         
         if prev.get('recommended_action'):
             lines.append(f"- Action taken: {prev['recommended_action']}")
-    
+
+        if prev.get('refinement_error'):
+            lines.append(
+                f"- **NOTE: The recommended fix was NOT applied** because "
+                f"the refinement LLM call failed ({prev['refinement_error']}). "
+                f"The results below are UNCHANGED from this attempt — "
+                f"do not penalize for identical output. Re-evaluate the "
+                f"recommended action and suggest concrete fixes."
+            )
+
     lines.extend([
         "\n\n## IMPORTANT",
         "1. Check if previous issues were RESOLVED or still PERSIST",
         "2. If a fix didn't work, suggest something DIFFERENT",
+        "3. If a previous fix was NOT applied due to an API error, "
+        "re-suggest it or propose an alternative",
     ])
     
     return "\n".join(lines)
@@ -2014,6 +2025,7 @@ Return JSON with the refined fitting approach:
             
         except Exception as e:
             self.logger.error(f"      Refinement failed: {e}")
+            config["_refinement_error"] = str(e)
             return config
 
     def _get_human_feedback_for_poor_fit(self, state: dict, best_result: dict, all_attempts: List[dict]) -> Optional[dict]:
@@ -2266,6 +2278,17 @@ Return JSON with:
 
                         # Apply LLM's recommended fixes
                         refined_config = self._apply_llm_verification_feedback(state, verification)
+
+                        # If the refinement LLM call failed (transient
+                        # API error), tag the history so the next verifier
+                        # knows the fix was never applied.
+                        refinement_error = refined_config.pop(
+                            "_refinement_error", None
+                        )
+                        if refinement_error:
+                            verification_history[-1]["refinement_error"] = (
+                                refinement_error
+                            )
 
                         if refined_config == state.get("locked_fitting_config", {}):
                             # No changes at current temperature — escalate to

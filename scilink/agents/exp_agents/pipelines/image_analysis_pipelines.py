@@ -57,9 +57,9 @@ def create_unified_image_analysis_pipeline(
     output_dir: str,
     literature_agent: Any | None = None,
     enable_human_feedback: bool = False,
-    max_approach_retries: int = 3,
+    max_approach_retries: int = 1,
     outlier_sigma: float = 2.0,
-    max_verification_iterations: int = 3,
+    max_verification_iterations: int = 7,
     num_plan_candidates: int = 1,
 ) -> List:
     """
@@ -117,9 +117,9 @@ def create_unified_image_analysis_pipeline(
         output_dir: Output directory path
         literature_agent: Optional literature search agent
         enable_human_feedback: Enable human-in-the-loop refinement
-        max_approach_retries: Max alternative approaches to try (default: 3)
+        max_approach_retries: Max alternative approaches to try (default: 1)
         outlier_sigma: Sigma threshold for outlier detection in series (default: 2.0)
-        max_verification_iterations: Max LLM verification iterations (default: 3)
+        max_verification_iterations: Max LLM verification iterations (default: 7)
 
     Returns:
         List of controller instances to execute in sequence
