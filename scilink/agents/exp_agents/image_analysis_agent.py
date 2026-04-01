@@ -95,9 +95,9 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         analysis_depth: "auto" (default), "basic", or "deep"
         enable_human_feedback: Enable feedback loop
         executor_timeout: Script timeout in seconds
-        max_approach_retries: Max alternative approaches to try (default: 3)
+        max_approach_retries: Max alternative approaches to try (default: 1)
         outlier_sigma: Sigma threshold for outlier detection (default: 2.0)
-        max_verification_iterations: Max LLM verification iterations (default: 5)
+        max_verification_iterations: Max LLM verification iterations (default: 7)
 
     Example:
         agent = ImageAnalysisAgent(api_key="...")
@@ -153,9 +153,9 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Analysis depth
         analysis_depth: str = "auto",
         # Quality control settings
-        max_approach_retries: int = 3,
+        max_approach_retries: int = 1,
         outlier_sigma: float = 2.0,
-        max_verification_iterations: int = 5,
+        max_verification_iterations: int = 7,
         # Planning settings
         num_plan_candidates: int = 1,
         **kwargs,
@@ -822,6 +822,25 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 shutil.move(str(item), str(dst))
         self.logger.info(f"   Tier 1 outputs preserved in {tier1_dir}")
 
+        # Copy Tier 1 data artifacts (.npy, .json, .csv) into the
+        # corresponding Tier 2 working directories so LLM-generated
+        # scripts can load them by filename without absolute paths.
+        # We copy rather than symlink because np.save writes through
+        # symlinks, which would corrupt the tier1/ archive.
+        for tier1_subdir in tier1_dir.iterdir():
+            if not tier1_subdir.is_dir():
+                continue
+            tier2_subdir = self.output_dir / tier1_subdir.name
+            tier2_subdir.mkdir(parents=True, exist_ok=True)
+            for src in tier1_subdir.iterdir():
+                if src.suffix in (".npy", ".json", ".csv"):
+                    dst = tier2_subdir / src.name
+                    if not dst.exists():
+                        try:
+                            shutil.copy2(str(src), str(dst))
+                        except OSError:
+                            pass
+
         tier2_state = self._build_tier2_state(
             tier1_state, tier1_results,
             first_image, original_image_bytes, image_statistics,
@@ -889,14 +908,14 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         tier2_decision=None,
     ) -> dict:
         """Build state dict for Tier 2 pipeline run."""
-        # Collect Tier 1 output files
+        # Collect Tier 1 output files, excluding the tier1/ archive to
+        # avoid duplicate entries (copies already live in the working dirs).
+        tier1_archive = self.output_dir / "tier1"
         tier1_files = []
-        for f in self.output_dir.rglob("*.npy"):
-            tier1_files.append(str(f))
-        for f in self.output_dir.rglob("*.json"):
-            tier1_files.append(str(f))
-        for f in self.output_dir.rglob("*.png"):
-            tier1_files.append(str(f))
+        for ext in ("*.npy", "*.json", "*.png"):
+            for f in self.output_dir.rglob(ext):
+                if not f.is_relative_to(tier1_archive):
+                    tier1_files.append(str(f))
 
         features = tier1_results.get("extracted_features", {})
         claims = tier1_results.get("scientific_claims", [])

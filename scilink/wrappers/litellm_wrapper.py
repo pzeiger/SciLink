@@ -162,24 +162,27 @@ class LiteLLMGenerativeModel:
         base_url: Optional[str] = None,
         system_instruction: Optional[str] = None,
         tools: Optional[List] = None,
+        timeout: Optional[int] = 1200,
     ):
         """
         Initialize the LiteLLM model.
-        
+
         Args:
             model: LiteLLM model string (e.g., "gemini/gemini-2.0-flash")
             api_key: API key for the provider
             base_url: Optional custom API base URL
             system_instruction: Default system message
             tools: Default tools for function calling
+            timeout: Request timeout in seconds (default: 1200)
         """
         _check_litellm()
-        
+
         self.model = _normalize_model_name(model)
         self.api_key = api_key
         self.base_url = base_url
         self.system_instruction = system_instruction
         self.tools = tools
+        self.timeout = timeout
     
     def generate_content(
         self,
@@ -223,6 +226,7 @@ class LiteLLMGenerativeModel:
                 api_key=self.api_key,
                 api_base=self.base_url,
                 stream=stream,
+                timeout=self.timeout,
                 **params
             )
             

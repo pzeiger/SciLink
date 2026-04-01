@@ -104,9 +104,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         executor_timeout: Script timeout in seconds
         r2_threshold: Minimum acceptable R² value (default: 0.95). Spectra
             below this threshold are flagged for adaptive refit.
-        max_model_retries: Max alternative models to try (default: 3)
+        max_model_retries: Max alternative models to try (default: 1)
         outlier_sigma: Sigma threshold for outlier detection (default: 2.0)
-        max_verification_iterations: Max LLM verification iterations (default: 3)
+        max_verification_iterations: Max LLM verification iterations (default: 7)
 
     Example:
         agent = CurveFittingAgent(api_key="...", use_literature=True)
@@ -171,9 +171,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         max_wait_time: int = 1000,
         # Quality control settings
         r2_threshold: float = 0.95,
-        max_model_retries: int = 3,
+        max_model_retries: int = 1,
         outlier_sigma: float = 2.0,
-        max_verification_iterations: int = 5,
+        max_verification_iterations: int = 7,
         **kwargs,
     ):
         # ====================================================================

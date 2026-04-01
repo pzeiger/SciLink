@@ -140,10 +140,21 @@ def build_verification_prompt_with_history(
         if prev.get('recommended_action'):
             lines.append(f"- Action taken: {prev['recommended_action']}")
 
+        if prev.get('refinement_error'):
+            lines.append(
+                f"- **NOTE: The recommended fix was NOT applied** because "
+                f"the refinement LLM call failed ({prev['refinement_error']}). "
+                f"The results below are UNCHANGED from this attempt — "
+                f"do not penalize for identical output. Re-evaluate the "
+                f"recommended action and suggest concrete fixes."
+            )
+
     lines.extend([
         "\n\n## IMPORTANT",
         "1. Check if previous issues were RESOLVED or still PERSIST",
         "2. If a fix didn't work, suggest something DIFFERENT",
+        "3. If a previous fix was NOT applied due to an API error, "
+        "re-suggest it or propose an alternative",
     ])
 
     return "\n".join(lines)
@@ -1317,9 +1328,9 @@ class UnifiedImageProcessingController:
     """
 
     MAX_ATTEMPTS = 5
-    DEFAULT_MAX_APPROACH_RETRIES = 3
+    DEFAULT_MAX_APPROACH_RETRIES = 1
     DEFAULT_OUTLIER_SIGMA = 2.0
-    DEFAULT_MAX_VERIFICATION_ITERATIONS = 5
+    DEFAULT_MAX_VERIFICATION_ITERATIONS = 7
     DEFAULT_QUALITY_THRESHOLD = 0.7
 
     # Constraint annealing: gradually raise the "temperature" so the
@@ -2052,6 +2063,7 @@ Return JSON:
         result: dict,
         history: List[dict] = None,
         verification_iter: int = 0,
+        annealing_level: int | None = None,
     ) -> Optional[dict]:
         """Use LLM to verify analysis quality by examining the visualization.
 
@@ -2069,11 +2081,15 @@ Return JSON:
         features_str = json.dumps(features, indent=2) if features else "No features extracted"
         metrics_str = json.dumps(metrics, indent=2) if metrics else "No metrics available"
 
-        # Constraint annealing: spread temperature levels evenly across iterations.
+        # Constraint annealing: use caller-supplied level (adaptive) or fall
+        # back to the legacy iteration-proportional formula.
         schedule = self._CONSTRAINT_ANNEALING_SCHEDULE
-        n_levels = len(schedule)
-        max_iter = max(self.max_verification_iterations, 1)
-        level = min(verification_iter * n_levels // max_iter, n_levels - 1)
+        if annealing_level is not None:
+            level = min(annealing_level, len(schedule) - 1)
+        else:
+            n_levels = len(schedule)
+            max_iter = max(self.max_verification_iterations, 1)
+            level = min(verification_iter * n_levels // max_iter, n_levels - 1)
         plan_constraint = schedule[level]
 
         prompt_text = self.QUALITY_VERIFICATION_PROMPT.format(
@@ -2165,12 +2181,18 @@ Return JSON:
         missed = verification.get("missed_features", [])
         false_positives = verification.get("false_positives", [])
 
+        # Inject the same constraint annealing directive so the refinement
+        # LLM respects the current temperature level.
+        annealing_level = state.get("_annealing_level", 0)
+        schedule = self._CONSTRAINT_ANNEALING_SCHEDULE
+        constraint_text = schedule[min(annealing_level, len(schedule) - 1)]
+
         refinement_prompt = f"""Refine the image analysis approach based on automated verification feedback.
 
 **CURRENT APPROACH:**
 - Pipeline: {config.get('processing_pipeline', 'Unknown')}
 - Approach: {config.get('analysis_approach', 'Unknown')}
-
+{constraint_text}
 **VERIFICATION FINDINGS:**
 {chr(10).join(issues_summary) if issues_summary else 'No specific issues listed'}
 
@@ -2206,6 +2228,7 @@ Return JSON with the refined analysis approach:
 
         except Exception as e:
             self.logger.error(f"      Refinement failed: {e}")
+            config["_refinement_error"] = str(e)
             return config
 
     def _get_human_feedback_for_poor_quality(
@@ -2413,6 +2436,7 @@ Return JSON with:
         judge_result = None
         best_result = None
         best_score = -1.0
+        best_config = state.get("locked_analysis_config", {}).copy()
         quality_threshold = self.quality_threshold
 
         # Anchor = first image overall OR first in a regime; gets full QC
@@ -2445,6 +2469,7 @@ Return JSON with:
             if score > best_score:
                 best_score = score
                 best_result = result
+                best_config = state.get("locked_analysis_config", {}).copy()
 
             user_accepted = False
 
@@ -2459,15 +2484,28 @@ Return JSON with:
                     analysis_was_approved = False
                     current_result = best_result  # track latest for verification
 
+                    # Adaptive annealing state: start frozen, escalate
+                    # only when the best score stalls for multiple iterations.
+                    # Unlike curve fitting (deterministic R²), quality_score is
+                    # LLM-assigned and noisy, so we use a patience counter
+                    # instead of a rate-based formula.
+                    _annealing_level = 0
+                    _stall_count = 0
+                    _PATIENCE = 2
+                    _prev_best_score = best_score
+                    _n_anneal_levels = len(self._CONSTRAINT_ANNEALING_SCHEDULE)
+
                     for verification_iter in range(self.max_verification_iterations):
                         self.logger.info(
                             f"   Verification {verification_iter + 1}/"
-                            f"{self.max_verification_iterations}..."
+                            f"{self.max_verification_iterations}"
+                            f" (annealing level {_annealing_level})..."
                         )
 
                         verification = self._verify_quality(
                             state, current_result, history=verification_history,
                             verification_iter=verification_iter,
+                            annealing_level=_annealing_level,
                         )
 
                         if verification is None:
@@ -2484,10 +2522,32 @@ Return JSON with:
                         if all_attempts:
                             all_attempts[-1]["score"] = v_score
 
-                        # Track best result across all iterations
+                        # Track best result (high-water mark)
                         if v_score > best_score:
                             best_score = v_score
                             best_result = current_result
+                            best_config = state.get("locked_analysis_config", {}).copy()
+
+                        # Patience-based adaptive annealing: check if
+                        # best_score improved since last iteration.
+                        if best_score > _prev_best_score:
+                            _stall_count = 0
+                        else:
+                            _stall_count += 1
+                            if _stall_count >= _PATIENCE:
+                                _annealing_level = min(
+                                    _annealing_level + 1,
+                                    _n_anneal_levels - 1,
+                                )
+                                _stall_count = 0
+                                self.logger.info(
+                                    f"   Annealing: {_PATIENCE} stalled "
+                                    f"iterations, escalating to level "
+                                    f"{_annealing_level}"
+                                )
+                        _prev_best_score = best_score
+
+                        _cur_level = _annealing_level
 
                         verification_attempts.append({
                             "result": current_result.copy() if current_result else {},
@@ -2495,15 +2555,6 @@ Return JSON with:
                             "config": state.get("locked_analysis_config", {}).copy(),
                             "score": v_score,
                         })
-
-                        # Compute the annealing level that was actually used
-                        # by _verify_quality for this iteration (not the stale
-                        # state value, which is updated after re-analysis).
-                        _n_lvl = len(self._CONSTRAINT_ANNEALING_SCHEDULE)
-                        _max_it = max(self.max_verification_iterations, 1)
-                        _cur_level = min(
-                            verification_iter * _n_lvl // _max_it, _n_lvl - 1
-                        )
 
                         verification_history.append({
                             "quality_score": v_score,
@@ -2547,11 +2598,34 @@ Return JSON with:
                             state, verification
                         )
 
-                        if refined_config == state.get("locked_analysis_config", {}):
-                            self.logger.info(
-                                "   No config changes suggested, stopping verification"
+                        # If the refinement LLM call failed (transient
+                        # API error), tag the history so the next verifier
+                        # knows the fix was never applied.
+                        refinement_error = refined_config.pop(
+                            "_refinement_error", None
+                        )
+                        if refinement_error:
+                            verification_history[-1]["refinement_error"] = (
+                                refinement_error
                             )
-                            break
+
+                        if refined_config == state.get("locked_analysis_config", {}):
+                            # No changes at current temperature — escalate to
+                            # give the LLM more freedom before giving up.
+                            _annealing_level = min(
+                                _annealing_level + 1, _n_anneal_levels - 1
+                            )
+                            if _annealing_level == _cur_level:
+                                self.logger.info(
+                                    "   No config changes at max annealing level, "
+                                    "stopping verification"
+                                )
+                                break
+                            self.logger.info(
+                                f"   No config changes suggested, escalating "
+                                f"to annealing level {_annealing_level}"
+                            )
+                            continue
 
                         # Clean up old visualization (but not the best result's viz)
                         old_viz_path = current_result.get("visualization_path")
@@ -2564,13 +2638,8 @@ Return JSON with:
 
                         state["locked_analysis_config"] = refined_config
 
-                        # Sync skill strictness with annealing temperature
-                        n_levels = len(self._SKILL_STRICTNESS_SCHEDULE)
-                        max_iter = max(self.max_verification_iterations, 1)
-                        state["_annealing_level"] = min(
-                            verification_iter * n_levels // max_iter,
-                            n_levels - 1,
-                        )
+                        # Sync skill strictness with adaptive annealing level
+                        state["_annealing_level"] = _annealing_level
 
                         # Re-analyze with refined config
                         self.logger.info(
@@ -2601,12 +2670,14 @@ Return JSON with:
                                 "   Re-analysis failed, stopping verification"
                             )
                             break
+
                     else:
                         # Loop exhausted without approval - verify final result
                         self.logger.info("   Verifying final re-analysis...")
                         final_verification = self._verify_quality(
                             state, current_result,
                             verification_iter=self.max_verification_iterations,
+                            annealing_level=_annealing_level,
                         )
 
                         if final_verification:
@@ -2618,6 +2689,7 @@ Return JSON with:
                                 if v_score > best_score:
                                     best_score = v_score
                                     best_result = current_result
+                                    best_config = state.get("locked_analysis_config", {}).copy()
 
                             verification_attempts.append({
                                 "result": current_result.copy() if current_result else {},
@@ -2640,6 +2712,9 @@ Return JSON with:
                         # If verification loop exhausted without approval,
                         # keep best result and let alternative approaches try next.
                         # Judge is only called after all alternatives are exhausted.
+
+                    # Restore config to match best result after verification loop
+                    state["locked_analysis_config"] = best_config
 
             # --- Check if quality is acceptable ---
             if best_score >= quality_threshold:
@@ -2777,6 +2852,7 @@ Return JSON with:
                         refined = self._apply_verification_feedback(
                             state, alt_verification
                         )
+                        refined.pop("_refinement_error", None)
                         if refined != temp_config:
                             state["locked_analysis_config"] = refined
                             reanalysis = self._process_single_image(
@@ -2822,6 +2898,7 @@ Return JSON with:
                 if alt_score > best_score:
                     best_score = alt_score
                     best_result = alt_result
+                    best_config = temp_config.copy()
                     best_result["_winning_config"] = temp_config
 
                 if alt_score >= quality_threshold:
@@ -2920,6 +2997,7 @@ Return JSON with:
                     if human_score > best_score:
                         best_score = human_score
                         best_result = human_guided_result
+                        best_config = refined_config.copy()
                         if _is_anchor:
                             state["locked_analysis_config"] = refined_config
                     else:
@@ -2950,6 +3028,7 @@ Return JSON with:
                 best_result = selected["result"]
                 best_score = selected["score"]
                 if selected.get("config"):
+                    best_config = selected["config"].copy()
                     state["locked_analysis_config"] = selected["config"]
                 self.logger.info(
                     f"   Judge selected attempt {idx + 1} "
@@ -3013,8 +3092,8 @@ Return JSON with:
                 f"(score = {best_score:.2f})"
             )
 
-            if _is_anchor and best_result.get("_winning_config"):
-                state["locked_analysis_config"] = best_result["_winning_config"]
+            if _is_anchor:
+                state["locked_analysis_config"] = best_config
 
             best_result["quality_history"] = self._build_quality_history(
                 best_score, quality_threshold, all_attempts,
@@ -4040,8 +4119,8 @@ class ImageAdaptiveRefitController:
         quality_instructions: str,
         output_dir: str,
         image_to_bytes_fn: Callable,
-        max_approach_retries: int = 3,
-        max_verification_iterations: int = 3,
+        max_approach_retries: int = 1,
+        max_verification_iterations: int = 7,
         enable_human_feedback: bool = False,
         conformance_instructions: str = "",
     ):

@@ -59,11 +59,22 @@ def build_verification_prompt_with_history(
         
         if prev.get('recommended_action'):
             lines.append(f"- Action taken: {prev['recommended_action']}")
-    
+
+        if prev.get('refinement_error'):
+            lines.append(
+                f"- **NOTE: The recommended fix was NOT applied** because "
+                f"the refinement LLM call failed ({prev['refinement_error']}). "
+                f"The results below are UNCHANGED from this attempt — "
+                f"do not penalize for identical output. Re-evaluate the "
+                f"recommended action and suggest concrete fixes."
+            )
+
     lines.extend([
         "\n\n## IMPORTANT",
         "1. Check if previous issues were RESOLVED or still PERSIST",
         "2. If a fix didn't work, suggest something DIFFERENT",
+        "3. If a previous fix was NOT applied due to an API error, "
+        "re-suggest it or propose an alternative",
     ])
     
     return "\n".join(lines)
@@ -1200,9 +1211,9 @@ class UnifiedSeriesProcessingController:
     
     MAX_ATTEMPTS = 5
     DEFAULT_R2_THRESHOLD = 0.95
-    DEFAULT_MAX_MODEL_RETRIES = 3
+    DEFAULT_MAX_MODEL_RETRIES = 1
     DEFAULT_OUTLIER_SIGMA = 2.0
-    DEFAULT_MAX_VERIFICATION_ITERATIONS = 5
+    DEFAULT_MAX_VERIFICATION_ITERATIONS = 7
 
     JUDGE_PROMPT = '''You are a scientific data fitting expert acting as a judge.
 
@@ -1229,7 +1240,7 @@ Examine each fit carefully. Look at:
 
 **Return JSON:**
 {{
-    "selected_index": <0, 1, 2, etc., or null if ALL are unacceptable>,
+    "selected_index": <1, 2, 3, etc. matching the Attempt numbers above, or null if ALL are unacceptable>,
     "acceptable": true/false,
     "reasoning": "detailed explanation of your choice or why all are unacceptable",
     "issues_with_selected": "any remaining concerns with the chosen fit, or null if none"
@@ -1817,7 +1828,7 @@ Return JSON:
 }}
 
 
-Remember: Rejecting a good fit (R² > 0.98) to chase marginal improvements often makes things WORSE through overfitting or convergence failures.
+Remember: Rejecting a good fit (R² > {accept_threshold:.2f}) to chase marginal improvements often makes things WORSE through overfitting or convergence failures.
 '''
 
     # Constraint annealing: gradually raise the "temperature" so the
@@ -1838,7 +1849,9 @@ Remember: Rejecting a good fit (R² > 0.98) to chase marginal improvements often
         "why a parameter-level fix is insufficient.\n",
         # T=2  hot: full freedom, justify from data.
         "\n**Plan constraint (open — previous iterations could not fix the fit):**\n"
-        "You have full freedom to suggest any change the data warrants. "
+        "You have full freedom to suggest any change the data warrants, "
+        "from small parameter adjustments to a completely different model. "
+        "Choose the scale of change that fits the remaining issues. "
         "The only requirement is that you justify every deviation from the "
         "original plan based on what you observe in the data and residuals.\n",
     )
@@ -1860,7 +1873,7 @@ Remember: Rejecting a good fit (R² > 0.98) to chase marginal improvements often
         "explain the deviation.\n\n",
     )
 
-    def _verify_fit_with_llm(self, state: dict, fit_result: dict, history: List[dict] = None, verification_iter: int = 0) -> Optional[dict]:
+    def _verify_fit_with_llm(self, state: dict, fit_result: dict, history: List[dict] = None, verification_iter: int = 0, annealing_level: int | None = None) -> Optional[dict]:
         """
         Use LLM to verify fit quality by examining the visualization.
         Returns verification result with any issues found, or None if verification fails.
@@ -1889,11 +1902,15 @@ Remember: Rejecting a good fit (R² > 0.98) to chase marginal improvements often
             reject_threshold=self.r2_threshold - 0.05,
         )
 
-        # Constraint annealing: spread temperature levels evenly across iterations.
+        # Constraint annealing: use caller-supplied level (adaptive) or fall
+        # back to the legacy iteration-proportional formula.
         schedule = self._CONSTRAINT_ANNEALING_SCHEDULE
-        n_levels = len(schedule)
-        max_iter = max(self.max_verification_iterations, 1)
-        level = min(verification_iter * n_levels // max_iter, n_levels - 1)
+        if annealing_level is not None:
+            level = min(annealing_level, len(schedule) - 1)
+        else:
+            n_levels = len(schedule)
+            max_iter = max(self.max_verification_iterations, 1)
+            level = min(verification_iter * n_levels // max_iter, n_levels - 1)
         prompt_text += schedule[level]
 
         # Add history context
@@ -1947,25 +1964,31 @@ Remember: Rejecting a good fit (R² > 0.98) to chase marginal improvements often
         Returns updated config.
         """
         config = state.get("locked_fitting_config", {}).copy()
-        
+
         recommended_action = verification.get("recommended_action", "")
         if not recommended_action or recommended_action.lower() == "none":
             return config
-        
+
         # Build a refinement prompt based on verification results
         issues_summary = []
         for issue in verification.get("issues_found", []):
             issues_summary.append(f"- {issue.get('location', 'Unknown')}: {issue.get('problem', '')} -> {issue.get('suggested_fix', '')}")
-        
+
         spurious = verification.get("spurious_components", [])
         missing = verification.get("missing_features", [])
-        
+
+        # Inject the same constraint annealing directive so the refinement
+        # LLM respects the current temperature level.
+        annealing_level = state.get("_annealing_level", 0)
+        schedule = self._CONSTRAINT_ANNEALING_SCHEDULE
+        constraint_text = schedule[min(annealing_level, len(schedule) - 1)]
+
         refinement_prompt = f"""Refine the fitting approach based on automated verification feedback.
 
 **CURRENT APPROACH:**
 - Model: {config.get('physical_model', 'Unknown')}
 - Strategy: {config.get('fitting_strategy', 'Unknown')}
-
+{constraint_text}
 **VERIFICATION FINDINGS:**
 {chr(10).join(issues_summary) if issues_summary else 'No specific issues listed'}
 
@@ -2002,6 +2025,7 @@ Return JSON with the refined fitting approach:
             
         except Exception as e:
             self.logger.error(f"      Refinement failed: {e}")
+            config["_refinement_error"] = str(e)
             return config
 
     def _get_human_feedback_for_poor_fit(self, state: dict, best_result: dict, all_attempts: List[dict]) -> Optional[dict]:
@@ -2179,6 +2203,7 @@ Return JSON with:
         verification_history = []
         best_result = None
         best_r2 = -1.0
+        best_config = state.get("locked_fitting_config", {}).copy()
 
         # Anchor = first spectrum overall OR first in a regime; gets full QC
         _is_anchor = spectrum_idx == 0 or is_regime_anchor
@@ -2203,34 +2228,35 @@ Return JSON with:
             if r2 > best_r2:
                 best_r2 = r2
                 best_result = result
+                best_config = state.get("locked_fitting_config", {}).copy()
 
             # --- Verification loop (for anchor spectra: first overall or first in regime) ---
+            fit_was_approved = False
             if _is_anchor:
                 if not best_result or not best_result.get("success") or best_r2 < 0.1:
                     self.logger.warning(f"   Initial fit failed or R² too low ({best_r2:.4f}), skipping verification")
                 else:
-                    fit_was_approved = False
+                    # Adaptive annealing state: start frozen, escalate
+                    # only when improvement is too slow to reach threshold.
+                    _annealing_level = 0
+                    _prev_best_r2 = best_r2
+                    _n_anneal_levels = len(self._CONSTRAINT_ANNEALING_SCHEDULE)
 
                     for verification_iter in range(self.max_verification_iterations):
-                        self.logger.info(f"   Verification {verification_iter + 1}/{self.max_verification_iterations}...")
-                        
+                        self.logger.info(f"   Verification {verification_iter + 1}/{self.max_verification_iterations} (annealing level {_annealing_level})...")
+
                         verification = self._verify_fit_with_llm(
                             state, best_result,
                             history=verification_history,
                             verification_iter=verification_iter,
+                            annealing_level=_annealing_level,
                         )
-                        
+
                         if verification is None:
                             self.logger.warning(f"   Verification failed, skipping")
                             break
-                        
-                        # Compute the annealing level actually used by the
-                        # verification prompt (not the stale state value).
-                        _n_lvl = len(self._CONSTRAINT_ANNEALING_SCHEDULE)
-                        _max_it = max(self.max_verification_iterations, 1)
-                        _cur_level = min(
-                            verification_iter * _n_lvl // _max_it, _n_lvl - 1
-                        )
+
+                        _cur_level = _annealing_level
 
                         # Store in history for next iteration's context
                         verification_history.append({
@@ -2246,17 +2272,34 @@ Return JSON with:
                             self.logger.info(f"   ✅ Fit approved (R² = {best_r2:.4f})")
                             fit_was_approved = True
                             break
-                        
+
                         # Log issues
                         self._log_verification_issues(verification)
-                        
+
                         # Apply LLM's recommended fixes
                         refined_config = self._apply_llm_verification_feedback(state, verification)
-                        
+
+                        # If the refinement LLM call failed (transient
+                        # API error), tag the history so the next verifier
+                        # knows the fix was never applied.
+                        refinement_error = refined_config.pop(
+                            "_refinement_error", None
+                        )
+                        if refinement_error:
+                            verification_history[-1]["refinement_error"] = (
+                                refinement_error
+                            )
+
                         if refined_config == state.get("locked_fitting_config", {}):
-                            self.logger.info(f"   No config changes suggested, stopping verification")
-                            break
-                        
+                            # No changes at current temperature — escalate to
+                            # give the LLM more freedom before giving up.
+                            _annealing_level = min(_annealing_level + 1, _n_anneal_levels - 1)
+                            if _annealing_level == _cur_level:
+                                self.logger.info(f"   No config changes at max annealing level, stopping verification")
+                                break
+                            self.logger.info(f"   No config changes suggested, escalating to annealing level {_annealing_level}")
+                            continue
+
                         # Clean up old visualization
                         old_viz_path = best_result.get("visualization_path")
                         if old_viz_path and Path(old_viz_path).exists():
@@ -2264,15 +2307,11 @@ Return JSON with:
                                 os.remove(old_viz_path)
                             except:
                                 pass
-                        
+
                         state["locked_fitting_config"] = refined_config
 
-                        # Sync skill strictness with annealing temperature
-                        n_levels = len(self._SKILL_STRICTNESS_SCHEDULE)
-                        max_iter = max(self.max_verification_iterations, 1)
-                        state["_annealing_level"] = min(
-                            verification_iter * n_levels // max_iter, n_levels - 1
-                        )
+                        # Sync skill strictness with adaptive annealing level
+                        state["_annealing_level"] = _annealing_level
 
                         # Refit with refined config
                         self.logger.info(f"   Refitting with verification feedback...")
@@ -2280,14 +2319,11 @@ Return JSON with:
                             state=state, curve_data=curve_data, data_path=data_path,
                             spectrum_name=spectrum_name, spectrum_idx=spectrum_idx, base_script=None
                         )
-                        
+
                         if verified_result["success"]:
                             verified_r2 = verified_result.get("fit_quality", {}).get("r_squared", 0)
                             self.logger.info(f"   Refit R² = {verified_r2:.4f} (was {best_r2:.4f})")
-                            
-                            # Update best result for next iteration
-                            best_r2 = verified_r2
-                            best_result = verified_result
+
                             all_attempts.append({
                                 "model": f"Verification-{verification_iter + 1}",
                                 "r2": verified_r2,
@@ -2295,16 +2331,51 @@ Return JSON with:
                                 "config": state.get("locked_fitting_config", {}).copy(),
                                 "verification": verification,
                             })
+
+                            # Always promote: the verifier rejected the previous
+                            # best, so the refit (produced to fix those issues)
+                            # should be what gets verified next.  The highest-R²
+                            # result is preserved in all_attempts for the judge.
+                            best_r2 = verified_r2
+                            best_result = verified_result
+                            best_config = state.get("locked_fitting_config", {}).copy()
+
+                            # Adaptive annealing: escalate only when the
+                            # improvement rate is too slow to reach threshold
+                            # within the remaining iterations.
+                            improvement = verified_r2 - _prev_best_r2
+                            remaining = max(self.max_verification_iterations - verification_iter - 1, 1)
+                            required_rate = max(self.r2_threshold - best_r2, 0.0) / remaining
+                            if improvement < required_rate:
+                                _annealing_level = min(
+                                    _annealing_level + 1, _n_anneal_levels - 1
+                                )
+                                self.logger.info(
+                                    f"   Annealing: improvement {improvement:.4f} < required rate {required_rate:.4f}, "
+                                    f"escalating to level {_annealing_level}"
+                                )
+                            else:
+                                self.logger.info(
+                                    f"   Annealing: improvement {improvement:.4f} >= required rate {required_rate:.4f}, "
+                                    f"staying at level {_annealing_level}"
+                                )
+                            _prev_best_r2 = best_r2
+
+                            # Keep state config synced with best result so the
+                            # next iteration refines the config that produced
+                            # the visualization it examines.
+                            state["locked_fitting_config"] = best_config
                         else:
                             self.logger.warning(f"   Refit failed, stopping verification")
                             break
-                    
+
                     else:
                         # Loop exhausted without approval - verify the final refit
                         self.logger.info(f"   Verifying final refit...")
                         final_verification = self._verify_fit_with_llm(
                             state, best_result,
                             verification_iter=self.max_verification_iterations,
+                            annealing_level=_annealing_level,
                         )
 
                         if final_verification:
@@ -2312,7 +2383,23 @@ Return JSON with:
                                 self.logger.info(f"   ✅ Final fit approved (R² = {best_r2:.4f})")
                             else:
                                 self._log_verification_issues(final_verification)
-                    
+
+                    # Restore config to match best result after verification loop
+                    state["locked_fitting_config"] = best_config
+
+            # --- Verifier-approved fits bypass the R² threshold check ---
+            if fit_was_approved:
+                self.logger.info(f"✅ Verifier approved fit (R² = {best_r2:.4f})")
+                quality_history = self._build_quality_history(
+                    best_r2, self.r2_threshold, all_attempts,
+                    verification_history, None,
+                    best_result.get("script_errors"),
+                )
+                quality_history["approved"] = True
+                quality_history["approved_by"] = "verifier"
+                best_result["quality_history"] = quality_history
+                return best_result
+
             # --- Check if we meet threshold ---
             if best_r2 >= self.r2_threshold:
                 self.logger.info(f"✅ R² = {best_r2:.4f} (meets threshold {self.r2_threshold})")
@@ -2376,6 +2463,7 @@ Return JSON with:
                 if alt_r2 > best_r2:
                     best_r2 = alt_r2
                     best_result = alt_result
+                    best_config = temp_config.copy()
                     best_result["_winning_config"] = temp_config
                 
                 if alt_r2 >= self.r2_threshold:
@@ -2445,6 +2533,7 @@ Return JSON with:
                         if human_r2 > best_r2:
                             best_r2 = human_r2
                             best_result = human_guided_result
+                            best_config = refined_config.copy()
                             if _is_anchor:
                                 state["locked_fitting_config"] = refined_config
                         else:
@@ -2500,8 +2589,8 @@ Return JSON with:
             )
             self.logger.warning(f"⚠️ Proceeding with best available fit (R² = {best_r2:.4f})")
 
-            if _is_anchor and best_result.get("_winning_config"):
-                state["locked_fitting_config"] = best_result["_winning_config"]
+            if _is_anchor:
+                state["locked_fitting_config"] = best_config
 
             return best_result
         else:
@@ -3165,11 +3254,20 @@ Return JSON with:
                     "reasoning": f"Judge parse failed: {error}"
                 }
             
-            # Log judge decision
+            # Convert 1-indexed response to 0-indexed, with bounds check
             selected = result.get("selected_index")
+            if selected is not None:
+                selected = int(selected) - 1  # prompt uses 1-indexed labels
+                if selected < 0 or selected >= len(attempts):
+                    self.logger.warning(
+                        f"   Judge returned out-of-range index {selected + 1}, ignoring"
+                    )
+                    selected = None
+                result["selected_index"] = selected
+
             acceptable = result.get("acceptable", False)
             reasoning = result.get("reasoning", "No reasoning provided")
-            
+
             if acceptable and selected is not None:
                 self.logger.info(f"   ✅ Judge selected attempt {selected + 1}")
             else:
@@ -3223,8 +3321,8 @@ class AdaptiveRefitController:
         output_dir: str,
         plot_fn: Callable,
         r2_threshold: float = 0.95,
-        max_model_retries: int = 3,
-        max_verification_iterations: int = 3,
+        max_model_retries: int = 1,
+        max_verification_iterations: int = 7,
         preprocessor: Any = None,
         enable_human_feedback: bool = False,
         conformance_instructions: str = "",
@@ -3479,6 +3577,7 @@ class AdaptiveRefitController:
                 result = self._fitting_helper._fit_with_quality_control(
                     state=refit_state, curve_data=curve_data, data_path=data_path,
                     spectrum_name=name, spectrum_idx=idx,
+                    is_regime_anchor=True,  # enable full verification for independent refit
                 )
             except Exception as e:
                 self.logger.error(f"  Consistency refit failed for {name}: {e}")
@@ -3588,6 +3687,7 @@ class AdaptiveRefitController:
                 refit_result = self._fitting_helper._fit_with_quality_control(
                     state=refit_state, curve_data=curve_data, data_path=data_path,
                     spectrum_name=name, spectrum_idx=idx,
+                    is_regime_anchor=True,  # enable full verification for independent refit
                 )
             except Exception as e:
                 self.logger.error(f"  Refit failed for {name}: {e}")

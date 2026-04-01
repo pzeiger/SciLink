@@ -59,9 +59,9 @@ def create_unified_curve_fitting_pipeline(
     literature_agent: Any | None = None,
     enable_human_feedback: bool = False,
     r2_threshold: float = 0.95,
-    max_model_retries: int = 3,
+    max_model_retries: int = 1,
     outlier_sigma: float = 2.0,
-    max_verification_iterations: int = 3,
+    max_verification_iterations: int = 7,
 ) -> List:
     """
     Factory function to create the unified curve fitting pipeline.
@@ -123,9 +123,9 @@ def create_unified_curve_fitting_pipeline(
         literature_agent: Optional literature search agent
         enable_human_feedback: Enable human-in-the-loop refinement
         r2_threshold: Minimum acceptable R² value (default: 0.95)
-        max_model_retries: Max alternative models to try if R² inadequate (default: 3)
+        max_model_retries: Max alternative models to try if R² inadequate (default: 1)
         outlier_sigma: Sigma threshold for outlier detection in series (default: 2.0)
-        max_verification_iterations: Max LLM verification iterations for first spectrum (default: 3)
+        max_verification_iterations: Max LLM verification iterations for first spectrum (default: 7)
     
     Returns:
         List of controller instances to execute in sequence
@@ -282,9 +282,9 @@ def create_curve_fitting_pipeline(
     enable_human_feedback: bool = False,
     settings: dict | None = None,  # Deprecated
     r2_threshold: float = 0.95,
-    max_model_retries: int = 3,
+    max_model_retries: int = 1,
     outlier_sigma: float = 2.0,
-    max_verification_iterations: int = 3,
+    max_verification_iterations: int = 7,
 ) -> List:
     """
     BACKWARD COMPATIBLE: Creates curve fitting pipeline.
