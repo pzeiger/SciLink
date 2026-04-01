@@ -2632,8 +2632,11 @@ Access channels via `image[:,:,0]`, `image[:,:,1]`, etc.
   Usage: `result = run_sam_analysis(image_array, params={"sam_parameters": "default",
     "min_area": <set_from_image>, "max_area": <set_from_image>,
     "pruning_iou_threshold": <set_from_image>})`
-  First arg must be a 2D grayscale numpy array (not a file path, not RGB). \
-For multi-channel images, pass a single channel (e.g., `image[:,:,0]`).
+  First arg accepts a 2D grayscale numpy array or an HxWx3 RGB uint8 array. \
+For RGB images, passing the array directly is often preferable because SAM can leverage \
+color contrast, but extracting a single channel is also valid when one channel carries the \
+most relevant contrast. For non-RGB multi-channel images (e.g., 2-channel or 4-channel), \
+pass a single channel (e.g., `image[:,:,0]`).
   Choose min_area/max_area based on expected object sizes in the image.
   Always start with sam_parameters='default'. Only escalate to 'sensitive' in a retry if
   'default' misses visible objects.
@@ -2971,8 +2974,9 @@ scilink.tools.sam — SAM instance segmentation for touching/overlapping objects
 usage: `result = run_sam_analysis(image_array, params={{"sam_parameters": "default", \
 "min_area": <set_from_plan>, "max_area": <set_from_plan>, \
 "pruning_iou_threshold": <set_from_plan>}})`. \
-First arg must be a 2D grayscale numpy array (not a file path, not RGB). \
-For multi-channel images, pass a single channel (e.g., `image[:,:,0]`). \
+First arg must be a 2D grayscale numpy array or an HxWx3 RGB uint8 array. \
+For multi-channel images that are not RGB (e.g., 2-channel or 4-channel), pass a single \
+channel (e.g., `image[:,:,0]`). True RGB images can be passed directly. \
 Choose min_area/max_area based on expected object sizes in the image. \
 sam_parameters MUST be 'default' on the first attempt — only switch to 'sensitive' in a retry \
 after 'default' has been tried and missed objects. \
@@ -2980,6 +2984,7 @@ Parameters: \
 min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False), \
 pruning_iou_threshold (masks with IoU above this are removed; lower = stricter, higher = keeps more overlapping objects; default 0.5). \
 Returns dict with "particles" (list with "mask", "area" per particle), "total_count", "masks". \
+For RGB input, each particle also includes "mean_color_rgb". \
 Avoid Gaussian blur before SAM unless noise is very high.
 
 **Requirements:**
@@ -3044,14 +3049,17 @@ scilink.tools.sam — SAM instance segmentation for touching/overlapping objects
 usage: `result = run_sam_analysis(image_array, params={{"sam_parameters": "default", \
 "min_area": <set_from_plan>, "max_area": <set_from_plan>, \
 "pruning_iou_threshold": <set_from_plan>}})`. \
-First arg must be a 2D grayscale numpy array (not a file path, not RGB). \
-For multi-channel images, pass a single channel (e.g., `image[:,:,0]`). \
+First arg must be a 2D grayscale numpy array or an HxWx3 RGB uint8 array. \
+For multi-channel images that are not RGB (e.g., 2-channel or 4-channel), pass a single \
+channel (e.g., `image[:,:,0]`). True RGB images can be passed directly. \
+Choose min_area/max_area based on expected object sizes in the image. \
 sam_parameters MUST be 'default' on the first attempt — only switch to 'sensitive' in a retry \
 after 'default' has been tried and missed objects. \
 Parameters: \
 min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False), \
 pruning_iou_threshold (masks with IoU above this are removed; lower = stricter, higher = keeps more overlapping objects; default 0.5). \
 Returns dict with "particles" (list with "mask", "area" per particle), "total_count", "masks". \
+For RGB input, each particle also includes "mean_color_rgb". \
 Avoid Gaussian blur before SAM unless noise is very high.
 
 **CRITICAL:** Fix only the execution error. Do NOT change the analysis pipeline, feature \
@@ -3092,6 +3100,9 @@ to achieve reasonable results, while keeping the same methods and pipeline struc
 3. The script adds minor preprocessing/postprocessing steps (hole filling, small object \
 removal, morphological cleanup) that support the core methods without changing their \
 input/output contract.
+4. The script passes an RGB image directly to SAM instead of converting to a single channel \
+(or vice versa) — SAM accepts both, and the choice of grayscale vs RGB input is an \
+implementation-level decision, not a method change.
 The script's "summary" field should explain any adjustment.
 Changing the analysis method (e.g., replacing LoG with Hough circles) is NOT a justified \
 deviation — that requires a new plan via the retry pipeline.

@@ -55,8 +55,9 @@ boundaries follow real inter-object edges.
 
 ### foundational
 **SAM implementation (preferred):**
-Pass a 2D grayscale array (single channel). For multi-channel images, pass
-the most informative channel (e.g., `image[:,:,0]`). Do not convert to RGB.
+Pass a 2D grayscale array or an HxWx3 RGB uint8 array. For multi-channel
+images that are not RGB (e.g., 2-channel or 4-channel), pass a single
+channel (e.g., `image[:,:,0]`).
 **Tune all numeric parameters to the image** — the values below are
 syntax examples only, not recommended defaults.
 ```

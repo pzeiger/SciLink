@@ -2,13 +2,11 @@
 SAM Analysis Tools with Model Caching Support
 
 This module provides SAM-based particle analysis tools that integrate with
-atomai's ParticleAnalyzer while adding:
+scilink's ParticleAnalyzer (supports both grayscale and RGB input) while adding:
 1. Model caching - loads SAM model once and reuses for batch processing
 2. Proper statistics calculation with actual area values
 3. Shape statistics (circularity, solidity, aspect ratio)
 4. Support for spatial calibration (nm/pixel)
-
-Replace the contents of scilink/tools/sam.py with this file.
 """
 
 import json
@@ -47,7 +45,7 @@ def get_or_create_sam_model(params: dict) -> Any:
     Returns:
         Loaded SAM model (ParticleAnalyzer instance)
     """
-    from atomai.models.sam import ParticleAnalyzer
+    from scilink.tools.particle_analyzer import ParticleAnalyzer
     
     # Create cache key from model-defining parameters
     cache_key = (
@@ -203,7 +201,7 @@ def calculate_sam_statistics(
             - mean_solidity: Mean solidity
             - Plus calibrated measurements if nm_per_pixel provided
     """
-    from atomai.models.sam import ParticleAnalyzer
+    from scilink.tools.particle_analyzer import ParticleAnalyzer
     
     logger.info("   (Tool Info: Extracting morphological statistics...)")
     
@@ -306,7 +304,7 @@ def visualize_sam_results(
     Returns:
         RGB visualization array (uint8)
     """
-    from atomai.models.sam import ParticleAnalyzer
+    from scilink.tools.particle_analyzer import ParticleAnalyzer
     
     # Use atomai's visualization
     overlay_image = ParticleAnalyzer.visualize_particles(
@@ -387,7 +385,7 @@ def get_particles_dataframe(sam_result: dict):
     Returns:
         pandas DataFrame with particle properties
     """
-    from atomai.models.sam import ParticleAnalyzer
+    from scilink.tools.particle_analyzer import ParticleAnalyzer
     return ParticleAnalyzer.particles_to_dataframe(sam_result)
 
 
