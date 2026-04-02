@@ -272,39 +272,48 @@ class KnowledgeBase:
        
     def source_difference(self, new_sources: List[str | Dict[str, str]]) -> List[str | Dict[str, str]]:
         """Returns the subset of new sources which are not present in the existing sources."""
-        
+
         if not new_sources:
             return []
 
-        # Check if the new sources are dictionaries
-        contains_dict = any(isinstance(item, dict) for item in new_sources)
-        
+        # Check if the new sources are dictionaries (code repo format with url/ref)
+        contains_dict = any(
+            isinstance(item, dict) and "path" not in item
+            for item in new_sources
+        )
+
         if contains_dict:
             # 1. Convert new sources to tuples for set comparison
             new_sources_tuple = {tuple(sorted(d.items())) for d in new_sources if isinstance(d, dict)}
-            
-            # 2. Filter existing sources to ONLY check dictionaries
+
+            # 2. Filter existing sources to ONLY check dictionaries (exclude manifests)
             old_sources_tuple = {
-                tuple(sorted(d.items())) 
-                for d in self.sources 
-                if isinstance(d, dict)
+                tuple(sorted(d.items()))
+                for d in self.sources
+                if isinstance(d, dict) and "path" not in d
             }
-            
+
             # 3. Calculate difference and convert back to dicts
             difference_tuples = new_sources_tuple - old_sources_tuple
             source_difference = [dict(t) for t in difference_tuples]
-            
+
         else:
             normalize = lambda p: os.path.normpath(p)
 
             # Collect existing source info for comparison.
-            existing_paths = {normalize(s) for s in self.sources if isinstance(s, str)}
+            existing_paths: set[str] = set()
+            for s in self.sources:
+                if isinstance(s, str):
+                    existing_paths.add(normalize(s))
+                elif isinstance(s, dict) and "path" in s:
+                    existing_paths.add(normalize(s["path"]))
 
             # Build a set of filenames that were previously ingested.
             # We extract basenames from:
             #   1. Source paths that look like files (have a known extension)
-            #   2. Chunk metadata (each chunk stores its source file path)
-            #   3. Directory sources that still exist on disk
+            #   2. Directory manifests stored alongside source paths
+            #   3. Chunk metadata (each chunk stores its source file path)
+            #   4. Directory sources that still exist on disk
             # This lets us recognise the same file even when it's uploaded
             # to a different session directory whose old path no longer exists.
             _FILE_EXTENSIONS = {
@@ -314,6 +323,11 @@ class KnowledgeBase:
             }
             existing_basenames: set[str] = set()
             for s in self.sources:
+                if isinstance(s, dict):
+                    # Manifest entry: extract stored filenames
+                    if "files" in s:
+                        existing_basenames.update(s["files"])
+                    continue
                 if not isinstance(s, str):
                     continue
                 p = Path(normalize(s))
@@ -350,7 +364,18 @@ class KnowledgeBase:
                     if dir_files and dir_files.issubset(existing_basenames):
                         continue
                 source_difference.append(s)
-        
-        # Update history
-        self.sources.extend(source_difference)
+
+        # Update history — store directory sources as manifests so that
+        # future comparisons work even if the directory is later deleted
+        # and contains files (e.g. images) that don't produce chunks.
+        for s in source_difference:
+            if isinstance(s, str):
+                p = Path(normalize(s))
+                if p.is_dir():
+                    dir_files = sorted(f.name for f in p.rglob("*") if f.is_file())
+                    self.sources.append({"path": s, "files": dir_files})
+                else:
+                    self.sources.append(s)
+            else:
+                self.sources.append(s)
         return source_difference
