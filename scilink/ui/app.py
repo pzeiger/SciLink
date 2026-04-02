@@ -450,7 +450,6 @@ with chat_tab:
                         st.iframe(
                             p.read_text(encoding="utf-8"),
                             height=600,
-                            scrolling=True,
                         )
                     st.download_button(
                         f"Download {p.name}",
@@ -578,7 +577,6 @@ with chat_tab:
                     f'overflow-y:auto;line-height:1.5">'
                     f"{escaped_ctx}</pre>",
                     height=box_h,
-                    scrolling=True,
                 )
 
             # Adapt labels based on the type of input prompt.
@@ -747,7 +745,6 @@ with chat_tab:
                         f"<script>var e=document.getElementById('log');"
                         f"e.scrollTop=e.scrollHeight;</script>",
                         height=300,
-                        scrolling=False,
                     )
 
     _agent_monitor()

@@ -74,7 +74,6 @@ def render_file_preview(file_path: Path) -> None:
         st.iframe(
             file_path.read_text(encoding="utf-8"),
             height=600,
-            scrolling=True,
         )
         return
 
