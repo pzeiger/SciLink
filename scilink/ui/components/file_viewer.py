@@ -28,10 +28,16 @@ def render_file_preview(file_path: Path) -> None:
     if suffix in (".tif", ".tiff"):
         try:
             from PIL import Image
+            import numpy as np
             img = Image.open(file_path)
-            st.image(img)
-        except Exception:
+            arr = np.array(img, dtype=np.float64)
+            if arr.max() > arr.min():
+                arr = (arr - arr.min()) / (arr.max() - arr.min())
+            st.image(arr, clamp=True)
+        except ImportError:
             st.info("Install Pillow to preview TIFF files.")
+        except Exception as exc:
+            st.error(f"Could not preview TIFF file: {exc}")
         return
 
     # JSON
