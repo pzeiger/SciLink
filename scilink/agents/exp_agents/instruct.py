@@ -2985,7 +2985,10 @@ min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default
 pruning_iou_threshold (masks with IoU above this are removed; lower = stricter, higher = keeps more overlapping objects; default 0.5). \
 Returns dict with "particles" (list with "mask", "area" per particle), "total_count", "masks". \
 For RGB input, each particle also includes "mean_color_rgb". \
-Avoid Gaussian blur before SAM unless noise is very high.
+Avoid Gaussian blur before SAM unless noise is very high. \
+scilink.tools.atom_finding_tools — atomic column detection for STEM images. \
+`from scilink.tools.atom_finding_tools import detect_atoms, find_zone_axes, find_missing_atoms, subtract_atoms`; \
+use only when the domain skill or plan calls for atom-finding tools.
 
 **Requirements:**
 1. Load image: use `np.load(path)` for .npy, or `cv2.imread(path, cv2.IMREAD_UNCHANGED)` \
@@ -3060,7 +3063,10 @@ min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default
 pruning_iou_threshold (masks with IoU above this are removed; lower = stricter, higher = keeps more overlapping objects; default 0.5). \
 Returns dict with "particles" (list with "mask", "area" per particle), "total_count", "masks". \
 For RGB input, each particle also includes "mean_color_rgb". \
-Avoid Gaussian blur before SAM unless noise is very high.
+Avoid Gaussian blur before SAM unless noise is very high. \
+scilink.tools.atom_finding_tools — atomic column detection for STEM images. \
+`from scilink.tools.atom_finding_tools import detect_atoms, find_zone_axes, find_missing_atoms, subtract_atoms`; \
+use only when the domain skill or plan calls for atom-finding tools.
 
 **CRITICAL:** Fix only the execution error. Do NOT change the analysis pipeline, feature \
 extraction approach, or the overall analysis strategy. The approach is locked for series consistency.
