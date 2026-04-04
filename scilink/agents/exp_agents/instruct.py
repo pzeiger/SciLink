@@ -2987,8 +2987,9 @@ Returns dict with "particles" (list with "mask", "area" per particle), "total_co
 For RGB input, each particle also includes "mean_color_rgb". \
 Avoid Gaussian blur before SAM unless noise is very high. \
 scilink.tools.atom_finding_tools — atomic column detection for STEM images. \
-`from scilink.tools.atom_finding_tools import detect_atoms, find_zone_axes, find_missing_atoms, subtract_atoms`; \
-use only when the domain skill or plan calls for atom-finding tools.
+`from scilink.tools.atom_finding_tools import detect_atoms, detect_atoms_dcnn, refine_positions, find_zone_axes, find_missing_atoms, subtract_atoms`; \
+detect_atoms uses classical peak detection; detect_atoms_dcnn uses a DCNN ensemble and requires fov_nm (field of view in nm). \
+Use only when the domain skill or plan calls for atom-finding tools.
 
 **Requirements:**
 1. Load image: use `np.load(path)` for .npy, or `cv2.imread(path, cv2.IMREAD_UNCHANGED)` \
@@ -2997,13 +2998,14 @@ Check the image shape — it may have 2 or more channels that are not RGB. Acces
 via `image[:,:,0]`, `image[:,:,1]`, etc. Do not assume grayscale or RGB.
 2. Implement the analysis pipeline
 3. Save visualization(s): `analysis_visualization.png` showing original image alongside \
-analysis results. Use subplots with clear labels. For segmentation tasks, the first subplot \
-MUST show the original image, and the second MUST show a segmentation overlay (original \
-image with colored semi-transparent masks and contour boundaries for each detected object). \
-For multi-channel images, show each channel as a separate grayscale subplot (do not try to \
+key analysis results. Use subplots with clear labels. For basic/foundational analyses, \
+keep it concise (2-4 subplots). For complex analyses with multiple derived quantities, \
+up to 6 subplots is acceptable. For segmentation tasks, the first subplot MUST show the \
+original image, and the second MUST show a segmentation overlay (original image with \
+colored semi-transparent masks and contour boundaries for each detected object). For \
+multi-channel images, show each channel as a separate grayscale subplot (do not try to \
 display a 2-channel array directly with imshow). \
-All visualizations must be saved to the current working directory. Use `dpi=100` and limit \
-to 6 subplots max to keep file size manageable.
+All visualizations must be saved to the current working directory. Use `dpi=100`.
 4. Save key output arrays to the current working directory as `.npy` files. \
 At minimum save the primary detection/segmentation result (label map, binary \
 mask, or position array). Example: `np.save("analysis_labels.npy", label_map)`. \
@@ -3065,8 +3067,9 @@ Returns dict with "particles" (list with "mask", "area" per particle), "total_co
 For RGB input, each particle also includes "mean_color_rgb". \
 Avoid Gaussian blur before SAM unless noise is very high. \
 scilink.tools.atom_finding_tools — atomic column detection for STEM images. \
-`from scilink.tools.atom_finding_tools import detect_atoms, find_zone_axes, find_missing_atoms, subtract_atoms`; \
-use only when the domain skill or plan calls for atom-finding tools.
+`from scilink.tools.atom_finding_tools import detect_atoms, detect_atoms_dcnn, refine_positions, find_zone_axes, find_missing_atoms, subtract_atoms`; \
+detect_atoms uses classical peak detection; detect_atoms_dcnn uses a DCNN ensemble and requires fov_nm (field of view in nm). \
+Use only when the domain skill or plan calls for atom-finding tools.
 
 **CRITICAL:** Fix only the execution error. Do NOT change the analysis pipeline, feature \
 extraction approach, or the overall analysis strategy. The approach is locked for series consistency.
