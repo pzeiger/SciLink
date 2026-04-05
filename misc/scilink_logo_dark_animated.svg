@@ -119,39 +119,66 @@
   <!-- Subtle inner ring on center circle -->
   <circle cx="400" cy="430" r="102" fill="none" stroke="rgba(255,255,255,0.3)" stroke-width="1"/>
   
-  <!-- Small colored dots that orbit around the center circle edge -->
-  <!-- Hidden orbit paths centered at (400, 430) with radius 115 -->
-  <path id="orbitPathCW" d="M 400,315 A 115,115 0 0,1 515,430 A 115,115 0 0,1 400,545 A 115,115 0 0,1 285,430 A 115,115 0 0,1 400,315" fill="none" stroke="none"/>
+  <!-- Flow paths: each dot travels from one node → center circle → next node -->
+  <!-- 
+    Node positions:
+    - Blue (top): (400, 180)
+    - Orange (bottom-left): (183.5, 555)  
+    - Green (bottom-right): (616.5, 555)
+    
+    Center circle edge points (radius 115, center at 400,430):
+    - Top: (400, 315)
+    - Bottom-left: (300.4, 487.5)
+    - Bottom-right: (499.6, 487.5)
+  -->
   
-  <!-- All dots use same speed (12s) to maintain consistent 120° spacing -->
+  <!-- Path: Blue node → center circle (arc) → Orange node -->
+  <path id="pathBlueToOrange" d="M 400,248 
+                                  L 400,315 
+                                  A 115,115 0 0,0 300.4,487.5 
+                                  L 242.4,521
+                                  L 183.5,555" fill="none" stroke="none"/>
   
-  <!-- Blue dot - starts at top (0°), clockwise -->
-  <g filter="url(#blueDotGlow)" opacity="0.45">
+  <!-- Path: Orange node → center circle (arc) → Green node -->
+  <path id="pathOrangeToGreen" d="M 183.5,555 
+                                   L 242.4,521
+                                   L 300.4,487.5 
+                                   A 115,115 0 0,0 499.6,487.5 
+                                   L 557.6,521
+                                   L 616.5,555" fill="none" stroke="none"/>
+  
+  <!-- Path: Green node → center circle (arc) → Blue node -->
+  <path id="pathGreenToBlue" d="M 616.5,555 
+                                 L 557.6,521
+                                 L 499.6,487.5 
+                                 A 115,115 0 0,0 400,315 
+                                 L 400,248
+                                 L 400,180" fill="none" stroke="none"/>
+  
+  <!-- Blue dot - flows from Blue node → Orange node -->
+  <g filter="url(#blueDotGlow)" opacity="0.65">
     <circle r="5" fill="#4A90E2">
-      <animateMotion dur="18s" repeatCount="indefinite" begin="0s">
-        <mpath href="#orbitPathCW"/>
+      <animateMotion dur="8s" repeatCount="indefinite" calcMode="spline" keySplines="0.3 0 0.7 1">
+        <mpath href="#pathBlueToOrange"/>
       </animateMotion>
-      <animate attributeName="r" values="5;6;5" dur="6s" repeatCount="indefinite" calcMode="spline" keySplines="0.4 0 0.6 1; 0.4 0 0.6 1"/>
     </circle>
   </g>
   
-  <!-- Orange dot - starts at bottom-left (240°), clockwise, 12s behind blue -->
-  <g filter="url(#orangeDotGlow)" opacity="0.45">
+  <!-- Orange dot - flows from Orange node → Green node -->
+  <g filter="url(#orangeDotGlow)" opacity="0.65">
     <circle r="5" fill="#F06A45">
-      <animateMotion dur="18s" repeatCount="indefinite" begin="-12s">
-        <mpath href="#orbitPathCW"/>
+      <animateMotion dur="8s" repeatCount="indefinite" calcMode="spline" keySplines="0.3 0 0.7 1">
+        <mpath href="#pathOrangeToGreen"/>
       </animateMotion>
-      <animate attributeName="r" values="5;6;5" dur="6s" repeatCount="indefinite" begin="-2s" calcMode="spline" keySplines="0.4 0 0.6 1; 0.4 0 0.6 1"/>
     </circle>
   </g>
   
-  <!-- Green dot - starts at bottom-right (120°), clockwise, 6s behind blue -->
-  <g filter="url(#greenDotGlow)" opacity="0.45">
+  <!-- Green dot - flows from Green node → Blue node -->
+  <g filter="url(#greenDotGlow)" opacity="0.65">
     <circle r="5" fill="#34C77B">
-      <animateMotion dur="18s" repeatCount="indefinite" begin="-6s">
-        <mpath href="#orbitPathCW"/>
+      <animateMotion dur="8s" repeatCount="indefinite" calcMode="spline" keySplines="0.3 0 0.7 1">
+        <mpath href="#pathGreenToBlue"/>
       </animateMotion>
-      <animate attributeName="r" values="5;6;5" dur="6s" repeatCount="indefinite" begin="-4s" calcMode="spline" keySplines="0.4 0 0.6 1; 0.4 0 0.6 1"/>
     </circle>
   </g>
   
