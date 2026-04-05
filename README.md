@@ -181,6 +181,8 @@ Provide a Python file with `tool_schemas` (list of OpenAI-format tool dicts) and
 scilink analyze --tools ./my_image_tools.py
 ```
 
+See [docs/custom_tools_integration.md](docs/custom_tools_integration.md) for the full guide, including how custom tool outputs flow into built-in agents and how to feed a preprocessed file back into the analysis pipeline.
+
 ### Custom Skills
 
 Add domain-specific analysis guidance via Markdown skill files:
