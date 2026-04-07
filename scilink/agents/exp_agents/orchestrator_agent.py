@@ -109,7 +109,7 @@ class OrchestratorAgent:
     """
     def __init__(self, 
                  api_key: str | None = None, 
-                 model_name: str = "gemini-3-flash-preview", 
+                 model_name: str = "claude-opus-4-6",
                  base_url: str = None,
                  # Deprecated
                  google_api_key: str | None = None, 

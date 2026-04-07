@@ -54,7 +54,7 @@ class ScalarizerAgent(BaseAgent):
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model_name: str = "gemini-3.1-pro-preview",
+        model_name: str = "claude-opus-4-6",
         base_url: Optional[str] = None,
         output_dir: str = ".",
         # Deprecated

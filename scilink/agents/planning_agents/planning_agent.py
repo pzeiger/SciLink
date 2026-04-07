@@ -75,7 +75,7 @@ class PlanningAgent(BaseAgent):
     Args:
         api_key: API key for the LLM provider.
         model_name: Model name. For public deployments, use LiteLLM format
-            (e.g., "gemini-3.1-pro-preview", "claude-opus-4-6").
+            (e.g., "claude-opus-4-6", "gemini-3.1-pro-preview").
         base_url: Base URL for internal proxy endpoint.
             When provided, uses OpenAI-compatible client.
             When None, uses LiteLLM for multi-provider support.
@@ -90,7 +90,7 @@ class PlanningAgent(BaseAgent):
         local_model: DEPRECATED. Use 'base_url' instead.
     """
     def __init__(self, api_key: str = None,
-                 model_name: str = "gemini-3.1-pro-preview",
+                 model_name: str = "claude-opus-4-6",
                  base_url: Optional[str] = None,
                  embedding_model: str = "gemini-embedding-001",
                  embedding_api_key: Optional[str] = None,

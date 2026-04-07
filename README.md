@@ -93,7 +93,7 @@ Requires `pip install scilink[ui]`.
 ### MCP Server
 
 ```bash
-scilink serve --model gemini-3.1-pro-preview
+scilink serve --model claude-opus-4-6
 ```
 
 See [MCP Integration](#mcp-integration) for details.
@@ -105,7 +105,7 @@ from scilink.agents.planning_agents import PlanningAgent
 from scilink.agents.exp_agents import AnalysisOrchestratorAgent, AnalysisMode
 
 # Generate an experimental plan
-planner = PlanningAgent(model_name="gemini-3.1-pro-preview")
+planner = PlanningAgent(model_name="claude-opus-4-6")
 plan = planner.propose_experiments(
     objective="Optimize lithium extraction yield",
     knowledge_paths=["./literature/"],
@@ -133,7 +133,7 @@ Expose SciLink's analysis and planning tools to any MCP-compatible client:
 
 ```bash
 # Default (stdio transport, autonomous mode)
-scilink serve --model gemini-3.1-pro-preview
+scilink serve --model claude-opus-4-6
 
 # Analysis only, with human approval for major actions
 scilink serve --mode analyze --autonomy co-pilot
@@ -288,7 +288,7 @@ orchestrator = PlanningOrchestratorAgent(
 response = orchestrator.chat("Generate initial plan and analyze batch_001.csv")
 
 # Direct agent usage
-agent = PlanningAgent(model_name="gemini-3.1-pro-preview")
+agent = PlanningAgent(model_name="claude-opus-4-6")
 plan = agent.propose_experiments(
     objective="Screen precipitation conditions",
     knowledge_paths=["./literature/"],
@@ -296,7 +296,7 @@ plan = agent.propose_experiments(
 )
 
 # Bayesian optimization
-bo = BOAgent(model_name="gemini-3.1-pro-preview")
+bo = BOAgent(model_name="claude-opus-4-6")
 result = bo.run_optimization_loop(
     data_path="./optimization_data.csv",
     objective_text="Maximize yield while minimizing cost",

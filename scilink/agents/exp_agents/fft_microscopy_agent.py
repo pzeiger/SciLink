@@ -52,7 +52,7 @@ class FFTMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     def __init__(
         self,
         api_key: str | None = None,
-        model_name: str = "gemini-3.1-pro-preview",
+        model_name: str = "claude-opus-4-6",
         base_url: str | None = None,
         # Deprecated params
         google_api_key: str | None = None,

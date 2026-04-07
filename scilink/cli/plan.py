@@ -58,9 +58,9 @@ Environment Variables:
   FUTUREHOUSE_API_KEY      FutureHouse API key for literature search (optional)
 
 Supported Models:
+  Anthropic: claude-opus-4-6, claude-sonnet-4-6, etc.
   Google:    gemini-3.1-pro-preview, gemini-2.0-flash, gemini-1.5-pro, etc.
   OpenAI:    gpt-4o, gpt-4-turbo, o1-preview, etc.
-  Anthropic: claude-sonnet-4-20250514, claude-opus-4-20250514, etc.
         """
     )
     
@@ -68,8 +68,8 @@ Supported Models:
     parser.add_argument(
         '--model',
         type=str,
-        default='gemini-3.1-pro-preview',
-        help='Model name (default: gemini-3.1-pro-preview)'
+        default='claude-opus-4-6',
+        help='Model name (default: claude-opus-4-6)'
     )
     
     parser.add_argument(
@@ -309,7 +309,7 @@ class OrchestratorPlayground:
         )
         
         # Read from config (passed from CLI)
-        model_name = self.config.get('model_name', 'gemini-3.1-pro-preview')
+        model_name = self.config.get('model_name', 'claude-opus-4-6')
         base_url = self.config.get('base_url')
         embedding_model = self.config.get('embedding_model', 'gemini-embedding-001')
         api_key = self.config.get('api_key')

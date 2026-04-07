@@ -138,7 +138,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     def __init__(
         self,
         api_key: str | None = None,
-        model_name: str = "gemini-3.1-pro-preview",
+        model_name: str = "claude-opus-4-6",
         base_url: str | None = None,
         output_dir: str = "image_analysis_output",
         # Deprecated parameters
