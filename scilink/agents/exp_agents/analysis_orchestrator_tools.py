@@ -1516,7 +1516,8 @@ class AnalysisOrchestratorTools:
             auxiliary_data: str = None,
             auxiliary_label: str = None,
             skill: str = None,
-            series_metadata: str = None
+            series_metadata: str = None,
+            task_mode: str = None,
         ) -> str:
             """
             Execute analysis with the selected or specified agent.
@@ -1975,6 +1976,11 @@ class AnalysisOrchestratorTools:
                     if skill in custom_skills:
                         skill = custom_skills[skill]
                     analyze_kwargs["skill"] = skill
+                if task_mode is not None:
+                    # Currently consumed by CurveFittingAgent; other agents
+                    # accept **kwargs and silently ignore unknown parameters,
+                    # matching the existing pattern for `hints`.
+                    analyze_kwargs["task_mode"] = task_mode
                 if self.orch.active_knowledge:
                     analyze_kwargs["prior_knowledge"] = self.orch.active_knowledge
                 result = agent.analyze(**analyze_kwargs)
@@ -2131,6 +2137,20 @@ class AnalysisOrchestratorTools:
                         "automatically sorted by value for correct trend analysis. "
                         "Format: {\"variable\": \"<variable>\", \"values\": {\"<filename>\": <value>, ...}, \"unit\": \"<units>\"}. "
                         "Example: {\"variable\": \"temperature\", \"values\": {\"spec_5K.csv\": 5, \"spec_10K.csv\": 10, \"spec_20K.csv\": 20}, \"unit\": \"K\"}"
+                    )
+                },
+                "task_mode": {
+                    "type": "string",
+                    "enum": ["fitting", "identification"],
+                    "description": (
+                        "CurveFitting agent only. Set to 'identification' when the user "
+                        "is asking the agent to help identify what material or phase the "
+                        "spectrum is from (no sample identity known), rather than to fit "
+                        "and interpret a known material. In identification mode the planner "
+                        "uses a generic flexible model and the interpreter enumerates "
+                        "ranked candidate materials with discriminating peaks instead of "
+                        "asserting a single answer. Leave unset (defaults to 'fitting') "
+                        "for standard analyses where the sample is known."
                     )
                 }
             },

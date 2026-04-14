@@ -256,6 +256,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         data: AnalysisInput,
         system_info: Dict[str, Any] | str | None = None,
         # Curve fitting specific
+        task_mode: str | None = None,
         objective: str | None = None,
         hints: str | None = None,
         series_metadata: Optional[dict] = None,
@@ -285,6 +286,17 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             system_info: Sample/experiment metadata. May include a ``"series"``
                 key with series metadata (see below); it will be extracted
                 automatically.
+            task_mode: Optional task mode. ``"fitting"`` (default) performs
+                the standard curve-fitting analysis. ``"identification"``
+                switches the agent into a material-identification guardrail
+                mode: the planner uses a generic flexible model with neutral
+                parameter names, and the interpreter produces a ranked list
+                of candidate materials/phases with discriminating peaks
+                instead of asserting a single answer. Set this explicitly —
+                standalone callers pass it directly; the
+                ``AnalysisOrchestratorAgent`` passes it via its tool
+                interface based on user intent. When ``None``, defaults to
+                ``"fitting"``; no auto-detection is performed.
             objective: Optional high-level scientific objective that frames
                 the entire analysis (e.g., "Determine whether the sample
                 underwent a phase transition", "Quantify the relative
@@ -390,6 +402,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         effective_r2_threshold = r2_threshold if r2_threshold is not None else self.r2_threshold
         effective_max_retries = max_model_retries if max_model_retries is not None else self.max_model_retries
         effective_outlier_sigma = outlier_sigma if outlier_sigma is not None else self.outlier_sigma
+
+        # Resolve task_mode — caller sets this explicitly (standalone user or
+        # orchestrator). Defaults to "fitting" when unset.
+        effective_task_mode = self._resolve_task_mode(task_mode)
         
         # Convert DataFrame to numpy array (first two numeric columns)
         if isinstance(data, pd.DataFrame):
@@ -541,6 +557,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "series_metadata": series_metadata or {},
             "analysis_hints": hints,
             "analysis_objective": objective,
+            "task_mode": effective_task_mode,
 
             # Auxiliary reference data
             **aux_state,
@@ -647,6 +664,27 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         )
         
         return final_results
+
+    def _resolve_task_mode(self, explicit: str | None) -> str:
+        """Validate and normalize the caller-supplied task_mode.
+
+        The caller (user of the standalone agent, or the orchestrator's tool
+        function) is expected to pass `task_mode` explicitly. When `None`,
+        the default is ``"fitting"``. Unknown values are logged and fall
+        back to ``"fitting"``.
+
+        Valid values: ``"fitting"`` (default) and ``"identification"``.
+        """
+        if explicit is None:
+            return "fitting"
+        mode = str(explicit).strip().lower()
+        if mode in ("fitting", "identification"):
+            return mode
+        self.logger.warning(
+            f"Unknown task_mode={explicit!r}; falling back to 'fitting'. "
+            "Valid values: 'fitting', 'identification'."
+        )
+        return "fitting"
 
     def _compute_statistics(self, curve_data: np.ndarray) -> dict:
         """Compute statistics for a spectrum."""
@@ -824,8 +862,17 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Base result structure
         results = {
             "status": "success",
-            "output_directory": str(self.output_dir)
+            "output_directory": str(self.output_dir),
+            "task_mode": state.get("task_mode", "fitting"),
         }
+
+        # In identification mode, surface the ranked candidate list if the
+        # synthesis produced one. Additive/optional field — callers that don't
+        # know about it can ignore it.
+        if state.get("task_mode") == "identification":
+            candidates = synthesis.get("candidate_identifications", [])
+            if candidates:
+                results["candidate_identifications"] = candidates
         
         if is_single:
             # Single spectrum: backward-compatible structure
