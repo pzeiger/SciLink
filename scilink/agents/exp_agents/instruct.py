@@ -2197,7 +2197,10 @@ methods (e.g., Shirley background, Voigt line shapes, spin-orbit constraints) th
 substituted with alternatives.
 Deviations are acceptable ONLY when they are obvious from the data dimensions provided \
 (e.g., more parameters than data points). In such cases, implement the closest viable model \
-and document the deviation and reasoning in the results "summary" field. \
+and document the deviation and reasoning in the results `"deviation_note"` field. \
+`deviation_note` is **only** for process notes about how/why you diverged from the plan — it is NOT \
+a place to write findings, peak assignments, or scientific conclusions. Leave it as an empty string \
+if the plan was followed as specified.
 Do NOT preemptively deviate because you think the plan might not converge — implement the \
 plan as specified and let the retry pipeline handle actual runtime failures.
 
@@ -2215,14 +2218,23 @@ plan as specified and let the retry pipeline handle actual runtime failures.
 1. Load data (handle .npy, .csv, .txt)
 2. Implement your fitting approach
 3. Compute R² and RMSE
-4. Save `fit_visualization.png` (data + fit + residuals; show components if multiple peaks)
+4. Save `fit_visualization.png`: data + fit + residuals (show individual components if multiple peaks).
+   **Plot labels must be neutral** — this plot is passed to the interpretation stage, \
+so any text in it becomes part of that stage's input:
+   - Title: use "Data and Fit" or "Fit" (NOT "Lorentzian fit at 1580 cm⁻¹", \
+NOT any material/phase name, NOT any model name)
+   - Legend: "Data", "Fit", "Component 1", "Component 2", "Residuals" \
+(NOT "D-band"/"G-band"/"Ti2+"/"graphitic"/etc.)
+   - Annotations: parameter values are OK (e.g. "FWHM=12"); physical assignments are NOT \
+(e.g. "sp² carbon" — do not add)
+   - Axis labels: use xlabel/ylabel from sample metadata if provided; else generic "X" / "Y"
 5. Print results as JSON:
 ```python
 results = {{
     "model_type": "description",
     "parameters": {{"peak_1": {{"center": val, "center_err": err, ...}}, ...}},
     "fit_quality": {{"r_squared": val, "rmse": val}},
-    "summary": "Key finding"
+    "deviation_note": ""  # empty if plan was followed; else one line on process-level deviations only
 }}
 print(f"FIT_RESULTS_JSON:{{json.dumps(results)}}")
 ```
@@ -2248,6 +2260,9 @@ FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed script.
 **Available Libraries:** numpy, pandas, scipy, lmfit, matplotlib, json
 
 **CRITICAL:** Fix only the execution error. Do NOT change the fitting model, its parameters, or the overall analysis approach. The model is locked for series consistency.
+
+**Plot labels must be neutral** if your fix touches `fit_visualization.png`: \
+use "Data"/"Fit"/"Component N"/"Residuals" only — no material names, no peak assignments, no model names in titles/legends/annotations.
 
 **Response:** Return only `{{"diagnosis": "...", "script": "..."}}`
 """
@@ -2286,7 +2301,7 @@ line shapes, does the script use Voigt — not Gaussian?)
 Allow reasonable implementation-level variation (variable naming, optimization algorithm, \
 library choice). A deviation is **justified** only if it is obvious from the data dimensions \
 that the plan cannot work (e.g., more components than data points). In that case the script's \
-"summary" field should explain the deviation. Justified deviations should be marked conformant.
+`deviation_note` field should explain the deviation. Justified deviations should be marked conformant.
 
 Mark as non-conformant when the script implements a different model or structure than the plan \
 describes without clear justification (e.g., plan says "3 Voigt peaks" but script uses \
@@ -2356,39 +2371,189 @@ Images show: (1) Original data, (2) Fit + components + residuals
 """
 
 
-FITTING_INTERPRETATION_INSTRUCTIONS = """Interpret these curve fitting results.
+# =============================================================================
+# Interpretation prompts — staged structure
+# -----------------------------------------------------------------------------
+# To reduce model-anchoring bias, the synthesis controller composes the
+# interpretation prompt in three parts. Stage 1 is model-blind (no model name).
+# Evidence (data plot, fit plot, parameters, metadata, skill/objective/prior
+# context) is inserted between Stage 1 and Stage 2. Stage 2 discloses the
+# fitted model name — by this point the LLM has already seen the evidence.
+# Stage 3 is the output schema.
+# =============================================================================
 
-**Model:** {model_type}
-**Summary:** {summary}
+FITTING_INTERPRETATION_STAGE1 = """You will interpret this curve fitting analysis in three stages. \
+Do the stages in order — do not skip ahead or preview the model name before Stage 2.
 
-You have: original data, fit visualization, parameters with uncertainties, fit metrics, sample metadata.
+## Stage 1 — Hypothesis from the data (model-blind)
+Below you will be given: the original data plot, the fit overlay with residuals, fitted parameter \
+values with uncertainties, fit-quality metrics, and sample metadata. You have NOT yet been told \
+the name of the mathematical model that was used for the fit — that will be disclosed in Stage 2.
 
-**Task:** Explain what the fitted parameters mean physically. What do they reveal about the sample?
+Working from the data alone, answer these first:
+- What physical regime or process does this curve describe? (Use the sample metadata if provided.)
+- What features must any adequate model capture (peak count, lineshape character, asymmetry, \
+baseline structure, noise level)?
+- Is there structure in the residuals that suggests model inadequacy \
+(systematic misfit, unmodeled shoulder, baseline drift, unexpected oscillation)?
+- Given parameter uncertainties, how well-constrained are the physical claims you could make?
 
-**Response:**
+Frame your Stage 1 answer as if you had to recommend a model yourself from this evidence.
+"""
+
+FITTING_INTERPRETATION_STAGE2_TMPL = """
+
+## Stage 2 — Reconcile with the fitted model
+The model that was actually used for the fit is: **{model_type}**.
+
+Compare to your Stage 1 hypothesis:
+- If this model matches what your Stage 1 analysis would have suggested: proceed to interpret \
+the fitted parameters in physical terms.
+- If it does not match: document the divergence concretely. The fitted parameters may still be \
+informative, but qualify every physical claim by the mismatch and note what an alternative model \
+might have revealed.
+"""
+
+FITTING_INTERPRETATION_STAGE3 = """
+
+## Stage 3 — Output
+Return a single JSON object with exactly these keys:
+
 ```json
-{{
-    "detailed_analysis": "Physical interpretation of results",
+{
+    "stage1_hypothesis": "your conclusion from the data and parameters alone, before the model was disclosed",
+    "model_reconciliation": "whether the disclosed model aligns with your Stage 1 hypothesis, and what that implies for the interpretation",
+    "detailed_analysis": "Physical interpretation of the results, integrating Stage 1 and Stage 2",
     "scientific_claims": [
-        {{
+        {
             "claim": "Finding with value ± uncertainty",
             "scientific_impact": "Why this finding is significant",
             "has_anyone_question": "Has anyone observed [reformulate claim as research question]?",
             "keywords": ["keyword1", "keyword2", "keyword3"]
-        }}
+        }
     ],
-    "caveats": "Limitations",
+    "caveats": "Limitations — include any model-vs-data divergence from Stage 2",
     "suggested_followup": "Next steps"
-}}
+}
 ```
 """
 
+# Generic interpretation instruction used by feedback-refinement flows that do
+# NOT go through the synthesis controller (e.g., human_feedback refinement).
+# No f-string placeholders — this prompt is inserted verbatim into refinement
+# prompts that already have their own context plumbing.
+FITTING_INTERPRETATION_INSTRUCTIONS = """Interpret these curve fitting results.
+
+You have: the original data, the fit visualization with residuals, fitted parameters with \
+uncertainties, fit-quality metrics, and sample metadata.
+
+**Task:** Explain what the fitted parameters mean physically and what they reveal about the \
+sample. Qualify claims by parameter uncertainty and by any residual structure you observe. \
+If the residuals suggest the model is inadequate for part of the data, say so.
+
+**Response:**
+```json
+{
+    "detailed_analysis": "Physical interpretation of results",
+    "scientific_claims": [
+        {
+            "claim": "Finding with value ± uncertainty",
+            "scientific_impact": "Why this finding is significant",
+            "has_anyone_question": "Has anyone observed [reformulate claim as research question]?",
+            "keywords": ["keyword1", "keyword2", "keyword3"]
+        }
+    ],
+    "caveats": "Limitations",
+    "suggested_followup": "Next steps"
+}
+```
+"""
+
+
+# =============================================================================
+# Identification-mode addenda
+# -----------------------------------------------------------------------------
+# When `task_mode == "identification"` the user is asking the agent to help
+# identify a material/phase from the spectrum. These addenda are appended to
+# the standard planning and interpretation prompts; they do NOT replace them.
+# Purpose: keep the fit mathematical but generic, and force the interpretation
+# to enumerate candidates with discriminating peaks rather than assert a
+# single identification.
+# =============================================================================
+
+ID_MODE_PLANNING_ADDENDUM = """
+
+## Identification mode is ACTIVE
+The user has NOT specified what material this is — they are asking the agent to help \
+identify the material or phase from the data. Apply these additional constraints to your \
+fitting plan:
+
+- Choose a **generic flexible mathematical model** sufficient to reproduce the spectrum \
+(e.g. "N Lorentzians/Gaussians/Voigt profiles of unconstrained shape, polynomial baseline"). \
+Select N from the visible peak count, not from any presumed material.
+- Do NOT embed a material or phase assignment in `physical_model`. \
+Use neutral phrasing like "N-component generic fit (identification pending)" — \
+NEVER "D/G band fit", "Ti 2p doublet", "Raman spectrum of disordered carbon", etc.
+- Use neutral parameter names (`peak_1`, `peak_2`, …). Do NOT use `d_band_center`, \
+`g_band_width`, `ti2p_1_area`, etc.
+- `parameters_to_extract` should list peak position, width, height, area for each component.
+- The interpretation stage will enumerate candidate materials/phases from the fitted \
+parameters. Your job here is to produce a clean, unbiased fit — NOT to identify the material.
+"""
+
+ID_MODE_INTERPRETATION_STAGE1_ADDENDUM = """
+
+## Identification mode is ACTIVE — Stage 1 additionally requires candidate enumeration
+
+The user has asked "what material/phase is this?" The sample metadata does not identify \
+the material. Do NOT commit to a single identification — instead, from the fitted peak \
+positions, widths, intensity ratios, and whatever metadata is available, enumerate \
+**at least 3 candidate materials or phases** that are consistent with the data.
+
+For EACH candidate:
+- **Name** the candidate (material, phase, molecular class).
+- **Discriminating peaks present:** which peaks expected for this candidate match what \
+the fit found.
+- **Discriminating peaks absent:** which peaks expected for this candidate would be \
+missing from the data, and whether their absence rules out the candidate or is explainable.
+- **What evidence would distinguish this candidate** from the others (XRD, complementary \
+spectroscopy, known sample history).
+
+Then **rank** the candidates by overall consistency with the evidence. If the data does \
+not discriminate between the top candidates, SAY SO — do not pick a winner.
+
+Stage 2 will still disclose the mathematical fit model, but the fit model is intentionally \
+generic in identification mode; its name is not an identification.
+"""
+
+ID_MODE_OUTPUT_ADDENDUM = """
+
+## Identification mode output — additional fields required
+
+In identification mode, add a `candidate_identifications` array to your JSON output. Each \
+entry has this shape:
+
+```json
+{
+    "name": "candidate material or phase",
+    "rank": 1,
+    "consistency": "high | medium | low",
+    "discriminating_peaks_present": ["peak descriptions that support this candidate"],
+    "discriminating_peaks_absent": ["peaks expected but not seen; note whether absence is fatal"],
+    "distinguishing_evidence": "what additional measurement would uniquely confirm or rule this out"
+}
+```
+
+Also, in identification mode, `scientific_claims` should be phrased as \
+"consistent with X, Y, or Z" — NOT "the sample is X" — unless the data genuinely \
+discriminates (e.g., one candidate has diagnostic peaks all present and others all missing).
+"""
+
+
 CURVE_FITTING_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS = """Recommend follow-up measurements based on curve fitting results.
 
-**Model:** {model_type}
-**Findings:** {summary}
-
-You have: fit visualization, extracted parameters, sample metadata.
+You have: the detailed analysis and scientific claims from the curve fitting stage, \
+the saved fit visualization, extracted parameters, and sample metadata.
 
 **Task:** Recommend 2-4 follow-up measurements to validate or extend these findings.
 
