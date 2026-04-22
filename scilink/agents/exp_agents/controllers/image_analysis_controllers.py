@@ -2108,10 +2108,72 @@ Return JSON:
             self.logger.error(f"      LLM verification failed: {e}")
             return None
 
-    def _apply_verification_feedback(self, state: dict, verification: dict) -> dict:
+    def _format_refinement_history(self, history: list) -> str:
+        """Compact per-iteration trajectory for the refinement LLM.
+
+        Gives the refiner visibility into prior scores and pipelines so it
+        can recognize when a recent change regressed and consider backing
+        off toward a better-scoring earlier config. Leaner than
+        ``build_verification_prompt_with_history`` (used by the verifier) —
+        the refiner needs scores + pipeline summaries, not full issue lists.
+        """
+        if not history:
+            return ""
+
+        # Cap at the most recent 6 entries to bound token cost.
+        recent = history[-6:]
+        scores = [h.get("quality_score", 0.0) for h in recent]
+        if not scores:
+            return ""
+        best = max(scores)
+
+        lines = [
+            "**ITERATION HISTORY (oldest first, current last):**",
+            "Use this trajectory to decide whether the current pipeline is "
+            "improving or has regressed from an earlier version. If a recent "
+            "change dropped the score, consider reverting toward the "
+            "better-scoring config and making a smaller adjustment rather "
+            "than piling on further changes. You may still accept a temporary "
+            "regression if your reasoning supports it.",
+            "",
+        ]
+        n = len(recent)
+        for i, h in enumerate(recent):
+            score = h.get("quality_score", 0.0)
+            cfg = h.get("config_used", {}) or {}
+            pipeline = (cfg.get("processing_pipeline", "") or "").strip()
+            if len(pipeline) > 200:
+                pipeline = pipeline[:200] + "..."
+            markers = []
+            if abs(score - best) < 1e-6:
+                markers.append("BEST")
+            if i == n - 1:
+                markers.append("CURRENT")
+            tag = f" [{', '.join(markers)}]" if markers else ""
+            lines.append(
+                f"- score={score:.2f}{tag}: "
+                f"{pipeline or '(no pipeline captured)'}"
+            )
+        return "\n".join(lines)
+
+    def _apply_verification_feedback(
+        self,
+        state: dict,
+        verification: dict,
+        history: list | None = None,
+    ) -> dict:
         """Apply LLM verification feedback to refine the analysis configuration.
 
-        Returns updated config.
+        Args:
+            state: Pipeline state dict.
+            verification: Latest verifier output (scores, issues, recommended_action).
+            history: Optional list of prior ``verification_history`` entries. When
+                provided, a compact trajectory is included in the refinement prompt
+                so the LLM can reason about regressions. Leave ``None`` to preserve
+                previous behavior (no history injected).
+
+        Returns:
+            Updated analysis config dict.
         """
         config = state.get("locked_analysis_config", {}).copy()
 
@@ -2140,6 +2202,9 @@ Return JSON:
             min(annealing_level, len(tool_schedule) - 1)
         ]
 
+        history_text = self._format_refinement_history(history or [])
+        history_section = f"\n{history_text}\n" if history_text else ""
+
         refinement_prompt = f"""Refine the image analysis approach based on automated verification feedback.
 
 **CURRENT APPROACH:**
@@ -2147,6 +2212,7 @@ Return JSON:
 - Approach: {config.get('analysis_approach', 'Unknown')}
 {constraint_text}
 {tool_constraint}
+{history_section}
 **VERIFICATION FINDINGS:**
 {chr(10).join(issues_summary) if issues_summary else 'No specific issues listed'}
 
@@ -2560,9 +2626,13 @@ Return JSON with:
                                 verification.get("recommended_action", "")
                             )
 
-                        # Apply LLM's recommended fixes
+                        # Apply LLM's recommended fixes. Pass the
+                        # accumulated verification_history so the refiner
+                        # can see prior scores/pipelines and recognize
+                        # regressions instead of iterating blindly on the
+                        # previous (possibly degraded) config.
                         refined_config = self._apply_verification_feedback(
-                            state, verification
+                            state, verification, history=verification_history
                         )
 
                         # If the refinement LLM call failed (transient
@@ -2969,15 +3039,20 @@ Return JSON with:
 - Approach: {analysis_approach}
 - Pipeline: {processing_pipeline}
 
-Decide how to address the user's feedback:
-- If the feedback is about visualization, colormaps, labels, fonts, or display only → modify the relevant plotting sections of the existing script. Keep all analysis logic untouched.
-- If the feedback requires minor analysis changes (parameters, thresholds, filters) → modify the relevant parts of the existing script.
-- If the feedback requires a fundamentally different analysis approach → write a new script from scratch.
+Decide how to address the user's feedback and classify the change:
+- **cosmetic** — visualization, colormaps, labels, fonts, legend, axis ranges, \
+subplot layout, or other display-only changes. Modify the plotting sections \
+only; keep all analysis logic and extracted values untouched.
+- **analytical** — parameter / threshold / filter changes, or any change that \
+affects the extracted values. Modify the relevant parts of the script.
+- **rewrite** — the feedback demands a fundamentally different analysis \
+approach. Write a new script from scratch.
 
 In all cases, preserve the output contract: the script must print \
 'IMAGE_ANALYSIS_RESULTS_JSON:{{...}}' and save a visualization PNG.
 
-Return JSON: {{"diagnosis": "what you changed and why", "script": "full Python script"}}
+Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
+"diagnosis": "what you changed and why", "script": "full Python script"}}
 '''
 
     def _apply_user_feedback(
@@ -3020,8 +3095,13 @@ Return JSON: {{"diagnosis": "what you changed and why", "script": "full Python s
 
                 if not error and result and result.get("script"):
                     diagnosis = result.get("diagnosis", "")
+                    change_type = (
+                        result.get("change_type", "").strip().lower()
+                    )
                     if diagnosis:
                         self.logger.info(f"    Diagnosis: {diagnosis}")
+                    if change_type:
+                        self.logger.info(f"    Change type: {change_type}")
                     patched_script = result["script"]
 
                     # Execute the patched script
@@ -3088,7 +3168,6 @@ Return JSON: {{"diagnosis": "what you changed and why", "script": "full Python s
                                     pass
 
                         if analysis_results and viz_bytes:
-                            # Verify the user-guided result with the LLM
                             user_guided_result = {
                                 "index": image_idx,
                                 "name": image_name,
@@ -3111,6 +3190,25 @@ Return JSON: {{"diagnosis": "what you changed and why", "script": "full Python s
                                 "script_errors": [],
                             }
 
+                            # Cosmetic-only changes: the analysis outputs did
+                            # not change, so skip re-verification and keep the
+                            # previous best_score. Accept the patched script
+                            # and new visualization as the final result.
+                            if change_type == "cosmetic":
+                                user_guided_result["_quality_score"] = best_score
+                                self.logger.info(
+                                    "   Cosmetic change applied — skipping "
+                                    "re-verification, keeping existing score "
+                                    f"({best_score:.2f})"
+                                )
+                                all_attempts.append({
+                                    "pipeline": "User-guided (cosmetic)",
+                                    "score": best_score,
+                                    "result": user_guided_result,
+                                })
+                                return user_guided_result, best_score
+
+                            # Analytical / rewrite changes: verify quality.
                             verification = self._verify_quality(
                                 state, user_guided_result
                             )
