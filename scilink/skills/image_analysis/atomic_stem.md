@@ -252,6 +252,13 @@ image area and unit cell) should be within 0.90-1.10.
 **Unit cell sanity:** Measured lattice parameters should be close to
 known bulk values when spatial calibration is available.
 
+**Do not recommend preprocessing on the input to `detect_atoms_dcnn`**
+(CLAHE, contrast normalization, background subtraction, etc.). The
+AtomNet3 model is trained on raw images and handles intensity
+gradients internally; added preprocessing can degrade detection. If
+weak columns are missed, recommend adjusting the tool's `threshold`
+parameter instead.
+
 ### advanced
 **Sublattice populations:** Should match expected stoichiometry for
 the material. Heavy doping can shift intensities between clusters.
