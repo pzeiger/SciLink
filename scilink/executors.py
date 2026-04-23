@@ -287,7 +287,7 @@ class ScriptExecutor:
 
     def execute_script(self, script_content: str, working_dir: str = None) -> dict:
         """Execute a Python script."""
-        logging.info("Executing Python script...")
+        logging.info("   Executing Python script...")
         
         original_cwd = os.getcwd()
         if working_dir:

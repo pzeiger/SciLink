@@ -1514,6 +1514,7 @@ Your guidance: '''
         outlier_sigma: float = None,
         max_verification_iterations: int = None,
         conformance_instructions: str = "",
+        refinement_instructions: str = "",
     ):
         self.model = model
         self.logger = logger
@@ -1523,6 +1524,7 @@ Your guidance: '''
         self.executor = executor
         self.script_instructions = script_instructions
         self.correction_instructions = correction_instructions
+        self.refinement_instructions = refinement_instructions
         self.quality_instructions = quality_instructions
         self.output_dir = Path(output_dir)
         self.image_to_bytes_fn = image_to_bytes_fn
@@ -1532,8 +1534,20 @@ Your guidance: '''
         self.quality_threshold = self.DEFAULT_QUALITY_THRESHOLD
         self.conformance_instructions = conformance_instructions
 
-    def _generate_analysis_script(self, state: dict, data_path: str, stats: dict) -> str:
-        """Generate an image analysis script using the locked config."""
+    def _generate_analysis_script(
+        self,
+        state: dict,
+        data_path: str,
+        stats: dict,
+        base_script: str | None = None,
+    ) -> str:
+        """Generate an image analysis script using the locked config.
+
+        When ``base_script`` is provided (non-empty), uses the refinement
+        prompt to adapt the previous attempt's script to the refined plan
+        rather than regenerating from scratch. When ``None`` or empty,
+        falls back to fresh generation via ``self.script_instructions``.
+        """
         config = state.get("locked_analysis_config", {})
         context_parts = []
         if state.get("literature_context"):
@@ -1560,7 +1574,7 @@ Your guidance: '''
 
         from ....tools._registry import format_tool_inventory
 
-        prompt = self.script_instructions.format(
+        format_kwargs = dict(
             analysis_approach=config.get("analysis_approach", "Analyze the image"),
             processing_pipeline=config.get("processing_pipeline", "Standard processing"),
             features_to_extract=", ".join(config.get("features_to_extract", [])) or "relevant features",
@@ -1572,6 +1586,14 @@ Your guidance: '''
             intensity_max=stats.get("intensity_range", [0, 255])[1],
             tool_inventory=format_tool_inventory("image_analysis"),
         )
+
+        if base_script and self.refinement_instructions:
+            prompt = self.refinement_instructions.format(
+                base_script=base_script,
+                **format_kwargs,
+            )
+        else:
+            prompt = self.script_instructions.format(**format_kwargs)
 
         response = self.model.generate_content(prompt)
         result, error = self._parse(response)
@@ -1712,8 +1734,26 @@ Your guidance: '''
         image_name: str,
         image_idx: int,
         base_script: Optional[str] = None,
+        refine_from_script: Optional[str] = None,
     ) -> dict:
-        """Execute analysis pipeline on a single image with retry logic."""
+        """Execute analysis pipeline on a single image with retry logic.
+
+        Two independent ways to carry a previous script forward:
+
+        - ``base_script`` — series-level adaptation. When provided, the first
+          attempt substitutes data paths / output names via
+          ``_adapt_script_for_image`` without invoking the LLM. Used to
+          keep pipeline consistent across images in a series.
+        - ``refine_from_script`` — refinement-iteration adaptation. When
+          provided, the first attempt calls ``_generate_analysis_script``
+          with ``base_script=refine_from_script`` so the refinement prompt
+          is used (LLM adapts the previous script to the refined plan).
+          Used when carrying a working script forward across verification
+          refinement iterations at lower annealing levels.
+
+        ``base_script`` wins if both are supplied (series consistency takes
+        precedence over refinement adaptation).
+        """
         stats = compute_image_statistics(image_data)
 
         # Create working directory for this image
@@ -1749,7 +1789,12 @@ Your guidance: '''
                         base_script, str(temp_data_path), output_prefix
                     )
                 elif attempt == 1:
-                    script = self._generate_analysis_script(state, str(temp_data_path), stats)
+                    script = self._generate_analysis_script(
+                        state,
+                        str(temp_data_path),
+                        stats,
+                        base_script=refine_from_script,
+                    )
                     # Check conformance with locked plan on fresh generation
                     conformance = self._check_conformance(state, script)
                     if conformance and not conformance.get("conformant", True):
@@ -1977,6 +2022,7 @@ Estimate Completeness, Precision, and Plausibility separately, then average.
 - Minor imperfections in segmentation boundaries
 - A few missed small or ambiguous features if the majority are captured
 - Slight over- or under-segmentation if the overall result is scientifically usable
+- An abundance map or decomposition component that does not delineate every visible region of the image. Data-driven decompositions (NMF, PCA, ICA, FFT-NMF) produce basis patterns, not semantic segmentations — they are not required to match what you would segment by eye. If the output is coherent and faithful to the image content, score it on that basis, not on whether it matched the regions you visually identified.
 
 ---
 
@@ -2516,6 +2562,7 @@ Return JSON with:
                     # LLM-assigned and noisy, so we use a patience counter
                     # instead of a rate-based formula.
                     _annealing_level = 0
+                    _previous_annealing_level = 0
                     _stall_count = 0
                     _PATIENCE = 2
                     _prev_best_score = best_score
@@ -2687,6 +2734,23 @@ Return JSON with:
                         # Sync skill strictness with adaptive annealing level
                         state["_annealing_level"] = _annealing_level
 
+                        # Carry the previous attempt's script forward so the
+                        # code generator can adapt rather than regenerate
+                        # from scratch — except on the single iteration
+                        # where the annealing level escalates from < 2 to
+                        # = 2 (hot). That escalation step deliberately
+                        # gets fresh generation so the code generator can
+                        # restructure without anchor bias from the
+                        # structure that prompted the escalation.
+                        _just_escalated_to_hot = (
+                            _annealing_level >= 2
+                            and _previous_annealing_level < 2
+                        )
+                        _refine_from_script = (
+                            None if _just_escalated_to_hot
+                            else (current_result or {}).get("script")
+                        )
+
                         # Re-analyze with refined config
                         self.logger.info(
                             "   Re-analyzing with verification feedback..."
@@ -2695,7 +2759,9 @@ Return JSON with:
                             state=state, image_data=image_data,
                             data_path=data_path, image_name=image_name,
                             image_idx=image_idx, base_script=None,
+                            refine_from_script=_refine_from_script,
                         )
+                        _previous_annealing_level = _annealing_level
 
                         if verified_result["success"]:
                             verified_result["_quality_score"] = 0.0
@@ -4028,6 +4094,7 @@ class ImageAdaptiveRefitController:
         max_verification_iterations: int = 7,
         enable_human_feedback: bool = False,
         conformance_instructions: str = "",
+        refinement_instructions: str = "",
     ):
         self.logger = logger
         self.output_dir = Path(output_dir)
@@ -4050,6 +4117,7 @@ class ImageAdaptiveRefitController:
             enable_human_feedback=False,
             max_verification_iterations=max_verification_iterations,
             conformance_instructions=conformance_instructions,
+            refinement_instructions=refinement_instructions,
         )
 
     def _load_image(self, idx, image_paths, image_stack):

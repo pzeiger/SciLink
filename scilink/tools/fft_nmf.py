@@ -326,7 +326,21 @@ TOOL_SPEC = ToolSpec(
         "With a window size tuned to the spatial scale of the repeating features and a "
         "simple post-processing step (e.g. inspecting components and abundance maps, "
         "thresholding or clustering abundances to localize distinct regions), this is "
-        "already a complete Tier 1 pipeline — no extra processing steps are required."
+        "already a complete Tier 1 pipeline — no extra processing steps are required.\n"
+        "\n"
+        "**What the method guarantees vs. does not:** FFT-NMF is a data-driven "
+        "non-negative decomposition. It reliably produces (a) non-negative spectral "
+        "components with low reconstruction error, (b) spatially coherent abundance "
+        "maps when the image contains spatial variation, and (c) visually distinct "
+        "components when the image contains distinct patterns. It does NOT assign "
+        "semantic labels to components (e.g. one component = 'crystalline', another "
+        "= 'disordered') — that is for the user to interpret. Plan's quality_criteria "
+        "should target coherent, non-noise outputs rather than idealized textbook "
+        "patterns or strict semantic separation the method cannot deliver. "
+        "When signals co-vary spatially (lattice × LDOS envelope, topography × "
+        "composition, etc.), components typically mix these signals rather than "
+        "isolating each — interpret components as basis patterns, not "
+        "physics-separated modes."
     ),
     parameters={
         "image_array": {

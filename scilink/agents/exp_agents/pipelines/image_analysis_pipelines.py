@@ -38,6 +38,7 @@ from ..instruct import (
     IMAGE_ANALYSIS_PLANNING_INSTRUCTIONS,
     IMAGE_ANALYSIS_SCRIPT_INSTRUCTIONS,
     IMAGE_ANALYSIS_SCRIPT_CORRECTION_INSTRUCTIONS,
+    IMAGE_ANALYSIS_SCRIPT_REFINEMENT_PROMPT,
     IMAGE_ANALYSIS_QUALITY_ASSESSMENT_INSTRUCTIONS,
     IMAGE_ANALYSIS_INTERPRETATION_INSTRUCTIONS,
     IMAGE_ANALYSIS_PLAN_CONFORMANCE_CHECK_INSTRUCTIONS,
@@ -190,6 +191,7 @@ def create_unified_image_analysis_pipeline(
             outlier_sigma=outlier_sigma,
             max_verification_iterations=max_verification_iterations,
             conformance_instructions=IMAGE_ANALYSIS_PLAN_CONFORMANCE_CHECK_INSTRUCTIONS,
+            refinement_instructions=IMAGE_ANALYSIS_SCRIPT_REFINEMENT_PROMPT,
         )
     )
 
@@ -210,6 +212,7 @@ def create_unified_image_analysis_pipeline(
             max_verification_iterations=max_verification_iterations,
             enable_human_feedback=enable_human_feedback,
             conformance_instructions=IMAGE_ANALYSIS_PLAN_CONFORMANCE_CHECK_INSTRUCTIONS,
+            refinement_instructions=IMAGE_ANALYSIS_SCRIPT_REFINEMENT_PROMPT,
         )
     )
 

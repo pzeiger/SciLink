@@ -2819,7 +2819,7 @@ sections below):
     "analysis_approach": "Overall strategy in one sentence",
     "processing_pipeline": "Step-by-step sequence: e.g., 'Gaussian blur (sigma=2) -> Otsu threshold -> morphological opening (disk r=3) -> connected component labeling -> region property extraction'",
     "features_to_extract": ["feature1", "feature2"],
-    "quality_criteria": "How to verify the analysis worked — specific, measurable where possible (e.g., 'segmentation should capture >90% of visible grains', 'detected edge map should trace visible boundaries')",
+    "quality_criteria": "How to verify the analysis produced usable output. Match criteria specificity to the objective. Targeted objective (e.g. count grains, measure lattice spacing, find specific defects): set concrete measurable criteria that check those features are extracted and physically plausible — e.g. 'grain count within 10% of visual estimate', 'lattice spacing matches known bulk value'. Exploratory / open-ended objective (or no objective provided): keep criteria descriptive — 'outputs are coherent (not pure noise or all NaN)', 'features correspond to real image content rather than artifacts'. Avoid baking in specific expectations the data may not actually support — the analysis should discover what is there, not confirm a hypothesis.",
     "expected_outputs": ["output_visualization_1.png", "output_visualization_2.png"],
     "literature_query": "Question for literature search to help with analysis, or null if not needed"
 }}
@@ -3157,6 +3157,92 @@ file you saved — each entry should have `description`, `shape`, and `dtype` so
 follow-up analysis can load the right file without guessing. \
 Example entry: `"analysis_labels.npy": {{"description": "Integer label map, \
 23 grains labeled 1-23, background=0", "shape": [512, 512], "dtype": "int32"}}`. \
+The standard fields are:
+```python
+results = {{{{
+    "analysis_type": "description of what was done",
+    "extracted_features": {{{{"feature_name": value, ...}}}},
+    "quality_metrics": {{{{"metric_name": value, ...}}}},
+    "summary": "Key finding in one sentence",
+    "saved_arrays": {{{{...}}}}
+}}}}
+print(f"IMAGE_ANALYSIS_RESULTS_JSON:{{{{json.dumps(results)}}}}")
+```
+
+**Response:** Return only `{{"script": "..."}}`
+"""
+
+
+IMAGE_ANALYSIS_SCRIPT_REFINEMENT_PROMPT = """Refine an existing image analysis script to match a refined plan.
+
+**Your Plan (refined by verification feedback):**
+- Approach: {analysis_approach}
+- Pipeline: {processing_pipeline}
+- Features to extract: {features_to_extract}
+
+**CONFORMANCE:** Your updated script should implement the plan's methods and \
+extract the listed features. You may adjust numerical parameters (thresholds, \
+window sizes, sigma values) to produce reasonable results — document adjustments \
+in the "summary" field. Do not change the analysis methods themselves (e.g., \
+don't replace Otsu with adaptive thresholding) unless the refined plan \
+explicitly demands it.
+
+**REGISTERED TOOLS:** If the plan names a registered tool, you MUST import and call it \
+by its exact import line and signature. Do not reimplement the tool's internals inline, \
+even when you believe you can write "equivalent logic" — a hand-written variant cannot \
+be verified as equivalent to the registered implementation. Two narrow exceptions: \
+(1) the tool fails at runtime due to a major infrastructure issue (model weights \
+cannot be downloaded, a required dependency is not installed, model files are missing \
+or corrupted); (2) the tool runs but produces clearly unacceptable output that cannot \
+be fixed by tuning its documented parameters — and you have actually tried tuning \
+them first. In either case: try the tool first (and for case 2, attempt reasonable \
+parameter adjustments before giving up), catch the failure or inadequate result, \
+document the specific issue in the "summary" field, and only then fall back to custom \
+code.
+
+**Context:** {context}
+
+**Data:**
+- Path: `{data_path}`
+- Shape: {shape}
+- dtype: {dtype}
+- Intensity range: [{intensity_min}, {intensity_max}]
+
+{tool_inventory}
+
+**PREVIOUS SCRIPT (working baseline):**
+```python
+{base_script}
+```
+
+**How to adapt the previous script:**
+The previous script produced a partial result that the verifier wants improved. \
+The refined plan above reflects the verifier's feedback. Modify the previous script \
+to implement the refined plan — **preserve pipeline choices and custom implementations \
+that still apply** (e.g., a handwritten per-window processing loop that was matching \
+the plan's intent). Only change the parts the refinement actually requires. \
+If the refined plan demands fundamentally different methods (e.g., switching from \
+intensity thresholding to edge detection, or from one registered tool to another), \
+rewrite the analysis portion accordingly — but do not rewrite more than the \
+refined plan calls for.
+
+**Requirements:**
+1. Load image: use `np.load(path)` for .npy, or `cv2.imread(path, cv2.IMREAD_UNCHANGED)` \
+for standard formats (remember cv2 loads BGR — convert to RGB if 3-channel color). \
+Check the image shape — it may have 2 or more channels that are not RGB. Access channels \
+via `image[:,:,0]`, `image[:,:,1]`, etc. Do not assume grayscale or RGB.
+2. Implement the refined analysis pipeline.
+3. Save visualization(s): `analysis_visualization.png` showing original image alongside \
+key analysis results. Use subplots with clear labels. All visualizations must be saved \
+to the current working directory. Use `dpi=100`.
+4. Save key output arrays to the current working directory as `.npy` files. \
+At minimum save the primary detection/segmentation result.
+5. NumPy / Python scalar conversions: values pulled out of numpy arrays (via indexing, \
+reductions, or tool outputs) are numpy scalars, not Python scalars. Before passing them \
+to Python builtins (`round()`, f-string width/precision), `json.dumps`, or any code that \
+expects a native Python `int`/`float`, wrap with `float(...)` or `int(...)`.
+6. Print results as JSON. Include a `saved_arrays` key describing every `.npy` \
+file you saved — each entry should have `description`, `shape`, and `dtype`. \
 The standard fields are:
 ```python
 results = {{{{
