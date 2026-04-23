@@ -154,13 +154,6 @@ def synthesize_knowledge(
                             f" to {next_score:.2f}"
                         )
 
-            for alt in qh.get("alternative_approaches", []):
-                qh_lines.append(
-                    f"- Alternative pipeline "
-                    f"(score={alt.get('score', 0):.2f}): "
-                    f"{alt.get('diagnosis', '')}"
-                )
-
             if len(qh_lines) > 1:
                 analysis_texts.append("\n".join(qh_lines))
 

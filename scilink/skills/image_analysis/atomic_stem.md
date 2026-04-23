@@ -11,6 +11,18 @@ identification, and structural variation analysis.
 ## planning
 
 ### foundational
+**When to use `run_fft_nmf_analysis` instead of atom-resolved detection:**
+inspect the image for pattern-level heterogeneity — visible textures or
+phase-like regions, disorder or defects at a scale coarser than
+individual atoms, or atomic detail that is noisy or low-contrast (where
+peak finding would be unreliable). If any of these is present,
+`run_fft_nmf_analysis` with a window size tuned to the feature scale is
+a complete Tier 1 pipeline. The same applies when the objective
+explicitly targets disorder, defects, or phase separation. Use
+atom-resolved detection (below) when the image is clean and uniform and
+per-column measurements are needed — which is also the default when no
+objective is provided and the image looks well-resolved.
+
 Before running detection, estimate the expected number of **visible**
 atomic columns from the image dimensions, pixel calibration (if
 available), and known lattice parameters for the material. Count all
@@ -45,10 +57,15 @@ from scilink.tools.atom_finding_tools import (
 Two detection methods are available: `detect_atoms_dcnn` (AtomNet3
 DCNN ensemble, requires `fov_nm` from metadata) and `detect_atoms`
 (classical peak detection, works in pixel space). Both return the same
-dict format so downstream tools work with either. Try `detect_atoms_dcnn`
-first when spatial calibration is available. If DCNN detection fails or
-produces poor results, fall back to `detect_atoms`. Use `detect_atoms`
-directly when `fov_nm` cannot be determined from metadata.
+dict format so downstream tools work with either. Choose between them
+based on material and image quality:
+- The AtomNet3 works best for transition-metal oxides (including
+  perovskites, layered perovskites, and cuprate superconductors) and
+  graphene. For these materials, try `detect_atoms_dcnn` first when
+  spatial calibration is available.
+- For materials outside that list, when `fov_nm` cannot be determined,
+  or when DCNN results look poor on inspection, use `detect_atoms`
+  directly — it is the more general-purpose baseline.
 
 Plan the pipeline around the chosen detector, then use `find_zone_axes` to identify
 lattice vectors, `find_missing_atoms` to predict weaker sublattice
@@ -234,6 +251,13 @@ image area and unit cell) should be within 0.90-1.10.
 
 **Unit cell sanity:** Measured lattice parameters should be close to
 known bulk values when spatial calibration is available.
+
+**Do not recommend preprocessing on the input to `detect_atoms_dcnn`**
+(CLAHE, contrast normalization, background subtraction, etc.). The
+AtomNet3 model is trained on raw images and handles intensity
+gradients internally; added preprocessing can degrade detection. If
+weak columns are missed, recommend adjusting the tool's `threshold`
+parameter instead.
 
 ### advanced
 **Sublattice populations:** Should match expected stoichiometry for

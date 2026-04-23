@@ -95,7 +95,6 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         analysis_depth: "auto" (default), "basic", or "deep"
         enable_human_feedback: Enable feedback loop
         executor_timeout: Script timeout in seconds
-        max_approach_retries: Max alternative approaches to try (default: 1)
         outlier_sigma: Sigma threshold for outlier detection (default: 2.0)
         max_verification_iterations: Max LLM verification iterations (default: 7)
 
@@ -153,7 +152,6 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Analysis depth
         analysis_depth: str = "auto",
         # Quality control settings
-        max_approach_retries: int = 1,
         outlier_sigma: float = 2.0,
         max_verification_iterations: int = 7,
         # Planning settings
@@ -188,7 +186,6 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.output_dir = Path(self.output_dir).resolve()
 
         # Quality control settings
-        self.max_approach_retries = max_approach_retries
         self.outlier_sigma = outlier_sigma
         self.max_verification_iterations = max_verification_iterations
         self.num_plan_candidates = num_plan_candidates
@@ -232,7 +229,6 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         skill: Optional[str] = None,
         prior_knowledge: Optional[List[Dict[str, Any]]] = None,
         # Quality control overrides
-        max_approach_retries: Optional[int] = None,
         outlier_sigma: Optional[float] = None,
         **kwargs,
     ) -> Dict[str, Any]:
@@ -263,7 +259,6 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             auxiliary_label: Description of auxiliary data
             skill: Domain skill name or path to .md skill file
             prior_knowledge: Reference findings from previous analyses
-            max_approach_retries: Override default max retries
             outlier_sigma: Override default outlier sigma
 
         Returns:
@@ -274,11 +269,6 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             for traceability.
         """
         # Use provided overrides or fall back to instance defaults
-        effective_max_retries = (
-            max_approach_retries
-            if max_approach_retries is not None
-            else self.max_approach_retries
-        )
         effective_outlier_sigma = (
             outlier_sigma if outlier_sigma is not None else self.outlier_sigma
         )
@@ -345,7 +335,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         self.logger.info("")
         self.logger.info(f"🖼️  IMAGE ANALYSIS - {num_images} image{'s' if num_images > 1 else ''}")
-        self.logger.info(f"   Quality: max_retries={effective_max_retries}, depth={self.analysis_depth}")
+        self.logger.info(f"   Quality: depth={self.analysis_depth}")
         if not is_single_image:
             self.logger.info(f"   Outlier detection: {effective_outlier_sigma}σ")
 
@@ -459,7 +449,6 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             output_dir=str(self.output_dir),
             literature_agent=self.literature_agent,
             enable_human_feedback=self.enable_human_feedback,
-            max_approach_retries=effective_max_retries,
             outlier_sigma=effective_outlier_sigma,
             max_verification_iterations=self.max_verification_iterations,
             num_plan_candidates=self.num_plan_candidates,
@@ -524,7 +513,6 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             image_stack=image_stack, input_type=input_type,
             num_images=num_images, is_single_image=is_single_image,
             first_image_name=first_image_name,
-            effective_max_retries=effective_max_retries,
             effective_outlier_sigma=effective_outlier_sigma,
         )
 
@@ -800,7 +788,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         skill_state, aux_state,
         image_paths, image_stack, input_type,
         num_images, is_single_image, first_image_name,
-        effective_max_retries, effective_outlier_sigma,
+        effective_outlier_sigma,
         tier2_decision=None,
     ) -> Optional[dict]:
         """Run Tier 2 pipeline and return compiled results, or None on failure."""
@@ -864,7 +852,6 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             output_dir=str(self.output_dir),
             literature_agent=self.literature_agent,
             enable_human_feedback=self.enable_human_feedback,
-            max_approach_retries=effective_max_retries,
             outlier_sigma=effective_outlier_sigma,
             max_verification_iterations=self.max_verification_iterations,
             num_plan_candidates=self.num_plan_candidates,

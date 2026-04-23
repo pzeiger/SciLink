@@ -12,6 +12,31 @@ to which object).
 ## planning
 
 ### foundational
+**Check first whether the problem actually needs instance segmentation.**
+Several common cases resolve with simple classical methods before
+reaching for a heavy model like SAM:
+
+- **Well-separated objects** → Otsu + connected components is enough.
+- **Objects separated by a visible boundary feature** (dark grain
+  boundaries in etched metal, stained cell walls, bright domain
+  edges) → use the boundary itself to separate the objects. Extract
+  the boundary first — the method depends on how the boundary looks
+  in the pixel data (thresholding for clean dark/bright lines, edge
+  detection such as Canny/Sobel for gradient edges, gradient magnitude
+  or texture filters for softer boundaries; add morphological closing
+  if the boundary is broken). Once you have the boundary map, the two
+  classical ways to turn it into labeled objects are (a) invert and
+  run connected components on the interiors, or (b) use the boundary
+  map as a watershed landscape. Usually sharper and faster than SAM
+  for these images — SAM does not know to treat a thin boundary
+  feature as an object separator.
+- **Clean foreground-background intensity separation** → Otsu +
+  connected components + morphological cleanup.
+
+Only reach for SAM when objects genuinely touch or overlap AND no
+visible boundary feature delineates them — the case where classical
+approaches would merge adjacent objects into single blobs.
+
 Connected component labeling on a binary mask merges all touching pixels
 into one object. If the image shows touching or overlapping objects, the
 pipeline must include a splitting step between mask creation and

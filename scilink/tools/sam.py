@@ -460,3 +460,58 @@ def merge_sam_results(results: List[dict]) -> dict:
         'masks': [p.get('mask') for p in all_particles if p.get('mask') is not None],
         'merged_from': len(results)
     }
+
+
+# =============================================================================
+# TOOL SPEC
+# =============================================================================
+
+from ._spec import ToolSpec
+
+TOOL_SPEC = ToolSpec(
+    name="run_sam_analysis",
+    description=(
+        "Segment Anything Model (SAM) instance segmentation. Detects individual "
+        "object instances even when they touch or overlap."
+    ),
+    import_line="from scilink.tools.sam import run_sam_analysis",
+    signature="run_sam_analysis(image_array, params) -> dict",
+    agents=["image_analysis"],
+    when_to_use=(
+        "2D images where discrete objects touch or overlap (particles, cells, pores, "
+        "grains). Accepts a 2D grayscale array or an HxWx3 RGB uint8 array. For non-RGB "
+        "multi-channel images, pass a single channel (e.g. image[:, :, 0]). "
+        "For objects that do not touch, plain connected-component labeling is usually "
+        "sufficient."
+    ),
+    parameters={
+        "image_array": {
+            "type": "ndarray",
+            "description": "2D grayscale array or HxWx3 RGB uint8 array.",
+        },
+        "params": {
+            "type": "dict",
+            "description": (
+                "Analysis parameters. Keys: "
+                "sam_parameters ('default' | 'sensitive' | 'ultra-permissive', "
+                "always start with 'default'), "
+                "min_area and max_area (pixel area filters, set from expected object size), "
+                "pruning_iou_threshold (float, default 0.5 — lower is stricter, higher keeps "
+                "more overlapping masks), "
+                "use_clahe (bool, default False — contrast enhancement)."
+            ),
+        },
+    },
+    required=["image_array", "params"],
+    returns=(
+        "dict with 'particles' (list with 'mask' and 'area' per particle), "
+        "'total_count' (int), 'masks' (list of binary arrays), 'areas' (list of ints)."
+    ),
+    example=(
+        "result = run_sam_analysis(image_array, params={\n"
+        "    'sam_parameters': 'default',\n"
+        "    'min_area': 50, 'max_area': 5000,\n"
+        "    'pruning_iou_threshold': 0.5,\n"
+        "})"
+    ),
+)

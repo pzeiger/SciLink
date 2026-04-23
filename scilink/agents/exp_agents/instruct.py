@@ -2784,31 +2784,16 @@ channel for what it measures, and consider whether cross-channel relationships a
 meaningful (e.g., do features in one channel correspond to or predict features in another).
 Access channels via `image[:,:,0]`, `image[:,:,1]`, etc.
 
-**Common Analysis Approaches** (for reference):
+**Common Analysis Approaches** (for reference — callable tools and available \
+libraries are listed in the `## Available Tools` and `## Available Libraries` \
+sections below):
 - Segmentation (Otsu, adaptive threshold, watershed, morphological)
 - Edge/boundary detection (Canny, Sobel, Laplacian of Gaussian)
-- Feature extraction (connected components, region properties, contour analysis)
+- Feature extraction (connected components, region properties, contour analysis).
   Note: connected component labeling cannot separate touching or overlapping objects —
-  they will be merged into single blobs. If objects touch or overlap, use SAM instance
-  segmentation or add a splitting step (e.g., distance transform → watershed).
-- SAM instance segmentation — for images with touching/overlapping objects.
-  Use `from scilink.tools.sam import run_sam_analysis` in your script.
-  SAM detects individual object instances directly, even when they overlap.
-  Usage: `result = run_sam_analysis(image_array, params={"sam_parameters": "default",
-    "min_area": <set_from_image>, "max_area": <set_from_image>,
-    "pruning_iou_threshold": <set_from_image>})`
-  First arg accepts a 2D grayscale numpy array or an HxWx3 RGB uint8 array. \
-For RGB images, passing the array directly is often preferable because SAM can leverage \
-color contrast, but extracting a single channel is also valid when one channel carries the \
-most relevant contrast. For non-RGB multi-channel images (e.g., 2-channel or 4-channel), \
-pass a single channel (e.g., `image[:,:,0]`).
-  Choose min_area/max_area based on expected object sizes in the image.
-  Always start with sam_parameters='default'. Only escalate to 'sensitive' in a retry if
-  'default' misses visible objects.
-  Parameters: min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False),
-    pruning_iou_threshold (masks with IoU above this are removed; lower = stricter, higher = keeps more overlapping objects; default 0.5).
-  Returns dict with "particles" (list with "mask", "area" per particle), "total_count", "masks".
-  Avoid Gaussian blur before SAM unless noise is very high.
+  they will be merged into single blobs. For touching or overlapping objects, reach for
+  a registered instance-segmentation tool from `## Available Tools` or add a splitting
+  step (e.g., distance transform → watershed).
 - Texture analysis (GLCM, local binary patterns, Gabor filters)
 - Morphological measurements (area, perimeter, circularity, aspect ratio, solidity)
 - Phase identification (intensity clustering, color-space segmentation)
@@ -2818,27 +2803,6 @@ pass a single channel (e.g., `image[:,:,0]`).
   Prefer FFT-based methods for atomically resolved images where it is more meaningful
   to learn about periodic structures, symmetries, or electronic patterns rather than
   find every atom.
-- Sliding FFT/NMF decomposition — for images with periodic or quasi-periodic structures.
-  Use `from scilink.tools.fft_nmf import run_fft_nmf_analysis` in your script.
-  Procedure: slides a window across the image, computes the FFT power spectrum of each
-  patch (with Hamming windowing, log-magnitude, and central zoom), then runs NMF on the
-  stacked spectra to factorize them into a small set of spectral components (dominant
-  frequency patterns) and their spatial abundance maps (where each pattern is present).
-  Usage: `result = run_fft_nmf_analysis(image_array, params={"n_components": 4})`
-  First arg must be a 2D grayscale numpy array.
-  Parameters: window_size (pixels, default: auto), n_components (default: 4),
-    step_fraction (window overlap, default: 0.25).
-  Returns dict with "components" shape (n_components, fft_h, fft_w) — each component is
-    a 2D FFT power spectrum representing a dominant frequency pattern; "abundances" shape
-    (n_components, grid_h, grid_w) — spatial maps showing where each component is present
-    in the image; plus "n_components", "window_size", "grid_shape".
-  Choose window_size and n_components based on the physics of the problem — the spatial
-  scale of repeating features and the number of distinct patterns expected in the image
-  based on the material system and imaging conditions.
-  Always save components and abundances as .npy files (e.g.,
-  `np.save("nmf_components.npy", result["components"])` and
-  `np.save("abundance_maps.npy", result["abundances"])`) and include them in
-  `saved_arrays` so follow-up analysis can reuse them.
 
 **Commit to specific choices — do NOT hedge:**
 - State ONE segmentation method, not alternatives (write "Otsu thresholding" not "Otsu or adaptive")
@@ -2855,7 +2819,7 @@ pass a single channel (e.g., `image[:,:,0]`).
     "analysis_approach": "Overall strategy in one sentence",
     "processing_pipeline": "Step-by-step sequence: e.g., 'Gaussian blur (sigma=2) -> Otsu threshold -> morphological opening (disk r=3) -> connected component labeling -> region property extraction'",
     "features_to_extract": ["feature1", "feature2"],
-    "quality_criteria": "How to verify the analysis worked — specific, measurable where possible (e.g., 'segmentation should capture >90% of visible grains', 'detected edge map should trace visible boundaries')",
+    "quality_criteria": "How to verify the analysis produced usable output. Match criteria specificity to the objective. Targeted objective (e.g. count grains, measure lattice spacing, find specific defects): set concrete measurable criteria that check those features are extracted and physically plausible — e.g. 'grain count within 10% of visual estimate', 'lattice spacing matches known bulk value'. Exploratory / open-ended objective (or no objective provided): keep criteria descriptive — 'outputs are coherent (not pure noise or all NaN)', 'features correspond to real image content rather than artifacts'. Avoid baking in specific expectations the data may not actually support — the analysis should discover what is there, not confirm a hypothesis.",
     "expected_outputs": ["output_visualization_1.png", "output_visualization_2.png"],
     "literature_query": "Question for literature search to help with analysis, or null if not needed"
 }}
@@ -2876,6 +2840,14 @@ your findings.
 Keep the pipeline simple and robust. A successful basic analysis that
 captures the main features is more valuable than an ambitious pipeline
 that fails.
+
+When a registered tool already does the hard step (e.g. `run_fft_nmf_analysis`
+with a window size tuned to the spatial scale of the features of interest for
+disorder / defect / multi-phase analysis, or `run_sam_analysis` for instance
+segmentation), a single tool call followed by a simple post-processing step is
+already a complete Tier 1 pipeline. Do not pad it with additional processing
+steps for the sake of thoroughness — the tool output plus a focused
+interpretation is the deliverable.
 
 If a specific analysis objective was provided, ensure your foundational
 analysis captures the features most relevant to that objective —
@@ -2947,25 +2919,37 @@ IMAGE_ANALYSIS_TIER2_DECISION_INSTRUCTIONS = """You are evaluating whether a fou
 
 **Analysis Objective:** {objective}
 
-Based on the Tier 1 findings, decide whether a deeper follow-up
-analysis would produce scientifically meaningful additional insights.
+**Default answer is NO.** Tier 1 is typically sufficient. Only answer YES when
+Tier 2 would deliver a *specific, concrete* scientific insight that Tier 1 did
+not and cannot produce. Interesting-looking features or possibilities do not
+justify Tier 2 — there must be a clear follow-up analysis with a clear outcome.
 
-Answer YES if the Tier 1 results reveal:
-- Multiple distinct feature populations worth separating (e.g., bimodal intensity suggesting sublattices)
-- Spatial patterns or gradients worth quantifying (e.g., size gradient, intensity variation)
-- Anomalous regions worth characterizing (e.g., dark bands, displaced features)
-- The stated objective requires analysis beyond basic detection and measurement
+**Answer NO if any of the following is true:**
+- Tier 1 already addresses the stated objective (even partially — if the core
+  question is answered, stop).
+- The image is uniform or featureless.
+- Tier 1 quality is poor or unreliable — building deeper analysis on a weak
+  foundation is worse than stopping.
+- The additional insight from Tier 2 would be incremental or speculative rather
+  than a distinct new finding.
+- You cannot name a specific follow-up analysis that would produce a specific
+  new measurable outcome.
 
-Answer NO if:
-- Tier 1 already fully addresses the objective
-- The image shows uniform, featureless structure with nothing to investigate further
-- Tier 1 quality is too poor to build on (detection failed, lattice fit unreliable)
+**Answer YES only if all of the following are true:**
+- The stated objective requires analysis that Tier 1 demonstrably did not
+  perform (e.g., objective mentions sublattice-resolved measurement, strain
+  mapping, or phase-resolved quantification, and Tier 1 did not produce it).
+- Tier 1 findings *clearly* indicate a follow-up with a concrete, bounded
+  outcome — not "investigate further," but "measure X using Y."
+- Tier 1 results are reliable enough to serve as input to the follow-up.
+
+If you are uncertain, answer NO.
 
 Return JSON:
 {{
     "tier2_needed": true/false,
-    "reasoning": "why deeper analysis is or isn't warranted",
-    "suggested_focus": "what the follow-up should investigate (if needed)"
+    "reasoning": "Concrete justification. If YES: name the specific follow-up analysis and the specific outcome it will produce that Tier 1 did not.",
+    "suggested_focus": "Specific follow-up analysis if YES; empty string if NO."
 }}
 """
 
@@ -3124,6 +3108,19 @@ features. You may adjust numerical parameters (thresholds, window sizes, sigma v
 to produce reasonable results — document adjustments in the "summary" field. Do not \
 change the analysis methods themselves (e.g., don't replace Otsu with adaptive thresholding).
 
+**REGISTERED TOOLS:** If the plan names a registered tool, you MUST import and call it \
+by its exact import line and signature. Do not reimplement the tool's internals inline, \
+even when you believe you can write "equivalent logic" — a hand-written variant cannot \
+be verified as equivalent to the registered implementation. Two narrow exceptions: \
+(1) the tool fails at runtime due to a major infrastructure issue (model weights \
+cannot be downloaded, a required dependency is not installed, model files are missing \
+or corrupted); (2) the tool runs but produces clearly unacceptable output that cannot \
+be fixed by tuning its documented parameters — and you have actually tried tuning \
+them first. In either case: try the tool first (and for case 2, attempt reasonable \
+parameter adjustments before giving up), catch the failure or inadequate result, \
+document the specific issue in the "summary" field, and only then fall back to custom \
+code.
+
 **Context:** {context}
 
 **Data:**
@@ -3132,29 +3129,7 @@ change the analysis methods themselves (e.g., don't replace Otsu with adaptive t
 - dtype: {dtype}
 - Intensity range: [{intensity_min}, {intensity_max}]
 
-**Available Libraries:** numpy, scipy (ndimage, signal, optimize), scikit-image (skimage), \
-opencv-python (cv2), matplotlib, Pillow (PIL), scikit-learn (sklearn), pandas, json, \
-scilink.tools.sam — SAM instance segmentation for touching/overlapping objects. \
-`from scilink.tools.sam import run_sam_analysis`; \
-usage: `result = run_sam_analysis(image_array, params={{"sam_parameters": "default", \
-"min_area": <set_from_plan>, "max_area": <set_from_plan>, \
-"pruning_iou_threshold": <set_from_plan>}})`. \
-First arg must be a 2D grayscale numpy array or an HxWx3 RGB uint8 array. \
-For multi-channel images that are not RGB (e.g., 2-channel or 4-channel), pass a single \
-channel (e.g., `image[:,:,0]`). True RGB images can be passed directly. \
-Choose min_area/max_area based on expected object sizes in the image. \
-sam_parameters MUST be 'default' on the first attempt — only switch to 'sensitive' in a retry \
-after 'default' has been tried and missed objects. \
-Parameters: \
-min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False), \
-pruning_iou_threshold (masks with IoU above this are removed; lower = stricter, higher = keeps more overlapping objects; default 0.5). \
-Returns dict with "particles" (list with "mask", "area" per particle), "total_count", "masks". \
-For RGB input, each particle also includes "mean_color_rgb". \
-Avoid Gaussian blur before SAM unless noise is very high. \
-scilink.tools.atom_finding_tools — atomic column detection for STEM images. \
-`from scilink.tools.atom_finding_tools import detect_atoms, detect_atoms_dcnn, refine_positions, find_zone_axes, find_missing_atoms, subtract_atoms`; \
-detect_atoms uses classical peak detection; detect_atoms_dcnn uses a DCNN ensemble and requires fov_nm (field of view in nm). \
-Use only when the domain skill or plan calls for atom-finding tools.
+{tool_inventory}
 
 **Requirements:**
 1. Load image: use `np.load(path)` for .npy, or `cv2.imread(path, cv2.IMREAD_UNCHANGED)` \
@@ -3198,6 +3173,92 @@ print(f"IMAGE_ANALYSIS_RESULTS_JSON:{{{{json.dumps(results)}}}}")
 """
 
 
+IMAGE_ANALYSIS_SCRIPT_REFINEMENT_PROMPT = """Refine an existing image analysis script to match a refined plan.
+
+**Your Plan (refined by verification feedback):**
+- Approach: {analysis_approach}
+- Pipeline: {processing_pipeline}
+- Features to extract: {features_to_extract}
+
+**CONFORMANCE:** Your updated script should implement the plan's methods and \
+extract the listed features. You may adjust numerical parameters (thresholds, \
+window sizes, sigma values) to produce reasonable results — document adjustments \
+in the "summary" field. Do not change the analysis methods themselves (e.g., \
+don't replace Otsu with adaptive thresholding) unless the refined plan \
+explicitly demands it.
+
+**REGISTERED TOOLS:** If the plan names a registered tool, you MUST import and call it \
+by its exact import line and signature. Do not reimplement the tool's internals inline, \
+even when you believe you can write "equivalent logic" — a hand-written variant cannot \
+be verified as equivalent to the registered implementation. Two narrow exceptions: \
+(1) the tool fails at runtime due to a major infrastructure issue (model weights \
+cannot be downloaded, a required dependency is not installed, model files are missing \
+or corrupted); (2) the tool runs but produces clearly unacceptable output that cannot \
+be fixed by tuning its documented parameters — and you have actually tried tuning \
+them first. In either case: try the tool first (and for case 2, attempt reasonable \
+parameter adjustments before giving up), catch the failure or inadequate result, \
+document the specific issue in the "summary" field, and only then fall back to custom \
+code.
+
+**Context:** {context}
+
+**Data:**
+- Path: `{data_path}`
+- Shape: {shape}
+- dtype: {dtype}
+- Intensity range: [{intensity_min}, {intensity_max}]
+
+{tool_inventory}
+
+**PREVIOUS SCRIPT (working baseline):**
+```python
+{base_script}
+```
+
+**How to adapt the previous script:**
+The previous script produced a partial result that the verifier wants improved. \
+The refined plan above reflects the verifier's feedback. Modify the previous script \
+to implement the refined plan — **preserve pipeline choices and custom implementations \
+that still apply** (e.g., a handwritten per-window processing loop that was matching \
+the plan's intent). Only change the parts the refinement actually requires. \
+If the refined plan demands fundamentally different methods (e.g., switching from \
+intensity thresholding to edge detection, or from one registered tool to another), \
+rewrite the analysis portion accordingly — but do not rewrite more than the \
+refined plan calls for.
+
+**Requirements:**
+1. Load image: use `np.load(path)` for .npy, or `cv2.imread(path, cv2.IMREAD_UNCHANGED)` \
+for standard formats (remember cv2 loads BGR — convert to RGB if 3-channel color). \
+Check the image shape — it may have 2 or more channels that are not RGB. Access channels \
+via `image[:,:,0]`, `image[:,:,1]`, etc. Do not assume grayscale or RGB.
+2. Implement the refined analysis pipeline.
+3. Save visualization(s): `analysis_visualization.png` showing original image alongside \
+key analysis results. Use subplots with clear labels. All visualizations must be saved \
+to the current working directory. Use `dpi=100`.
+4. Save key output arrays to the current working directory as `.npy` files. \
+At minimum save the primary detection/segmentation result.
+5. NumPy / Python scalar conversions: values pulled out of numpy arrays (via indexing, \
+reductions, or tool outputs) are numpy scalars, not Python scalars. Before passing them \
+to Python builtins (`round()`, f-string width/precision), `json.dumps`, or any code that \
+expects a native Python `int`/`float`, wrap with `float(...)` or `int(...)`.
+6. Print results as JSON. Include a `saved_arrays` key describing every `.npy` \
+file you saved — each entry should have `description`, `shape`, and `dtype`. \
+The standard fields are:
+```python
+results = {{{{
+    "analysis_type": "description of what was done",
+    "extracted_features": {{{{"feature_name": value, ...}}}},
+    "quality_metrics": {{{{"metric_name": value, ...}}}},
+    "summary": "Key finding in one sentence",
+    "saved_arrays": {{{{...}}}}
+}}}}
+print(f"IMAGE_ANALYSIS_RESULTS_JSON:{{{{json.dumps(results)}}}}")
+```
+
+**Response:** Return only `{{"script": "..."}}`
+"""
+
+
 IMAGE_ANALYSIS_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed image analysis script.
 
 **Plan:** {analysis_approach} | **Pipeline:** {processing_pipeline}
@@ -3212,29 +3273,7 @@ IMAGE_ANALYSIS_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed image analysi
 {error_message}
 ```
 
-**Available Libraries:** numpy, scipy (ndimage, signal, optimize), scikit-image (skimage), \
-opencv-python (cv2), matplotlib, Pillow (PIL), scikit-learn (sklearn), pandas, json, \
-scilink.tools.sam — SAM instance segmentation for touching/overlapping objects. \
-`from scilink.tools.sam import run_sam_analysis`; \
-usage: `result = run_sam_analysis(image_array, params={{"sam_parameters": "default", \
-"min_area": <set_from_plan>, "max_area": <set_from_plan>, \
-"pruning_iou_threshold": <set_from_plan>}})`. \
-First arg must be a 2D grayscale numpy array or an HxWx3 RGB uint8 array. \
-For multi-channel images that are not RGB (e.g., 2-channel or 4-channel), pass a single \
-channel (e.g., `image[:,:,0]`). True RGB images can be passed directly. \
-Choose min_area/max_area based on expected object sizes in the image. \
-sam_parameters MUST be 'default' on the first attempt — only switch to 'sensitive' in a retry \
-after 'default' has been tried and missed objects. \
-Parameters: \
-min_area/max_area (pixel area filters), use_clahe (contrast enhancement, default False), \
-pruning_iou_threshold (masks with IoU above this are removed; lower = stricter, higher = keeps more overlapping objects; default 0.5). \
-Returns dict with "particles" (list with "mask", "area" per particle), "total_count", "masks". \
-For RGB input, each particle also includes "mean_color_rgb". \
-Avoid Gaussian blur before SAM unless noise is very high. \
-scilink.tools.atom_finding_tools — atomic column detection for STEM images. \
-`from scilink.tools.atom_finding_tools import detect_atoms, detect_atoms_dcnn, refine_positions, find_zone_axes, find_missing_atoms, subtract_atoms`; \
-detect_atoms uses classical peak detection; detect_atoms_dcnn uses a DCNN ensemble and requires fov_nm (field of view in nm). \
-Use only when the domain skill or plan calls for atom-finding tools.
+{tool_inventory}
 
 **CRITICAL:** Fix only the execution error. Do NOT change the analysis pipeline, feature \
 extraction approach, or the overall analysis strategy. The approach is locked for series consistency.
@@ -3280,6 +3319,16 @@ implementation-level decision, not a method change.
 The script's "summary" field should explain any adjustment.
 Changing the analysis method (e.g., replacing LoG with Hough circles) is NOT a justified \
 deviation — that requires a new plan via the retry pipeline.
+
+Reimplementing a registered tool inline instead of calling it is NOT a justified \
+deviation, even when the script claims "equivalent logic" or "same parameters". The \
+registered tool is the single source of truth for that operation. The only valid \
+exceptions are (1) the tool actually failed at runtime due to a major infrastructure \
+issue (model download failed, required dependency not installed, model files missing), \
+or (2) the tool ran but produced clearly unacceptable output that could not be fixed by \
+tuning its documented parameters and the script documents the attempted tuning. Both \
+exceptions must be explicitly documented in the script's "summary" field — mere \
+assertion of equivalence is not sufficient.
 
 Return JSON:
 {{"conformant": true/false, "justified_deviations": ["deviations with stated reasoning, if any"], "unjustified_deviations": ["deviations with no explanation"], "summary": "one sentence"}}

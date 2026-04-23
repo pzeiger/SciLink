@@ -380,7 +380,7 @@ def download_file_with_gdown(file_id, output_path, logger):
         parent_dir = os.path.dirname(output_path)
         if parent_dir:
             os.makedirs(parent_dir, exist_ok=True)
-        gdown.download(id=file_id, output=output_path, quiet=False, fuzzy=True)
+        gdown.download(id=file_id, output=output_path, quiet=False)
         logger.info(f"File downloaded to: {output_path}")
         return output_path
     except Exception as e:

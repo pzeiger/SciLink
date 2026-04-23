@@ -348,7 +348,7 @@ def download_file_with_gdown(file_id, output_path):
             os.makedirs(parent_dir, exist_ok=True)
 
         # gdown.download handles the direct download link construction and large file quirks
-        gdown.download(id=file_id, output=output_path, quiet=False, fuzzy=True) # fuzzy=True for slightly more relaxed ID matching
+        gdown.download(id=file_id, output=output_path, quiet=False)
         
         print(f"File downloaded to: {output_path}")
         return output_path

@@ -736,3 +736,251 @@ def _empty_result():
         "amplitude": None,
         "rotation": None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Tool specs
+# ---------------------------------------------------------------------------
+
+from ._spec import ToolSpec
+
+TOOL_SPECS = [
+    ToolSpec(
+        name="detect_atoms",
+        description=(
+            "Classical atom-column detection: peak detection plus optional 2D Gaussian "
+            "refinement. Returns sub-pixel positions and per-atom Gaussian parameters."
+        ),
+        import_line="from scilink.tools.atom_finding_tools import detect_atoms",
+        signature=(
+            "detect_atoms(image, separation, threshold_rel=0.02, refine=True, "
+            "percent_to_nn=0.40, subtract_background=False, normalize_intensity=True) -> dict"
+        ),
+        agents=["image_analysis"],
+        when_to_use=(
+            "Atomic-resolution STEM/HAADF images where atoms appear as bright peaks on a "
+            "darker background and the approximate atom separation in pixels is known "
+            "(from metadata or by measurement). A good general-purpose baseline across "
+            "materials — no training-data dependence."
+        ),
+        parameters={
+            "image": {"type": "ndarray", "description": "2D grayscale array."},
+            "separation": {
+                "type": "int",
+                "description": "Minimum atom spacing in pixels.",
+            },
+            "threshold_rel": {
+                "type": "float",
+                "description": "Relative peak threshold (default 0.02).",
+            },
+            "refine": {
+                "type": "bool",
+                "description": "Fit a 2D Gaussian per peak for sub-pixel precision (default True).",
+            },
+            "percent_to_nn": {
+                "type": "float",
+                "description": "Gaussian mask radius as fraction of nearest-neighbor distance (default 0.40).",
+            },
+            "subtract_background": {
+                "type": "bool",
+                "description": "Gaussian-blur background subtraction before peak finding (default False).",
+            },
+            "normalize_intensity": {
+                "type": "bool",
+                "description": "Normalize to 0-1 before peak finding (default True).",
+            },
+        },
+        required=["image", "separation"],
+        returns=(
+            "dict with 'positions' (N,2 array of (x,y) sub-pixel coordinates), "
+            "'sigma_x', 'sigma_y', 'amplitude', 'rotation' (each length-N arrays, or "
+            "None when refine=False)."
+        ),
+    ),
+    ToolSpec(
+        name="detect_atoms_dcnn",
+        description=(
+            "AtomNet3 deep-CNN ensemble detection. Produces atom positions and a "
+            "probability heatmap."
+        ),
+        import_line="from scilink.tools.atom_finding_tools import detect_atoms_dcnn",
+        signature=(
+            "detect_atoms_dcnn(image, fov_nm, model_dir=None, "
+            "target_pixel_size=0.25, threshold=0.8, refine=True) -> dict"
+        ),
+        agents=["image_analysis"],
+        when_to_use=(
+            "Relatively clean atomic-resolution images. Known to work well on "
+            "transition-metal oxides — simple perovskites, layered perovskites, and "
+            "cuprate superconductors (e.g. YBCO, BSCCO) — and on graphene. Preferred "
+            "over classical peak finding for these material systems. Requires the "
+            "field of view in nanometers (from metadata/calibration). Requires the "
+            "atomai package; models auto-download on first call."
+        ),
+        parameters={
+            "image": {"type": "ndarray", "description": "2D grayscale array."},
+            "fov_nm": {
+                "type": "float",
+                "description": "Field of view in nanometers (from metadata or calibration).",
+            },
+            "model_dir": {
+                "type": "str | None",
+                "description": "Path to directory with atomnet3*.tar files. None auto-discovers/downloads.",
+            },
+            "target_pixel_size": {
+                "type": "float",
+                "description": "Target pixel size in Angstroms (default 0.25).",
+            },
+            "threshold": {
+                "type": "float",
+                "description": "Detection confidence 0-1 (default 0.8).",
+            },
+            "refine": {
+                "type": "bool",
+                "description": "Sub-pixel refinement on detected peaks (default True).",
+            },
+        },
+        required=["image", "fov_nm"],
+        returns=(
+            "dict with 'positions' (N,2 array (x,y) in original image pixels), "
+            "'heatmap' (2D probability map in original image space), and "
+            "'sigma_x', 'sigma_y', 'amplitude', 'rotation' (None — call refine_positions "
+            "to obtain Gaussian parameters)."
+        ),
+    ),
+    ToolSpec(
+        name="refine_positions",
+        description=(
+            "Fit 2D Gaussians at known atom positions to obtain sub-pixel coordinates "
+            "and per-atom sigma, amplitude, and rotation values."
+        ),
+        import_line="from scilink.tools.atom_finding_tools import refine_positions",
+        signature="refine_positions(image, positions, percent_to_nn=0.40) -> dict",
+        agents=["image_analysis"],
+        when_to_use=(
+            "After detect_atoms_dcnn (or any source that returns positions without "
+            "Gaussian parameters), when downstream tools like subtract_atoms need "
+            "sigma / amplitude per atom."
+        ),
+        parameters={
+            "image": {"type": "ndarray", "description": "2D grayscale array."},
+            "positions": {
+                "type": "ndarray",
+                "description": "(N, 2) array of (x, y) atom positions.",
+            },
+            "percent_to_nn": {
+                "type": "float",
+                "description": "Gaussian mask radius as fraction of nearest-neighbor distance (default 0.40).",
+            },
+        },
+        required=["image", "positions"],
+        returns=(
+            "dict with 'positions' (refined N,2 (x,y)), 'sigma_x', 'sigma_y', "
+            "'amplitude', 'rotation' (each length-N arrays)."
+        ),
+    ),
+    ToolSpec(
+        name="find_zone_axes",
+        description=(
+            "Detect lattice translation vectors from a set of atom positions. Returns "
+            "the unique shortest lattice vectors."
+        ),
+        import_line="from scilink.tools.atom_finding_tools import find_zone_axes",
+        signature="find_zone_axes(positions, n_neighbors=9, distance_tolerance=None) -> list",
+        agents=["image_analysis"],
+        when_to_use=(
+            "Once atom positions are known (detect_atoms or detect_atoms_dcnn), to "
+            "recover lattice periodicity and pass a zone vector to find_missing_atoms."
+        ),
+        parameters={
+            "positions": {
+                "type": "ndarray",
+                "description": "(N, 2) array of atom positions (x, y).",
+            },
+            "n_neighbors": {
+                "type": "int",
+                "description": "Neighbors per atom to examine (default 9).",
+            },
+            "distance_tolerance": {
+                "type": "float | None",
+                "description": "Clustering tolerance in pixels. Default: median NN distance / 3.",
+            },
+        },
+        required=["positions"],
+        returns="List of (dx, dy) tuples — unique lattice vectors, shortest first.",
+    ),
+    ToolSpec(
+        name="find_missing_atoms",
+        description=(
+            "Predict atom positions at fractional lattice sites along a zone vector "
+            "(e.g. midpoints for a second sublattice)."
+        ),
+        import_line="from scilink.tools.atom_finding_tools import find_missing_atoms",
+        signature="find_missing_atoms(positions, zone_vector, fraction=0.5, min_distance=3.0) -> ndarray",
+        agents=["image_analysis"],
+        when_to_use=(
+            "Multi-sublattice materials where a second (weaker) sublattice sits at "
+            "fractional positions between detected atoms. Pair with subtract_atoms to "
+            "reveal the weaker sublattice, then re-detect."
+        ),
+        parameters={
+            "positions": {
+                "type": "ndarray",
+                "description": "(N, 2) array of detected atoms (x, y).",
+            },
+            "zone_vector": {
+                "type": "tuple",
+                "description": "(dx, dy) lattice vector from find_zone_axes.",
+            },
+            "fraction": {
+                "type": "float",
+                "description": "Fractional position along the vector (0.5 = midpoint).",
+            },
+            "min_distance": {
+                "type": "float",
+                "description": "Minimum distance from existing atoms (pixels, default 3.0).",
+            },
+        },
+        required=["positions", "zone_vector"],
+        returns="(M, 2) ndarray of predicted positions (x, y).",
+    ),
+    ToolSpec(
+        name="subtract_atoms",
+        description=(
+            "Subtract fitted 2D Gaussians from an image to produce a residual that "
+            "reveals weaker sublattices or features."
+        ),
+        import_line="from scilink.tools.atom_finding_tools import subtract_atoms",
+        signature=(
+            "subtract_atoms(image, positions, sigma_x, sigma_y, amplitude, "
+            "rotation=None) -> ndarray"
+        ),
+        agents=["image_analysis"],
+        when_to_use=(
+            "Revealing weaker sublattices in multi-sublattice materials after the "
+            "primary sublattice is fit with detect_atoms (or detect_atoms_dcnn + "
+            "refine_positions). Feed the residual back into a detector for the second "
+            "sublattice."
+        ),
+        parameters={
+            "image": {"type": "ndarray", "description": "2D array."},
+            "positions": {
+                "type": "ndarray",
+                "description": "(N, 2) atom positions (x, y).",
+            },
+            "sigma_x": {"type": "ndarray", "description": "Per-atom sigma_x (length N)."},
+            "sigma_y": {"type": "ndarray", "description": "Per-atom sigma_y (length N)."},
+            "amplitude": {
+                "type": "ndarray",
+                "description": "Per-atom Gaussian amplitude (length N).",
+            },
+            "rotation": {
+                "type": "ndarray | None",
+                "description": "Per-atom rotation in radians. Default 0 for all.",
+            },
+        },
+        required=["image", "positions", "sigma_x", "sigma_y", "amplitude"],
+        returns="2D residual image (clipped to >= 0).",
+    ),
+]
+
