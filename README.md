@@ -332,6 +332,8 @@ AnalysisOrchestratorAgent (main coordinator)
 
 **ImageAnalysisAgent** uses a two-tier pipeline: Tier 1 performs foundational detection and measurement, while Tier 2 (triggered automatically or on demand) handles deeper analysis such as strain mapping, sublattice separation, or defect classification. The `analysis_depth` parameter controls this behavior (`"auto"`, `"basic"`, or `"deep"`).
 
+> **Beta:** ImageAnalysisAgent is under active development. Expect rough edges: verification scores and planner choices can vary across runs, and some domain-specific defaults are still being tuned. Feedback welcome.
+
 ## CLI Usage
 
 ```bash
