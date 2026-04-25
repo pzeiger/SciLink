@@ -64,6 +64,26 @@ cell). Compare detected count against this estimate; significant
 discrepancy (outside 0.90-1.10×) suggests detection issues or a
 structurally interesting region worth reporting.
 
+**Calibration awareness.** Absolute spacings derived from images
+typically carry a few percent uncertainty in scale: pixel-size metadata
+may be approximate, scan distortion can be anisotropic (different stretch
+along fast vs. slow axis), and older datasets can be off by 5%. Account
+for this when designing the step's `quality_criteria`:
+
+- Do **not** write quality criteria as a hard absolute-value match
+  against bulk literature values (e.g. *"measured a-axis must be within
+  1% of 0.38 nm"*). A 3-5% offset between measurement and literature is
+  consistent with calibration error, not an analysis failure, but a
+  tight criterion will fail and trigger pointless retries.
+- Prefer **internally consistent** criteria the data can actually
+  satisfy: ratios (e.g. *"`b/a` within 5% of expected ratio"* — cancels
+  scale), FFT self-consistency (the reciprocal-lattice peaks form a
+  consistent grid), or fit residuals in the data's own units (lattice
+  fit residual / lattice spacing — dimensionless).
+- An absolute lattice-value match against literature is fine as an
+  **informational** check ("measured 0.38 nm matches YBCO a-axis to
+  ~3% — consistent within calibration"), not as a pass/fail.
+
 ### advanced
 **Tool reference:** detection and refinement helpers live in
 `scilink.tools.atom_finding_tools` (`detect_atoms`, `detect_atoms_dcnn`,
@@ -231,8 +251,11 @@ the position fit uncertainty.
 **HAADF intensity:** Scales as ~Z^1.6-2. Brighter columns contain
 heavier atoms.
 
-**Lattice parameters:** Compare against known bulk values. Report in
-both pixels and physical units when calibration is available.
+**Lattice parameters:** Compare against known bulk values, treating a
+few-percent absolute deviation as expected calibration uncertainty.
+Report in both pixels and physical units when calibration is
+available, and note the calibration-driven uncertainty band when
+matching against literature.
 
 ### advanced
 **Sublattice assignment:** Use chemical identity from intensity and
@@ -256,8 +279,13 @@ image area and unit cell) should be within 0.90-1.10.
 
 **NN distance consistency:** CV below 15% for well-ordered crystals.
 
-**Unit cell sanity:** Measured lattice parameters should be close to
-known bulk values when spatial calibration is available.
+**Unit cell sanity:** Measured lattice parameters should be in the
+right ballpark of known bulk values, but absolute scale carries a
+few-percent calibration uncertainty. Treat 3-5% deviations from
+literature as informational (likely calibration), not a pass/fail
+failure. Hard checks should be self-consistency: ratio of measured
+spacings (b/a) matching the expected ratio, or FFT peaks forming a
+consistent reciprocal lattice.
 
 **Do not recommend preprocessing on the input to `detect_atoms_dcnn`**
 (CLAHE, contrast normalization, background subtraction, etc.). The
