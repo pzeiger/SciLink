@@ -2827,39 +2827,25 @@ sections below):
 """
 
 
-IMAGE_ANALYSIS_TIER1_SUFFIX = """
+IMAGE_ANALYSIS_PIPELINE_DISCIPLINE_SUFFIX = """
 
-**IMPORTANT: Foundational analysis only.**
-Focus on detecting and measuring the primary features in the image.
-Produce reliable basic statistics (counts, sizes, positions, intensities,
-lattice parameters). Do NOT attempt advanced analysis (strain mapping,
-defect classification, sublattice-resolved measurements, displacement
-fields) — that will be handled in a follow-up step if warranted by
-your findings.
+**Pipeline complexity discipline:**
 
-Keep the pipeline simple and robust. A successful basic analysis that
-captures the main features is more valuable than an ambitious pipeline
+Keep the pipeline simple and robust. A successful focused analysis that
+captures the question at hand is more valuable than a complex pipeline
 that fails.
 
 When a registered tool already does the hard step (e.g. `run_fft_nmf_analysis`
-with a window size tuned to the spatial scale of the features of interest for
-disorder / defect / multi-phase analysis, or `run_sam_analysis` for instance
-segmentation), a single tool call followed by a simple post-processing step is
-already a complete Tier 1 pipeline. Do not pad it with additional processing
-steps for the sake of thoroughness — the tool output plus a focused
-interpretation is the deliverable.
+with a window size tuned to the spatial scale of the features of interest
+for disorder / defect / multi-phase analysis, or `run_sam_analysis` for
+instance segmentation), a single tool call followed by a simple post-
+processing step is already a complete pipeline. Do not pad it with
+additional processing steps for the sake of thoroughness — the tool
+output plus a focused interpretation is the deliverable.
 
-If a specific analysis objective was provided, ensure your foundational
-analysis captures the features most relevant to that objective —
-detection, measurement, and statistics for the structures it concerns.
-Tier 2 can then build on these to perform deeper investigation.
-
-If no specific analysis objective was provided, focus on basic
-characterization: identify what structures are present, measure their
-primary properties (count, size, spacing, intensity), and report what
-you observe. Do not attempt to answer every possible scientific
-question about the image — Tier 2 can follow up on the most
-interesting findings.
+Do not attempt to answer every possible scientific question about the
+image in a single step. Pick the question(s) the user's objective and
+context imply, and answer those.
 """
 
 

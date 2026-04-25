@@ -738,6 +738,96 @@ def _empty_result():
     }
 
 
+def local_env_gmm(image, positions, n_components=4, window_size=32):
+    """GMM clustering on local image patches around detected atomic positions.
+
+    Crops a ``(window_size, window_size)`` window around each position,
+    flattens each crop into a feature vector, and clusters with a Gaussian
+    Mixture Model. Captures the full local neighborhood (neighboring column
+    arrangement, not just peak intensity) — the right tool for sublattice
+    separation in complex structures where intensity alone is ambiguous.
+
+    Args:
+        image: 2D grayscale array.
+        positions: (N, 2) array of atom positions as (x, y) — the format
+            returned by ``detect_atoms`` / ``detect_atoms_dcnn``.
+        n_components: number of GMM clusters (default 4).
+        window_size: side length of the local patch in pixels (default 32).
+            Should be roughly the lattice parameter so each patch contains
+            the central atom plus its immediate neighbors.
+
+    Returns:
+        dict with:
+        - ``centroids``: (n_components, window_size, window_size) array,
+          one average local-environment image per cluster.
+        - ``positions``: (M, 2) ``(x, y)`` positions of the atoms that were
+          successfully classified (atoms whose patches fell outside the
+          image border are dropped by ``imlocal``).
+        - ``classes``: (M,) cluster id (0-indexed) per surviving atom.
+    """
+    try:
+        import atomai as aoi
+    except ImportError as exc:
+        raise ImportError(
+            "local_env_gmm requires atomai. Install with: pip install atomai"
+        ) from exc
+
+    pos_xy = np.asarray(positions, dtype=float)
+    if pos_xy.ndim != 2 or pos_xy.shape[1] not in (2, 3):
+        raise ValueError(
+            f"positions must be (N,2) or (N,3); got shape {pos_xy.shape}"
+        )
+    if pos_xy.shape[1] == 3:
+        pos_xy = pos_xy[:, :2]
+
+    # ``imlocal`` expects (row, col, class) per atom; swap to match.
+    coords_rcc = np.column_stack([
+        pos_xy[:, 1],
+        pos_xy[:, 0],
+        np.zeros(len(pos_xy)),
+    ])
+
+    img = np.asarray(image)
+    if img.ndim == 2:
+        expdata = img[None, ..., None]
+    elif img.ndim == 3 and img.shape[-1] == 1:
+        expdata = img[None, ...]
+    else:
+        raise ValueError(
+            f"image must be 2D (or 2D + trailing single channel); "
+            f"got shape {img.shape}"
+        )
+
+    imstack = aoi.stat.imlocal(
+        expdata, {0: coords_rcc}, window_size=int(window_size)
+    )
+    centroids, _, coords_class = imstack.gmm(int(n_components))
+
+    # Strip any trailing channel dim from centroids: atomai returns
+    # (k, win, win, 1) for single-channel input.
+    centroids = np.asarray(centroids)
+    if centroids.ndim == 4 and centroids.shape[-1] == 1:
+        centroids = centroids[..., 0]
+
+    if coords_class is None or len(coords_class) == 0:
+        return {
+            "centroids": centroids,
+            "positions": np.empty((0, 2)),
+            "classes": np.empty(0, dtype=int),
+        }
+
+    # Convert imlocal's 1-indexed classes to 0-indexed and re-emit
+    # positions in (x, y) order to match the rest of this module.
+    coords_class = np.asarray(coords_class, dtype=float).copy()
+    coords_class[:, 2] = coords_class[:, 2] - 1
+    out_positions = np.column_stack([coords_class[:, 1], coords_class[:, 0]])
+    return {
+        "centroids": centroids,
+        "positions": out_positions,
+        "classes": coords_class[:, 2].astype(int),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tool specs
 # ---------------------------------------------------------------------------
@@ -981,6 +1071,54 @@ TOOL_SPECS = [
         },
         required=["image", "positions", "sigma_x", "sigma_y", "amplitude"],
         returns="2D residual image (clipped to >= 0).",
+    ),
+    ToolSpec(
+        name="local_env_gmm",
+        description=(
+            "GMM clustering on local image patches around detected atomic positions. "
+            "Captures the full local neighborhood (neighboring column arrangement, not "
+            "just peak intensity) for sublattice separation in complex structures where "
+            "intensity alone is ambiguous."
+        ),
+        import_line="from scilink.tools.atom_finding_tools import local_env_gmm",
+        signature=(
+            "local_env_gmm(image, positions, n_components=4, window_size=32) -> dict"
+        ),
+        agents=["image_analysis"],
+        when_to_use=(
+            "Sublattice separation in multi-component or complex layered structures "
+            "(perovskites, layered oxides, cuprate superconductors) where columns of "
+            "different species share similar intensities and intensity-based clustering "
+            "alone is insufficient. Run after detection (detect_atoms or "
+            "detect_atoms_dcnn). Choose ``window_size`` ≈ lattice parameter so each "
+            "patch contains the central atom plus its immediate neighbors. Requires "
+            "the atomai package."
+        ),
+        parameters={
+            "image": {"type": "ndarray", "description": "2D grayscale array."},
+            "positions": {
+                "type": "ndarray",
+                "description": "(N, 2) atom positions as (x, y) from any detector.",
+            },
+            "n_components": {
+                "type": "int",
+                "description": "Number of GMM clusters (default 4).",
+            },
+            "window_size": {
+                "type": "int",
+                "description": (
+                    "Side length of the local patch in pixels (default 32). "
+                    "Set to ~lattice parameter."
+                ),
+            },
+        },
+        required=["image", "positions"],
+        returns=(
+            "dict with 'centroids' ((n_components, window_size, window_size) array, "
+            "average local-environment image per cluster), 'positions' ((M, 2) (x, y) "
+            "of atoms successfully classified — may be smaller than N if patches were "
+            "cropped at the image border), and 'classes' ((M,) 0-indexed cluster id)."
+        ),
     ),
 ]
 

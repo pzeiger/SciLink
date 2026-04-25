@@ -50,7 +50,7 @@ from .instruct import (
     IMAGE_ANALYSIS_INTERPRETATION_INSTRUCTIONS,
     IMAGE_ANALYSIS_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS,
     IMAGE_ANALYSIS_PLANNING_INSTRUCTIONS,
-    IMAGE_ANALYSIS_TIER1_SUFFIX,
+    IMAGE_ANALYSIS_PIPELINE_DISCIPLINE_SUFFIX,
     IMAGE_ANALYSIS_TIER2_PLANNING_INSTRUCTIONS,
     IMAGE_ANALYSIS_TIER2_DECISION_INSTRUCTIONS,
 )
@@ -430,11 +430,12 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # Sub-agent preprocessing results
             "fft_preprocessing": None,
             "sam_preprocessing": None,
-            # Tier-aware planning
+            # Every planning call gets the same complexity discipline.
+            # `analysis_depth` only gates whether in-agent Tier 2 escalation
+            # runs after Tier 1; it does not change what the planner is told.
             "planning_instructions_override": (
-                IMAGE_ANALYSIS_PLANNING_INSTRUCTIONS + IMAGE_ANALYSIS_TIER1_SUFFIX
-                if self.analysis_depth != "basic"
-                else None
+                IMAGE_ANALYSIS_PLANNING_INSTRUCTIONS
+                + IMAGE_ANALYSIS_PIPELINE_DISCIPLINE_SUFFIX
             ),
             # Pipeline state
             "analysis_images": [
@@ -943,13 +944,15 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 file_lines.append(f"- {f}")
         files_str = "\n".join(file_lines)
 
-        # Build Tier 2 planning instructions
+        # Build Tier 2 planning instructions. Append the pipeline-discipline
+        # suffix so Tier 2 stays bounded to the same complexity ceiling as
+        # Tier 1 — Tier 2 builds on Tier 1, it is not a more elaborate pipeline.
         tier2_instructions = IMAGE_ANALYSIS_TIER2_PLANNING_INSTRUCTIONS.format(
             tier1_summary=tier1_results.get("detailed_analysis", "")[:2000],
             tier1_features=features_str,
             tier1_claims=claims_str,
             tier1_files=files_str,
-        )
+        ) + IMAGE_ANALYSIS_PIPELINE_DISCIPLINE_SUFFIX
 
         if tier2_decision and tier2_decision.get("suggested_focus"):
             tier2_instructions += (
