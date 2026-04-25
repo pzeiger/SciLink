@@ -1,9 +1,52 @@
 import os
+import re
 import logging
 import json
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from ase.io import read as ase_read
+
+
+# Phrases that indicate the validator LLM is *confirming* a feature rather than
+# flagging an issue. Entries containing any of these phrases are filtered out
+# of identified_issues_detail before the success/needs-correction decision.
+_CONFIRMATION_PATTERNS = (
+    r"\bthis is (?:actually )?correct\b",
+    r"\bnot an? issue\b",
+    r"\b(?:correctly|successfully) (?:placed|created|removed|implemented|matches)",
+    r"\bconfirm(?:s|ed|ing)\b",
+    r"\bmatches the (?:user'?s? )?request\b",
+    r"\bis expected\b",
+    r"\bas expected\b",
+    r"\bexpected and (?:matches|consistent)",
+    r"\bphysically (?:sound|reasonable|valid|correct)",
+    r"\bvalidates? the\b",
+    r"\bthis is fine\b",
+    r"\bis (?:also |actually )?(?:fine|acceptable|appropriate)\b",
+    r"\bno (?:real )?issue\b",
+    r"\bcosmetic(?:ally)? (?:only|unusual|issue)?\b",
+    r"\bnot physically wrong\b",
+    r"\bthis should not cause issues\b",
+    r"\bcorrect behavior\b",
+    r"\bcorrect (?:and|behavior|implementation|coordination|stoichiometry)\b",
+)
+_CONFIRMATION_RE = re.compile("|".join(_CONFIRMATION_PATTERNS), re.IGNORECASE)
+
+
+def _filter_confirmations(issues: List[str]) -> List[str]:
+    """Drop entries that look like confirmations / positive observations
+    rather than actionable problems. Used to stop the structure-refinement
+    loop from spinning on cosmetic remarks the validator put in its issue list.
+    """
+    out = []
+    for item in issues or []:
+        text = item if isinstance(item, str) else str(item)
+        if not text.strip():
+            continue
+        if _CONFIRMATION_RE.search(text):
+            continue
+        out.append(item)
+    return out
 
 # Replaced google.generativeai imports with wrappers
 from ...auth import get_internal_proxy_key
@@ -246,9 +289,21 @@ class StructureValidatorAgent:
         )
 
         final_feedback["overall_assessment"] = llm_feedback.get("overall_assessment", "LLM assessment missing or failed.")
-        # Issues identified by LLM are now the sole source of issues
-        final_feedback["all_identified_issues"] = llm_feedback.get("identified_issues_detail", [])
+        # Issues identified by LLM are now the sole source of issues, but the
+        # LLM frequently puts confirmations / positive observations in this list
+        # ("this is correct", "matches the request", "confirms the vacancy",
+        # etc). Filter those out — they should not trigger a refinement cycle.
+        raw_issues = llm_feedback.get("identified_issues_detail", [])
+        final_feedback["all_identified_issues"] = _filter_confirmations(raw_issues)
         final_feedback["script_modification_hints"] = llm_feedback.get("script_modification_hints", [])
+
+        dropped = len(raw_issues) - len(final_feedback["all_identified_issues"])
+        if dropped > 0:
+            self.logger.info(
+                f"Filtered {dropped} confirmation/positive observation(s) "
+                f"from validator's issue list (kept {len(final_feedback['all_identified_issues'])} "
+                f"actionable issue(s))."
+            )
 
         if not final_feedback["all_identified_issues"]:
             final_feedback["status"] = "success"

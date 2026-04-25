@@ -32,7 +32,11 @@ from .metadata_converter import (
     normalize_metadata_dict_with_llm,
 )
 from ..lit_agents import OwlLiteratureAgent, NoveltyScorer
+from .recommendation_agent import RecommendationAgent
 from ...skills.loader import list_skills, list_all_skills, load_skill
+# Note: DFTOrchestrator is imported lazily inside `run_dft_workflow` to avoid
+# pulling in the optional [sim] extras (ase, atomate2, pymatgen) on every
+# AnalysisOrchestratorAgent instantiation.
 
 def _build_skill_description(agent_registry: dict = None,
                               custom_skills: dict = None) -> str:
@@ -2671,6 +2675,288 @@ class AnalysisOrchestratorTools:
                 "analysis_index": {
                     "type": "integer",
                     "description": "Alternatively, use the index of the analysis in memory (-1 for most recent)"
+                }
+            },
+            required=[]
+        )
+
+        # =====================================================================
+        # 11b. RECOMMEND DFT STRUCTURES
+        # =====================================================================
+        def recommend_dft_structures(analysis_id: str = None,
+                                     analysis_index: int = -1) -> str:
+            """
+            Generate DFT structure recommendations from a completed analysis,
+            optionally informed by a prior novelty assessment.
+            """
+            print(f"  ⚡ Tool: Generating DFT structure recommendations...")
+
+            # 1. Locate the analysis record
+            record = None
+            record_index = None
+
+            if analysis_id:
+                for i, r in enumerate(self.orch.analysis_results):
+                    if r.get("analysis_id") == analysis_id:
+                        record = r
+                        record_index = i
+                        break
+                if record is None:
+                    return json.dumps({"status": "error", "message": f"Analysis ID not found: {analysis_id}"})
+            else:
+                if not self.orch.analysis_results:
+                    return json.dumps({"status": "error", "message": "No analysis history available."})
+                record_index = analysis_index if analysis_index >= 0 else len(self.orch.analysis_results) + analysis_index
+                record = self.orch.analysis_results[record_index]
+
+            # 2. Extract analysis text
+            full_result = record.get("full_result") or {}
+            analysis_text = (
+                full_result.get("detailed_analysis")
+                or full_result.get("full_analysis")
+                or ""
+            )
+            if not analysis_text:
+                return json.dumps({
+                    "status": "error",
+                    "message": "Analysis record has no detailed_analysis text to work from."
+                })
+
+            # 3. Pull novel-claim *strings* (high_novelty_claims entries are dicts)
+            novelty = record.get("novelty_assessment") or {}
+            novel_claim_dicts = novelty.get("high_novelty_claims", []) or []
+            novel_claims = [
+                c.get("original_claim", "") if isinstance(c, dict) else str(c)
+                for c in novel_claim_dicts
+            ]
+            novel_claims = [c for c in novel_claims if c]
+
+            # 4. Build novelty context (mirror DFTRecommender.run_from_data)
+            if novel_claims:
+                context = "Focus on these potentially novel findings:\n"
+                for i, claim in enumerate(novel_claims, 1):
+                    context += f"{i}. {claim}\n"
+                context += "\nPrioritize DFT structures that can investigate these novel aspects."
+            else:
+                context = "No specific novel claims identified. Focus on most interesting aspects."
+
+            # 5. Output dir nested under the analysis record's directory
+            base_dir = Path(record.get("output_directory", self.orch.results_dir))
+            out_dir = base_dir / "dft_recommendations"
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            # 6. Run RecommendationAgent directly (no need for the DFTRecommender wrapper)
+            try:
+                agent = RecommendationAgent(
+                    api_key=self.orch.api_key,
+                    base_url=self.orch.base_url,
+                    model_name=self.orch.model_name,
+                )
+                result = agent.generate_dft_recommendations_from_text(
+                    cached_detailed_analysis=analysis_text,
+                    additional_prompt_context=context,
+                    system_info=self.orch.current_metadata,
+                )
+            except Exception as e:
+                return json.dumps({"status": "error", "message": f"Failed to generate recommendations: {e}"})
+
+            if "error" in result:
+                return json.dumps({"status": "error", "message": result.get("error")})
+
+            recommendations = result.get("recommendations", []) or []
+            reasoning = result.get("analysis_summary_or_reasoning", "")
+
+            # 7. Persist sidecar JSON for parity with the standalone runner
+            output_file = out_dir / "dft_recommendations.json"
+            try:
+                with open(output_file, 'w') as f:
+                    json.dump({
+                        "reasoning": reasoning,
+                        "recommendations": recommendations,
+                        "novel_claims": novel_claims,
+                    }, f, indent=2)
+            except Exception as e:
+                self.logger.warning(f"Failed to write DFT recommendations sidecar: {e}")
+
+            # 8. Persist on the analysis record for downstream tools
+            self.orch.analysis_results[record_index]["dft_recommendations"] = recommendations
+
+            print(f"    Generated {len(recommendations)} DFT recommendations → {output_file}")
+
+            return json.dumps({
+                "status": "success",
+                "count": len(recommendations),
+                "recommendations": [
+                    {
+                        "priority": r.get("priority"),
+                        "description": r.get("description"),
+                        "scientific_interest": r.get("scientific_interest"),
+                    }
+                    for r in recommendations
+                ],
+                "output_file": str(output_file),
+            })
+
+        self._register_tool(
+            func=recommend_dft_structures,
+            name="recommend_dft_structures",
+            description=(
+                "Generate DFT structure recommendations from a completed analysis. "
+                "Specify by analysis_id or use analysis_index (-1 for most recent). "
+                "If assess_novelty was run first, recommendations focus on novel claims. "
+                "Stores recommendations on the analysis record for use by run_dft_workflow."
+            ),
+            parameters={
+                "analysis_id": {
+                    "type": "string",
+                    "description": "The ID of the analysis run to use (e.g. 'sample1_FFT_2023...')"
+                },
+                "analysis_index": {
+                    "type": "integer",
+                    "description": "Alternatively, use the index of the analysis in memory (-1 for most recent)"
+                }
+            },
+            required=[]
+        )
+
+        # =====================================================================
+        # 11c. RUN DFT WORKFLOW (DFTOrchestrator)
+        # =====================================================================
+        def run_dft_workflow(structure_description: str = None,
+                             analysis_id: str = None,
+                             analysis_index: int = -1,
+                             recommendation_index: int = None,
+                             vasp_generator_method: str = "atomate2",
+                             max_refinement_cycles: int = 4) -> str:
+            """
+            Run the DFT orchestrator to produce VASP-ready inputs (POSCAR, INCAR,
+            KPOINTS) for a given structure description, or for a structure picked
+            from the recommendations stored on a previous analysis record.
+            """
+            print(f"  ⚡ Tool: Running DFT workflow...")
+
+            # 1. Locate the optional analysis record
+            record = None
+            record_index = None
+            if analysis_id:
+                for i, r in enumerate(self.orch.analysis_results):
+                    if r.get("analysis_id") == analysis_id:
+                        record = r
+                        record_index = i
+                        break
+                if record is None:
+                    return json.dumps({"status": "error", "message": f"Analysis ID not found: {analysis_id}"})
+            elif self.orch.analysis_results:
+                record_index = analysis_index if analysis_index >= 0 else len(self.orch.analysis_results) + analysis_index
+                if 0 <= record_index < len(self.orch.analysis_results):
+                    record = self.orch.analysis_results[record_index]
+
+            # 2. Resolve the structure description
+            if recommendation_index is not None:
+                if record is None:
+                    return json.dumps({"status": "error",
+                                       "message": "recommendation_index requires an analysis_id or available analysis history."})
+                recs = record.get("dft_recommendations") or []
+                if not (0 <= recommendation_index < len(recs)):
+                    return json.dumps({"status": "error",
+                                       "message": f"recommendation_index {recommendation_index} out of range (have {len(recs)})."})
+                structure_description = recs[recommendation_index].get("description") or structure_description
+            if not structure_description:
+                return json.dumps({"status": "error",
+                                   "message": "structure_description is required (or pass recommendation_index with an analysis that has stored recommendations)."})
+
+            # 3. Build output directory
+            slug = re.sub(r'[^A-Za-z0-9_-]+', '_', structure_description)[:40].strip('_') or "structure"
+            base_dir = Path(record.get("output_directory")) if record else Path(self.orch.results_dir)
+            out_dir = base_dir / "dft" / slug
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            # 4. Run the orchestrator (lazy import — keeps [sim] extras optional)
+            try:
+                from ..sim_agents.dft_orchestrator import DFTOrchestrator
+            except ImportError as e:
+                # vasp_generator_method='llm' only needs ase; 'atomate2' also
+                # needs pymatgen + atomate2. Both paths require ase for
+                # structure validation.
+                if vasp_generator_method == "atomate2":
+                    hint = "pip install ase pymatgen atomate2  (or: pip install 'scilink[sim]')"
+                else:
+                    hint = "pip install ase  (sufficient for vasp_generator_method='llm')"
+                return json.dumps({
+                    "status": "error",
+                    "message": (
+                        f"DFT workflow could not load required dependency. "
+                        f"Install: {hint}. Original error: {e}"
+                    ),
+                })
+            try:
+                wf = DFTOrchestrator(
+                    api_key=self.orch.api_key,
+                    base_url=self.orch.base_url,
+                    futurehouse_api_key=self.orch.futurehouse_api_key,
+                    mp_api_key=None,  # DFTOrchestrator auto-discovers via get_api_key
+                    generator_model=self.orch.model_name,
+                    validator_model=self.orch.model_name,
+                    output_dir=str(out_dir),
+                    max_refinement_cycles=max_refinement_cycles,
+                    vasp_generator_method=vasp_generator_method,
+                )
+                result = wf.run_complete_workflow(structure_description)
+            except Exception as e:
+                return json.dumps({"status": "error", "message": f"DFT workflow failed: {e}"})
+
+            final_status = result.get("final_status")
+
+            # 5. Persist on the analysis record
+            if record is not None:
+                self.orch.analysis_results[record_index].setdefault("dft_runs", []).append({
+                    "description": structure_description,
+                    "output_directory": str(out_dir),
+                    "final_status": final_status,
+                })
+
+            return json.dumps({
+                "status": final_status if final_status else "error",
+                "final_status": final_status,
+                "output_directory": str(out_dir),
+                "manifest_path": str(out_dir / "final_files_manifest.json"),
+                "ready_for_vasp": final_status == "success",
+            })
+
+        self._register_tool(
+            func=run_dft_workflow,
+            name="run_dft_workflow",
+            description=(
+                "Run the DFT orchestrator to produce VASP-ready inputs (POSCAR, INCAR, "
+                "KPOINTS) for a structure. Provide either an explicit structure_description, "
+                "or an analysis_id + recommendation_index to pick a structure from prior "
+                "recommend_dft_structures output. Does not run VASP itself; only generates inputs."
+            ),
+            parameters={
+                "structure_description": {
+                    "type": "string",
+                    "description": "Free-text description of the structure to build (e.g. 'MoS2 monolayer with sulfur vacancy')."
+                },
+                "analysis_id": {
+                    "type": "string",
+                    "description": "Analysis run to attach this DFT job to (used for output dir + recommendation lookup)."
+                },
+                "analysis_index": {
+                    "type": "integer",
+                    "description": "Alternatively, index of the analysis in memory (-1 for most recent)."
+                },
+                "recommendation_index": {
+                    "type": "integer",
+                    "description": "Index into the analysis record's stored DFT recommendations to use as the structure description."
+                },
+                "vasp_generator_method": {
+                    "type": "string",
+                    "enum": ["llm", "atomate2"],
+                    "description": "How to produce INCAR/KPOINTS. 'atomate2' is rule-based and fast; 'llm' is more flexible but slower."
+                },
+                "max_refinement_cycles": {
+                    "type": "integer",
+                    "description": "Maximum validator-guided structure refinement cycles."
                 }
             },
             required=[]

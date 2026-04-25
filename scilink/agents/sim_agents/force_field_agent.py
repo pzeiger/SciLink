@@ -6,8 +6,10 @@ import shutil
 import tempfile
 import subprocess
 from typing import Dict, Any, List, Optional, Tuple, Union
-from MDAnalysis import Universe
 import numpy as np
+# MDAnalysis is imported lazily inside _analyze_system_composition so that
+# loading scilink.agents.sim_agents (e.g., via DFTOrchestrator) doesn't
+# require the LAMMPS-side optional dep.
 from ...auth import get_internal_proxy_key
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
@@ -1262,6 +1264,7 @@ Provide a brief summary of what the results mean and any actions needed.
         self.logger.info(f"Analyzing composition of {pdb_file}")
 
         try:
+            from MDAnalysis import Universe
             u = Universe(pdb_file)
 
             elements = {}

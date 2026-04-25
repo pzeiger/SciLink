@@ -214,16 +214,33 @@ class StructureGenerator:
         
         return base_prompt + JSON_OUTPUT_INSTRUCTION
 
-    def _build_validation_correction_prompt(self, original_request: str, 
+    def _build_validation_correction_prompt(self, original_request: str,
                                             attempted_script_content: str,
                                             validator_feedback: dict,
-                                            tool_name: str) -> str:
-        """Build validation correction prompt."""
+                                            tool_name: str,
+                                            attempt_history: Optional[list] = None) -> str:
+        """Build validation correction prompt, optionally with prior-cycle history."""
         validator_issues = validator_feedback.get("all_identified_issues", [])
         validator_hints = validator_feedback.get("script_modification_hints", [])
-        
+
         issues_str = "\n".join([f"- {issue}" for issue in validator_issues]) if validator_issues else "No specific issues listed."
         hints_str = "\n".join([f"- {hint}" for hint in validator_hints]) if validator_hints else "No specific hints provided."
+
+        # Render prior-attempts block, if any. Only show cycles BEFORE the
+        # immediately-previous one (which is already included as the
+        # "Previously Attempted Script" + its validator feedback).
+        prior_block = ""
+        if attempt_history and len(attempt_history) >= 2:
+            earlier = attempt_history[:-1]
+            lines = [
+                "",
+                "- **Prior-cycle history (for context — to detect recurring/cosmetic complaints):**",
+            ]
+            for i, entry in enumerate(earlier, start=1):
+                ents = entry.get("issues") or []
+                ents_str = "; ".join(str(e)[:140] for e in ents) if ents else "(no issues recorded)"
+                lines.append(f"  - Cycle {i} → validator complaints: {ents_str}")
+            prior_block = "\n".join(lines) + "\n"
 
         base_prompt = SCRIPT_CORRECTION_FROM_VALIDATION_TEMPLATE.format(
             original_request=original_request,
@@ -231,9 +248,10 @@ class StructureGenerator:
             validator_overall_assessment=validator_feedback.get("overall_assessment", "N/A"),
             validator_specific_issues=issues_str,
             validator_script_hints=hints_str,
-            tool_name=tool_name
+            prior_attempts_summary=prior_block,
+            tool_name=tool_name,
         )
-        
+
         return base_prompt + JSON_OUTPUT_INSTRUCTION
 
     def _generate_json(self, prompt: str) -> dict:
@@ -280,15 +298,22 @@ class StructureGenerator:
             self.logger.exception(f"Error during LLM content generation: {e}")
             raise
 
-    def generate_script(self, original_user_request: str, attempt_number_overall: int, 
+    def generate_script(self, original_user_request: str, attempt_number_overall: int,
                         is_refinement_from_validation: bool = False,
                         previous_script_content: Optional[str] = None,
-                        validator_feedback: Optional[dict] = None) -> dict:
-        """Generate or refine a script using appropriate tool and documentation."""
-        
+                        validator_feedback: Optional[dict] = None,
+                        attempt_history: Optional[list] = None) -> dict:
+        """Generate or refine a script using appropriate tool and documentation.
+
+        Args:
+            attempt_history: Optional list of {script, issues, hints} dicts from
+                all prior cycles in this refinement loop. Lets the generator
+                detect recurring/cosmetic complaints and stop chasing them.
+        """
+
         # Select tool based on request
         tool_name = self._select_tool(original_user_request)
-        
+
         if is_refinement_from_validation:
             print(f"   🔄 Refining script using {tool_name} (cycle {attempt_number_overall})")
             if not previous_script_content or not validator_feedback:
@@ -297,7 +322,8 @@ class StructureGenerator:
                 original_request=original_user_request,
                 attempted_script_content=previous_script_content,
                 validator_feedback=validator_feedback,
-                tool_name=tool_name
+                tool_name=tool_name,
+                attempt_history=attempt_history,
             )
         else:
             print(f"   🤖 Generating script using {tool_name} (cycle {attempt_number_overall})")

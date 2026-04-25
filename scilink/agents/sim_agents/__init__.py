@@ -7,3 +7,4 @@ from .force_field_agent import ForceFieldAgent
 from .lammps_analysis import LAMMPSAnalysisAgent
 from .lammps_analysis_updater import LAMMPSAnalysisUpdater
 from .lammps_orchestrator import LAMMPSOrchestrator
+from .dft_orchestrator import DFTOrchestrator

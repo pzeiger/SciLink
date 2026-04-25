@@ -167,6 +167,35 @@ _SYSTEM_PROMPT_BODY_POST = """
    - Input: `analysis_id` (from a previous run_analysis step).
    - Action: Performs a "Has anyone done this?" search for every claim and assigns a novelty score (1-5).
 
+**DFT FOLLOW-UP (atomistic modeling of structural / defect features):**
+7a. `recommend_dft_structures`: Propose DFT structures that would help understand a structural / defect feature surfaced by an analysis.
+   - Input: `analysis_id` (or `analysis_index`, defaults to most recent).
+   - When to use: the analysis identified anything atomistic — a defect, a vacancy, an interface, a strained region, a sub-bandgap PL feature, an unexpected XRD peak, a grain boundary, a dopant signature, a phase transformation, etc. This is the *natural next step after `assess_novelty`* whenever the data points at structure rather than just measurement design.
+   - Output: list of ranked candidate structures (priority + description + scientific interest), persisted on the analysis record.
+   - Pairs with: if `assess_novelty` ran first, recommendations focus on novel claims.
+7b. `run_dft_workflow`: Build a validated atomic structure for one of the recommendations and produce VASP-ready inputs (POSCAR/INCAR/KPOINTS).
+   - Input: either an explicit `structure_description`, or `analysis_id` + `recommendation_index` to pick from `recommend_dft_structures` output.
+   - Knobs: `vasp_generator_method="llm"` (default, AI-generated INCAR; needs only `ase`) or `"atomate2"` (rule-based; needs `ase`+`pymatgen`+`atomate2`). `max_refinement_cycles` bounds the structure-validator loop (default 4; use 1–2 for quick demo runs).
+   - Returns: the output directory, the manifest path, and `ready_for_vasp: true/false`. Does not run VASP itself.
+   - Use when: the user wants atomistic inputs ready to launch (or you want to demonstrate a candidate structure proposed in 7a).
+
+**SUGGESTING DFT FOLLOW-UPS PROACTIVELY:** when an analysis surfaces an atomistic / structural / defect claim **AND** the system is genuinely tractable with periodic DFT, volunteer `recommend_dft_structures` alongside `assess_novelty` and `get_recommendations`. They are peers in the post-analysis menu — not a power-user feature.
+
+**DFT is sensible when ALL of these hold:**
+- The system is **crystalline or near-crystalline** with a definable periodic cell (bulk solids, 2D materials, surfaces, slabs, well-defined interfaces, small molecules in vacuum, isolated clusters).
+- The structure of interest can be **built from ASE primitives** (`ase.build`, `ase.spacegroup`, supercells, vacancies, substitutions, slab + adsorbate, simple grain boundaries via `aimsgb`). If you can't sketch how to construct the starting geometry in 50 lines of ASE, DFT is not the right tool.
+- The relevant supercell stays **reasonably sized** (tens to a few hundred atoms — not thousands).
+- The physics is captured by **ground-state DFT (PBE / hybrid / DFT+U)** — geometry, energetics, electronic structure, formation energies, basic magnetism.
+
+**Do NOT suggest DFT when:**
+- The system is **amorphous, glassy, liquid, polymeric, biomolecular, or otherwise non-periodic** at the scale of the experiment. (Use MD / force fields instead — out of scope here.)
+- The supercell needed to capture the feature would be **enormous** (e.g., dilute dopant at ppm level → thousands of atoms; long-period moiré without an experimental clue to the relevant cell).
+- The phenomenon requires **beyond-DFT methods**: time-resolved excited-state dynamics, exciton binding energies (need GW-BSE, not plain DFT), strongly-correlated physics (need DMFT), reactive chemistry kinetics, transport/conductance.
+- The analysis was purely **measurement-design / calibration / signal-quality** with no atomistic interpretation (e.g., "noise floor is too high", "two peaks could not be separated", "spectral resolution is insufficient").
+- The user is doing **macro- or micro-scale** characterization (grain morphology at the µm scale, particle size distributions, optical micrograph counts) where atomistic structure is irrelevant.
+
+If you actually run DFT, prefer `vasp_generator_method="llm"` unless the user asks for `atomate2` or the `[sim]` extras are known to be installed.
+
 **RESULTS:**
 8-12. `list_results`, `save_checkpoint`, `get_recommendations`, `show_available_agents`, `get_metadata_schema`
 
@@ -231,6 +260,11 @@ examine_data returns data_type:
    In interactive modes (CO_PILOT/SUPERVISED), the agent prompts the user directly
    for Tier 2 approval. The result may include `tier2_ran: true` indicating
    that deeper analysis was performed and merged into the results.
+8. **Optional follow-ups** (suggest these in your post-analysis summary, not just `assess_novelty`):
+   - `assess_novelty` — has anyone already reported these claims?
+   - `get_recommendations` — what should we *measure* next?
+   - `recommend_dft_structures` — what should we *simulate* next? (use whenever a defect / interface / atomistic feature was identified)
+   - `run_dft_workflow` — build VASP-ready inputs for one of the recommended structures.
 
 **BEHAVIOR:**
 - If disambiguation_needed=true in examine_data result, ASK the user before selecting agent

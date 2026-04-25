@@ -8,7 +8,7 @@ import textwrap
 from pathlib import Path
 
 from .analyzers import MicroscopyAnalyzer, SpectroscopyAnalyzer, BaseExperimentAnalyzer, CurveAnalyzer
-from ..workflows.dft_recommendation_workflow import DFTRecommendationsWorkflow
+from ..agents.exp_agents.dft_recommender import DFTRecommender
 from ..agents.exp_agents.fft_microscopy_agent import FFTMicroscopyAnalysisAgent
 from ..agents.lit_agents.literature_agent import OwlLiteratureAgent
 from ..agents.lit_agents.novelty_scorer import NoveltyScorer, enhanced_novelty_assessment
@@ -735,11 +735,11 @@ class ExperimentNoveltyAssessment:
                 system_info_dict = system_info
             
             # Instantiate a text-only analysis agent for this step
-            dft_agent = DFTRecommendationsWorkflow(
-                 google_api_key=self.google_api_key,
-                 analysis_model = self.analysis_model,
-                 local_model = self.local_model,
-                 output_dir = "dft_output")
+            dft_agent = DFTRecommender(
+                api_key=self.google_api_key,
+                base_url=self.local_model,
+                analysis_model=self.analysis_model,
+                output_dir="dft_output")
 
             dft_recommendations_result = dft_agent.run_from_data(
                 analysis_text=analysis_text,

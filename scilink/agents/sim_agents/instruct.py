@@ -134,15 +134,16 @@ A previous attempt to generate an ASE script for this request was made.
     {validator_specific_issues}
   - **Validator's Hints for Modifying the Script:**
     {validator_script_hints}
-
+{prior_attempts_summary}
 Your task is to generate a **new, corrected, complete, and executable Python ASE script** that:
 1.  Precisely fulfills the original user request: "{original_request}".
-2.  Directly addresses all "Specific Issues Identified by Validator".
-3.  Intelligently incorporates the "Validator's Hints for Modifying the Script". If hints conflict or are unclear, prioritize fulfilling the original request and fixing issues.
+2.  Directly addresses **substantive** "Specific Issues Identified by Validator" — but recognize when an "issue" is actually cosmetic or a non-problem (see rule 8 below).
+3.  Intelligently incorporates the "Validator's Hints for Modifying the Script". If hints conflict or are unclear, prioritize fulfilling the original request and fixing real issues.
 4.  The script MUST include all necessary imports (e.g., `from ase import Atoms`, `from ase.build import ...`, `from ase.io import write`).
 5.  The script MUST save the final `Atoms` object to a file (e.g., 'structure.xyz', 'POSCAR'). Choose a suitable, simple filename.
 6.  CRITICALLY: Immediately after successfully saving the file, the script MUST print *exactly* this confirmation line to standard output: `STRUCTURE_SAVED:<filename.ext>` (replace `<filename.ext>` with the actual filename used).
 7.  Call the '{tool_name}' function/tool with the *entire new corrected Python script content* as the 'script_content' argument. Do not add any explanatory text before or after the function call itself in your response.
+8.  **STOP CHASING COSMETIC ISSUES.** If the prior-attempts history shows the same kind of complaint repeating (e.g., "negative Cartesian coordinates in hexagonal cell", "atom near edge could be wrapped", "structure could be cleaner"), AND no prior fix has eliminated it, treat it as cosmetic and **return the previous script unchanged** (or with only trivial whitespace changes). Cosmetic remarks do not warrant another refinement cycle. Save the user's compute budget by accepting the structure as-is when validator complaints are recurring or non-substantive.
 """
 
 
