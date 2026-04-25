@@ -121,4 +121,21 @@ def render_file_preview(file_path: Path) -> None:
         st.code(file_path.read_text()[:100000], language="text")
         return
 
+    # Extension-less plain-text scientific files (VASP DFT inputs, LAMMPS data,
+    # etc). Detected by exact filename match. Render as plain text.
+    _PLAIN_TEXT_NAMES = {
+        "POSCAR", "CONTCAR", "INCAR", "KPOINTS", "POTCAR",
+        "OUTCAR", "OSZICAR", "DOSCAR", "EIGENVAL", "PROCAR",
+        "vasprun.xml", "XDATCAR", "CHGCAR", "WAVECAR",
+    }
+    if file_path.name in _PLAIN_TEXT_NAMES:
+        # Show small files in full; clip large binary-ish ones to a head preview.
+        try:
+            content = file_path.read_text(errors="replace")
+            lang = "xml" if file_path.name == "vasprun.xml" else "text"
+            st.code(content[:100000], language=lang)
+        except Exception as exc:
+            st.error(f"Could not read file: {exc}")
+        return
+
     st.info(f"No preview available for `{suffix}` files.")

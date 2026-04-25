@@ -8,8 +8,8 @@ from pathlib import Path
 
 # Import other workflows
 from .experiment_novelty_workflow import ExperimentNoveltyAssessment
-from .dft_recommendation_workflow import DFTRecommendationsWorkflow
-from .dft_workflow import DFTWorkflow
+from ..agents.exp_agents.dft_recommender import DFTRecommender
+from ..agents.sim_agents.dft_orchestrator import DFTOrchestrator
 
 # Import auth for API key management
 from ..auth import get_api_key, APIKeyNotFoundError
@@ -88,14 +88,14 @@ class Experimental2DFT:
         self.spectroscopy_analysis_enabled = spectroscopy_analysis_enabled
         
         # Initialize structure generation workflow
-        self.dft_rec_workflow = DFTRecommendationsWorkflow(
-            google_api_key=google_api_key,
+        self.dft_recommender = DFTRecommender(
+            api_key=google_api_key,
             analysis_model=analysis_model,
             output_dir=str(self.output_dir / "dft_recommendations")
         )
-        
-        self.dft_workflow = DFTWorkflow(
-            google_api_key=google_api_key,
+
+        self.dft_orchestrator = DFTOrchestrator(
+            api_key=google_api_key,
             futurehouse_api_key=futurehouse_api_key,
             mp_api_key=mp_api_key,
             generator_model=generator_model,
@@ -342,7 +342,7 @@ class Experimental2DFT:
                 system_info_dict = system_info
             
             # Generate recommendations with enhanced context
-            dft_result = self.dft_rec_workflow.run_from_data(
+            dft_result = self.dft_recommender.run_from_data(
                 analysis_text=analysis_text,
                 novel_claims=priority_claims,  # Use prioritized claims
                 system_info=system_info_dict
@@ -471,15 +471,16 @@ class Experimental2DFT:
                 print(f"      📁 Output directory: {structure_name}/")
                 
                 # Create a new DFT workflow instance for this structure
-                structure_dft_workflow = DFTWorkflow(
-                    google_api_key=self.dft_workflow.google_api_key,
-                    futurehouse_api_key=self.dft_workflow.futurehouse_api_key,
-                    mp_api_key=getattr(self.dft_workflow.structure_generator, 'mp_api_key', None),
-                    generator_model=self.dft_workflow.structure_generator.llm_client.model_name,
-                    validator_model=self.dft_workflow.structure_validator.model_name,
+                structure_dft_orchestrator = DFTOrchestrator(
+                    api_key=self.dft_orchestrator.api_key,
+                    base_url=self.dft_orchestrator.base_url,
+                    futurehouse_api_key=self.dft_orchestrator.futurehouse_api_key,
+                    mp_api_key=getattr(self.dft_orchestrator.structure_generator, 'mp_api_key', None),
+                    generator_model=self.dft_orchestrator.structure_generator.llm_client.model_name,
+                    validator_model=self.dft_orchestrator.structure_validator.model_name,
                     output_dir=str(structure_output_dir),  # Structure-specific directory
-                    max_refinement_cycles=self.dft_workflow.max_refinement_cycles,
-                    script_timeout=self.dft_workflow.structure_generator.ase_executor.timeout
+                    max_refinement_cycles=self.dft_orchestrator.max_refinement_cycles,
+                    script_timeout=self.dft_orchestrator.structure_generator.ase_executor.timeout
                 )
                 
                 # Create detailed request for structure generation
@@ -489,7 +490,7 @@ class Experimental2DFT:
                 user_request += ". Save the structure in POSCAR format."
                 
                 # Generate the structure
-                struct_result = structure_dft_workflow.run_complete_workflow(user_request)
+                struct_result = structure_dft_orchestrator.run_complete_workflow(user_request)
                 
                 structure_info = {
                     "recommendation": structure_rec,

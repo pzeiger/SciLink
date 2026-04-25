@@ -6,6 +6,7 @@ from .orchestrator_agent import OrchestratorAgent, AGENT_MAP
 from .curve_fitting_agent import CurveFittingAgent
 from .image_analysis_agent import ImageAnalysisAgent
 from .analysis_orchestrator import AnalysisOrchestratorAgent, AnalysisMode
+from .dft_recommender import DFTRecommender
 from .metadata_converter import (
     generate_metadata_json_from_text,
     check_schema_conformance,
@@ -28,6 +29,8 @@ __all__ = [
     # Main analysis orchestrator (user-facing)
     'AnalysisOrchestratorAgent',
     'AnalysisMode',
+    # DFT recommendations runner
+    'DFTRecommender',
     # Metadata utilities
     'generate_metadata_json_from_text',
     'check_schema_conformance',
