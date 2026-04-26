@@ -544,7 +544,7 @@ def _render_monitor() -> None:
                     import html as _html
 
                     escaped = _html.escape(stdout)
-                    st.components.v1.html(
+                    st.iframe(
                         f'<pre id="so" style="height:350px;overflow-y:auto;'
                         f"margin:0;background:#0e1117;padding:10px;"
                         f"border-radius:6px;border:1px solid #333;"
@@ -554,7 +554,6 @@ def _render_monitor() -> None:
                         f"<script>var e=document.getElementById('so');"
                         f"e.scrollTop=e.scrollHeight;</script>",
                         height=370,
-                        scrolling=False,
                     )
                 else:
                     st.caption("(no output yet)")
@@ -627,7 +626,7 @@ def _render_terminal() -> None:
         import html as _html
 
         escaped = _html.escape("\n".join(lines))
-        st.components.v1.html(
+        st.iframe(
             f'<pre id="term" style="height:340px;overflow-y:auto;'
             f"margin:0;background:#0e1117;padding:12px;"
             f"border-radius:6px;border:1px solid #333;"
@@ -637,7 +636,6 @@ def _render_terminal() -> None:
             f"<script>var e=document.getElementById('term');"
             f"e.scrollTop=e.scrollHeight;</script>",
             height=360,
-            scrolling=False,
         )
 
     # Command input
