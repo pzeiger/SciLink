@@ -24,6 +24,139 @@ _LOGO_DIR = Path(__file__).resolve().parent.parent / "assets"
 _LOGO_DARK = _LOGO_DIR / "scilink_logo_v3_dark.svg"
 _LOGO_LIGHT = _LOGO_DIR / "scilink_logo_v3_light.svg"
 
+def _render_hpc_connection() -> None:
+    """Compact HPC connection controls for the sidebar."""
+    try:
+        import paramiko  # noqa: F401
+    except ImportError:
+        with st.expander("🖥️ HPC Connection"):
+            st.caption("Install `paramiko` to enable HPC connectivity.")
+        return
+
+    from scilink.hpc.connection import HPCConnection, HPCProfile
+    from scilink.hpc.scheduler import detect_scheduler
+
+    conn = st.session_state.get("hpc_connection")
+    is_connected = conn is not None and conn.is_connected
+
+    label = (
+        f"🟢 {conn.profile.username}@{conn.profile.hostname}"
+        if is_connected
+        else "🖥️ HPC Connection"
+    )
+
+    with st.expander(label, expanded=False):
+        if is_connected:
+            sched = st.session_state.get("hpc_scheduler")
+            if sched:
+                st.caption(f"Scheduler: **{sched.name}**")
+            tracked = st.session_state.get("hpc_tracked_jobs", {})
+            from scilink.hpc.scheduler import JobStatus
+            n_active = sum(
+                1 for j in tracked.values()
+                if j.status in (JobStatus.RUNNING, JobStatus.PENDING)
+            )
+            if n_active:
+                st.caption(f"Active jobs: **{n_active}**")
+            if st.button(
+                "Disconnect",
+                key="sidebar_hpc_disconnect",
+                use_container_width=True,
+            ):
+                conn.disconnect()
+                st.session_state.hpc_connection = None
+                st.session_state.hpc_scheduler = None
+                st.rerun()
+            return
+
+        # ── Not connected — login form ────────────────────
+        saved: list = st.session_state.get("hpc_saved_profiles", [])
+
+        prefill = None
+        if saved:
+            names = ["New connection…"] + [p.name for p in saved]
+            sel = st.selectbox("Profile", names, key="sidebar_hpc_profile_sel")
+            if sel != "New connection…":
+                prefill = next(p for p in saved if p.name == sel)
+
+        hostname = st.text_input(
+            "Host",
+            value=prefill.hostname if prefill else "",
+            placeholder="login.cluster.edu",
+            key="sidebar_hpc_host",
+        )
+        username = st.text_input(
+            "User",
+            value=prefill.username if prefill else "",
+            key="sidebar_hpc_user",
+        )
+        port = st.number_input(
+            "Port", value=prefill.port if prefill else 22,
+            min_value=1, max_value=65535, key="sidebar_hpc_port",
+        )
+        auth = st.radio(
+            "Auth",
+            ["SSH Key", "Password"],
+            horizontal=True,
+            key="sidebar_hpc_auth",
+        )
+        password = key_path = key_pass = proxy = ""
+        if auth == "Password":
+            password = st.text_input("Password", type="password", key="sidebar_hpc_pass")
+        else:
+            key_path = st.text_input(
+                "Key path (blank → default)",
+                value=prefill.key_path if prefill else "",
+                key="sidebar_hpc_keypath",
+            )
+            key_pass = st.text_input(
+                "Key passphrase",
+                type="password",
+                key="sidebar_hpc_keypass",
+            )
+        proxy = st.text_input(
+            "ProxyJump (optional)",
+            value=prefill.proxy_jump if prefill else "",
+            placeholder="user@bastion",
+            key="sidebar_hpc_proxy",
+        )
+
+        save_chk = st.checkbox("Remember profile", key="sidebar_hpc_save")
+
+        if st.button(
+            "Connect",
+            disabled=not (hostname and username),
+            use_container_width=True,
+            key="sidebar_hpc_connect",
+        ):
+            profile = HPCProfile(
+                name=hostname.split(".")[0] if hostname else "cluster",
+                hostname=hostname,
+                username=username,
+                port=int(port),
+                auth_method="key" if auth == "SSH Key" else "password",
+                key_path=key_path,
+                proxy_jump=proxy,
+            )
+            try:
+                c = HPCConnection(profile)
+                c.connect(password=password, key_passphrase=key_pass)
+                sched = detect_scheduler(c)
+                home = c.home_dir()
+
+                st.session_state.hpc_connection = c
+                st.session_state.hpc_scheduler = sched
+                st.session_state.hpc_remote_cwd = home
+
+                if save_chk:
+                    profiles = [p for p in saved if p.name != profile.name]
+                    profiles.append(profile)
+                    st.session_state.hpc_saved_profiles = profiles
+
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Connection failed: {exc}")
+
 def render_sidebar() -> None:
     with st.sidebar:
         # ── Theme toggle ──────────────────────────────────
@@ -76,6 +209,7 @@ def render_sidebar() -> None:
         else:
             st.title("SciLink")
         _locked = st.session_state.agent_initialized
+        _is_simulate = st.session_state.app_mode == "simulate"
         preset = st.selectbox(
             "Model",
             MODEL_OPTIONS + ["Custom"],
@@ -90,6 +224,8 @@ def render_sidebar() -> None:
         base_url = st.text_input("Base URL (optional)", key="cfg_base_url", disabled=_locked)
         fh_api_key = st.text_input("FutureHouse API key (optional)", type="password", key="cfg_fh_api_key", disabled=_locked)
         mp_api_key = st.text_input("Materials Project API key (optional)", type="password", key="cfg_mp_api_key", disabled=_locked)
+
+        _render_hpc_connection()
 
         # Planning mode: embedding model
         if st.session_state.app_mode == "plan":
@@ -822,3 +958,92 @@ def save_upload_batch(uploaded_files: list, kind: str, auto_dispatch: bool = Tru
         if auto_dispatch:
             st.session_state.pending_auto_examine = series_dir_str
         st.sidebar.success(f"Uploaded {len(uploaded_files)} files to series/")
+
+def _start_simulate_session(
+    model: str,
+    api_key: str,
+    base_url: str,
+    mode: str,
+    fh_api_key: str,
+) -> None:
+    """Lightweight session init for simulate mode (no heavy agent)."""
+    resolved_key = (
+        api_key
+        or os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("ANTHROPIC_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+        or os.environ.get("GEMINI_API_KEY")
+    )
+    if not resolved_key and not base_url:
+        st.sidebar.error("Provide an API key or set an environment variable.")
+        return
+
+    # Set API key in environment so the simulation agent can find it
+    if api_key:
+        _m = model.lower()
+        if any(x in _m for x in ("gpt", "o1", "o3", "o4")):
+            os.environ.setdefault("OPENAI_API_KEY", api_key)
+        elif any(x in _m for x in ("claude", "sonnet", "haiku", "opus")):
+            os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
+        elif any(x in _m for x in ("gemini", "gemma")):
+            os.environ.setdefault("GOOGLE_API_KEY", api_key)
+
+    prefix = SESSION_DIR_PREFIXES.get("simulate", "simulation_session")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_dir = Path(f"{prefix}_{ts}").resolve()
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    st.session_state.agent_initialized = True
+    st.session_state.session_dir = str(session_dir)
+    st.session_state.agent_config = {
+        "model": model,
+        "api_key": resolved_key,
+        "base_url": base_url or "",
+        "mode": mode,
+        "fh_api_key": fh_api_key or "",
+    }
+    st.session_state.chat_messages = []
+    st.session_state.known_images = set()
+    st.rerun()
+
+
+def _render_simulate_sidebar_status() -> None:
+    """Show HPC and simulation agent status in the sidebar."""
+    conn = st.session_state.get("hpc_connection")
+    if conn and conn.is_connected:
+        st.markdown(f"🟢 **{conn.profile.hostname}**")
+        sched = st.session_state.get("hpc_scheduler")
+        if sched:
+            st.caption(f"Scheduler: {sched.name}")
+    else:
+        st.caption("🔴 No HPC connection")
+        st.caption("Connect via the HPC section above, or work offline.")
+
+
+def _render_simulate_status() -> None:
+    """Show simulate-mode agent status metrics."""
+    agent = st.session_state.get("hpc_sim_agent")
+    result = st.session_state.get("hpc_gen_result")
+    conn = st.session_state.get("hpc_connection")
+
+    r1, r2 = st.columns(2)
+    with r1:
+        if agent and agent.skill_name:
+            st.metric("Engine", agent.skill_name)
+        else:
+            st.metric("Engine", "—")
+    with r2:
+        connected = conn is not None and conn.is_connected
+        st.metric("HPC", "Connected" if connected else "Offline")
+
+    if result:
+        sys_info = result.get("system_info", {})
+        st.metric("Last system", sys_info.get("system_category", "—"))
+        st.metric("Atoms", f"{sys_info.get('atom_count', '—'):,}")
+
+    tracked = st.session_state.get("hpc_tracked_jobs", {})
+    if tracked:
+        from scilink.hpc.scheduler import JobStatus
+        n_run = sum(1 for j in tracked.values() if j.status == JobStatus.RUNNING)
+        n_done = sum(1 for j in tracked.values() if j.status.is_terminal)
+        st.metric("Jobs", f"{n_run} running · {n_done} completed")

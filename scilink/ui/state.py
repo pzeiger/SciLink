@@ -54,6 +54,17 @@ def init_session_state() -> None:
         "uploaded_knowledge_paths": [],
         "uploaded_code_paths": [],
         "uploaded_planning_data_paths": [],
+        # ── HPC agent workflow ──
+        "hpc_sim_agent": None,              # MDSimulationAgent instance
+        "hpc_gen_task": None,               # background generation tracker
+        "hpc_gen_result": None,             # result dict from generate_simulation()
+        "hpc_workflow_dir": None,           # local temp dir for generated files
+        "hpc_workflow_script": None,        # editable script content (review step)
+        "hpc_workflow_phase": "configure",      # configure|review|monitoring|results
+        "hpc_mon_known_files": set(),           # remote files already seen
+        "hpc_mon_downloaded_images": {},         # {remote_path: bytes}
+        "hpc_remote_origins": {},           # {local_filename: remote_path}
+        "hpc_env_probe": None,              # HPCEnvironment from probe_remote()
         # Theme
         "theme_mode": "dark",
     }

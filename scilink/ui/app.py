@@ -418,33 +418,58 @@ if not st.session_state.agent_initialized:
             "LLM-powered agents for scientific research automation</p>",
             unsafe_allow_html=True,
         )
-        # ── Simulate mode: direct launch (no agent needed) ───
+        # ── Simulate mode: direct launch ─────────────────
         if st.session_state.app_mode == "simulate":
             st.markdown(
                 '<p style="text-align:center;color:#6B7A8C;font-size:0.95em;'
-                'margin-top:8px;margin-bottom:20px">'
-                'Connect to your cluster via SSH — no agent initialization required.'
+                'margin-top:8px;margin-bottom:4px">'
+                'Generate simulation inputs with AI agents, then optionally '
+                'submit to HPC.'
                 '</p>',
                 unsafe_allow_html=True,
             )
+            # Show connection status as a visual cue
+            _conn = st.session_state.get("hpc_connection")
+            if _conn and _conn.is_connected:
+                st.markdown(
+                    f'<p style="text-align:center;font-size:0.85em;margin-bottom:16px">'
+                    f'🟢 Connected to <b>{_conn.profile.hostname}</b></p>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    '<p style="text-align:center;color:#6B7A8C;font-size:0.85em;'
+                    'margin-bottom:16px">'
+                    '🔴 No HPC connection — you can connect via the sidebar, '
+                    'or work offline.'
+                    '</p>',
+                    unsafe_allow_html=True,
+                )
             _, _lc, _ = st.columns([1, 1, 1])
             with _lc:
+                # Reuse the sidebar's start logic
                 if st.button(
                     "🖥️ Launch Simulations",
                     type="primary",
                     use_container_width=True,
                     key="launch_simulate",
                 ):
-                    st.session_state.agent_initialized = True
-                    st.rerun()
+                    from scilink.ui.components.sidebar import _start_simulate_session
+                    _sim_preset = st.session_state.get("cfg_model_preset", "")
+                    _sim_model = (
+                        st.session_state.get("cfg_model_custom", "")
+                        if _sim_preset == "Custom" else _sim_preset
+                    )
+                    _start_simulate_session(
+                        model=_sim_model,
+                        api_key=st.session_state.get("cfg_api_key", ""),
+                        base_url=st.session_state.get("cfg_base_url", ""),
+                        mode=st.session_state.get("cfg_mode", "co-pilot"),
+                        fh_api_key=st.session_state.get("cfg_fh_api_key", ""),
+                    )
             st.stop()
-
     st.stop()
 
-
-# ══════════════════════════════════════════════════════════════════
-# Active session — Chat + File Explorer tabs
-# ══════════════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════════════
 # Active session — Chat + File Explorer tabs
 # ══════════════════════════════════════════════════════════════════

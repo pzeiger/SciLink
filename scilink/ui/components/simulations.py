@@ -24,6 +24,8 @@ from scilink.hpc.scheduler import (
     detect_scheduler,
 )
 
+from scilink.ui.components.sim_workflow import render_agent_workflow
+
 import logging
 
 # ── SLURM script templates ────────────────────────────────────
@@ -110,7 +112,7 @@ echo "Array task $SLURM_ARRAY_TASK_ID of job $SLURM_ARRAY_JOB_ID"
 # Public entry point
 # ══════════════════════════════════════════════════════════════
 
-def render_simulations_tab() -> None:  # noqa: C901
+def render_simulations_tab() -> None:
     if _paramiko is None:
         st.error(
             "**Paramiko** is required for HPC connectivity.  "
@@ -119,133 +121,45 @@ def render_simulations_tab() -> None:  # noqa: C901
         return
 
     conn: Optional[HPCConnection] = st.session_state.get("hpc_connection")
+    has_hpc = conn is not None and conn.is_connected
 
-    if conn is None or not conn.is_connected:
-        _render_login()
-        return
+    if has_hpc:
+        _render_connection_bar(conn)
+        gen, dash, submit, monitor, terminal, files = st.tabs(
+            ["🧪 Generate", "📊 Dashboard", "🚀 Submit Job",
+             "📡 Monitor", "💻 Terminal", "📁 Remote Files"],
+        )
+    else:
+        gen, dash = st.tabs(["🧪 Generate", "📊 Dashboard"])
+        submit = monitor = terminal = files = None
 
-    _render_connection_bar(conn)
-    dash, submit, monitor, terminal, files = st.tabs(
-        ["📊 Dashboard", "🚀 Submit Job", "📡 Monitor",
-         "💻 Terminal", "📁 Remote Files"],
-    )
+    with gen:
+        render_agent_workflow()
+
     with dash:
-        _render_dashboard()
-    with submit:
-        _render_submit()
-    with monitor:
-        _render_monitor()
-    with terminal:
-        _render_terminal()
-    with files:
-        _render_remote_files()
-
-
-# ── Login ─────────────────────────────────────────────────────
-
-def _render_login() -> None:
-    st.markdown("### 🖥️ Connect to HPC")
-    st.caption(
-        "SSH into your cluster or supercomputer. "
-        "Credentials are held in-memory only for the current browser session."
-    )
-
-    saved: list[HPCProfile] = st.session_state.get("hpc_saved_profiles", [])
-
-    # Quick-connect buttons for saved profiles
-    if saved:
-        st.markdown("**Saved profiles**")
-        cols = st.columns(min(len(saved), 4))
-        for i, prof in enumerate(saved):
-            with cols[i % len(cols)]:
-                if st.button(
-                    f"🖥 {prof.name}",
-                    key=f"hpc_qc_{i}",
-                    use_container_width=True,
-                ):
-                    st.session_state["_hpc_prefill"] = prof
-                    st.rerun()
-        st.divider()
-
-    pf: Optional[HPCProfile] = st.session_state.pop("_hpc_prefill", None)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        hostname = st.text_input(
-            "Hostname",
-            value=pf.hostname if pf else "",
-            placeholder="login.cluster.edu",
-        )
-        username = st.text_input("Username", value=pf.username if pf else "")
-        port = st.number_input(
-            "Port", value=pf.port if pf else 22, min_value=1, max_value=65535,
-        )
-    with c2:
-        auth = st.radio(
-            "Authentication",
-            ["SSH Key", "Password"],
-            index=0 if (not pf or pf.auth_method == "key") else 1,
-            horizontal=True,
-        )
-        password = key_path = key_pass = ""
-        if auth == "Password":
-            password = st.text_input("Password", type="password")
+        if has_hpc:
+            _render_dashboard()
         else:
-            key_path = st.text_input(
-                "Private key path (blank → default ~/.ssh/id_*)",
-                value=pf.key_path if pf else "",
+            st.info(
+                "**No HPC connection.** Connect to a cluster via the "
+                "sidebar to access the job dashboard, terminal, and "
+                "remote file browser.\n\n"
+                "You can still **generate simulation inputs** in the "
+                "Generate tab and download them locally."
             )
-            key_pass = st.text_input("Key passphrase (if any)", type="password")
-        proxy = st.text_input(
-            "ProxyJump / bastion (optional)",
-            value=pf.proxy_jump if pf else "",
-            placeholder="user@bastion.example.edu",
-        )
 
-    save_chk = st.checkbox("Save profile for quick reconnect")
-    prof_name = ""
-    if save_chk:
-        prof_name = st.text_input(
-            "Profile name",
-            value=pf.name if pf else (hostname.split(".")[0] if hostname else ""),
-        )
-
-    err_slot = st.empty()
-
-    if st.button("Connect", type="primary", disabled=not (hostname and username)):
-        st.warning("🔍 Connect button fired — building profile...") 
-        profile = HPCProfile(
-            name=prof_name or hostname,
-            hostname=hostname,
-            username=username,
-            port=int(port),
-            auth_method="key" if auth == "SSH Key" else "password",
-            key_path=key_path,
-            proxy_jump=proxy,
-        )
-        try:
-            st.warning(f"🔍 Attempting SSH to {hostname}:{port} as {username}...")
-            _paramiko.util.log_to_file("/tmp/paramiko_debug.log", level=logging.DEBUG)
-
-            with st.spinner("Connecting …"):
-                conn = HPCConnection(profile)
-                conn.connect(password=password, key_passphrase=key_pass)
-                sched = detect_scheduler(conn)
-                home = conn.home_dir()
-
-            st.session_state.hpc_connection = conn
-            st.session_state.hpc_scheduler = sched
-            st.session_state.hpc_remote_cwd = home
-
-            if save_chk and prof_name:
-                profiles = [p for p in saved if p.name != prof_name]
-                profiles.append(profile)
-                st.session_state.hpc_saved_profiles = profiles
-
-            st.rerun()
-        except Exception as exc:
-            err_slot.error(f"Connection failed: {exc}")
-
+    if submit is not None:
+        with submit:
+            _render_submit()
+    if monitor is not None:
+        with monitor:
+            _render_monitor()
+    if terminal is not None:
+        with terminal:
+            _render_terminal()
+    if files is not None:
+        with files:
+            _render_remote_files()
 
 # ── Connection bar ────────────────────────────────────────────
 
