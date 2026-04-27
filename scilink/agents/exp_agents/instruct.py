@@ -3371,6 +3371,10 @@ You have: original image, analysis visualization, extracted features with values
 
 **Task:** Explain what the extracted features mean physically. What do they reveal about the sample?
 
+Generate **1-2 scientific claims** total (not more). One focused, well-supported
+claim is preferred — only add a second when it covers a genuinely distinct
+finding from the same analysis. Do not pad with redundant or speculative claims.
+
 **Response:**
 ```json
 {{

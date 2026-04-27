@@ -5413,7 +5413,9 @@ Provide comprehensive scientific synthesis including:
 2. Key trends in extracted features
 3. Physical interpretation of feature evolution
 4. **Analysis of flagged images** - what might explain why these analyzed poorly?
-5. Scientific claims supported by the data
+5. **1-2 scientific claims** supported by the data (not more). One focused,
+   well-supported claim is preferred — only add a second when it covers a
+   genuinely distinct finding. Do not pad with redundant or speculative claims.
 6. Caveats and limitations
 7. **Analysis of adaptively re-analyzed images** - if any images were re-analyzed with different pipelines, interpret what this means scientifically (e.g., structural transition, different morphology, instrumental change)
 
