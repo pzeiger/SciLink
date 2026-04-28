@@ -256,10 +256,11 @@ examine_data returns data_type:
 4. `select_agent`
 5. `run_analysis`
 6. Present results
-7. ImageAnalysisAgent handles Tier 2 deep analysis internally when warranted.
-   In interactive modes (CO_PILOT/SUPERVISED), the agent prompts the user directly
-   for Tier 2 approval. The result may include `tier2_ran: true` indicating
-   that deeper analysis was performed and merged into the results.
+7. For deeper follow-up analysis on images, call `run_analysis` again with
+   `prior_analysis_paths` set to the prior `output_directory`; the agent will
+   surface the prior state to its planner and the generated script can load
+   prior outputs (masks, feature tables) via absolute path instead of
+   recomputing them.
 8. **Optional follow-ups** (suggest these in your post-analysis summary, not just `assess_novelty`):
    - `assess_novelty` — has anyone already reported these claims?
    - `get_recommendations` — what should we *measure* next?
@@ -270,6 +271,10 @@ examine_data returns data_type:
 - If disambiguation_needed=true in examine_data result, ASK the user before selecting agent
 - For directories, check if metadata_files was detected
 - If status="error", stop and report to user
+- Before launching a fresh `run_analysis`, consider whether a prior analysis from
+  `list_results()` already covers the new request's prerequisites (e.g. existing
+  segmentation, fits, abundance maps). If so, pass its `output_directory` via
+  `prior_analysis_paths` so the new run can build on it instead of recomputing.
 """
 
 
@@ -359,7 +364,12 @@ class AnalysisOrchestratorAgent:
         embedding_api_key: API key for the embedding LLM provider.
         restore_checkpoint: Whether to restore from previous checkpoint.
         analysis_mode: Level of autonomy (CO_PILOT, SUPERVISED, or AUTONOMOUS).
-        
+        image_analysis_depth: Default analysis depth passed to
+            ImageAnalysisAgent ("basic", "auto", or "deep"). Defaults to
+            "basic" so Tier 2 is handled at the orchestrator level via
+            a follow-up `run_analysis` call with `prior_analysis_paths`,
+            not by in-agent auto-escalation.
+
         google_api_key: DEPRECATED. Use 'api_key' instead.
         local_model: DEPRECATED. Use 'base_url' instead.
     """
@@ -380,6 +390,7 @@ class AnalysisOrchestratorAgent:
         restore_checkpoint: bool = False,
         analysis_mode: AnalysisMode = AnalysisMode.CO_PILOT,
         futurehouse_api_key: Optional[str] = None,
+        image_analysis_depth: str = "basic",
         # Deprecated
         google_api_key: Optional[str] = None,
         local_model: Optional[str] = None,
@@ -426,6 +437,14 @@ class AnalysisOrchestratorAgent:
         # Store analysis mode
         self.analysis_mode = analysis_mode
         self._enable_human_feedback = self._should_enable_human_feedback()
+
+        # Default analysis depth for code-generating image analyses.
+        # In orchestrator mode, Tier 2 is better expressed as a follow-up
+        # run via `prior_analysis_paths` (the orchestrator LLM can reason
+        # over Tier 1 output and pick the next step) than as an opaque
+        # in-agent escalation, so the image agent defaults to Tier-1-only.
+        # Users can override via the constructor kwarg.
+        self.image_analysis_depth = image_analysis_depth
 
         self.futurehouse_api_key = futurehouse_api_key
         if not self.futurehouse_api_key:
@@ -986,6 +1005,9 @@ class AnalysisOrchestratorAgent:
             "base_url": self.base_url,
             "output_dir": output_dir,
             "enable_human_feedback": self._enable_human_feedback,
+            # Consumed only by ImageAnalysisAgent; other agents accept
+            # **kwargs and silently ignore.
+            "analysis_depth": self.image_analysis_depth,
         }
 
         # Lazy-load built-in agents; custom agents already carry their class.

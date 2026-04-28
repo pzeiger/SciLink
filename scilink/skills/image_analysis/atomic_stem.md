@@ -11,87 +11,114 @@ identification, and structural variation analysis.
 ## planning
 
 ### foundational
-**When to use `run_fft_nmf_analysis` instead of atom-resolved detection:**
-inspect the image for pattern-level heterogeneity — visible textures or
-phase-like regions, disorder or defects at a scale coarser than
+**Pick ONE focused goal for this step.** This skill describes a toolkit
+that covers detection, sublattice separation, lattice characterization,
+defect identification, and strain analysis — but a single planning call
+should answer one of these, not all of them. Common one-step goals
+(pick the one the user's objective implies; if none is given, default
+to detection + count):
+
+- detect atomic columns and report count + per-column statistics
+- separate sublattices in a multi-component structure
+- measure lattice parameters / identify zone axis
+- identify vacancies / missing columns relative to an ideal lattice
+- map displacements / strain relative to an ideal lattice
+
+Each goal becomes its own focused pipeline. Follow-up goals — sublattice
+separation built on already-detected positions, displacement maps built
+on an already-fit lattice — are best expressed as a separate
+`run_analysis` call with `prior_analysis_paths` pointing at this run's
+output, not appended to this plan.
+
+**Detection vs. pattern-level analysis (`run_fft_nmf_analysis`):**
+inspect the image for pattern-level heterogeneity — visible textures
+or phase-like regions, disorder or defects at a scale coarser than
 individual atoms, or atomic detail that is noisy or low-contrast (where
-peak finding would be unreliable). If any of these is present,
-`run_fft_nmf_analysis` with a window size tuned to the feature scale is
-a complete Tier 1 pipeline. The same applies when the objective
-explicitly targets disorder, defects, or phase separation. Use
-atom-resolved detection (below) when the image is clean and uniform and
-per-column measurements are needed — which is also the default when no
-objective is provided and the image looks well-resolved.
+peak finding would be unreliable). If any of these is present, or the
+objective targets disorder / defects / phase separation,
+`run_fft_nmf_analysis` with a window size tuned to the feature scale
+is a complete pipeline by itself. Otherwise pick atom-resolved
+detection.
 
-Before running detection, estimate the expected number of **visible**
-atomic columns from the image dimensions, pixel calibration (if
-available), and known lattice parameters for the material. Count all
-sublattices that are visible in HAADF — for multi-sublattice
-structures, the expected total is the number of unit cells multiplied
-by the number of visible column types per cell. After detection,
-compare the actual count against this estimate — significant
-discrepancy (outside 0.90-1.10x) suggests detection issues or a
-structurally interesting region.
+**For atom-resolved detection — choose the detector:**
+- `detect_atoms_dcnn` (AtomNet3 DCNN ensemble): best for transition-
+  metal oxides (perovskites, layered perovskites, cuprate
+  superconductors) and graphene; needs `fov_nm` from metadata. Pass
+  the raw image without preprocessing — the model handles intensity
+  gradients internally.
+- `detect_atoms` (classical peak detection): more general-purpose
+  baseline; use when material is outside the DCNN's training set, when
+  `fov_nm` is unknown, or when DCNN results look poor. Background
+  subtraction or bandpass filtering before detection helps with
+  non-uniform illumination.
 
-Choose a detection method that reliably finds atomic columns across
-the full image despite intensity variations (different species,
-thickness gradients). For classical detection (`detect_atoms`),
-background subtraction or bandpass filtering before detection helps
-with non-uniform illumination. For DCNN detection
-(`detect_atoms_dcnn`), pass the raw image without preprocessing — the
-model was trained to handle intensity gradients internally. Refine detected
-positions with 2D Gaussian fitting for sub-pixel precision. Determine
-lattice parameters from the FFT (which directly shows periodicity)
-rather than solely from nearest-neighbor distances.
+Refine detected positions with 2D Gaussian fitting (built into
+`detect_atoms`, available via `refine_positions` after
+`detect_atoms_dcnn`) for sub-pixel precision.
+
+**Validate the choice with an expected count:** estimate the visible
+atomic columns from image dimensions, pixel calibration (if available),
+and known lattice parameters for the material — count all sublattices
+visible in HAADF (number of unit cells × visible column types per
+cell). Compare detected count against this estimate; significant
+discrepancy (outside 0.90-1.10×) suggests detection issues or a
+structurally interesting region worth reporting.
+
+**Calibration awareness.** Absolute spacings derived from images
+typically carry a few percent uncertainty in scale: pixel-size metadata
+may be approximate, scan distortion can be anisotropic (different stretch
+along fast vs. slow axis), and older datasets can be off by 5%. Account
+for this when designing the step's `quality_criteria`:
+
+- Do **not** write quality criteria as a hard absolute-value match
+  against bulk literature values (e.g. *"measured a-axis must be within
+  1% of 0.38 nm"*). A 3-5% offset between measurement and literature is
+  consistent with calibration error, not an analysis failure, but a
+  tight criterion will fail and trigger pointless retries.
+- Prefer **internally consistent** criteria the data can actually
+  satisfy: ratios (e.g. *"`b/a` within 5% of expected ratio"* — cancels
+  scale), FFT self-consistency (the reciprocal-lattice peaks form a
+  consistent grid), or fit residuals in the data's own units (lattice
+  fit residual / lattice spacing — dimensionless).
+- An absolute lattice-value match against literature is fine as an
+  **informational** check ("measured 0.38 nm matches YBCO a-axis to
+  ~3% — consistent within calibration"), not as a pass/fail.
 
 ### advanced
-**Atom finding tools:** The functions in `scilink.tools.atom_finding_tools`
-handle multi-sublattice detection, refinement, and separation. Use them
-instead of writing detection code from scratch:
-```python
-from scilink.tools.atom_finding_tools import (
-    detect_atoms, detect_atoms_dcnn, refine_positions,
-    find_zone_axes, find_missing_atoms, subtract_atoms
-)
-```
-Two detection methods are available: `detect_atoms_dcnn` (AtomNet3
-DCNN ensemble, requires `fov_nm` from metadata) and `detect_atoms`
-(classical peak detection, works in pixel space). Both return the same
-dict format so downstream tools work with either. Choose between them
-based on material and image quality:
-- The AtomNet3 works best for transition-metal oxides (including
-  perovskites, layered perovskites, and cuprate superconductors) and
-  graphene. For these materials, try `detect_atoms_dcnn` first when
-  spatial calibration is available.
-- For materials outside that list, when `fov_nm` cannot be determined,
-  or when DCNN results look poor on inspection, use `detect_atoms`
-  directly — it is the more general-purpose baseline.
+**Tool reference:** detection and refinement helpers live in
+`scilink.tools.atom_finding_tools` (`detect_atoms`, `detect_atoms_dcnn`,
+`refine_positions`, `find_zone_axes`, `find_missing_atoms`,
+`subtract_atoms`). Detailed parameter docs and per-tool usage are in
+the `analysis` section below — refer to it when the goal you picked
+above needs a specific tool.
 
-Plan the pipeline around the chosen detector, then use `find_zone_axes` to identify
-lattice vectors, `find_missing_atoms` to predict weaker sublattice
-positions at fractional sites, and `subtract_atoms` to remove the
-dominant sublattice and reveal fainter ones underneath. For materials
-with multiple sublattices (perovskites, layered oxides, rock-salt),
-plan for iterative detect→subtract→detect cycles.
+**Goal-specific guidance** — apply only the bullet that matches the
+goal you picked above:
 
-**Sublattice separation:** Intensity-based clustering alone is not
-sufficient for complex structures. For layered materials, columns of
-different species form distinct rows or planes. Use both intensity AND
-position within the unit cell to assign sublattices. Verify that the
-assignment produces the correct stoichiometric ratios.
-
-**Unit cell identification:** The nearest-neighbor distance is NOT the
-lattice parameter for complex structures. The true unit cell repeat
-may be 2x, 3x, or more of the shortest column spacing. Use the FFT
-to identify the full periodicity, or count how many distinct column
-rows/intensities repeat along each direction.
-
-**Structural anomalies:** After fitting the ideal lattice, examine the
-spatial distribution of displacements, intensity variations, and local
-lattice parameter changes across the image. Regions where these
-quantities deviate systematically from the bulk may indicate structural
-features worth reporting — let the data guide the interpretation rather
-than searching for specific defect types.
+- *If goal is detection + count:* one detector call, refinement (if
+  not built in), and a focused interpretation is the complete pipeline.
+  Do not add FFT, zone-axis analysis, or sublattice clustering to the
+  same step.
+- *If goal is sublattice separation:* intensity-based clustering alone
+  is insufficient for complex structures — combine intensity with
+  position within the unit cell, or use local-environment GMM (see the
+  `analysis` section). Verify stoichiometric ratios. Detected positions
+  from a prior detection step should come from `prior_analysis_paths`,
+  not be re-detected here.
+- *If goal is lattice parameter / zone axis:* use FFT for periodicity
+  (NN distance is not the lattice parameter for multi-sublattice
+  structures — true unit cell may be 2× or more of the shortest column
+  spacing) and `find_zone_axes` for lattice vectors.
+- *If goal is vacancy / missing-column search:* requires an ideal
+  lattice — use detected positions plus zone vectors from a prior step
+  (load via `prior_analysis_paths`). Compare ideal sites to detected
+  positions; restrict to image interior; verify candidates with forced
+  Gaussian fits.
+- *If goal is displacement / strain mapping:* requires an ideal
+  lattice from a prior step. Map displacements spatially; report only
+  distortions exceeding the position fit uncertainty. Distinguish
+  fitted-lattice residuals (local disorder) from deviations against a
+  known ideal lattice (true strain).
 
 ## analysis
 
@@ -224,8 +251,11 @@ the position fit uncertainty.
 **HAADF intensity:** Scales as ~Z^1.6-2. Brighter columns contain
 heavier atoms.
 
-**Lattice parameters:** Compare against known bulk values. Report in
-both pixels and physical units when calibration is available.
+**Lattice parameters:** Compare against known bulk values, treating a
+few-percent absolute deviation as expected calibration uncertainty.
+Report in both pixels and physical units when calibration is
+available, and note the calibration-driven uncertainty band when
+matching against literature.
 
 ### advanced
 **Sublattice assignment:** Use chemical identity from intensity and
@@ -249,8 +279,13 @@ image area and unit cell) should be within 0.90-1.10.
 
 **NN distance consistency:** CV below 15% for well-ordered crystals.
 
-**Unit cell sanity:** Measured lattice parameters should be close to
-known bulk values when spatial calibration is available.
+**Unit cell sanity:** Measured lattice parameters should be in the
+right ballpark of known bulk values, but absolute scale carries a
+few-percent calibration uncertainty. Treat 3-5% deviations from
+literature as informational (likely calibration), not a pass/fail
+failure. Hard checks should be self-consistency: ratio of measured
+spacings (b/a) matching the expected ratio, or FFT peaks forming a
+consistent reciprocal lattice.
 
 **Do not recommend preprocessing on the input to `detect_atoms_dcnn`**
 (CLAHE, contrast normalization, background subtraction, etc.). The
@@ -260,11 +295,17 @@ weak columns are missed, recommend adjusting the tool's `threshold`
 parameter instead.
 
 ### advanced
-**Sublattice populations:** Should match expected stoichiometry for
-the material. Heavy doping can shift intensities between clusters.
+The following only apply when the step explicitly targets the named
+goal — not as additional checks for a basic detection step.
 
-**Lattice fit residual:** Below 0.3x the lattice spacing.
+**Sublattice populations** (when the step assigns sublattices): should
+match expected stoichiometry for the material. Heavy doping can shift
+intensities between clusters.
 
-**Displacement field:** Mean displacement from ideal lattice should be
-small (<0.3x lattice spacing). Large systematic displacements indicate
-fitting errors, not real strain.
+**Lattice fit residual** (when the step fits an ideal lattice): below
+0.3× the lattice spacing.
+
+**Displacement field** (when the step maps displacements): mean
+displacement from ideal lattice should be small (<0.3× lattice
+spacing). Large systematic displacements indicate fitting errors, not
+real strain.

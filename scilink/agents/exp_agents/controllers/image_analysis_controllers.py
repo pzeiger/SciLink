@@ -32,6 +32,60 @@ from typing import Callable, Optional, Any, Dict, List
 import numpy as np
 
 
+# Anthropic's API rejects images over 5 MB. Cap below that with headroom
+# for base64 expansion and other margin so generated visualizations don't
+# crash the verification call when scripts pile on diagnostic subplots.
+_VERIFICATION_IMAGE_CAP_BYTES = int(4.5 * 1024 * 1024)
+
+
+def _fit_image_under_api_cap(
+    image_bytes: bytes, cap: int = _VERIFICATION_IMAGE_CAP_BYTES
+) -> tuple[bytes, str]:
+    """Return image bytes guaranteed (best-effort) to fit under ``cap``.
+
+    No-op for inputs already at or below the cap — returns them with the
+    detected mime type. Otherwise decodes via PIL, re-encodes as JPEG
+    with progressively smaller dimensions until under the cap or a
+    floor size is reached. Returns the last attempt either way (better
+    a slightly-too-large image than crashing the API call).
+    """
+    if len(image_bytes) <= cap:
+        mime = "image/png" if image_bytes.startswith(b"\x89PNG") else "image/jpeg"
+        return image_bytes, mime
+
+    try:
+        from io import BytesIO
+        from PIL import Image as PILImage
+
+        img = PILImage.open(BytesIO(image_bytes))
+        if img.mode in ("RGBA", "LA", "P"):
+            img = img.convert("RGB")
+        elif img.mode == "L":
+            img = img.convert("RGB")
+
+        target_w, target_h = img.size
+        last_bytes = image_bytes
+        for _ in range(6):
+            buf = BytesIO()
+            img.resize((target_w, target_h), PILImage.LANCZOS).save(
+                buf, format="JPEG", quality=85, optimize=True
+            )
+            last_bytes = buf.getvalue()
+            if len(last_bytes) <= cap:
+                return last_bytes, "image/jpeg"
+            target_w = max(200, int(target_w * 0.7))
+            target_h = max(200, int(target_h * 0.7))
+            if target_w == 200 and target_h == 200:
+                break
+        return last_bytes, "image/jpeg"
+    except Exception:
+        # If PIL can't decode or anything else goes wrong, return the
+        # original bytes; the caller's API call may still fail but we
+        # don't make it worse.
+        mime = "image/png" if image_bytes.startswith(b"\x89PNG") else "image/jpeg"
+        return image_bytes, mime
+
+
 def load_image_file(image_path: str) -> np.ndarray:
     """Load image data from file, handling various formats.
 
@@ -267,6 +321,310 @@ def _append_prior_knowledge_context(prompt: list, state: dict) -> None:
             prompt.append("\nKey findings:")
             for f in findings:
                 prompt.append(f"- {f}")
+
+
+def _load_prior_state(raw_path):
+    """Locate and merge prior-analysis JSON for a single path.
+
+    Accepts a directory or a file inside one. Looks for
+    ``analysis_results.json`` in the directory or its parent, then merges
+    per-image fields from a sibling ``series_analysis_results.json``
+    (where ``extracted_features``, ``saved_arrays``, and
+    ``quality_metrics`` actually live for series runs). Returns
+    ``(anchor_dir, merged_data)`` or ``(None, None)`` on any failure.
+    """
+    p = Path(raw_path)
+    if p.is_file():
+        dir_candidates = [p.parent, p.parent.parent]
+    else:
+        dir_candidates = [p, p.parent]
+    results_json = None
+    anchor_dir = None
+    for cand in dir_candidates:
+        candidate_json = cand / "analysis_results.json"
+        if candidate_json.is_file():
+            results_json = candidate_json
+            anchor_dir = cand
+            break
+    if not results_json:
+        return None, None
+    try:
+        data = json.loads(results_json.read_text())
+    except Exception:
+        return None, None
+
+    series_json = anchor_dir / "series_analysis_results.json"
+    if series_json.is_file():
+        try:
+            series_data = json.loads(series_json.read_text())
+            per_image_results = series_data.get("results") or []
+
+            # Propagate the regime plan and per-regime representative
+            # features so the planner sees the multi-pipeline structure
+            # for follow-up runs on a multi-regime series.
+            series_plan = series_data.get("series_analysis_plan") or {}
+            regimes = series_plan.get("regimes") or []
+            if series_plan:
+                data["series_analysis_plan"] = series_plan
+            if regimes and per_image_results:
+                regime_summaries = []
+                for regime in regimes:
+                    indices = regime.get("image_indices") or []
+                    rep_idx = indices[0] if indices else None
+                    rep_features = {}
+                    if rep_idx is not None and rep_idx < len(per_image_results):
+                        rep_features = (
+                            (per_image_results[rep_idx] or {}).get(
+                                "extracted_features"
+                            ) or {}
+                        )
+                    regime_summaries.append({
+                        "name": regime.get("name", "Unnamed"),
+                        "image_indices": indices,
+                        "processing_pipeline": regime.get(
+                            "processing_pipeline", ""
+                        ),
+                        "features_to_extract": regime.get(
+                            "features_to_extract", []
+                        ),
+                        "representative_features": rep_features,
+                    })
+                data["_regime_summaries"] = regime_summaries
+
+            if per_image_results:
+                first = per_image_results[0] or {}
+                # First per-image result acts as the representative for
+                # planner-facing scalar fields. For a single-image run
+                # this is exhaustive; for a series it is one
+                # representative image (series-wide aggregates like
+                # `summary` and `feature_trends` come from
+                # `analysis_results.json` itself).
+                for key in (
+                    "extracted_features",
+                    "quality_metrics",
+                ):
+                    if key not in data and first.get(key):
+                        data[key] = first[key]
+                if "analysis_type" not in data and first.get("analysis_type"):
+                    data["analysis_type"] = first["analysis_type"]
+                if "detailed_analysis" not in data and first.get(
+                    "detailed_analysis"
+                ):
+                    data["detailed_analysis"] = first["detailed_analysis"]
+
+                # Aggregate `saved_arrays` across ALL per-image results so
+                # files from every image_<NNNN>/ subdir can be annotated
+                # by basename in the code-gen listing. Same basename
+                # across images carries the same description/shape/dtype
+                # by construction (the analysis writes the same array
+                # name per image), so first-seen wins.
+                aggregated_saved: dict = dict(data.get("saved_arrays") or {})
+                for r in per_image_results:
+                    if not isinstance(r, dict):
+                        continue
+                    for name, meta in (r.get("saved_arrays") or {}).items():
+                        if name not in aggregated_saved:
+                            aggregated_saved[name] = meta
+                if aggregated_saved:
+                    data["saved_arrays"] = aggregated_saved
+        except Exception:
+            pass
+
+    return anchor_dir, data
+
+
+def _append_prior_analysis_state(prompt: list, state: dict) -> None:
+    """Surface a compact state summary from prior analyses to the planner.
+
+    For each path in ``state['prior_analysis_paths']`` that points at (or
+    contains) a directory holding ``analysis_results.json``, append a
+    state block with the analysis's pipeline, quality score, extracted
+    features, scientific claims, saved-arrays catalog, and detailed-
+    analysis narrative. Missing or malformed JSON silently skips the
+    path (the file-listing block for code-gen stays the single source
+    of truth for "which files exist"; this helper only adds planner-
+    facing context).
+
+    Called during the planning stage; the code-gen stage consumes the
+    same prior state via ``_load_prior_state`` in
+    ``_generate_analysis_script``.
+    """
+    paths = state.get("prior_analysis_paths", [])
+    if not paths:
+        return
+
+    entries = []
+    for raw_path in paths:
+        anchor_dir, data = _load_prior_state(raw_path)
+        if anchor_dir is None:
+            continue
+        entries.append((anchor_dir, data))
+
+    if not entries:
+        return
+
+    prompt.append("\n## Prior Analysis State")
+    prompt.append(
+        "Compact summaries of prior analyses whose full artifacts are "
+        "listed to the code generator below. Use these to inform your "
+        "plan — what has already been measured, what features are "
+        "available, and how reliable the prior results were."
+    )
+    for anchor_dir, data in entries:
+        label = anchor_dir.name or str(anchor_dir)
+        prompt.append(f"\n### {label}")
+
+        approach = data.get("analysis_approach") or data.get("analysis_type")
+        if approach:
+            prompt.append(f"- Approach: {approach}")
+
+        qh = data.get("quality_history") or {}
+        score = qh.get("final_score")
+        approved = qh.get("approved")
+        if score is not None or approved is not None:
+            parts = []
+            if score is not None:
+                parts.append(f"score={score}")
+            if approved is not None:
+                parts.append(f"approved={approved}")
+            prompt.append(f"- Quality: {', '.join(parts)}")
+
+        # Series-level summary (only present when prior run was a series).
+        summary = data.get("summary") or {}
+        if summary:
+            summary_parts = []
+            if summary.get("total_images") is not None:
+                summary_parts.append(
+                    f"{summary['total_images']} images "
+                    f"({summary.get('successful_analyses', '?')} successful)"
+                )
+            if summary.get("flagged_count"):
+                summary_parts.append(
+                    f"{summary['flagged_count']} flagged"
+                )
+            if summary.get("locked_approach"):
+                summary_parts.append(
+                    f"approach: {summary['locked_approach']}"
+                )
+            if summary_parts:
+                prompt.append(f"- Series: {', '.join(summary_parts)}")
+
+        # Multi-regime structure: when the prior run split the series
+        # into regimes with different pipelines, surface each regime so
+        # the follow-up planner knows which images share an analysis
+        # pipeline. Single-regime series fall through to the
+        # representative-features block below.
+        regime_summaries = data.get("_regime_summaries") or []
+        is_multi_regime = len(regime_summaries) > 1
+        if is_multi_regime:
+            series_plan = data.get("series_analysis_plan") or {}
+            regime_lines = [f"- Regimes ({len(regime_summaries)}):"]
+            if series_plan.get("rationale"):
+                rationale = series_plan["rationale"]
+                if len(rationale) > 200:
+                    rationale = rationale[:200] + "..."
+                regime_lines.append(f"  - Rationale: {rationale}")
+            for r in regime_summaries:
+                indices = r.get("image_indices") or []
+                if len(indices) > 6:
+                    idx_str = (
+                        f"{indices[0]}–{indices[-1]} "
+                        f"({len(indices)} images)"
+                    )
+                else:
+                    idx_str = ", ".join(str(i) for i in indices)
+                regime_lines.append(
+                    f"  - \"{r.get('name', 'Unnamed')}\" "
+                    f"(images {idx_str}):"
+                )
+                pipeline = r.get("processing_pipeline") or ""
+                if pipeline:
+                    if len(pipeline) > 200:
+                        pipeline = pipeline[:200] + "..."
+                    regime_lines.append(f"    - Pipeline: {pipeline}")
+                rep = r.get("representative_features") or {}
+                if rep:
+                    feat_strs = []
+                    for k, v in list(rep.items())[:6]:
+                        v_str = str(v)
+                        if len(v_str) > 80:
+                            v_str = v_str[:80] + "..."
+                        feat_strs.append(f"`{k}`={v_str}")
+                    if feat_strs:
+                        regime_lines.append(
+                            f"    - Sample features (image "
+                            f"{(r.get('image_indices') or [0])[0]}): "
+                            f"{', '.join(feat_strs)}"
+                        )
+            prompt.append("\n".join(regime_lines))
+
+        features = data.get("extracted_features") or {}
+        if features and not is_multi_regime:
+            heading = (
+                "- Extracted features (representative image):"
+                if summary else "- Extracted features:"
+            )
+            feat_lines = [heading]
+            for k, v in list(features.items())[:12]:
+                v_str = str(v)
+                if len(v_str) > 120:
+                    v_str = v_str[:120] + "..."
+                feat_lines.append(f"  - `{k}`: {v_str}")
+            if len(features) > 12:
+                feat_lines.append(f"  - ... ({len(features) - 12} more)")
+            prompt.append("\n".join(feat_lines))
+
+        # Series feature trends (e.g., monotonic increase, drift) live in
+        # `analysis_results.json` for series runs.
+        trends = data.get("feature_trends") or {}
+        if trends:
+            trend_lines = ["- Feature trends across series:"]
+            for k, v in list(trends.items())[:8]:
+                v_str = str(v)
+                if len(v_str) > 200:
+                    v_str = v_str[:200] + "..."
+                trend_lines.append(f"  - `{k}`: {v_str}")
+            if len(trends) > 8:
+                trend_lines.append(f"  - ... ({len(trends) - 8} more)")
+            prompt.append("\n".join(trend_lines))
+
+        claims = data.get("scientific_claims") or []
+        if claims:
+            claim_lines = ["- Scientific claims:"]
+            for c in claims[:6]:
+                c_str = c if isinstance(c, str) else (
+                    c.get("claim") or c.get("text") or str(c)
+                )
+                if len(c_str) > 200:
+                    c_str = c_str[:200] + "..."
+                claim_lines.append(f"  - {c_str}")
+            if len(claims) > 6:
+                claim_lines.append(f"  - ... ({len(claims) - 6} more)")
+            prompt.append("\n".join(claim_lines))
+
+        saved = data.get("saved_arrays") or {}
+        if saved:
+            saved_lines = ["- Saved arrays:"]
+            for name, meta in saved.items():
+                desc = ""
+                shape = ""
+                if isinstance(meta, dict):
+                    desc = meta.get("description", "")
+                    shape_val = meta.get("shape")
+                    if shape_val:
+                        shape = f" shape {shape_val}"
+                desc_str = f" — {desc}" if desc else ""
+                saved_lines.append(f"  - `{name}`{shape}{desc_str}")
+            prompt.append("\n".join(saved_lines))
+
+        # Rich narrative from the prior run; mirrors what direct-API
+        # Tier 2 receives via `tier1_summary` in IMAGE_ANALYSIS_TIER2_
+        # PLANNING_INSTRUCTIONS.format(...).
+        detailed = data.get("detailed_analysis") or ""
+        if detailed:
+            if len(detailed) > 2000:
+                detailed = detailed[:2000] + "\n... (truncated)"
+            prompt.append(f"- Detailed analysis:\n{detailed}")
 
 
 def _append_objective_context(prompt: list, state: dict) -> None:
@@ -627,7 +985,7 @@ class ImagePlanningController:
 
     def _get_instructions(self, state: dict) -> str:
         """Return planning instructions, using state override if present."""
-        return state.get("planning_instructions_override", self.instructions)
+        return state.get("planning_instructions_override") or self.instructions
 
     def _display_plan(self, state: dict) -> None:
         is_single = state.get("is_single_image", True)
@@ -728,6 +1086,7 @@ class ImagePlanningController:
         _append_tool_inventory(prompt, agent="image_analysis")
         _append_skill_context(prompt, state, "planning")
         _append_prior_knowledge_context(prompt, state)
+        _append_prior_analysis_state(prompt, state)
         _append_subagent_context(prompt, state)
 
         # Series context: use scout data if available, otherwise basic notice
@@ -1031,6 +1390,7 @@ class ImagePlanningController:
         _append_tool_inventory(prompt, agent="image_analysis")
         _append_skill_context(prompt, state, "planning")
         _append_prior_knowledge_context(prompt, state)
+        _append_prior_analysis_state(prompt, state)
         _append_subagent_context(prompt, state)
 
         # Include current series plan and scout data in refinement context
@@ -1270,7 +1630,7 @@ class ImagePlanningController:
             state["quality_criteria"] = "Visual inspection"
             state["expected_outputs"] = []
             state["literature_query"] = None
-            state["locked_analysis_config"] = None
+            state["locked_analysis_config"] = {}
             state["series_analysis_plan"] = None
             state["regime_configs"] = None
 
@@ -1570,6 +1930,73 @@ Your guidance: '''
                     shape = preproc.get("array_shapes", {}).get(name, "")
                     shape_str = f" shape {shape}" if shape else ""
                     lines.append(f"- `{name}`{shape_str}")
+                context_parts.append("\n".join(lines))
+
+        # Add prior-analysis file listing (available via absolute path;
+        # NOT copied into working dir — use the absolute paths directly).
+        # Annotate each file with description / shape / dtype from the
+        # prior run's `saved_arrays` catalog where available, mirroring
+        # the direct-API Tier 2 file listing built in
+        # `image_analysis_agent._build_tier2_state`.
+        prior_paths = state.get("prior_analysis_paths") or []
+        if prior_paths:
+            listing: list[tuple[str, dict]] = []
+            file_globs = ("*.npy", "*.json", "*.csv", "*.png", "*.py")
+            saved_arrays_by_basename: dict = {}
+            for raw in prior_paths:
+                _, prior_data = _load_prior_state(raw)
+                if prior_data:
+                    for name, meta in (prior_data.get("saved_arrays") or {}).items():
+                        if isinstance(meta, dict):
+                            saved_arrays_by_basename[name] = meta
+
+                p = Path(raw)
+                if p.is_file():
+                    listing.append((str(p.resolve()), {}))
+                elif p.is_dir():
+                    # Include files in this dir and one level of subdirs
+                    # (typical analysis-results layout: analysis_<id>/ and
+                    # analysis_<id>/image_0000/). Skip the `tier1/` archive
+                    # subdir to avoid duplicate entries when the prior run
+                    # was a direct-API auto/deep run.
+                    matched: set = set()
+                    for pat in file_globs:
+                        matched.update(p.glob(pat))
+                        matched.update(p.glob(f"*/{pat}"))
+                    matched = {
+                        f for f in matched
+                        if "tier1" not in f.relative_to(p).parts
+                    }
+                    for f in sorted(matched):
+                        meta = saved_arrays_by_basename.get(f.name, {})
+                        listing.append((str(f.resolve()), meta))
+            if listing:
+                lines = [
+                    "## Prior Analysis Files (available via absolute path)",
+                    "The following files from previous analyses are "
+                    "accessible. Load them with `np.load` (.npy), "
+                    "`json.load` or `pd.read_json` (.json), "
+                    "`pd.read_csv` (.csv), `cv2.imread` (.png) as "
+                    "appropriate. Use the absolute paths — files are "
+                    "NOT copied into the working directory.",
+                ]
+                for path_str, meta in listing:
+                    desc = meta.get("description", "") if meta else ""
+                    shape = meta.get("shape", "") if meta else ""
+                    dtype = meta.get("dtype", "") if meta else ""
+                    if desc or shape or dtype:
+                        annotation_parts = []
+                        if desc:
+                            annotation_parts.append(desc)
+                        if shape:
+                            annotation_parts.append(f"shape={shape}")
+                        if dtype:
+                            annotation_parts.append(f"dtype={dtype}")
+                        lines.append(
+                            f"- `{path_str}` — {', '.join(annotation_parts)}"
+                        )
+                    else:
+                        lines.append(f"- `{path_str}`")
                 context_parts.append("\n".join(lines))
 
         from ....tools._registry import format_tool_inventory
@@ -2121,11 +2548,18 @@ Return JSON:
             "\n\n**ANALYSIS VISUALIZATION (examine carefully):**",
         ]
 
-        # Add the analysis visualization
-        prompt_parts.append({
-            "mime_type": "image/png",
-            "data": result["visualization_bytes"]
-        })
+        # Add the analysis visualization, capped under Anthropic's 5 MB
+        # per-image limit so retry-loop figure inflation doesn't crash
+        # the verification call.
+        viz_bytes, viz_mime = _fit_image_under_api_cap(
+            result["visualization_bytes"]
+        )
+        if viz_bytes is not result["visualization_bytes"]:
+            self.logger.info(
+                f"      Visualization shrunk for verification: "
+                f"{len(result['visualization_bytes'])} → {len(viz_bytes)} bytes"
+            )
+        prompt_parts.append({"mime_type": viz_mime, "data": viz_bytes})
 
         # Also include original image for comparison
         if state.get("original_image_bytes"):
@@ -5040,7 +5474,9 @@ Provide comprehensive scientific synthesis including:
 2. Key trends in extracted features
 3. Physical interpretation of feature evolution
 4. **Analysis of flagged images** - what might explain why these analyzed poorly?
-5. Scientific claims supported by the data
+5. **1-2 scientific claims** supported by the data (not more). One focused,
+   well-supported claim is preferred — only add a second when it covers a
+   genuinely distinct finding. Do not pad with redundant or speculative claims.
 6. Caveats and limitations
 7. **Analysis of adaptively re-analyzed images** - if any images were re-analyzed with different pipelines, interpret what this means scientifically (e.g., structural transition, different morphology, instrumental change)
 

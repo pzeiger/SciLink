@@ -22,7 +22,7 @@ import time
 import numpy as np
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Callable
+from typing import Dict, Any, Callable, List
 
 from .metadata_converter import (
     generate_metadata_json_from_text,
@@ -1522,6 +1522,7 @@ class AnalysisOrchestratorTools:
             skill: str = None,
             series_metadata: str = None,
             task_mode: str = None,
+            prior_analysis_paths: List[str] = None,
         ) -> str:
             """
             Execute analysis with the selected or specified agent.
@@ -1987,6 +1988,8 @@ class AnalysisOrchestratorTools:
                     analyze_kwargs["task_mode"] = task_mode
                 if self.orch.active_knowledge:
                     analyze_kwargs["prior_knowledge"] = self.orch.active_knowledge
+                if prior_analysis_paths:
+                    analyze_kwargs["prior_analysis_paths"] = prior_analysis_paths
                 result = agent.analyze(**analyze_kwargs)
                 
                 # === Store result ===
@@ -2155,6 +2158,24 @@ class AnalysisOrchestratorTools:
                         "ranked candidate materials with discriminating peaks instead of "
                         "asserting a single answer. Leave unset (defaults to 'fitting') "
                         "for standard analyses where the sample is known."
+                    )
+                },
+                "prior_analysis_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "List of folder or file paths from previous analyses whose "
+                        "outputs the new run can consume. Use this when a follow-up "
+                        "analysis needs to load artifacts (masks, positions, "
+                        "feature tables, abundance maps) from a prior run rather "
+                        "than recomputing them. Directory paths typically come "
+                        "from `list_results()` (the `output_directory` field). "
+                        "For each path, the agent's code generator receives the "
+                        "file listing (loadable via absolute path); for paths "
+                        "containing `analysis_results.json`, the planner also "
+                        "receives a state summary (pipeline, quality score, "
+                        "extracted features, scientific claims, saved-arrays "
+                        "catalog). Image-analysis agent only."
                     )
                 }
             },

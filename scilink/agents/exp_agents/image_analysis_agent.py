@@ -50,7 +50,7 @@ from .instruct import (
     IMAGE_ANALYSIS_INTERPRETATION_INSTRUCTIONS,
     IMAGE_ANALYSIS_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS,
     IMAGE_ANALYSIS_PLANNING_INSTRUCTIONS,
-    IMAGE_ANALYSIS_TIER1_SUFFIX,
+    IMAGE_ANALYSIS_PIPELINE_DISCIPLINE_SUFFIX,
     IMAGE_ANALYSIS_TIER2_PLANNING_INSTRUCTIONS,
     IMAGE_ANALYSIS_TIER2_DECISION_INSTRUCTIONS,
 )
@@ -228,6 +228,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         auxiliary_label: Optional[str] = None,
         skill: Optional[str] = None,
         prior_knowledge: Optional[List[Dict[str, Any]]] = None,
+        prior_analysis_paths: Optional[List[str]] = None,
         # Quality control overrides
         outlier_sigma: Optional[float] = None,
         **kwargs,
@@ -259,6 +260,13 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             auxiliary_label: Description of auxiliary data
             skill: Domain skill name or path to .md skill file
             prior_knowledge: Reference findings from previous analyses
+            prior_analysis_paths: List of folder or file paths from previous
+                analyses. Folders containing ``analysis_results.json`` surface
+                a compact state summary (pipeline, quality score, extracted
+                features, scientific claims, saved-arrays catalog) to the
+                planner; all paths surface a file listing to the code
+                generator so generated scripts can load prior outputs via
+                absolute path.
             outlier_sigma: Override default outlier sigma
 
         Returns:
@@ -411,6 +419,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             **skill_state,
             # Prior knowledge
             "prior_knowledge": prior_knowledge or [],
+            "prior_analysis_paths": prior_analysis_paths or [],
             # First image (for planning)
             "image_path": (
                 image_paths[0] if image_paths else first_image_name
@@ -421,11 +430,12 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # Sub-agent preprocessing results
             "fft_preprocessing": None,
             "sam_preprocessing": None,
-            # Tier-aware planning
+            # Every planning call gets the same complexity discipline.
+            # `analysis_depth` only gates whether in-agent Tier 2 escalation
+            # runs after Tier 1; it does not change what the planner is told.
             "planning_instructions_override": (
-                IMAGE_ANALYSIS_PLANNING_INSTRUCTIONS + IMAGE_ANALYSIS_TIER1_SUFFIX
-                if self.analysis_depth != "basic"
-                else None
+                IMAGE_ANALYSIS_PLANNING_INSTRUCTIONS
+                + IMAGE_ANALYSIS_PIPELINE_DISCIPLINE_SUFFIX
             ),
             # Pipeline state
             "analysis_images": [
@@ -934,13 +944,15 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 file_lines.append(f"- {f}")
         files_str = "\n".join(file_lines)
 
-        # Build Tier 2 planning instructions
+        # Build Tier 2 planning instructions. Append the pipeline-discipline
+        # suffix so Tier 2 stays bounded to the same complexity ceiling as
+        # Tier 1 — Tier 2 builds on Tier 1, it is not a more elaborate pipeline.
         tier2_instructions = IMAGE_ANALYSIS_TIER2_PLANNING_INSTRUCTIONS.format(
             tier1_summary=tier1_results.get("detailed_analysis", "")[:2000],
             tier1_features=features_str,
             tier1_claims=claims_str,
             tier1_files=files_str,
-        )
+        ) + IMAGE_ANALYSIS_PIPELINE_DISCIPLINE_SUFFIX
 
         if tier2_decision and tier2_decision.get("suggested_focus"):
             tier2_instructions += (
@@ -972,6 +984,9 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             **skill_state,
             # Prior knowledge
             "prior_knowledge": tier1_state.get("prior_knowledge", []),
+            "prior_analysis_paths": tier1_state.get(
+                "prior_analysis_paths", []
+            ),
             # Sub-agent results
             "fft_preprocessing": None,
             "sam_preprocessing": None,
