@@ -87,17 +87,17 @@ class SimulationOrchestratorTools:
         )
 
         # =====================================================================
-        # 1. GENERATE STRUCTURE
+        # 1. GENERATE STRUCTURE  (build → validate → refine, internal)
         # =====================================================================
-        def generate_structure(description: str, skill: str = None) -> str:
+        def generate_structure(description: str, skill: str = None,
+                               validate_and_refine: bool = True,
+                               max_refinement_cycles: int = 3) -> str:
             from .structure_agent import StructureGenerator
 
             slug = self._make_slug(description)
             workdir = self.orch.structures_dir / slug
             workdir.mkdir(parents=True, exist_ok=True)
 
-            # Resolve skill content if requested (best-effort; structure-gen
-            # falls through to a generic prompt on lookup failure).
             skill_content = self._load_skill_content(skill) if skill else None
 
             try:
@@ -119,13 +119,13 @@ class SimulationOrchestratorTools:
             if "poscar" not in request.lower():
                 request = request + ". Save the structure in POSCAR format."
 
+            # Cycle 1: initial generation.
             result = sg.generate_script(
                 original_user_request=request,
                 attempt_number_overall=1,
                 is_refinement_from_validation=False,
                 skill_content=skill_content,
             )
-
             if result.get("status") != "success":
                 return json.dumps({
                     "status": "error",
@@ -133,18 +133,13 @@ class SimulationOrchestratorTools:
                     "last_attempted_script_path": result.get("last_attempted_script_path"),
                 })
 
-            poscar_path = result["output_file"]
-            script_path = result["final_script_path"]
-            script_content = result["final_script_content"]
-            n_atoms = self._count_atoms(poscar_path)
-
             record = {
                 "slug": slug,
                 "description": description,
                 "structure_dir": str(workdir),
-                "poscar_path": poscar_path,
-                "script_path": script_path,
-                "script_content": script_content,
+                "poscar_path": result["output_file"],
+                "script_path": result["final_script_path"],
+                "script_content": result["final_script_content"],
                 "skill": skill,
                 "incar_path": None,
                 "kpoints_path": None,
@@ -154,18 +149,44 @@ class SimulationOrchestratorTools:
             }
             self.orch.generated_structures.append(record)
 
+            # Optionally chain validate + refine internally so the user's
+            # chat doesn't pause between generate and validate in co-pilot
+            # mode (mirrors how analyze mode's run_analysis does build +
+            # validate + refine inside a single tool call).
+            cycles_used = 1
+            warning = None
+            if validate_and_refine:
+                cycles_used, warning = self._validate_refine_loop(
+                    record=record,
+                    sg=sg,
+                    original_request=request,
+                    skill_content=skill_content,
+                    max_cycles=max_refinement_cycles,
+                )
+
             return json.dumps({
                 "status": "success",
                 "slug": slug,
                 "structure_dir": str(workdir),
-                "poscar_path": poscar_path,
-                "script_path": script_path,
-                "n_atoms": n_atoms,
+                "poscar_path": record["poscar_path"],
+                "script_path": record["script_path"],
+                "n_atoms": self._count_atoms(record["poscar_path"]),
                 "skill_used": skill,
+                "validation": {
+                    "status": (record.get("validation") or {}).get("status"),
+                    "issue_count": len(
+                        (record.get("validation") or {}).get("all_identified_issues", []) or []
+                    ),
+                    "overall_assessment": (record.get("validation") or {}).get("overall_assessment", ""),
+                } if record.get("validation") else None,
+                "refinement_cycles_used": cycles_used,
+                "warning": warning,
                 "next_steps": (
-                    "Optionally call validate_structure(poscar_path=..., "
-                    "original_request=...) to review the geometry, or "
-                    "generate_vasp_inputs(...) to produce INCAR + KPOINTS."
+                    "Generate VASP inputs with generate_vasp_inputs(...) "
+                    "for the desired calculation type, or build a related "
+                    "structure variant via another generate_structure call."
+                    if not warning
+                    else "Review the warning before proceeding to VASP inputs."
                 ),
             })
 
@@ -173,19 +194,25 @@ class SimulationOrchestratorTools:
             func=generate_structure,
             name="generate_structure",
             description=(
-                "Build a single atomic structure from a natural-language "
-                "description (e.g., 'rutile TiO2 with one O vacancy', "
-                "'graphene/MoS2 heterostructure'). Generates the structure "
-                "file (POSCAR) only — does not produce VASP inputs. Use "
-                "this when iterating on geometry; pair with "
-                "`validate_structure` and `refine_structure` for review/"
-                "refinement, and with `generate_vasp_inputs` afterward. "
-                "For the one-shot pipeline (structure + VASP inputs "
-                "together) use `run_complete_dft_workflow` instead.\n\n"
+                "Build an atomic structure from a natural-language description "
+                "(e.g., 'rutile TiO2 with one O vacancy', 'graphene/MoS2 "
+                "heterostructure'). By default also runs validation + "
+                "refinement internally — same shape as analyze mode's "
+                "`run_analysis`: one tool call returns a structure that has "
+                "already been reviewed and improved if needed.\n\n"
+                "Returns POSCAR + the structure record's session slug. Does "
+                "NOT produce VASP inputs — call `generate_vasp_inputs` for "
+                "those, or `run_complete_dft_workflow` for the full pipeline "
+                "(structure + inputs together).\n\n"
                 "Set `skill='aimsgb'` for grain boundaries / bicrystals / "
                 "coincident-site-lattice constructions to load curated "
                 "library guidance. Skip the `skill` parameter for plain "
-                "ASE / pymatgen workflows."
+                "ASE / pymatgen workflows.\n\n"
+                "Use `validate_and_refine=False` only when the user has "
+                "explicitly asked for a single-shot build with no "
+                "validation (rare). The standalone `validate_structure` and "
+                "`refine_structure` tools remain available for re-validating "
+                "after a manual edit or external modification."
             ),
             parameters={
                 "description": {
@@ -203,10 +230,25 @@ class SimulationOrchestratorTools:
                     "description": (
                         "Optional name of a built-in structure-generation "
                         "skill to load as additional library guidance. "
-                        "Currently available: 'aimsgb' (for grain "
-                        "boundaries / bicrystals / Σ-value parametrized "
-                        "interfaces). Omit when no specialized library is "
-                        "needed."
+                        "Currently available: 'aimsgb' (grain boundaries, "
+                        "bicrystals, Σ-value parametrized interfaces). Omit "
+                        "for plain ASE / pymatgen workflows."
+                    ),
+                },
+                "validate_and_refine": {
+                    "type": "boolean",
+                    "description": (
+                        "Whether to run validation + refinement internally "
+                        "after the initial build (default: true). Set false "
+                        "only when the user explicitly wants a one-shot "
+                        "build with no review."
+                    ),
+                },
+                "max_refinement_cycles": {
+                    "type": "integer",
+                    "description": (
+                        "Cap on validator-driven refinement cycles when "
+                        "validate_and_refine=true (default: 3)."
                     ),
                 },
             },
@@ -1091,6 +1133,114 @@ class SimulationOrchestratorTools:
     # ------------------------------------------------------------------
     # Helpers used by tool closures
     # ------------------------------------------------------------------
+
+    def _validate_refine_loop(self, record: Dict[str, Any], sg,
+                              original_request: str,
+                              skill_content: Optional[str],
+                              max_cycles: int) -> tuple:
+        """Run validate → refine → validate up to ``max_cycles`` times.
+
+        Updates ``record`` in place: after each cycle, ``poscar_path`` /
+        ``script_path`` / ``script_content`` are replaced with the latest
+        attempt and ``validation`` holds the latest validator output.
+
+        Mirrors DFTOrchestrator._generate_and_validate_structure's
+        circuit-breakers (unchanged-script and plateau-vs-divergence) so a
+        validator looping on cosmetic complaints accepts the structure
+        rather than burning the cycle budget — same fixes that landed in
+        the mp-tool-resolver branch.
+
+        Returns: (cycles_used, warning_or_None).
+        """
+        from .val_agent import StructureValidatorAgent
+
+        try:
+            validator = StructureValidatorAgent(
+                api_key=self.orch.api_key,
+                base_url=self.orch.base_url,
+                model_name=self.orch.model_name,
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to construct validator: {e}. Skipping validate+refine."
+            )
+            return 1, f"Validation skipped (validator construction failed: {e})"
+
+        attempt_history: list = []
+        prev_script = record.get("script_content")
+
+        for cycle in range(1, max_cycles + 1):
+            # Validate the current state of the record.
+            val = validator.validate_structure_and_script(
+                structure_file_path=record["poscar_path"],
+                generating_script_content=record["script_content"],
+                original_request=original_request,
+            )
+            record["validation"] = val
+            attempt_history.append({
+                "script": record["script_content"],
+                "issues": list(val.get("all_identified_issues", []) or []),
+                "hints": list(val.get("script_modification_hints", []) or []),
+            })
+
+            if val.get("status") == "success":
+                return cycle, None
+
+            # Plateau vs divergence circuit-breaker (mirrors DFTOrchestrator).
+            if len(attempt_history) >= 3:
+                n_now = len(attempt_history[-1]["issues"])
+                n_prev = len(attempt_history[-2]["issues"])
+                n_prev2 = len(attempt_history[-3]["issues"])
+                if n_now >= n_prev and n_prev >= n_prev2:
+                    if n_now > n_prev2:
+                        return cycle, (
+                            f"Refinement stopped: validator complaints "
+                            f"diverging ({n_prev2} → {n_prev} → {n_now}). "
+                            f"Structure may have substantial unresolved "
+                            f"issues; review before proceeding to VASP."
+                        )
+                    return cycle, (
+                        "Refinement stopped: issue count plateaued "
+                        "(likely cosmetic)."
+                    )
+
+            # Out of budget — stop without refining further.
+            if cycle >= max_cycles:
+                return cycle, (
+                    f"Max refinement cycles ({max_cycles}) reached; "
+                    f"structure has unresolved validation issues."
+                )
+
+            # Refine.
+            refine_result = sg.generate_script(
+                original_user_request=original_request,
+                attempt_number_overall=cycle + 1,
+                is_refinement_from_validation=True,
+                previous_script_content=record["script_content"],
+                validator_feedback=val,
+                attempt_history=attempt_history,
+                skill_content=skill_content,
+            )
+            if refine_result.get("status") != "success":
+                return cycle, (
+                    f"Refinement failed on cycle {cycle + 1}: "
+                    f"{refine_result.get('message') or refine_result.get('last_error')}"
+                )
+
+            new_script = refine_result["final_script_content"]
+            # Generator returned same script → nothing left to fix.
+            if new_script == prev_script:
+                return cycle, (
+                    "Refinement stopped: generator made no further changes."
+                )
+
+            record["poscar_path"] = refine_result["output_file"]
+            record["script_path"] = refine_result["final_script_path"]
+            record["script_content"] = new_script
+            prev_script = new_script
+
+        # Loop exit without explicit return — should not happen, but be safe.
+        return max_cycles, None
 
     def _load_skill_content(self, skill_name: str) -> Optional[str]:
         """Resolve a skill name to its content, formatted as a single block.
