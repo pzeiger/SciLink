@@ -2936,12 +2936,27 @@ class AnalysisOrchestratorTools:
                     "final_status": final_status,
                 })
 
+            # Surface refinement diagnostics to the agent. Without these the
+            # agent sees only `ready_for_vasp: true` and reports success even
+            # when the structure was accepted with substantial unresolved
+            # validation issues (e.g., circuit-breaker fired on diverging
+            # validator complaints).
+            structure_gen = result.get("structure_generation", {}) or {}
+            structure_warning = structure_gen.get("warning")
+            cycles_used = structure_gen.get("cycles_used")
+            val_result = structure_gen.get("validation_result", {}) or {}
+            outstanding_issues = val_result.get("all_identified_issues", []) or []
+
             return json.dumps({
                 "status": final_status if final_status else "error",
                 "final_status": final_status,
                 "output_directory": str(out_dir),
                 "manifest_path": str(out_dir / "final_files_manifest.json"),
                 "ready_for_vasp": final_status == "success",
+                "structure_warning": structure_warning,
+                "structure_refinement_cycles": cycles_used,
+                "structure_outstanding_issues_count": len(outstanding_issues),
+                "structure_outstanding_issues": outstanding_issues[:10],
             })
 
         self._register_tool(

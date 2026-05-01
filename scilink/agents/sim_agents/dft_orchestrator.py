@@ -400,23 +400,47 @@ class DFTOrchestrator:
                 }
 
             # CIRCUIT-BREAKER 2: issue count failed to strictly decrease over
-            # the last 2 consecutive cycles. The validator is stuck in a loop
-            # of cosmetic remarks; further refinement is unlikely to converge.
+            # the last 2 consecutive cycles. Two distinct sub-cases:
+            #   - PLATEAU (n2 == n1 == n0): same cosmetic complaints repeating
+            #   - DIVERGENCE (n0 > n2): refinement is making the structure
+            #     worse — each cycle introduces new issues without resolving
+            #     old ones. Surfaced as a louder warning so callers know the
+            #     final structure has substantial unresolved problems.
+            # In both cases we accept the current structure (continuing to
+            # refine wouldn't help), but the warning text differs.
             if len(attempt_history) >= 3:
                 n_now = len(attempt_history[-1]["issues"])
                 n_prev = len(attempt_history[-2]["issues"])
                 n_prev2 = len(attempt_history[-3]["issues"])
                 if n_now >= n_prev and n_prev >= n_prev2:
-                    print(f"🛑 Issue count not decreasing over 2 cycles "
-                          f"({n_prev2} → {n_prev} → {n_now}); validator complaints "
-                          f"appear cosmetic. Accepting current structure.")
+                    if n_now > n_prev2:
+                        print(f"🛑 Validator complaints diverging "
+                              f"({n_prev2} → {n_prev} → {n_now}); refinement is "
+                              f"making the structure worse, not better. Accepting "
+                              f"current structure but flagging unresolved issues.")
+                        warning = (
+                            f"Refinement stopped: validator complaints "
+                            f"diverging ({n_prev2} → {n_prev} → {n_now}). "
+                            f"Structure may have substantial unresolved issues; "
+                            f"review the validation feedback before relying on "
+                            f"the VASP inputs."
+                        )
+                    else:
+                        print(f"🛑 Issue count plateaued over 2 cycles "
+                              f"({n_prev2} → {n_prev} → {n_now}); validator "
+                              f"complaints appear cosmetic. Accepting current "
+                              f"structure.")
+                        warning = (
+                            "Refinement stopped: issue count plateaued "
+                            "(likely cosmetic)."
+                        )
                     return {
                         "status": "success",
                         "final_structure_path": structure_file,
                         "final_script_path": gen_result["final_script_path"],
                         "cycles_used": cycle_num,
                         "validation_result": val_result,
-                        "warning": "Refinement stopped: issue count plateaued (likely cosmetic).",
+                        "warning": warning,
                     }
 
             if cycle < self.max_refinement_cycles:
