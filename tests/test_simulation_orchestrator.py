@@ -379,6 +379,60 @@ def stress_3_session_status_called(model_name: str):
     print("   ✅ Agent correctly reported empty session")
 
 
+def stress_4_aimsgb_skill_loaded(model_name: str):
+    """Live: GB request → agent passes skill='aimsgb' → script uses aimsgb API.
+
+    Verifies the full skill-loading chain: system-prompt nudge → LLM
+    chooses to set skill='aimsgb' on generate_structure → tool resolves
+    the built-in skill via scilink.skills.loader → curated content lands
+    in the structure-generation prompt → generated script imports aimsgb
+    and uses Grain / GrainBoundary / build_gb correctly.
+
+    Requires: aimsgb installed (`pip install aimsgb`), MP_API_KEY set
+    (script fetches mp-13 = bcc Fe).
+    """
+    workdir = RUN_DIR / "stress_aimsgb"
+    if workdir.exists():
+        shutil.rmtree(workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    orch = _make_orch(model_name, str(workdir / "sim"), autonomy="autonomous")
+    response = orch.chat(
+        "Build a Σ5 [001] twist grain boundary in bcc iron (mp-13). "
+        "Use the granular generate_structure tool — there's a built-in "
+        "skill that handles this library well; load it via the "
+        "appropriate tool parameter."
+    )
+    print("   --- agent response (last 300 chars) ---")
+    print("   " + response[-300:].replace("\n", "\n   "))
+
+    structures = orch.generated_structures or []
+    assert structures, "No structures recorded"
+    s = structures[-1]
+    print(f"   slug: {s['slug']}, skill: {s.get('skill')}")
+
+    assert s.get("skill") == "aimsgb", (
+        f"Expected agent to pass skill='aimsgb' to generate_structure; "
+        f"got {s.get('skill')!r}. The system-prompt skill-availability "
+        f"nudge isn't reaching the LLM."
+    )
+
+    script_text = Path(s["script_path"]).read_text()
+    assert "aimsgb" in script_text, "Script should reference aimsgb"
+    assert "GrainBoundary" in script_text, "Script should use GrainBoundary"
+    assert "build_gb" in script_text, "Script should call .build_gb()"
+
+    poscar = Path(s["poscar_path"])
+    assert poscar.exists(), f"POSCAR missing: {poscar}"
+
+    from ase.io import read as ase_read
+    atoms = ase_read(str(poscar))
+    syms = atoms.get_chemical_symbols()
+    assert all(sy == "Fe" for sy in syms), f"Expected pure Fe, got {set(syms)}"
+    print(f"   ✅ skill='aimsgb' loaded; script uses aimsgb API; "
+          f"{len(atoms)} Fe atoms produced.")
+
+
 # ---------------------------------------------------------------------------
 # E2E — full run_task call producing files on disk
 # ---------------------------------------------------------------------------
@@ -426,6 +480,7 @@ STRESS_TESTS = [
     ("STRESS: generate + VASP inputs",         stress_1_generate_then_inputs),
     ("STRESS: post-run failure analysis",      stress_2_post_run_analysis_failure),
     ("STRESS: session_status call",            stress_3_session_status_called),
+    ("STRESS: aimsgb skill auto-loaded",       stress_4_aimsgb_skill_loaded),
 ]
 
 E2E_TESTS = [
