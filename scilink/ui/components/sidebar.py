@@ -88,6 +88,7 @@ def render_sidebar() -> None:
         api_key = st.text_input("API key", type="password", key="cfg_api_key", disabled=_locked)
         base_url = st.text_input("Base URL (optional)", key="cfg_base_url", disabled=_locked)
         fh_api_key = st.text_input("FutureHouse API key (optional)", type="password", key="cfg_fh_api_key", disabled=_locked)
+        mp_api_key = st.text_input("Materials Project API key (optional)", type="password", key="cfg_mp_api_key", disabled=_locked)
 
         # Planning mode: embedding model
         if st.session_state.app_mode == "plan":
@@ -183,6 +184,7 @@ def render_sidebar() -> None:
                             "base_url": base_url,
                             "mode": mode,
                             "fh_api_key": fh_api_key,
+                            "mp_api_key": mp_api_key,
                             "embedding_model": _r_embed_model,
                             "embedding_api_key": _r_embed_api_key,
                         }
@@ -206,6 +208,7 @@ def render_sidebar() -> None:
                     "base_url": base_url,
                     "mode": mode,
                     "fh_api_key": fh_api_key,
+                    "mp_api_key": mp_api_key,
                     "embedding_model": _embed_model,
                     "embedding_api_key": _embed_api_key,
                 }
@@ -381,19 +384,25 @@ def _render_planning_status() -> None:
 
 # ── helpers ──────────────────────────────────────────────────────
 
-def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key: str = "", embedding_model: str = None, embedding_api_key: str = None) -> None:
+def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key: str = "", mp_api_key: str = "", embedding_model: str = None, embedding_api_key: str = None) -> None:
     """Initialize the agent and session directory.
 
     Dispatches to the appropriate agent based on ``st.session_state.app_mode``.
     Designed to be called from the **main** content area (not inside
     ``with st.sidebar``) so that ``st.spinner`` is visible to the user.
     """
+    import scilink
     import scilink.executors as executors
 
     resolved_key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
     if not resolved_key and not base_url:
         st.sidebar.error("Provide an API key or set an environment variable (GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY).")
         return
+
+    # Optional MP key: register so DFTOrchestrator's auto-discovery picks it up
+    # later when the analysis orchestrator dispatches to structure generation.
+    if mp_api_key:
+        scilink.set_api_key('materials_project', mp_api_key)
 
     app_mode = st.session_state.app_mode or "analyze"
     prefix = SESSION_DIR_PREFIXES.get(app_mode, "session")
@@ -571,11 +580,13 @@ def resume_session(
     base_url: str,
     mode: str,
     fh_api_key: str = "",
+    mp_api_key: str = "",
     embedding_model: str = None,
     embedding_api_key: str = None,
 ) -> None:
     """Restore an agent from a past session directory and re-populate the UI."""
     import json as _json
+    import scilink
     import scilink.executors as executors
 
     resolved_key = (
@@ -590,6 +601,10 @@ def resume_session(
             "(GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY)."
         )
         return
+
+    # Optional MP key registration (see start_session for rationale).
+    if mp_api_key:
+        scilink.set_api_key('materials_project', mp_api_key)
 
     session_path = Path(session_dir)
     executors._GLOBAL_SANDBOX_APPROVED = True
@@ -693,6 +708,7 @@ def _reset_session() -> None:
         "cfg_api_key": st.session_state.get("cfg_api_key"),
         "cfg_base_url": st.session_state.get("cfg_base_url"),
         "cfg_fh_api_key": st.session_state.get("cfg_fh_api_key"),
+        "cfg_mp_api_key": st.session_state.get("cfg_mp_api_key"),
         "cfg_mode": st.session_state.get("cfg_mode"),
         "cfg_embedding_preset": st.session_state.get("cfg_embedding_preset"),
         "cfg_embedding_custom": st.session_state.get("cfg_embedding_custom"),

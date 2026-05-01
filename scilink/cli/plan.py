@@ -93,7 +93,15 @@ Supported Models:
         dest='api_key',
         help='API key for LLM provider (overrides environment variables)'
     )
-    
+
+    parser.add_argument(
+        '--mp-api-key',
+        type=str,
+        dest='mp_api_key',
+        help='Materials Project API key (or set MP_API_KEY env var). '
+             'Enables the MP tool-resolver in structure generation.'
+    )
+
     # Autonomy arguments
     parser.add_argument(
         '--autonomy',
@@ -199,7 +207,13 @@ Supported Models:
         print("⚠️  Warning: '--google-api-key' is deprecated. Use '--api-key' instead.")
         if not api_key:
             api_key = args.google_api_key
-    
+
+    # Register the MP key (if provided via flag) into the in-memory keystore so
+    # auto-discovery picks it up when run_dft_workflow constructs DFTOrchestrator.
+    if args.mp_api_key:
+        import scilink
+        scilink.set_api_key('materials_project', args.mp_api_key)
+
     # Validate: higher autonomy requires data-dir
     if args.autonomy in ('supervised', 'autonomous') and not args.data_dir:
         parser.error(
