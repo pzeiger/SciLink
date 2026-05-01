@@ -6,7 +6,7 @@ First, think step-by-step about how you would create this structure:
 2. What supercell sizes, layer thicknesses, or geometric parameters are required?
 3. What defects, substitutions, or other modifications need to be applied?
 4. What atomic constraints are physically appropriate for this model? (e.g., fixing the bottom layers of a slab to mimic bulk).
-5. How should the materials be combined? (For interfaces/heterostructures: stacking order, lattice matching, strain accommodation)
+5. How should the materials be combined? (For interfaces/heterostructures, do NOT invent supercell sizes by hand — that frequently produces unphysical strain. Use `pymatgen.analysis.interfaces.zsl.ZSLGenerator` (or `CoherentInterfaceBuilder`) to enumerate lattice-matched supercell combinations and pick one with low strain (typically <5%). If the user pinned specific supercell sizes that don't lattice-match, prefer the user's explicit request only if the resulting strain is reasonable; otherwise raise an error explaining the mismatch rather than producing a 50%+-strain structure.)
 6. In what order should these steps be performed?
 
 Then, generate a *complete* and *executable* Python script using the Atomic Simulation Environment (ASE) library to implement your approach:
