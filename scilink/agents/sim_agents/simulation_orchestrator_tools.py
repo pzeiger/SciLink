@@ -502,7 +502,416 @@ class SimulationOrchestratorTools:
             required=["description"],
         )
 
-        # ↓↓↓ Granular tools 3, 4, 6, 7, 11 land in step 3.
+        # =====================================================================
+        # 3. REFINE STRUCTURE
+        # =====================================================================
+        def refine_structure(poscar_path: str, original_request: str) -> str:
+            from .structure_agent import StructureGenerator
+
+            record = self._find_structure_record(poscar_path)
+            if record is None:
+                return json.dumps({
+                    "status": "error",
+                    "message": (
+                        "Refinement requires a structure that was generated "
+                        "in this session (so the validator feedback and "
+                        "prior script are available). No record found for: "
+                        f"{poscar_path}. Generate the structure first via "
+                        "generate_structure, then validate, then refine."
+                    ),
+                })
+
+            validator_feedback = record.get("validation")
+            if not validator_feedback or validator_feedback.get("status") == "success":
+                return json.dumps({
+                    "status": "no_changes_needed",
+                    "message": (
+                        "No refinement-worthy validator feedback on record. "
+                        "Run validate_structure first; if it returns "
+                        "'success', the structure is already a fine starting "
+                        "point and no refinement is needed."
+                    ),
+                })
+
+            prior_script = record.get("script_content") or self._find_script_content(poscar_path)
+            if not prior_script:
+                return json.dumps({
+                    "status": "error",
+                    "message": "Could not locate the prior script for refinement.",
+                })
+
+            workdir = Path(record["structure_dir"])
+            try:
+                sg = StructureGenerator(
+                    api_key=self.orch.api_key,
+                    base_url=self.orch.base_url,
+                    model_name=self.orch.model_name,
+                    generated_script_dir=str(workdir),
+                    mp_api_key=self.orch.mp_api_key,
+                )
+            except Exception as e:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Failed to construct StructureGenerator: {e}",
+                })
+
+            request = original_request
+            if "poscar" not in request.lower():
+                request = request + ". Save the structure in POSCAR format."
+
+            result = sg.generate_script(
+                original_user_request=request,
+                attempt_number_overall=2,  # refinement cycle
+                is_refinement_from_validation=True,
+                previous_script_content=prior_script,
+                validator_feedback=validator_feedback,
+            )
+
+            if result.get("status") != "success":
+                return json.dumps({
+                    "status": "error",
+                    "message": result.get("message") or result.get("last_error") or "Refinement failed",
+                })
+
+            new_poscar = result["output_file"]
+            new_script_path = result["final_script_path"]
+            new_script_content = result["final_script_content"]
+            n_atoms = self._count_atoms(new_poscar)
+
+            # Update the record in place rather than appending — refinement
+            # produces a successor of the same logical structure.
+            record["poscar_path"] = new_poscar
+            record["script_path"] = new_script_path
+            record["script_content"] = new_script_content
+            record["validation"] = None  # invalidate prior validation
+            record["incar_path"] = None  # invalidate prior inputs (geometry changed)
+            record["kpoints_path"] = None
+            record["vasp_summary"] = None
+
+            return json.dumps({
+                "status": "success",
+                "slug": record["slug"],
+                "poscar_path": new_poscar,
+                "script_path": new_script_path,
+                "n_atoms": n_atoms,
+                "next_steps": (
+                    "Optionally call validate_structure again to confirm the "
+                    "refinement addressed the prior issues; then proceed to "
+                    "generate_vasp_inputs."
+                ),
+            })
+
+        self._register_tool(
+            func=refine_structure,
+            name="refine_structure",
+            description=(
+                "Re-generate a structure that this session already built, "
+                "incorporating feedback from a prior validate_structure call. "
+                "Updates the structure in place — the slug, directory, and "
+                "session record are preserved; the POSCAR + script are "
+                "replaced. Prior INCAR/KPOINTS (if any) are invalidated since "
+                "the geometry changed. Requires the structure to have been "
+                "validated in this session — run validate_structure first."
+            ),
+            parameters={
+                "poscar_path": {
+                    "type": "string",
+                    "description": "Absolute path to the POSCAR to refine.",
+                },
+                "original_request": {
+                    "type": "string",
+                    "description": (
+                        "The original natural-language request the structure "
+                        "was built for. Refinement uses this together with "
+                        "the validator's feedback."
+                    ),
+                },
+            },
+            required=["poscar_path", "original_request"],
+        )
+
+        # =====================================================================
+        # 4. VIEW STRUCTURE
+        # =====================================================================
+        def view_structure(poscar_path: str) -> str:
+            from .utils import generate_structure_views
+
+            if not Path(poscar_path).exists():
+                return json.dumps({
+                    "status": "error",
+                    "message": f"POSCAR not found: {poscar_path}",
+                })
+
+            try:
+                image_paths = generate_structure_views(poscar_path)
+            except Exception as e:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Failed to render structure views: {e}",
+                })
+
+            if not image_paths:
+                return json.dumps({
+                    "status": "error",
+                    "message": (
+                        "Structure rendering produced no output (ASE may be "
+                        "missing or the file may be unparseable)."
+                    ),
+                })
+
+            return json.dumps({
+                "status": "success",
+                "image_paths": image_paths,
+                "note": (
+                    "PNG renders along the X, Y, and Z axes have been written "
+                    "next to the POSCAR. The user can open them; the model "
+                    "cannot view image bytes through this text-only tool "
+                    "interface."
+                ),
+            })
+
+        self._register_tool(
+            func=view_structure,
+            name="view_structure",
+            description=(
+                "Render axis-view PNG images (along X, Y, Z) of a structure "
+                "for visual inspection. Saves images alongside the POSCAR. "
+                "Useful when a user wants to eyeball the geometry before "
+                "running calculations; the images are surfaced to the user, "
+                "not to the model itself."
+            ),
+            parameters={
+                "poscar_path": {
+                    "type": "string",
+                    "description": "Absolute path to the POSCAR to render.",
+                },
+            },
+            required=["poscar_path"],
+        )
+
+        # =====================================================================
+        # 6. VALIDATE INCAR (literature-grounded)
+        # =====================================================================
+        def validate_incar(incar_path: str, system_description: str) -> str:
+            if not Path(incar_path).exists():
+                return json.dumps({
+                    "status": "error",
+                    "message": f"INCAR not found: {incar_path}",
+                })
+
+            if not self.orch.futurehouse_api_key:
+                return json.dumps({
+                    "status": "skipped",
+                    "message": (
+                        "Literature validation requires a FutureHouse API "
+                        "key. Set FUTUREHOUSE_API_KEY in the environment "
+                        "or pass futurehouse_api_key when constructing the "
+                        "orchestrator."
+                    ),
+                })
+
+            try:
+                from .val_agent import IncarValidatorAgent
+                validator = IncarValidatorAgent(
+                    api_key=self.orch.api_key,
+                    base_url=self.orch.base_url,
+                    model_name=self.orch.model_name,
+                    futurehouse_api_key=self.orch.futurehouse_api_key,
+                )
+            except Exception as e:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Failed to construct IncarValidatorAgent: {e}",
+                })
+
+            incar_content = Path(incar_path).read_text()
+            result = validator.validate_and_improve_incar(
+                incar_content=incar_content,
+                system_description=system_description,
+            )
+
+            if result.get("status") != "success":
+                return json.dumps({
+                    "status": "error",
+                    "message": result.get("message") or "Literature validation failed",
+                })
+
+            return json.dumps({
+                "status": "success",
+                "validation_status": result.get("validation_status"),
+                "overall_assessment": result.get("overall_assessment"),
+                "suggested_adjustments": result.get("suggested_adjustments", []),
+                "literature_review": result.get("literature_review", "")[:2000],
+                "incar_path": incar_path,
+            })
+
+        self._register_tool(
+            func=validate_incar,
+            name="validate_incar",
+            description=(
+                "Run a literature-grounded review of an INCAR file: pulls "
+                "papers via FutureHouse, asks an LLM whether the chosen "
+                "parameters are consistent with established practice for "
+                "the system in question, returns suggested adjustments. "
+                "Returns 'skipped' status when no FutureHouse API key is "
+                "configured. Pair with apply_incar_improvements to write "
+                "the suggested INCAR to disk."
+            ),
+            parameters={
+                "incar_path": {
+                    "type": "string",
+                    "description": "Absolute path to the INCAR to validate.",
+                },
+                "system_description": {
+                    "type": "string",
+                    "description": (
+                        "What system the INCAR is for and what the calculation "
+                        "is supposed to compute (used as context for the "
+                        "literature review)."
+                    ),
+                },
+            },
+            required=["incar_path", "system_description"],
+        )
+
+        # =====================================================================
+        # 7. APPLY INCAR IMPROVEMENTS
+        # =====================================================================
+        def apply_incar_improvements(incar_path: str, poscar_path: str,
+                                     original_request: str,
+                                     suggested_adjustments: list,
+                                     overall_assessment: str = "") -> str:
+            if not Path(incar_path).exists():
+                return json.dumps({
+                    "status": "error",
+                    "message": f"INCAR not found: {incar_path}",
+                })
+            if not Path(poscar_path).exists():
+                return json.dumps({
+                    "status": "error",
+                    "message": f"POSCAR not found: {poscar_path}",
+                })
+            if not suggested_adjustments:
+                return json.dumps({
+                    "status": "no_changes",
+                    "message": "No adjustments provided — nothing to apply.",
+                })
+
+            try:
+                from .vasp_agent import VaspInputAgent
+                agent = VaspInputAgent(
+                    api_key=self.orch.api_key,
+                    base_url=self.orch.base_url,
+                    model_name=self.orch.model_name,
+                )
+            except Exception as e:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Failed to construct VaspInputAgent: {e}",
+                })
+
+            original_incar = Path(incar_path).read_text()
+            output_dir = str(Path(incar_path).parent)
+
+            result = agent.apply_improvements(
+                original_incar=original_incar,
+                validation_result={
+                    "validation_status": "needs_adjustment",
+                    "suggested_adjustments": suggested_adjustments,
+                    "overall_assessment": overall_assessment,
+                },
+                poscar_path=poscar_path,
+                original_request=original_request,
+                output_dir=output_dir,
+            )
+
+            if result.get("status") not in ("success", "no_changes"):
+                return json.dumps({
+                    "status": "error",
+                    "message": result.get("message") or "Apply-improvements failed",
+                })
+
+            return json.dumps({
+                "status": result.get("status"),
+                "improvements_applied": result.get("improvements_applied", False),
+                "adjustments_count": result.get("adjustments_count", 0),
+                "improved_incar_path": result.get("improved_incar_path"),
+            })
+
+        self._register_tool(
+            func=apply_incar_improvements,
+            name="apply_incar_improvements",
+            description=(
+                "Apply a list of literature-validated INCAR adjustments to an "
+                "existing INCAR, writing the result as INCAR_improved next to "
+                "the original. Pair with validate_incar — pass its "
+                "suggested_adjustments through directly."
+            ),
+            parameters={
+                "incar_path": {
+                    "type": "string",
+                    "description": "Absolute path to the original INCAR.",
+                },
+                "poscar_path": {
+                    "type": "string",
+                    "description": "Absolute path to the POSCAR (provides system context).",
+                },
+                "original_request": {
+                    "type": "string",
+                    "description": "The original calculation-type request.",
+                },
+                "suggested_adjustments": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": (
+                        "List of adjustment dicts in the shape returned by "
+                        "validate_incar (each with parameter/current_value/"
+                        "suggested_value/reason)."
+                    ),
+                },
+                "overall_assessment": {
+                    "type": "string",
+                    "description": "Brief literature-review summary (passed verbatim).",
+                },
+            },
+            required=["incar_path", "poscar_path", "original_request", "suggested_adjustments"],
+        )
+
+        # =====================================================================
+        # 11. LIST GENERATED STRUCTURES
+        # =====================================================================
+        def list_generated_structures() -> str:
+            structures = self.orch.generated_structures or []
+            return json.dumps({
+                "status": "ok",
+                "count": len(structures),
+                "structures": [
+                    {
+                        "slug": s.get("slug"),
+                        "description": s.get("description"),
+                        "structure_dir": s.get("structure_dir"),
+                        "poscar_path": s.get("poscar_path"),
+                        "incar_path": s.get("incar_path"),
+                        "kpoints_path": s.get("kpoints_path"),
+                        "has_validation": s.get("validation") is not None,
+                        "created_at": s.get("created_at"),
+                    } for s in structures
+                ],
+            })
+
+        self._register_tool(
+            func=list_generated_structures,
+            name="list_generated_structures",
+            description=(
+                "List all structures generated in this session with their "
+                "paths and current state (whether VASP inputs exist, whether "
+                "validation has been run). Use to remember what's been built "
+                "before deciding next steps."
+            ),
+            parameters={},
+            required=[],
+        )
+
         # ↓↓↓ Post-run analysis (8, 9) lands in step 4.
 
     # ------------------------------------------------------------------
