@@ -23,6 +23,38 @@ Then, generate a *complete* and *executable* Python script implementing your app
 7. Call the '{tool_name}' function/tool with the *entire generated Python script content* as the 'script_content' argument. Do not add any explanatory text before or after the function call itself in your response.
 """
 
+MODIFICATION_PROMPT_TEMPLATE = """
+The user previously built an atomic structure with this script:
+
+```python
+{prior_script}
+```
+
+The user is now asking to modify that structure. Their description of the
+desired change:
+
+"{description}"
+
+Your task:
+1. Read the prior script carefully and understand what it built.
+2. Apply the requested change as a **minimal delta** to the prior script —
+   preserve lattice parameters, supercell size, vacuum, naming conventions,
+   and helper logic that don't need to change. The goal is the smallest
+   correct edit, not a rewrite. If you find yourself rewriting more than
+   half the script, stop and reconsider whether the prior script's setup is
+   actually being kept.
+3. The modified script MUST still save the final `Atoms` (or pymatgen
+   `Structure`) object to a file and print *exactly* `STRUCTURE_SAVED:<filename.ext>`
+   on success — same contract as the original.
+4. Use ASE as the primary structure library; pull in pymatgen, aimsgb, etc.
+   only as already used in the prior script (don't introduce new
+   dependencies for a simple delta).
+5. Call the '{tool_name}' function/tool with the *entire modified Python script
+   content* as the 'script_content' argument. No explanatory text around the
+   function call.
+"""
+
+
 CORRECTION_PROMPT_TEMPLATE = """
 The user's original request was: "{original_request}"
 

@@ -122,12 +122,42 @@ class SimulationOrchestratorTools:
         # =====================================================================
         def generate_structure(description: str, skill: str = None,
                                validate_and_refine: bool = True,
-                               max_refinement_cycles: int = 3) -> str:
+                               max_refinement_cycles: int = 3,
+                               based_on_slug: str = None) -> str:
             slug = self._make_slug(description)
             workdir = self.orch.structures_dir / slug
             workdir.mkdir(parents=True, exist_ok=True)
 
             skill_content = self._load_skill_content(skill) if skill else None
+
+            # If the user is asking for a variant of a previously-built
+            # structure, fetch the prior script so the LLM can apply a
+            # minimal delta instead of rewriting from scratch. Skipped
+            # silently if the slug isn't found (caller intent ambiguous;
+            # better to fall through to initial-build than refuse).
+            prior_script = None
+            if based_on_slug:
+                prior = next(
+                    (s for s in (self.orch.generated_structures or [])
+                     if s.get("slug") == based_on_slug),
+                    None,
+                )
+                if prior is None:
+                    return json.dumps({
+                        "status": "error",
+                        "message": (
+                            f"based_on_slug='{based_on_slug}' not found in "
+                            f"this session. Call list_generated_structures to "
+                            f"see available slugs, or omit based_on_slug to "
+                            f"build from scratch."
+                        ),
+                    })
+                prior_script = prior.get("script_content")
+                if not prior_script:
+                    self.logger.warning(
+                        f"based_on_slug='{based_on_slug}' found but has no "
+                        "script_content; falling through to initial build."
+                    )
 
             try:
                 sg = self._get_structure_generator(str(workdir))
@@ -142,12 +172,13 @@ class SimulationOrchestratorTools:
             if "poscar" not in request.lower():
                 request = request + ". Save the structure in POSCAR format."
 
-            # Cycle 1: initial generation.
+            # Cycle 1: initial generation OR modification of prior script.
             result = sg.generate_script(
                 original_user_request=request,
                 attempt_number_overall=1,
                 is_refinement_from_validation=False,
                 skill_content=skill_content,
+                prior_script_to_modify=prior_script,
             )
             if result.get("status") != "success":
                 return json.dumps({
@@ -164,6 +195,7 @@ class SimulationOrchestratorTools:
                 "script_path": result["final_script_path"],
                 "script_content": result["final_script_content"],
                 "skill": skill,
+                "based_on_slug": based_on_slug,
                 "incar_path": None,
                 "kpoints_path": None,
                 "vasp_summary": None,
@@ -272,6 +304,23 @@ class SimulationOrchestratorTools:
                     "description": (
                         "Cap on validator-driven refinement cycles when "
                         "validate_and_refine=true (default: 3)."
+                    ),
+                },
+                "based_on_slug": {
+                    "type": "string",
+                    "description": (
+                        "Optional. When the user's request is clearly a "
+                        "variant of a structure already built in this "
+                        "session (e.g., 'now add a vacancy to the structure "
+                        "you just built', 'same but with a different "
+                        "supercell size'), pass the slug of the prior "
+                        "structure here. The script generator will then "
+                        "apply the request as a minimal delta to the prior "
+                        "script rather than rewriting from scratch — more "
+                        "reliable, fewer tokens, preserves any working "
+                        "lattice setup. Get available slugs from "
+                        "list_generated_structures or session_status. Omit "
+                        "when starting fresh on an unrelated material."
                     ),
                 },
             },

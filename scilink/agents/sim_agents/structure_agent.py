@@ -11,6 +11,7 @@ from .instruct import (
     INITIAL_PROMPT_TEMPLATE,
     CORRECTION_PROMPT_TEMPLATE,
     SCRIPT_CORRECTION_FROM_VALIDATION_TEMPLATE,
+    MODIFICATION_PROMPT_TEMPLATE,
 )
 from .utils import save_generated_script, MaterialsProjectHelper, MP_SEARCH_TOOL_SCHEMA
 from ...executors import ScriptExecutor, DEFAULT_TIMEOUT
@@ -132,6 +133,20 @@ class StructureGenerator:
         if resolved_block:
             base_prompt = resolved_block + base_prompt
 
+        return base_prompt + JSON_OUTPUT_INSTRUCTION
+
+    def _build_modification_prompt(self, prior_script: str, description: str,
+                                   skill_content: Optional[str] = None) -> str:
+        """Build a prompt that asks the LLM to modify a prior script as a
+        minimal delta rather than write a new script from scratch. Used when
+        the user request is a variant of an already-generated structure
+        (e.g., 'now add a single vacancy to the structure I just built')."""
+        base_prompt = MODIFICATION_PROMPT_TEMPLATE.format(
+            prior_script=prior_script,
+            description=description,
+            tool_name="ASE",
+        )
+        base_prompt = base_prompt + self._format_skill_block(skill_content)
         return base_prompt + JSON_OUTPUT_INSTRUCTION
 
     def _build_correction_prompt(self, original_request: str, failed_script: str,
@@ -492,8 +507,20 @@ class StructureGenerator:
                         previous_script_content: Optional[str] = None,
                         validator_feedback: Optional[dict] = None,
                         attempt_history: Optional[list] = None,
-                        skill_content: Optional[str] = None) -> dict:
-        """Generate or refine a script using ASE / pymatgen / etc.
+                        skill_content: Optional[str] = None,
+                        prior_script_to_modify: Optional[str] = None) -> dict:
+        """Generate, refine, or modify a structure-building script.
+
+        Three mutually-exclusive modes:
+          - INITIAL (default): write a new script from scratch.
+          - REFINEMENT (`is_refinement_from_validation=True`): re-write to
+            address validator feedback. Requires `previous_script_content`
+            and `validator_feedback`.
+          - MODIFICATION (`prior_script_to_modify` set, refinement flag off):
+            apply a minimal delta to a prior script instead of rewriting.
+            Used when the user request is a variant of an already-built
+            structure (e.g., "now add a vacancy to the structure I just
+            built").
 
         Args:
             attempt_history: Optional list of {script, issues, hints} dicts from
@@ -503,6 +530,10 @@ class StructureGenerator:
                 from a built-in skill, e.g. "aimsgb" for grain boundaries) to
                 inject into the script-generation prompt as a "specialized
                 library guidance" section. When None, the prompt is generic.
+            prior_script_to_modify: Optional prior-cycle script content. When
+                set (and refinement mode off), the LLM is asked to apply
+                `original_user_request` as a minimal delta to this script
+                rather than write from scratch.
         """
         if is_refinement_from_validation:
             print(f"   🔄 Refining script (cycle {attempt_number_overall})")
@@ -513,6 +544,13 @@ class StructureGenerator:
                 attempted_script_content=previous_script_content,
                 validator_feedback=validator_feedback,
                 attempt_history=attempt_history,
+                skill_content=skill_content,
+            )
+        elif prior_script_to_modify:
+            print(f"   📝 Modifying prior script (cycle {attempt_number_overall})")
+            current_prompt = self._build_modification_prompt(
+                prior_script=prior_script_to_modify,
+                description=original_user_request,
                 skill_content=skill_content,
             )
         else:
