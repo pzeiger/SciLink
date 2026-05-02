@@ -29,6 +29,18 @@ _CONFIRMATION_PATTERNS = (
     r"\bthis should not cause issues\b",
     r"\bcorrect behavior\b",
     r"\bcorrect (?:and|behavior|implementation|coordination|stoichiometry)\b",
+    # New: catch the "I argued with myself and concluded it's fine" pattern.
+    # The validator often writes a long entry that ends in one of these
+    # phrases — meaning the entry isn't actionable, just thinking-out-loud.
+    r"\bmaking (?:this|it) acceptable\b",
+    r"\bcould be considered\b",
+    r"\bcould be interpreted as\b",
+    r"\bcommonly considered\b",
+    r"\bdepends on (?:the )?(?:definition|convention|interpretation)\b",
+    r"\bappears? (?:to be )?correct\b",
+    r"\bturns? out (?:to be )?(?:correct|fine|acceptable)\b",
+    r"\bis still valid\b",
+    r"\bremains (?:correct|valid|acceptable)\b",
 )
 _CONFIRMATION_RE = re.compile("|".join(_CONFIRMATION_PATTERNS), re.IGNORECASE)
 
