@@ -425,10 +425,21 @@ def generate_structure_views(structure_path: str, output_dir: str = None) -> Dic
         f"Generating {len(rotations)} structure view image(s) for "
         f"{structure_path} (view labels: {list(rotations)})..."
     )
+    # ASE PNG render tuning (Option 1 from the visualization-practices
+    # discussion): smaller atomic spheres so underlying lattice topology
+    # is visible (oversized spheres were a big factor in why broken
+    # honeycombs looked superficially OK), draw cell box for orientation
+    # cues, and bump the pixels-per-Å scale so fine features are legible.
+    render_kwargs = dict(
+        radii=0.5,        # half-default; prevents sphere overlap from hiding pattern
+        show_unit_cell=2, # draw cell edges (0=none, 1=plain, 2=fancy)
+        scale=20,         # pixels per Å — default is ~10
+    )
     for label, rotation in rotations.items():
         try:
             output_path = os.path.join(output_dir, f"{base_name}_view_{label}.png")
-            ase_write(output_path, atoms, format='png', rotation=rotation)
+            ase_write(output_path, atoms, format='png',
+                      rotation=rotation, **render_kwargs)
             image_paths[label] = output_path
             logger.info(f"Saved structure view: {output_path}")
         except Exception as e:
