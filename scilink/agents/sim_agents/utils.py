@@ -388,9 +388,17 @@ def ask_user_proceed_or_refine(validation_feedback, structure_file):
 
 
 def generate_structure_views(structure_path: str, output_dir: str = None) -> Dict[str, str]:
-    """
-    Reads a structure file and saves images of the structure along the x, y, and z axes.
-    Now with automatic centering for better visualization.
+    """Render PNG views of a structure for the validator and the user.
+
+    Picks rotations adaptively via ``_get_optimal_rotations``: slab
+    structures get a top-down + two edge views (so stacking is visible),
+    layered structures get layer-perpendicular views, anisotropic cells
+    get views aligned with the principal directions, and everything else
+    falls back to plain X/Y/Z orthogonal views.
+
+    The dict keys are semantic labels ('surface', 'edge1', 'layers', 'x',
+    etc.) — they're surfaced to the validator as "View ({label}):" so the
+    multimodal prompt knows which view it's looking at.
     """
     if not ASE_AVAILABLE:
         logging.warning("ASE not found, skipping image generation for validation.")
@@ -398,13 +406,10 @@ def generate_structure_views(structure_path: str, output_dir: str = None) -> Dic
 
     logger = logging.getLogger(__name__)
     image_paths = {}
-    
+
     try:
         atoms = ase_read(structure_path)
-        
-        # Center the structure for better visualization
         atoms = _center_structure_for_visualization(atoms)
-        
     except Exception as e:
         logger.error(f"Failed to read structure file {structure_path} with ASE: {e}")
         return image_paths
@@ -415,22 +420,19 @@ def generate_structure_views(structure_path: str, output_dir: str = None) -> Dic
 
     base_name = os.path.splitext(os.path.basename(structure_path))[0]
 
-    # Rotations for views along major axes
-    rotations = {
-        'x': '0y,90x,0z',  # View from +x
-        'y': '-90x,0y,0z', # View from +y
-        'z': '0x,0y,0z'    # View from +z (default)
-    }
-
-    logger.info(f"Generating structure view images for {structure_path}...")
-    for axis, rotation in rotations.items():
+    rotations = _get_optimal_rotations(atoms)
+    logger.info(
+        f"Generating {len(rotations)} structure view image(s) for "
+        f"{structure_path} (view labels: {list(rotations)})..."
+    )
+    for label, rotation in rotations.items():
         try:
-            output_path = os.path.join(output_dir, f"{base_name}_view_{axis}.png")
+            output_path = os.path.join(output_dir, f"{base_name}_view_{label}.png")
             ase_write(output_path, atoms, format='png', rotation=rotation)
-            image_paths[axis] = output_path
+            image_paths[label] = output_path
             logger.info(f"Saved structure view: {output_path}")
         except Exception as e:
-            logger.error(f"Failed to write image for {axis}-axis view: {e}")
+            logger.error(f"Failed to write image for {label} view: {e}")
 
     return image_paths
 
@@ -481,12 +483,15 @@ def _get_optimal_rotations(atoms):
         }
 
 def _is_slab_structure(cell, positions):
-    """Detect slab by checking for vacuum gap > 5 Å"""
+    """Detect slab by checking for a >5 Å vacuum gap along any axis.
+
+    Compares each cell length against the atomic extent along the SAME
+    axis (not just z), so slabs with vacuum along a or b are detected
+    correctly and anisotropic crystals without vacuum aren't false-
+    positive."""
     cell_lengths = np.linalg.norm(cell, axis=1)
-    z_extent = positions[:, 2].max() - positions[:, 2].min()
-    
-    # If cell is much larger than atomic extent in one direction = slab
-    return any(length > z_extent + 5.0 for length in cell_lengths)
+    extents = positions.max(axis=0) - positions.min(axis=0)
+    return any(length > extent + 5.0 for length, extent in zip(cell_lengths, extents))
 
 def _get_slab_rotations(cell):
     """Views optimized for slab structures"""

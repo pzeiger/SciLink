@@ -190,17 +190,25 @@ class StructureValidatorAgent:
         if image_paths:
             self.logger.info("Adding structure view images to validation prompt.")
             prompt_parts.append("\n\n## STRUCTURE VISUALIZATION:\n")
-            # Read images into bytes and append
-            for axis, img_path in sorted(image_paths.items()):
+            # Read images into bytes and append. Labels are 'x'/'y'/'z' for
+            # plain axis views or semantic ('surface', 'edge1', 'layers',
+            # 'along_short', etc.) for adaptive views from
+            # _get_optimal_rotations — render the label appropriately.
+            for label, img_path in sorted(image_paths.items()):
+                pretty_label = (
+                    f"{label.upper()}-axis"
+                    if label in ("x", "y", "z")
+                    else label.replace("_", " ")
+                )
                 try:
                     with open(img_path, 'rb') as f:
                         img_bytes = f.read()
-                    prompt_parts.append(f"View along {axis.upper()}-axis:")
+                    prompt_parts.append(f"View ({pretty_label}):")
                     # Wrapper format: {"mime_type": "...", "data": bytes}
                     prompt_parts.append({"mime_type": "image/png", "data": img_bytes})
                 except Exception as e:
                     self.logger.error(f"Could not read image file {img_path} for prompt: {e}")
-                    prompt_parts.append(f"(Error loading image for {axis}-axis view)")
+                    prompt_parts.append(f"(Error loading image for {pretty_label} view)")
 
         
         self.logger.info("Sending request to Validator LLM for full validation and script hints...")
