@@ -101,6 +101,115 @@ class StructureValidatorAgent:
         # rather than the generation config.
         self.generation_config = None
 
+    def _compute_structure_stats(self, structure_file_path: str) -> str:
+        """Compute and format structured stats for the validator's prompt.
+
+        Aim: give the validator concrete numbers (composition, cell,
+        coordination, vacuum thickness, min interatomic distance) that it
+        can verify against expectations directly — not infer from PNG
+        renders. The PNG renderer is low-res and bond-free; for similar-
+        looking lattices (honeycomb vs close-packed vs distorted) the
+        validator can't reliably tell from images alone.
+
+        Returns a markdown block to inject into the validator prompt, or
+        empty string on parse failure (validator falls through to the
+        existing image+file-content path).
+        """
+        try:
+            from collections import Counter
+            import numpy as np
+            from ase.io import read as ase_read
+            from ase.neighborlist import NeighborList
+        except Exception as e:
+            self.logger.warning(f"Could not import deps for stats: {e}")
+            return ""
+
+        try:
+            atoms = ase_read(structure_file_path)
+        except Exception as e:
+            self.logger.warning(f"Could not parse structure for stats: {e}")
+            return ""
+
+        lines = ["", "## STRUCTURE STATS (computed from POSCAR — verify these against expectations):"]
+
+        syms = atoms.get_chemical_symbols()
+        comp = Counter(syms)
+        comp_str = ", ".join(f"{el}: {n}" for el, n in sorted(comp.items()))
+        lines.append(f"- Composition: {comp_str} (total {len(atoms)} atoms)")
+
+        try:
+            a, b, c = atoms.cell.lengths()
+            alpha, beta, gamma = atoms.cell.angles()
+            lines.append(
+                f"- Cell: a={a:.3f}, b={b:.3f}, c={c:.3f} Å; "
+                f"α={alpha:.1f}°, β={beta:.1f}°, γ={gamma:.1f}°"
+            )
+        except Exception:
+            pass
+
+        # Per-species z-extents — useful for slab/interface stacking checks
+        try:
+            pos = atoms.get_positions()
+            if len(comp) > 1:
+                lines.append("- z-extent per species (min, max in Å):")
+                for el in sorted(comp.keys()):
+                    mask = np.array([s == el for s in syms])
+                    z = pos[mask, 2]
+                    lines.append(f"    {el}: [{z.min():.2f}, {z.max():.2f}]")
+        except Exception:
+            pass
+
+        # Vacuum (cell length minus atomic extent) per axis
+        try:
+            extents = pos.max(axis=0) - pos.min(axis=0)
+            cell_lengths = atoms.cell.lengths()
+            vac = cell_lengths - extents
+            lines.append(
+                f"- Vacuum (cell − atomic extent): a={vac[0]:.1f}, "
+                f"b={vac[1]:.1f}, c={vac[2]:.1f} Å"
+            )
+        except Exception:
+            pass
+
+        # Min pairwise distance with PBC — catches atom overlap / unphysical bonds
+        try:
+            dists = atoms.get_all_distances(mic=True)
+            np.fill_diagonal(dists, np.inf)
+            min_d = float(dists.min())
+            lines.append(f"- Min pairwise distance (with PBC): {min_d:.3f} Å")
+        except Exception:
+            pass
+
+        # Nearest-neighbor coordination distribution — catches lattice topology
+        # errors (honeycomb vs close-packed, broken bonds, etc.)
+        try:
+            cutoffs = [0.85] * len(atoms)  # ~1.7 Å pair cutoff, generous
+            nl = NeighborList(cutoffs, self_interaction=False, bothways=True)
+            nl.update(atoms)
+            coord_counts = []
+            for i in range(len(atoms)):
+                indices, _ = nl.get_neighbors(i)
+                coord_counts.append(len(indices))
+            arr = np.array(coord_counts)
+            mean_c = float(arr.mean())
+            dist = Counter(arr.tolist())
+            dist_str = ", ".join(f"{n}NN: {c} atoms" for n, c in sorted(dist.items()))
+            lines.append(
+                f"- Coordination (within 1.7 Å): mean={mean_c:.2f}; {dist_str}"
+            )
+        except Exception:
+            pass
+
+        # All atoms within cell?
+        try:
+            fracs = atoms.get_scaled_positions(wrap=False)
+            in_cell = bool(((fracs >= -1e-6) & (fracs < 1 + 1e-6)).all())
+            lines.append(f"- All atoms within cell (no wrap needed): {in_cell}")
+        except Exception:
+            pass
+
+        return "\n".join(lines) + "\n"
+
     def _read_structure_file_content(self, structure_file_path: str) -> str:
         """
         Read the raw content of the structure file for LLM analysis.
@@ -176,12 +285,20 @@ class StructureValidatorAgent:
 
     """
 
+        # Compute structured stats (composition, cell, coordination, vacuum
+        # thickness, etc.) so the validator can verify them numerically
+        # rather than inferring from low-resolution PNG renders. Catches
+        # cases where the renderer's eyeball look is misleading — e.g., a
+        # broken honeycomb that looks vaguely hexagonal in PNG but has
+        # mean coordination ≠ 3.
+        stats_section = self._compute_structure_stats(structure_file_path)
+
         base_prompt = VALIDATOR_PROMPT_TEMPLATE.format(
             tool_documentation=doc_section,
             original_request=original_request,
             generating_script_content=generating_script_content,
             structure_file_path=structure_file_path,
-        ) + structure_section
+        ) + stats_section + structure_section
 
         # --- Build multi-modal prompt ---
         # The wrapper handles list inputs [text, image, image...]
