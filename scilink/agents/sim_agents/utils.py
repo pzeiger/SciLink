@@ -121,6 +121,13 @@ class MaterialsProjectHelper:
         self.enabled = MP_API_AVAILABLE and bool(self.api_key)
         self.logger = logging.getLogger(__name__)
 
+        # Per-instance cache of MP record lookups. Keyed by (chemical_query,
+        # search_type, spacegroup_symbol, crystal_system). Survives the
+        # lifetime of the helper — when the orchestrator reuses the same
+        # StructureGenerator across calls, the same MP query doesn't hit
+        # the network twice in a session.
+        self._record_cache: Dict[tuple, Optional[Dict]] = {}
+
         if self.enabled:
             self.logger.info("Materials Project helper enabled and API key found for mp-id search.")
         else:
@@ -275,9 +282,20 @@ class MaterialsProjectHelper:
         Used by the structure agent's pre-script tool-resolution step so the
         LLM can verify it got the polymorph it asked for without a second
         round-trip to MP.
+
+        Results are cached per (query, search_type, spacegroup, crystal_system)
+        for the lifetime of this helper instance — so when the orchestrator
+        reuses the same StructureGenerator across `generate_structure` calls
+        for variants of the same material, the second and subsequent lookups
+        hit the cache rather than the MP API.
         """
         if not self.enabled or not chemical_query:
             return None
+
+        cache_key = (chemical_query, search_type, spacegroup_symbol, crystal_system)
+        if cache_key in self._record_cache:
+            self.logger.info(f"MP cache hit for {cache_key}")
+            return self._record_cache[cache_key]
 
         self.logger.info(
             f"Searching MP record for '{chemical_query}' ({search_type}"
@@ -306,9 +324,11 @@ class MaterialsProjectHelper:
                     )
                 else:
                     self.logger.error(f"Invalid search_type: {search_type}")
+                    # Don't cache invalid-input failures (caller can fix and retry).
                     return None
 
                 if not results:
+                    self._record_cache[cache_key] = None
                     return None
 
                 best = sorted(
@@ -326,17 +346,20 @@ class MaterialsProjectHelper:
                 if sym is not None:
                     sg_symbol = getattr(sym, "symbol", None)
 
-                return {
+                record = {
                     "material_id": str(best.material_id),
                     "formula_pretty": best.formula_pretty,
                     "energy_above_hull": best.energy_above_hull,
                     "spacegroup_symbol": sg_symbol,
                 }
+                self._record_cache[cache_key] = record
+                return record
         except Exception as e:
             self.logger.error(
                 f"MP search_material_record error for '{chemical_query}': {e}",
                 exc_info=True,
             )
+            # Don't cache transient API/network errors — let the next call retry.
             return None
 
 

@@ -42,7 +42,38 @@ class SimulationOrchestratorTools:
         self.functions_map: Dict[str, Callable] = {}
         self.openai_schemas: list = []
 
+        # Lazily-initialized StructureGenerator reused across generate_structure
+        # / refine_structure calls. Its MaterialsProjectHelper instance (and
+        # therefore the MP record cache) survives between calls — so iterating
+        # on variants of the same material doesn't re-fetch the same MP query
+        # over and over.
+        self._sg = None
+
         self._register_all_tools()
+
+    def _get_structure_generator(self, workdir: str):
+        """Return a session-shared StructureGenerator, with its
+        ``generated_script_dir`` set to the per-call workdir.
+
+        Lazy-initializes on first call. Reuses the same instance — and its
+        MP-helper cache, model wrapper, and script executor — across all
+        `generate_structure` / `refine_structure` calls in the session.
+        """
+        from .structure_agent import StructureGenerator
+        if self._sg is None:
+            self._sg = StructureGenerator(
+                api_key=self.orch.api_key,
+                base_url=self.orch.base_url,
+                model_name=self.orch.model_name,
+                generated_script_dir=str(workdir),
+                mp_api_key=self.orch.mp_api_key,
+            )
+        else:
+            self._sg.generated_script_dir = str(workdir)
+            # ScriptExecutor's working_dir is per-call (passed to execute_script),
+            # so no mutation needed there. The model wrapper, MP helper, and
+            # cached MP records all stay live across calls.
+        return self._sg
 
     # ------------------------------------------------------------------
     # Tool registration
@@ -92,8 +123,6 @@ class SimulationOrchestratorTools:
         def generate_structure(description: str, skill: str = None,
                                validate_and_refine: bool = True,
                                max_refinement_cycles: int = 3) -> str:
-            from .structure_agent import StructureGenerator
-
             slug = self._make_slug(description)
             workdir = self.orch.structures_dir / slug
             workdir.mkdir(parents=True, exist_ok=True)
@@ -101,13 +130,7 @@ class SimulationOrchestratorTools:
             skill_content = self._load_skill_content(skill) if skill else None
 
             try:
-                sg = StructureGenerator(
-                    api_key=self.orch.api_key,
-                    base_url=self.orch.base_url,
-                    model_name=self.orch.model_name,
-                    generated_script_dir=str(workdir),
-                    mp_api_key=self.orch.mp_api_key,
-                )
+                sg = self._get_structure_generator(str(workdir))
             except Exception as e:
                 return json.dumps({
                     "status": "error",
@@ -570,8 +593,6 @@ class SimulationOrchestratorTools:
         # 3. REFINE STRUCTURE
         # =====================================================================
         def refine_structure(poscar_path: str, original_request: str) -> str:
-            from .structure_agent import StructureGenerator
-
             record = self._find_structure_record(poscar_path)
             if record is None:
                 return json.dumps({
@@ -606,13 +627,7 @@ class SimulationOrchestratorTools:
 
             workdir = Path(record["structure_dir"])
             try:
-                sg = StructureGenerator(
-                    api_key=self.orch.api_key,
-                    base_url=self.orch.base_url,
-                    model_name=self.orch.model_name,
-                    generated_script_dir=str(workdir),
-                    mp_api_key=self.orch.mp_api_key,
-                )
+                sg = self._get_structure_generator(str(workdir))
             except Exception as e:
                 return json.dumps({
                     "status": "error",
