@@ -104,7 +104,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         executor_timeout: Script timeout in seconds
         r2_threshold: Minimum acceptable R² value (default: 0.95). Spectra
             below this threshold are flagged for adaptive refit.
-        max_model_retries: Max alternative models to try (default: 1)
+        max_model_retries: Vestigial — alternative-models loop was removed
+            in favor of patience-counter-driven hot annealing inside the
+            verification loop.  Accepted for backward compatibility but no
+            longer affects behavior.
         outlier_sigma: Sigma threshold for outlier detection (default: 2.0)
         max_verification_iterations: Max LLM verification iterations (default: 7)
 

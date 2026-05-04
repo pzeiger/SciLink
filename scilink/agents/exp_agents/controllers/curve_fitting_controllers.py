@@ -1311,11 +1311,15 @@ class HumanFeedbackRefinementController:
 class UnifiedSeriesProcessingController:
     """
     Processes ALL spectra using the locked fitting model.
-    
+
     Quality control features:
-    - If R² < threshold, automatically tries alternative models (max_model_retries)
-    - If still inadequate and human feedback enabled, asks for guidance
-    - Otherwise proceeds with best available fit
+    - Verification loop iterates with adaptive constraint annealing.  Patience
+      counter + iteration floor guarantee escalation to the hot annealing level
+      so the LLM can restructure the model from scratch when local refits stall.
+    - End-of-loop judge weighs all attempts on physics + R² when the verifier
+      kept rejecting the high-water best.
+    - If still inadequate and human feedback enabled, asks for guidance.
+    - Otherwise proceeds with best available fit.
     - For series: detects statistical outliers that may indicate interesting physics
     """
     
@@ -1358,42 +1362,6 @@ Examine each fit carefully. Look at:
 
 IMPORTANT: If one fit is clearly better than others (better residuals, more physical parameters), 
 select it even if it's not perfect. Only return acceptable=false if ALL fits are fundamentally flawed.
-'''
-
-    ALTERNATIVE_MODELS_PROMPT = '''The current fitting model achieved R² = {r_squared:.4f}, which is below the quality threshold of {threshold}.
-
-**Current Model:** {current_model}
-**Current Parameters:** {current_params}
-
-**Data Statistics:**
-{data_stats}
-
-**Original Analysis Approach:** {analysis_approach}
-
-**IMPORTANT:** Examine the fit visualization provided below carefully. Look for:
-1. Systematic deviations between the fit and data (not just noise)
-2. Missing features (additional peaks, shoulders, asymmetry)
-3. Incorrect baseline behavior
-4. Wrong peak shape (too sharp, too broad, wrong tail behavior)
-
-Based on your visual inspection and the numerical results, suggest an alternative fitting model.
-
-**Physics-first rule:** Before adding more components, first try improving the existing model:
-1. Different peak shapes (e.g., Voigt instead of Gaussian, asymmetric profiles)
-2. Better baseline treatment (higher-order polynomial, different correction method)
-3. Physically motivated constraints (known peak ratios, position bounds from literature)
-
-Only add new components if you can identify a specific physical feature in the data that the
-current model is missing (a visible shoulder, a second peak, etc.). Do NOT add components
-just to absorb residual structure — that is overfitting, not physics.
-
-Return JSON with:
-{{
-    "diagnosis": "specific description of what you observe is wrong with the current fit based on the visualization",
-    "alternative_model": "description of the new model to try",
-    "fitting_strategy": "specific fitting approach for the new model",
-    "parameters_to_extract": ["list", "of", "parameters"]
-}}
 '''
 
     HUMAN_FEEDBACK_PROMPT = '''## Fit Quality Issue
@@ -1444,6 +1412,10 @@ Your guidance: '''
         self.output_dir = Path(output_dir)
         self.plot_fn = plot_fn
         self.r2_threshold = r2_threshold if r2_threshold is not None else self.DEFAULT_R2_THRESHOLD
+        # Vestigial: the alternative-models loop was removed in favor of
+        # patience-counter-driven hot annealing inside the verification
+        # loop.  Parameter is accepted for backward compatibility but no
+        # longer affects behavior.
         self.max_model_retries = max_model_retries if max_model_retries is not None else self.DEFAULT_MAX_MODEL_RETRIES
         self.enable_human_feedback = enable_human_feedback
         self.outlier_sigma = outlier_sigma if outlier_sigma is not None else self.DEFAULT_OUTLIER_SIGMA
@@ -1864,70 +1836,6 @@ Your guidance: '''
             "script": script,
             "script_errors": script_errors,
         }
-
-    def _suggest_alternative_model(self, state: dict, current_result: dict, alternative_history: list | None = None) -> Optional[dict]:
-        """Use LLM to suggest an alternative fitting model, showing it the actual poor fit."""
-        config = state.get("locked_fitting_config", {})
-
-        prompt_text = self.ALTERNATIVE_MODELS_PROMPT.format(
-            r_squared=current_result.get("fit_quality", {}).get("r_squared", 0),
-            threshold=self.r2_threshold,
-            current_model=config.get("physical_model", "Unknown"),
-            current_params=json.dumps(current_result.get("parameters", {}), indent=2),
-            data_stats=json.dumps(current_result.get("statistics", {}), indent=2),
-            analysis_approach=config.get("analysis_approach", ""),
-        )
-
-        # Inject cross-attempt memory so the LLM doesn't repeat models
-        if alternative_history:
-            history_lines = [
-                "\n\n**PREVIOUSLY TRIED MODELS (do NOT repeat these):**"
-            ]
-            for i, prev in enumerate(alternative_history, 1):
-                history_lines.append(
-                    f"{i}. Model: {prev.get('model', 'N/A')} | "
-                    f"R² = {prev.get('r2', 0):.4f} | "
-                    f"Diagnosis: {prev.get('diagnosis', 'N/A')}"
-                )
-            history_lines.append(
-                "\nYou MUST suggest a model that differs from all of the above. "
-                "If you cannot think of a genuinely different approach, return an empty JSON {{}}."
-            )
-            prompt_text += "\n".join(history_lines)
-
-        # Build prompt with visualization if available
-        prompt_parts = [prompt_text]
-        
-        # Include the actual fit visualization so LLM can see what went wrong
-        if current_result.get("visualization_bytes"):
-            prompt_parts.append("\n\n**CURRENT FIT VISUALIZATION (showing the poor fit):**")
-            prompt_parts.append({
-                "mime_type": "image/png", 
-                "data": current_result["visualization_bytes"]
-            })
-            prompt_parts.append("\nExamine this fit carefully. Look at where the model deviates from the data and suggest a better model.")
-        
-        # Also include original data plot if available for comparison
-        if state.get("original_plot_bytes"):
-            prompt_parts.append("\n\n**ORIGINAL DATA:**")
-            prompt_parts.append({
-                "mime_type": "image/png",
-                "data": state["original_plot_bytes"]
-            })
-        
-        try:
-            response = self.model.generate_content(
-                contents=prompt_parts,
-                generation_config=self.generation_config,
-                safety_settings=self.safety_settings,
-            )
-            result, error = self._parse(response)
-            if error or not result:
-                return None
-            return result
-        except Exception as e:
-            self.logger.error(f"Failed to get alternative model suggestion: {e}")
-            return None
 
     FIT_VERIFICATION_PROMPT = '''You are a scientific data analysis expert reviewing a curve/spectral fit.
 
@@ -2410,14 +2318,17 @@ Return JSON with:
         Fit a single spectrum with quality control, verification, and optional judge selection.
 
         Flow:
-        1. Initial fit attempt
-        2. For anchor spectrum (first in series or first in regime): LLM verification loop
-           - Each iteration: verify current fit -> if issues, refit within locked model
-           - After loop: verify final refit
-        3. If still below R² threshold: try alternative models (with cross-attempt memory)
-        4. If human feedback enabled: allow user to guide refinement
-        5. Unified judge evaluates ALL attempts (verification + alternatives) together
-        6. Attach quality_history to result for downstream synthesis
+        1. Initial fit attempt.
+        2. For anchor spectrum (first in series or first in regime): LLM
+           verification loop with adaptive constraint annealing.  Patience
+           counter and iteration floor guarantee escalation to the hot
+           annealing level when refits stall.  At hot, the LLM regenerates
+           the script from scratch with full freedom to restructure the
+           model — this subsumes the prior "alternative models" path.
+        3. If human feedback enabled: allow user to guide refinement.
+        4. Unified judge evaluates ALL attempts when verifier kept rejecting
+           the high-water best (Option B threshold gating).
+        5. Attach quality_history to result for downstream synthesis.
         """
         all_attempts = []
         verification_history = []
@@ -2460,11 +2371,26 @@ Return JSON with:
                 if not best_result or not best_result.get("success") or best_r2 < 0.1:
                     self.logger.warning(f"   Initial fit failed or R² too low ({best_r2:.4f}), skipping verification")
                 else:
-                    # Adaptive annealing state: start frozen, escalate
-                    # only when improvement is too slow to reach threshold.
+                    # Adaptive annealing state: start frozen, escalate via
+                    # three complementary mechanisms so hot annealing
+                    # (level n-1) is reliably reached when refits stall:
+                    #   (a) rate-based escalation: improvement too slow to
+                    #       reach threshold within the remaining iterations
+                    #   (b) patience counter: N consecutive iterations with
+                    #       best stuck → escalate (mirrors image-analysis
+                    #       _PATIENCE = 2 at image_analysis_controllers.py:3001)
+                    #   (c) iteration floor: floor(iter / floor_divisor) is
+                    #       the minimum allowed level — guarantees we hit the
+                    #       hot level by the end of the budget regardless of
+                    #       what the rate/patience say.
                     _annealing_level = 0
                     _prev_best_r2 = best_r2
                     _n_anneal_levels = len(self._CONSTRAINT_ANNEALING_SCHEDULE)
+                    _PATIENCE = 2
+                    _stall_count = 0
+                    # Floor divisor chosen so the loop reaches level n-1 by
+                    # roughly the last third of the iteration budget.
+                    _floor_divisor = max(self.max_verification_iterations // _n_anneal_levels, 1)
 
                     # current_result tracks the latest refit (what the verifier
                     # diagnoses next); best_result is the high-water mark used
@@ -2680,25 +2606,66 @@ Return JSON with:
                                     f"(best stays {best_r2:.4f}; deferred to next verifier for physics check)"
                                 )
 
-                            # Adaptive annealing: escalate only when the actual
-                            # high-water mark is improving too slowly to reach
-                            # threshold within the remaining iterations.
+                            # Adaptive annealing — three escalation
+                            # triggers, applied in order; each can lift
+                            # _annealing_level (capped at n-1).
                             improvement = best_r2 - _prev_best_r2
                             remaining = max(self.max_verification_iterations - verification_iter - 1, 1)
                             required_rate = max(self.r2_threshold - best_r2, 0.0) / remaining
+
+                            # (a) Rate-based: improvement too slow to reach
+                            #     threshold in remaining budget.
+                            rate_escalated = False
                             if improvement < required_rate:
                                 _annealing_level = min(
                                     _annealing_level + 1, _n_anneal_levels - 1
                                 )
+                                rate_escalated = True
                                 self.logger.info(
                                     f"   Annealing: improvement {improvement:.4f} < required rate {required_rate:.4f}, "
                                     f"escalating to level {_annealing_level}"
                                 )
+
+                            # (b) Patience-based: best stalled for _PATIENCE
+                            #     consecutive iterations.  Resets on any
+                            #     forward movement of best.
+                            if best_r2 > _prev_best_r2:
+                                _stall_count = 0
                             else:
+                                _stall_count += 1
+                                if _stall_count >= _PATIENCE and not rate_escalated:
+                                    new_level = min(
+                                        _annealing_level + 1, _n_anneal_levels - 1
+                                    )
+                                    if new_level > _annealing_level:
+                                        _annealing_level = new_level
+                                        self.logger.info(
+                                            f"   Annealing: best stalled for {_stall_count} iterations, "
+                                            f"escalating to level {_annealing_level}"
+                                        )
+                                    _stall_count = 0
+
+                            # (c) Iteration floor: guarantees the hot level
+                            #     is reached even when rate/patience say
+                            #     otherwise (e.g., best ≥ threshold so
+                            #     required_rate degenerates to 0).
+                            _floor = min(
+                                (verification_iter + 1) // _floor_divisor,
+                                _n_anneal_levels - 1,
+                            )
+                            if _floor > _annealing_level:
                                 self.logger.info(
-                                    f"   Annealing: improvement {improvement:.4f} >= required rate {required_rate:.4f}, "
-                                    f"staying at level {_annealing_level}"
+                                    f"   Annealing: iteration floor lifting "
+                                    f"level {_annealing_level} → {_floor}"
                                 )
+                                _annealing_level = _floor
+                                _stall_count = 0
+
+                            if not rate_escalated and _stall_count == 0 and _floor <= _annealing_level:
+                                # No escalation this iteration; log the
+                                # rate decision for diagnostic continuity.
+                                pass  # already implicit; suppress duplicate logs
+
                             _prev_best_r2 = best_r2
                         else:
                             self.logger.warning(f"   Refit failed, stopping verification")
@@ -2789,92 +2756,13 @@ Return JSON with:
         else:
             self.logger.error(f"   Initial fit failed: {result.get('error', 'Unknown')[:50]}")
             all_attempts.append({"model": initial_model, "r2": 0, "result": result})
-        
-        # --- Alternative model retries ---
-        current_config = state.get("locked_fitting_config", {}).copy()
-        alternative_history = []  # Track what was tried for cross-attempt memory
 
-        for retry in range(self.max_model_retries):
-            self.logger.info(f"   Alternative model {retry + 1}/{self.max_model_retries}...")
+        # NOTE: the alternative-model loop was removed.  Hot annealing
+        # (level n-1) inside the verification loop now drops the script
+        # anchor and grants the LLM the same freedom to restructure the
+        # model.  Patience counter and iteration floor guarantee the hot
+        # level is reached when refits stall.
 
-            alternative = self._suggest_alternative_model(
-                state, best_result or result, alternative_history=alternative_history
-            )
-
-            if not alternative:
-                self.logger.warning("   Could not generate alternative model suggestion")
-                break
-
-            self.logger.info(f"   Diagnosis: {alternative.get('diagnosis', 'N/A')[:80]}")
-            self.logger.info(f"   Trying: {alternative.get('alternative_model', 'N/A')[:60]}")
-            
-            temp_config = current_config.copy()
-            temp_config["physical_model"] = alternative.get("alternative_model", temp_config.get("physical_model"))
-            temp_config["fitting_strategy"] = alternative.get("fitting_strategy", temp_config.get("fitting_strategy"))
-            temp_config["parameters_to_extract"] = alternative.get("parameters_to_extract", temp_config.get("parameters_to_extract", []))
-            
-            original_config = state.get("locked_fitting_config")
-            state["locked_fitting_config"] = temp_config
-            
-            alt_result = self._fit_single_spectrum(
-                state=state, curve_data=curve_data, data_path=data_path,
-                spectrum_name=spectrum_name, spectrum_idx=spectrum_idx, base_script=None
-            )
-            
-            state["locked_fitting_config"] = original_config
-            
-            if alt_result["success"]:
-                alt_r2 = alt_result.get("fit_quality", {}).get("r_squared", 0)
-                all_attempts.append({
-                    "model": alternative.get("alternative_model", f"Alternative {retry + 1}"),
-                    "r2": alt_r2, "result": alt_result, "config": temp_config
-                })
-                alternative_history.append({
-                    "model": alternative.get("alternative_model", f"Alternative {retry + 1}"),
-                    "r2": alt_r2,
-                    "diagnosis": alternative.get("diagnosis", ""),
-                })
-
-                if alt_r2 > best_r2:
-                    best_r2 = alt_r2
-                    best_result = alt_result
-                    best_config = temp_config.copy()
-                    best_result["_winning_config"] = temp_config
-                
-                if alt_r2 >= self.r2_threshold:
-                    self.logger.info(f"✅ R² = {alt_r2:.4f} (meets threshold with alternative model)")
-                    if _is_anchor:
-                        state["locked_fitting_config"] = temp_config
-
-                        # Offer human review for alternative model before locking
-                        if self.enable_human_feedback and alt_result.get("visualization_bytes"):
-                            user_feedback = self._get_user_feedback_on_fit(state, alt_result, alt_r2)
-                            if user_feedback:
-                                alt_result, alt_r2 = self._apply_user_feedback(
-                                    state, user_feedback, alt_result, alt_r2,
-                                    curve_data, data_path, spectrum_name, spectrum_idx, all_attempts
-                                )
-
-                    alt_result["quality_history"] = self._build_quality_history(
-                        alt_r2, self.r2_threshold, all_attempts,
-                        verification_history, None,
-                        alt_result.get("script_errors"),
-                    )
-                    return alt_result
-                else:
-                    self.logger.warning(f"   R² = {alt_r2:.4f} (still below threshold)")
-            else:
-                self.logger.warning(f"   Alternative model failed: {alt_result.get('error', 'Unknown')[:50]}")
-                all_attempts.append({
-                    "model": alternative.get("alternative_model", f"Alternative {retry + 1}"),
-                    "r2": 0, "result": alt_result
-                })
-                alternative_history.append({
-                    "model": alternative.get("alternative_model", f"Alternative {retry + 1}"),
-                    "r2": 0,
-                    "diagnosis": alternative.get("diagnosis", ""),
-                })
-        
         # --- Human feedback for poor fit (if enabled) ---
         if self.enable_human_feedback and _is_anchor:
             feedback_result = self._get_human_feedback_for_poor_fit(state, best_result, all_attempts)
@@ -3238,7 +3126,7 @@ Return JSON with:
         self.logger.info("")
         self.logger.info(f"⚙️ FITTING: {mode_str}")
         self.logger.info(f"   R² threshold: {self.r2_threshold}")
-        self.logger.info(f"   Max model retries: {self.max_model_retries}")
+        self.logger.info(f"   Max verification iterations: {self.max_verification_iterations}")
         if not is_single:
             self.logger.info(f"   Outlier detection: {self.outlier_sigma}σ")
         

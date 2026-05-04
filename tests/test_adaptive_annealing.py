@@ -699,6 +699,100 @@ def test_in_band_physics_promotion():
     print("  In-band physics promotion: PASS")
 
 
+def test_hot_annealing_reached_when_best_stalls_above_threshold():
+    """
+    The original failure mode: best_r2 ≥ threshold so the rate formula
+    degenerates (required_rate = 0), and a strict gate prevents
+    regressions.  Without patience counter / iteration floor, hot
+    annealing (level n-1) was never reached.
+
+    With the new mechanisms, annealing must reach the hot level by the
+    end of the verification budget even when best does not move.
+    """
+    import numpy as np
+
+    ctrl = make_controller(
+        r2_threshold=0.95,
+        max_verification_iterations=7,
+        max_model_retries=0,
+    )
+
+    # Initial above threshold; all refits hover at the same R² so best
+    # never advances.  Strict gate keeps best stuck at 0.96.
+    r2_seq = iter([0.96] + [0.96] * 10)
+
+    def mock_fit(state, curve_data, data_path, spectrum_name, spectrum_idx,
+                 base_script=None, refine_from_script=None,
+                 refine_from_r2=0.0, refine_from_issues=None):
+        try:
+            r2 = next(r2_seq)
+        except StopIteration:
+            return {"success": False, "error": "exhausted",
+                    "fit_quality": {}, "parameters": {},
+                    "script": "", "script_errors": []}
+        return {
+            "success": True, "error": None,
+            "fit_quality": {"r_squared": r2},
+            "parameters": {}, "model_type": "test",
+            "visualization_path": None, "visualization_bytes": b"",
+            "statistics": {}, "script": f"# r2={r2:.4f}",
+            "script_errors": [],
+        }
+
+    observed_levels = []
+
+    def mock_verify(state, fit_result, history=None,
+                    verification_iter=0, annealing_level=None,
+                    best_result=None, best_verification=None):
+        observed_levels.append(annealing_level)
+        return {
+            "fit_acceptable": False,
+            "issues_found": [{"problem": "test"}],
+            "spurious_components": [],
+            "missing_features": [],
+            "physically_better_than_best": False,
+            "comparison_note": "no improvement",
+            "overall_assessment": "rejected", "recommended_action": "x",
+        }
+
+    config_counter = iter(range(100))
+
+    def mock_apply_feedback(state, verification):
+        cfg = state.get("locked_fitting_config", {}).copy()
+        cfg["_tweak"] = next(config_counter)
+        return cfg
+
+    ctrl._fit_single_spectrum = mock_fit
+    ctrl._verify_fit_with_llm = mock_verify
+    ctrl._apply_llm_verification_feedback = mock_apply_feedback
+    ctrl._log_verification_issues = MagicMock()
+    ctrl._build_quality_history = MagicMock(return_value={})
+    ctrl._judge_select_best_fit = MagicMock(return_value={
+        "selected_index": None, "acceptable": False, "reasoning": "mock",
+    })
+
+    state = {"locked_fitting_config": {"physical_model": "test", "_tweak": -1}}
+    ctrl._fit_with_quality_control(
+        state=state,
+        curve_data=np.array([[0.0, 1.0], [1.0, 2.0]]),
+        data_path="/tmp/dummy",
+        spectrum_name="t", spectrum_idx=0,
+        is_regime_anchor=True,
+    )
+
+    n_levels = len(ctrl._CONSTRAINT_ANNEALING_SCHEDULE)
+    max_observed = max((l for l in observed_levels if l is not None), default=-1)
+    print(f"  Observed annealing levels: {observed_levels}")
+    print(f"  Max level reached: {max_observed} (n_levels - 1 = {n_levels - 1})")
+
+    assert max_observed == n_levels - 1, (
+        f"Hot annealing (level {n_levels - 1}) was never reached. "
+        f"Observed levels: {observed_levels}.  Patience counter / iteration "
+        f"floor failed to escalate when best stalled above threshold."
+    )
+    print("  Hot annealing reached when best stalls: PASS")
+
+
 def test_floor_blocks_catastrophic_regression():
     """
     A refit with R² below the floor (r2_threshold - 0.05) must be rejected
@@ -830,6 +924,7 @@ if __name__ == "__main__":
         test_verification_loop_escalation,
         test_regression_does_not_overwrite_best_r2,
         test_in_band_physics_promotion,
+        test_hot_annealing_reached_when_best_stalls_above_threshold,
         test_floor_blocks_catastrophic_regression,
     ])
     total_pass += p
