@@ -533,15 +533,21 @@ def test_regression_does_not_overwrite_best_r2():
             "script_errors": [],
         }
 
-    # Verifier rejects every iteration so the loop exhausts and we fall
-    # through to the post-loop R² threshold check (best_r2 >= 0.95).  This
-    # isolates the high-water-mark behavior from verifier-approval (which
-    # is by design allowed to override R² ordering).
+    # Verifier rejects every iteration; physically_better_than_best=False
+    # so lower-R² refits are NOT promoted on physics grounds.  This
+    # isolates the high-water-mark behavior: best_r2 should track the
+    # max across in-band promotions, not the latest refit.
     def mock_verify(state, fit_result, history=None,
-                    verification_iter=0, annealing_level=None):
+                    verification_iter=0, annealing_level=None,
+                    best_result=None, best_verification=None):
         return {
             "fit_acceptable": False,
             "issues_found": [{"problem": f"iter{verification_iter}"}],
+            "spurious_components": [],
+            "missing_features": [],
+            "physically_better_than_best": False,
+            "comparison_note": "no improvement",
+            "overall_assessment": "rejected",
             "recommended_action": "x",
         }
 
@@ -557,6 +563,14 @@ def test_regression_does_not_overwrite_best_r2():
     ctrl._apply_llm_verification_feedback = mock_apply_feedback
     ctrl._log_verification_issues = MagicMock()
     ctrl._build_quality_history = MagicMock(return_value={})
+    # Judge mock: decline to override (selected_index=None) so the in-loop
+    # best is preserved.  This isolates the strict-gate behavior from the
+    # judge's selection logic.
+    ctrl._judge_select_best_fit = MagicMock(return_value={
+        "selected_index": None,
+        "acceptable": False,
+        "reasoning": "test mock declines to select",
+    })
 
     state = {"locked_fitting_config": {"physical_model": "test", "_tweak": -1}}
 
@@ -580,6 +594,192 @@ def test_regression_does_not_overwrite_best_r2():
         "Regression at iter 3 (R²=0.000) likely overwrote the 0.897 high-water mark."
     )
     print("  Regression did not overwrite best: PASS")
+
+
+def test_in_band_physics_promotion():
+    """
+    When the verifier signals physically_better_than_best=True for a refit
+    whose R² is below best but within the acceptable floor, the refit
+    should be promoted on physics grounds (lower R² is OK if structure
+    improved).  When physically_better_than_best=False, the same refit
+    should be rejected as a regression.
+    """
+    import numpy as np
+
+    # Two scenarios share most of the setup; parameterize via a closure.
+    def run_scenario(physics_signal: bool) -> float:
+        ctrl = make_controller(
+            r2_threshold=0.95,
+            max_verification_iterations=3,
+            max_model_retries=0,
+        )
+
+        # initial=0.96 (above threshold, above floor), refit→0.92 (below
+        # best, ABOVE floor of 0.90).  Refit3 is exhausted to break the loop.
+        r2_seq = iter([0.96, 0.92])
+
+        def mock_fit(state, curve_data, data_path, spectrum_name, spectrum_idx,
+                     base_script=None, refine_from_script=None,
+                     refine_from_r2=0.0, refine_from_issues=None):
+            try:
+                r2 = next(r2_seq)
+            except StopIteration:
+                return {"success": False, "error": "exhausted",
+                        "fit_quality": {}, "parameters": {},
+                        "script": "", "script_errors": []}
+            return {
+                "success": True, "error": None,
+                "fit_quality": {"r_squared": r2},
+                "parameters": {}, "model_type": "test",
+                "visualization_path": None, "visualization_bytes": b"",
+                "statistics": {}, "script": f"# r2={r2:.4f}",
+                "script_errors": [],
+            }
+
+        def mock_verify(state, fit_result, history=None,
+                        verification_iter=0, annealing_level=None,
+                        best_result=None, best_verification=None):
+            # Signal physics improvement on the refit (current != best),
+            # gated by the scenario.
+            is_comparative = (
+                best_result is not None and best_result is not fit_result
+            )
+            return {
+                "fit_acceptable": False,
+                "issues_found": [{"problem": "test"}],
+                "spurious_components": [],
+                "missing_features": [],
+                "physically_better_than_best": physics_signal if is_comparative else False,
+                "comparison_note": "narrower peaks" if physics_signal else "no improvement",
+                "overall_assessment": "test", "recommended_action": "x",
+            }
+
+        config_counter = iter(range(100))
+
+        def mock_apply_feedback(state, verification):
+            cfg = state.get("locked_fitting_config", {}).copy()
+            cfg["_tweak"] = next(config_counter)
+            return cfg
+
+        ctrl._fit_single_spectrum = mock_fit
+        ctrl._verify_fit_with_llm = mock_verify
+        ctrl._apply_llm_verification_feedback = mock_apply_feedback
+        ctrl._log_verification_issues = MagicMock()
+        ctrl._build_quality_history = MagicMock(return_value={})
+        ctrl._judge_select_best_fit = MagicMock(return_value={
+            "selected_index": None, "acceptable": False, "reasoning": "mock",
+        })
+
+        state = {"locked_fitting_config": {"physical_model": "test", "_tweak": -1}}
+        result = ctrl._fit_with_quality_control(
+            state=state,
+            curve_data=np.array([[0.0, 1.0], [1.0, 2.0]]),
+            data_path="/tmp/dummy",
+            spectrum_name="t", spectrum_idx=0,
+            is_regime_anchor=True,
+        )
+        return result.get("fit_quality", {}).get("r_squared")
+
+    r2_with_physics = run_scenario(physics_signal=True)
+    r2_without_physics = run_scenario(physics_signal=False)
+
+    print(f"  With physics signal: best R² = {r2_with_physics}")
+    print(f"  Without physics signal: best R² = {r2_without_physics}")
+
+    # With physics signal: 0.92 should be promoted over 0.96 → final = 0.92
+    assert r2_with_physics == 0.92, (
+        f"Expected physics-promoted 0.92, got {r2_with_physics}. "
+        "in_band_with_physics path may not be wired."
+    )
+    # Without physics signal: 0.92 rejected as regression → final = 0.96
+    assert r2_without_physics == 0.96, (
+        f"Expected strict gate to keep 0.96, got {r2_without_physics}. "
+        "Regression-rejection path may be misbehaving."
+    )
+    print("  In-band physics promotion: PASS")
+
+
+def test_floor_blocks_catastrophic_regression():
+    """
+    A refit with R² below the floor (r2_threshold - 0.05) must be rejected
+    even if the verifier somehow signals physics improvement.  Catastrophic
+    regressions (script bugs, complete misfits) cannot be promoted.
+    """
+    import numpy as np
+
+    ctrl = make_controller(
+        r2_threshold=0.95,
+        max_verification_iterations=3,
+        max_model_retries=0,
+    )
+
+    # initial=0.96, refit→0.05 (catastrophic, well below floor of 0.90)
+    r2_seq = iter([0.96, 0.05])
+
+    def mock_fit(state, curve_data, data_path, spectrum_name, spectrum_idx,
+                 base_script=None, refine_from_script=None,
+                 refine_from_r2=0.0, refine_from_issues=None):
+        try:
+            r2 = next(r2_seq)
+        except StopIteration:
+            return {"success": False, "error": "exhausted",
+                    "fit_quality": {}, "parameters": {},
+                    "script": "", "script_errors": []}
+        return {
+            "success": True, "error": None,
+            "fit_quality": {"r_squared": r2},
+            "parameters": {}, "model_type": "test",
+            "visualization_path": None, "visualization_bytes": b"",
+            "statistics": {}, "script": f"# r2={r2:.4f}",
+            "script_errors": [],
+        }
+
+    # Verifier (mistakenly) signals physics improvement even on a catastrophic
+    # regression.  The R² floor must override.
+    def mock_verify(state, fit_result, history=None,
+                    verification_iter=0, annealing_level=None,
+                    best_result=None, best_verification=None):
+        return {
+            "fit_acceptable": False,
+            "issues_found": [{"problem": "test"}],
+            "spurious_components": [],
+            "missing_features": [],
+            "physically_better_than_best": True,  # would promote without floor
+            "comparison_note": "false positive",
+            "overall_assessment": "test", "recommended_action": "x",
+        }
+
+    config_counter = iter(range(100))
+
+    def mock_apply_feedback(state, verification):
+        cfg = state.get("locked_fitting_config", {}).copy()
+        cfg["_tweak"] = next(config_counter)
+        return cfg
+
+    ctrl._fit_single_spectrum = mock_fit
+    ctrl._verify_fit_with_llm = mock_verify
+    ctrl._apply_llm_verification_feedback = mock_apply_feedback
+    ctrl._log_verification_issues = MagicMock()
+    ctrl._build_quality_history = MagicMock(return_value={})
+    ctrl._judge_select_best_fit = MagicMock(return_value={
+        "selected_index": None, "acceptable": False, "reasoning": "mock",
+    })
+
+    state = {"locked_fitting_config": {"physical_model": "test", "_tweak": -1}}
+    result = ctrl._fit_with_quality_control(
+        state=state,
+        curve_data=np.array([[0.0, 1.0], [1.0, 2.0]]),
+        data_path="/tmp/dummy",
+        spectrum_name="t", spectrum_idx=0,
+        is_regime_anchor=True,
+    )
+
+    final_r2 = result.get("fit_quality", {}).get("r_squared")
+    print(f"  Final R² = {final_r2} (catastrophic refit's 0.05 must be rejected)")
+    assert final_r2 == 0.96, (
+        f"Expected 0.96 (refit at R²=0.05 below floor must be rejected), got {final_r2}"
+    )
+    print("  Floor blocks catastrophic regression: PASS")
 
 
 # ===========================================================================
@@ -629,6 +829,8 @@ if __name__ == "__main__":
     p, f = run_group("GROUP 3: Verification loop integration", [
         test_verification_loop_escalation,
         test_regression_does_not_overwrite_best_r2,
+        test_in_band_physics_promotion,
+        test_floor_blocks_catastrophic_regression,
     ])
     total_pass += p
     total_fail += f

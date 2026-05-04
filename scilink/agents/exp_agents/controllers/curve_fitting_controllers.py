@@ -1940,11 +1940,11 @@ Your guidance: '''
 
 **FITTED PARAMETERS:**
 {parameters}
-
+{prior_best_section}
 ## STEP 1: CHECK FOR BROKEN FITS (reject immediately if ANY are true)
 
 - **Wrong x-range?** Does the plot show a completely different x-range than where the model components are defined? (e.g., plot shows 135-200 but components are at 300, 520, 860) → REJECT
-- **Featureless fit?** Is R² ≈ 1.0 but the plot shows only a simple line/curve with no actual data structure being fitted? → REJECT  
+- **Featureless fit?** Is R² ≈ 1.0 but the plot shows only a simple line/curve with no actual data structure being fitted? → REJECT
 - **RMSE ≈ 0 with trivial fit?** Near-zero error but no meaningful features captured suggests fitting wrong data subset → REJECT
 - **Model components outside plot?** Legend shows components at positions not visible in the plotted x-range? → REJECT
 
@@ -1959,7 +1959,7 @@ If ANY box above is checked: set fit_acceptable: FALSE, explain the data range o
 
 **Reject if:**
 - R² < {reject_threshold:.2f}
-- Major systematic residual pattern across ENTIRE spectrum  
+- Major systematic residual pattern across ENTIRE spectrum
 - A prominent data feature is completely missed by the model
 
 **Do NOT reject for:**
@@ -1967,6 +1967,26 @@ If ANY box above is checked: set fit_acceptable: FALSE, explain the data range o
 - Minor position offsets (<5%)
 - Large parameter uncertainties (that's just uncertainty, not failure)
 - "Could try different model" suggestions
+
+---
+
+## STEP 3: COMPARATIVE ASSESSMENT (only if a previous best fit was shown above)
+
+If — and ONLY if — a "PREVIOUS BEST FIT" section was shown above the visualization,
+also rate whether THIS fit is **physically better than the previous best**, on:
+- Parameter values (closer to expected physics: ratios, splittings, widths in
+  benchmark ranges)
+- Component decomposition (fewer missing features, fewer spurious components)
+- Residual quality (more random / less systematic)
+- Convergence health (fewer parameters at bounds, fewer zero-error parameters)
+
+Set **`physically_better_than_best: true`** if THIS fit improves on the previous
+best in at least one of these dimensions WITHOUT introducing comparable new
+problems. Set **`false`** otherwise — including when the two fits have similar
+problems, or when this fit fixes one issue but breaks another.
+
+If no previous best fit was shown, set `physically_better_than_best: false` (the
+field is unused in that case).
 
 ---
 
@@ -1985,6 +2005,8 @@ Return JSON:
     ],
     "spurious_components": ["list of components fitting noise, not real features"],
     "missing_features": ["list of obvious data features not captured by model"],
+    "physically_better_than_best": true/false,
+    "comparison_note": "one line on what improved or didn't (or 'N/A' if no previous best shown)",
     "overall_assessment": "one sentence summary",
     "recommended_action": "specific fix OR 'none'"
 }}
@@ -2035,26 +2057,61 @@ Remember: Rejecting a good fit (R² > {accept_threshold:.2f}) to chase marginal 
         "explain the deviation.\n\n",
     )
 
-    def _verify_fit_with_llm(self, state: dict, fit_result: dict, history: List[dict] = None, verification_iter: int = 0, annealing_level: int | None = None) -> Optional[dict]:
+    def _verify_fit_with_llm(self, state: dict, fit_result: dict, history: List[dict] = None, verification_iter: int = 0, annealing_level: int | None = None, best_result: dict | None = None, best_verification: dict | None = None) -> Optional[dict]:
         """
         Use LLM to verify fit quality by examining the visualization.
         Returns verification result with any issues found, or None if verification fails.
+
+        When ``best_result`` is supplied AND it is a different object than
+        ``fit_result``, a "PREVIOUS BEST FIT" section is injected so the
+        verifier can rate whether the current fit is physically better than
+        the prior high-water mark.  ``best_verification`` (the verifier's
+        last verdict on best) is used to summarize prior issues.
         """
         if not fit_result.get("visualization_bytes"):
             self.logger.warning("      No visualization available for LLM verification")
             return None
-        
+
         # Gather fit info
         r_squared = fit_result.get("fit_quality", {}).get("r_squared", 0)
         model_type = fit_result.get("model_type", "Unknown")
         parameters = fit_result.get("parameters", {})
-        
+
         # Count components
         n_components = len(parameters) if isinstance(parameters, dict) else 0
-        
+
         # Format parameters for prompt
         params_str = json.dumps(parameters, indent=2) if parameters else "No parameters extracted"
-        
+
+        # Build the comparative "previous best" context only when fit_result
+        # is a different object than best_result.  When they are the same
+        # (initial verification, or just-promoted refit), no comparison is
+        # meaningful and we leave the section empty so the LLM ignores
+        # STEP 3's comparative assessment.
+        prior_best_section = ""
+        if best_result is not None and best_result is not fit_result:
+            best_r2 = best_result.get("fit_quality", {}).get("r_squared", 0)
+            best_issues_lines = []
+            if best_verification:
+                for issue in (best_verification.get("issues_found") or [])[:6]:
+                    if isinstance(issue, dict):
+                        loc = issue.get("location", "")
+                        prob = issue.get("problem", "")
+                        bullet = f"{loc}: {prob}" if loc else prob
+                        if bullet:
+                            best_issues_lines.append(f"  - {bullet}")
+            best_issues_text = (
+                "\n".join(best_issues_lines)
+                if best_issues_lines
+                else "  - (no specific issues recorded)"
+            )
+            prior_best_section = (
+                "\n**PREVIOUS BEST FIT (for comparative assessment):**\n"
+                f"- R² = {best_r2:.4f}\n"
+                f"- Issues the verifier flagged on the previous best:\n"
+                f"{best_issues_text}\n"
+            )
+
         prompt_text = self.FIT_VERIFICATION_PROMPT.format(
             r_squared=r_squared,
             model_type=model_type,
@@ -2062,6 +2119,7 @@ Remember: Rejecting a good fit (R² > {accept_threshold:.2f}) to chase marginal 
             parameters=params_str,
             accept_threshold=self.r2_threshold,
             reject_threshold=self.r2_threshold - 0.05,
+            prior_best_section=prior_best_section,
         )
 
         # Constraint annealing: use caller-supplied level (adaptive) or fall
@@ -2366,6 +2424,10 @@ Return JSON with:
         best_result = None
         best_r2 = -1.0
         best_config = state.get("locked_fitting_config", {}).copy()
+        # Option B gate: set to True if the verifier ever rejects best_result
+        # without later approving it.  Drives the threshold short-circuit
+        # at the post-loop checkpoint.
+        best_ever_rejected = False
 
         # Anchor = first spectrum overall OR first in a regime; gets full QC
         _is_anchor = spectrum_idx == 0 or is_regime_anchor
@@ -2410,14 +2472,32 @@ Return JSON with:
                     current_result = best_result
                     current_r2 = best_r2
 
+                    # best_ever_rejected is initialized at function scope.
+                    # Reset on promotion (new best hasn't been verified yet).
+                    # Used to gate the threshold short-circuit so a high-R²
+                    # but verifier-rejected best falls through to the
+                    # end-of-loop judge.
+                    best_verification = None  # last verifier verdict on best
+
+                    # R² floor for "in-band" promotion on physics grounds.
+                    # Catastrophic regressions (script bugs, complete failure)
+                    # are always rejected; small dips are admissible if the
+                    # verifier signals physical improvement.
+                    R2_FLOOR = max(self.r2_threshold - 0.05, 0.0)
+
                     for verification_iter in range(self.max_verification_iterations):
                         self.logger.info(f"   Verification {verification_iter + 1}/{self.max_verification_iterations} (annealing level {_annealing_level})...")
 
+                        # Pass best_result for comparative assessment.  The
+                        # verifier emits physically_better_than_best only when
+                        # current and best are different objects.
                         verification = self._verify_fit_with_llm(
                             state, current_result,
                             history=verification_history,
                             verification_iter=verification_iter,
                             annealing_level=_annealing_level,
+                            best_result=best_result,
+                            best_verification=best_verification,
                         )
 
                         if verification is None:
@@ -2425,6 +2505,33 @@ Return JSON with:
                             break
 
                         _cur_level = _annealing_level
+                        _was_rejected = not verification.get("fit_acceptable", True)
+
+                        # Retroactive physics-based promotion: if a previous
+                        # iteration deferred current_result (in-band lower R²,
+                        # awaiting a verifier verdict), this verification just
+                        # rated it.  Promote if physics improved over best.
+                        if (current_result is not best_result
+                                and current_r2 >= R2_FLOOR
+                                and verification.get("physically_better_than_best", False)):
+                            note = (verification.get("comparison_note") or "physics improvement")[:90]
+                            best_r2 = current_r2
+                            best_result = current_result
+                            best_config = state.get("locked_fitting_config", {}).copy()
+                            state["locked_fitting_config"] = best_config
+                            self.logger.info(
+                                f"   Retroactively promoted current (R² = {current_r2:.4f}) on physics — {note}"
+                            )
+
+                        # If the verifier just inspected best_result itself
+                        # (either was already best or just promoted above),
+                        # record its verdict so the next iteration's prompt
+                        # can include best's complaint summary and the
+                        # post-loop threshold gate can know whether best is
+                        # under suspicion.
+                        if current_result is best_result:
+                            best_verification = verification
+                            best_ever_rejected = best_ever_rejected or _was_rejected
 
                         # Store in history for next iteration's context
                         verification_history.append({
@@ -2433,16 +2540,20 @@ Return JSON with:
                             "issues_found": verification.get("issues_found", []),
                             "overall_assessment": verification.get("overall_assessment", ""),
                             "recommended_action": verification.get("recommended_action", ""),
+                            "physically_better_than_best": verification.get("physically_better_than_best", False),
+                            "comparison_note": verification.get("comparison_note", ""),
                             "annealing_level": _cur_level,
                         })
 
-                        if verification.get("fit_acceptable", True):
+                        if not _was_rejected:
                             # Verifier approval trumps the R² high-water mark —
                             # the verifier may accept a lower-R² fit on physics
                             # grounds (e.g. better peak shape).  Promote.
                             best_r2 = current_r2
                             best_result = current_result
                             best_config = state.get("locked_fitting_config", {}).copy()
+                            best_verification = verification
+                            best_ever_rejected = False
                             state["locked_fitting_config"] = best_config
                             self.logger.info(f"   ✅ Fit approved (R² = {best_r2:.4f})")
                             fit_was_approved = True
@@ -2537,28 +2648,36 @@ Return JSON with:
                             current_result = verified_result
                             current_r2 = verified_r2
 
-                            # Conservative high-water promotion: keep the new
-                            # fit only if it improved.  The verifier-approval
-                            # branch above already overrides the R² ordering
-                            # when the verifier accepts a lower-R² fit on
-                            # physics grounds, so the strict gate here is the
-                            # right rule for the rejection path.
+                            # Promotion rule (post-refit, no LLM call here):
+                            # 1. Strict R² improvement → promote immediately.
+                            # 2. Catastrophic regression (R² < floor) →
+                            #    reject; roll back the locked config so the
+                            #    next refit anchors on best.
+                            # 3. In-band lower R² → DEFER promotion to the
+                            #    next iteration's verifier, which will rate
+                            #    physically_better_than_best with the new
+                            #    fit's visualization.  Keep refined_config
+                            #    as the locked one so it matches current.
                             if verified_r2 > best_r2:
                                 best_r2 = verified_r2
                                 best_result = verified_result
                                 best_config = state.get("locked_fitting_config", {}).copy()
                                 state["locked_fitting_config"] = best_config
+                                best_ever_rejected = False
+                                best_verification = None
                                 self.logger.info(
                                     f"   Refit R² = {verified_r2:.4f} promoted (best now {best_r2:.4f})"
                                 )
-                            else:
-                                # Roll back the locked config so the next
-                                # refinement anchors on best_config, not the
-                                # regression that we just rejected.
+                            elif verified_r2 < R2_FLOOR:
                                 state["locked_fitting_config"] = best_config
                                 self.logger.info(
                                     f"   Refit R² = {verified_r2:.4f} "
-                                    f"(best stays {best_r2:.4f} — regression rejected)"
+                                    f"(best stays {best_r2:.4f} — below R² floor {R2_FLOOR:.2f})"
+                                )
+                            else:
+                                self.logger.info(
+                                    f"   Refit R² = {verified_r2:.4f} "
+                                    f"(best stays {best_r2:.4f}; deferred to next verifier for physics check)"
                                 )
 
                             # Adaptive annealing: escalate only when the actual
@@ -2586,19 +2705,49 @@ Return JSON with:
                             break
 
                     else:
-                        # Loop exhausted without approval - verify the final refit
+                        # Loop exhausted without approval - one final pass to
+                        # rate the latest state.  If current was deferred
+                        # (in-band, awaiting physics verdict), this is its
+                        # last chance to be promoted.
                         self.logger.info(f"   Verifying final refit...")
                         final_verification = self._verify_fit_with_llm(
-                            state, best_result,
+                            state, current_result,
                             verification_iter=self.max_verification_iterations,
                             annealing_level=_annealing_level,
+                            best_result=best_result,
+                            best_verification=best_verification,
                         )
 
                         if final_verification:
-                            if final_verification.get("fit_acceptable", True):
-                                self.logger.info(f"   ✅ Final fit approved (R² = {best_r2:.4f})")
+                            _final_rejected = not final_verification.get("fit_acceptable", True)
+
+                            # Retroactive promotion of deferred current
+                            if (current_result is not best_result
+                                    and current_r2 >= R2_FLOOR
+                                    and final_verification.get("physically_better_than_best", False)):
+                                note = (final_verification.get("comparison_note") or "physics improvement")[:90]
+                                best_r2 = current_r2
+                                best_result = current_result
+                                best_config = state.get("locked_fitting_config", {}).copy()
+                                self.logger.info(
+                                    f"   Post-loop promoted current (R² = {current_r2:.4f}) on physics — {note}"
+                                )
+
+                            # Update best's verdict tracking
+                            if current_result is best_result:
+                                best_verification = final_verification
+                                if not _final_rejected:
+                                    self.logger.info(f"   ✅ Final fit approved (R² = {best_r2:.4f})")
+                                    fit_was_approved = True
+                                    best_ever_rejected = False
+                                else:
+                                    best_ever_rejected = True
+                                    self._log_verification_issues(final_verification)
                             else:
-                                self._log_verification_issues(final_verification)
+                                # current still differs from best (no physics
+                                # promotion).  best's last verdict stands.
+                                if _final_rejected:
+                                    self._log_verification_issues(final_verification)
 
                     # Restore config to match best result after verification loop
                     state["locked_fitting_config"] = best_config
@@ -2617,7 +2766,12 @@ Return JSON with:
                 return best_result
 
             # --- Check if we meet threshold ---
-            if best_r2 >= self.r2_threshold:
+            # Option B: when the verifier explicitly rejected best at some
+            # point and never approved it later, fall through to the judge
+            # even if R² meets the numerical threshold.  This catches the
+            # "high-R² but wrong-physics" trap where the verifier kept
+            # complaining about best on physics grounds.
+            if best_r2 >= self.r2_threshold and not best_ever_rejected:
                 self.logger.info(f"✅ R² = {best_r2:.4f} (meets threshold {self.r2_threshold})")
                 best_result["quality_history"] = self._build_quality_history(
                     best_r2, self.r2_threshold, all_attempts,
@@ -2625,6 +2779,11 @@ Return JSON with:
                     best_result.get("script_errors"),
                 )
                 return best_result
+            elif best_r2 >= self.r2_threshold:
+                self.logger.info(
+                    f"⚠️ R² = {best_r2:.4f} meets threshold {self.r2_threshold}, "
+                    f"but verifier rejected best — deferring to judge"
+                )
             else:
                 self.logger.warning(f"⚠️ R² = {best_r2:.4f} (below threshold {self.r2_threshold})")
         else:
