@@ -793,6 +793,126 @@ def test_hot_annealing_reached_when_best_stalls_above_threshold():
     print("  Hot annealing reached when best stalls: PASS")
 
 
+def test_state_isolation_across_sequential_refits():
+    """
+    Series-context regression test.  AdaptiveRefitController calls
+    _fit_with_quality_control once per flagged spectrum with a freshly-built
+    refit_state.  Our new code mutates state["locked_fitting_config"] on
+    promotion/rollback and tracks loop-local state (best_ever_rejected,
+    patience counter, annealing level).  Verify nothing leaks across
+    sequential calls — running the helper twice in a row with the same
+    parent state must produce two independent runs.
+    """
+    import numpy as np
+
+    ctrl = make_controller(
+        r2_threshold=0.95,
+        max_verification_iterations=3,
+        max_model_retries=0,
+    )
+
+    # Each call sees its own R² sequence.  Catastrophic regression on
+    # call 2 must not be poisoned by promotion state from call 1.
+    call_log = []
+
+    def make_mock_fit(r2_seq):
+        seq_iter = iter(r2_seq)
+        def mock_fit(state, curve_data, data_path, spectrum_name, spectrum_idx,
+                     base_script=None, refine_from_script=None,
+                     refine_from_r2=0.0, refine_from_issues=None):
+            try:
+                r2 = next(seq_iter)
+            except StopIteration:
+                return {"success": False, "error": "exhausted",
+                        "fit_quality": {}, "parameters": {},
+                        "script": "", "script_errors": []}
+            call_log.append((spectrum_idx, r2))
+            return {
+                "success": True, "error": None,
+                "fit_quality": {"r_squared": r2},
+                "parameters": {}, "model_type": "test",
+                "visualization_path": None, "visualization_bytes": b"",
+                "statistics": {}, "script": f"# r2={r2:.4f}",
+                "script_errors": [],
+            }
+        return mock_fit
+
+    def mock_verify(state, fit_result, history=None,
+                    verification_iter=0, annealing_level=None,
+                    best_result=None, best_verification=None):
+        return {
+            "fit_acceptable": False,
+            "issues_found": [{"problem": "test"}],
+            "spurious_components": [], "missing_features": [],
+            "physically_better_than_best": False,
+            "comparison_note": "no improvement",
+            "overall_assessment": "rejected", "recommended_action": "x",
+        }
+
+    config_counter = iter(range(100))
+
+    def mock_apply_feedback(state, verification):
+        cfg = state.get("locked_fitting_config", {}).copy()
+        cfg["_tweak"] = next(config_counter)
+        return cfg
+
+    ctrl._verify_fit_with_llm = mock_verify
+    ctrl._apply_llm_verification_feedback = mock_apply_feedback
+    ctrl._log_verification_issues = MagicMock()
+    ctrl._build_quality_history = MagicMock(return_value={})
+    ctrl._judge_select_best_fit = MagicMock(return_value={
+        "selected_index": None, "acceptable": False, "reasoning": "mock",
+    })
+
+    # AdaptiveRefitController builds a fresh state per refit; mimic that.
+    parent_state = {"locked_fitting_config": {"physical_model": "parent", "_id": "parent"}}
+
+    # Call 1: spectrum_idx=5, sequence [0.96, 0.93] (initial above
+    # threshold, refit below floor).  Should return best=0.96.
+    fresh_state_1 = {"locked_fitting_config": {"physical_model": "spec5", "_id": "spec5"}}
+    ctrl._fit_single_spectrum = make_mock_fit([0.96, 0.93])
+    result_1 = ctrl._fit_with_quality_control(
+        state=fresh_state_1,
+        curve_data=np.array([[0.0, 1.0], [1.0, 2.0]]),
+        data_path="/tmp/s5", spectrum_name="s5", spectrum_idx=5,
+        is_regime_anchor=True,
+    )
+
+    # Call 2: spectrum_idx=7, sequence [0.97, 0.05] (initial above
+    # threshold, refit catastrophic).  If state from call 1 leaked,
+    # the catastrophic refit might be mistaken for an improvement.
+    fresh_state_2 = {"locked_fitting_config": {"physical_model": "spec7", "_id": "spec7"}}
+    ctrl._fit_single_spectrum = make_mock_fit([0.97, 0.05])
+    result_2 = ctrl._fit_with_quality_control(
+        state=fresh_state_2,
+        curve_data=np.array([[0.0, 1.0], [1.0, 2.0]]),
+        data_path="/tmp/s7", spectrum_name="s7", spectrum_idx=7,
+        is_regime_anchor=True,
+    )
+
+    r2_1 = result_1.get("fit_quality", {}).get("r_squared")
+    r2_2 = result_2.get("fit_quality", {}).get("r_squared")
+    print(f"  Call 1 (spec5) final R² = {r2_1} (should be 0.96)")
+    print(f"  Call 2 (spec7) final R² = {r2_2} (should be 0.97)")
+    print(f"  Call log: {call_log}")
+
+    assert r2_1 == 0.96, (
+        f"Call 1 expected 0.96, got {r2_1}.  Floor should reject the "
+        f"0.93-below-floor refit."
+    )
+    assert r2_2 == 0.97, (
+        f"Call 2 expected 0.97, got {r2_2}.  Catastrophic 0.05 refit "
+        f"should be rejected by the floor.  If state from call 1 leaked, "
+        f"the floor or best-tracking may be contaminated."
+    )
+
+    # Parent state must not have been mutated by either call.
+    assert parent_state["locked_fitting_config"]["_id"] == "parent", (
+        "Parent state was mutated by a refit call — state isolation broken."
+    )
+    print("  State isolation across sequential refits: PASS")
+
+
 def test_floor_blocks_catastrophic_regression():
     """
     A refit with R² below the floor (r2_threshold - 0.05) must be rejected
@@ -926,6 +1046,7 @@ if __name__ == "__main__":
         test_in_band_physics_promotion,
         test_hot_annealing_reached_when_best_stalls_above_threshold,
         test_floor_blocks_catastrophic_regression,
+        test_state_isolation_across_sequential_refits,
     ])
     total_pass += p
     total_fail += f
