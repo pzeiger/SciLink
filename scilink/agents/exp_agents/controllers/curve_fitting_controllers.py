@@ -1451,7 +1451,15 @@ Your guidance: '''
         self.preprocessor = preprocessor
         self.conformance_instructions = conformance_instructions
 
-    def _generate_fitting_script(self, state: dict, data_path: str, stats: dict) -> str:
+    def _generate_fitting_script(
+        self,
+        state: dict,
+        data_path: str,
+        stats: dict,
+        prior_script: Optional[str] = None,
+        prior_r2: float = 0.0,
+        prior_issues: Optional[list] = None,
+    ) -> str:
         config = state.get("locked_fitting_config", {})
         context_parts = []
         if state.get("literature_context"):
@@ -1477,6 +1485,42 @@ Your guidance: '''
             y_min=stats["y_range"][0],
             y_max=stats["y_range"][1],
         )
+
+        if prior_script:
+            issues_text = "  - (no specific issues recorded)"
+            if prior_issues:
+                issues_lines = []
+                for issue in prior_issues:
+                    if isinstance(issue, dict):
+                        loc = issue.get("location", "")
+                        prob = issue.get("problem", "")
+                        fix = issue.get("suggested_fix", "")
+                        bullet = prob or fix or str(issue)
+                        if loc:
+                            bullet = f"{loc}: {bullet}"
+                        if fix and fix not in bullet:
+                            bullet = f"{bullet} — fix: {fix}"
+                        issues_lines.append(f"  - {bullet}")
+                    else:
+                        issues_lines.append(f"  - {issue}")
+                if issues_lines:
+                    issues_text = "\n".join(issues_lines)
+
+            prompt += (
+                "\n\n## REFINEMENT MODE\n"
+                f"A previous fitting attempt produced the script below "
+                f"(R² = {prior_r2:.4f}). The verifier rejected it for these reasons:\n"
+                f"{issues_text}\n\n"
+                "Adapt this script to the (possibly updated) locked plan above. "
+                "Preserve working scaffolding (data loading, output paths, numpy "
+                "formatting, 1D-vs-2D handling, FIT_RESULTS_JSON output) verbatim; "
+                "only modify the model components, initial guesses, bounds, or "
+                "background treatment needed to address the issues. Do NOT "
+                "regenerate from scratch.\n\n"
+                "```python\n"
+                f"{prior_script}\n"
+                "```\n"
+            )
 
         response = self.model.generate_content(prompt)
         result, error = self._parse(response)
@@ -1657,13 +1701,16 @@ Your guidance: '''
                 return np.loadtxt(data_path, skiprows=1)
 
     def _fit_single_spectrum(
-        self, 
-        state: dict, 
-        curve_data: np.ndarray, 
+        self,
+        state: dict,
+        curve_data: np.ndarray,
         data_path: str,
         spectrum_name: str,
         spectrum_idx: int,
-        base_script: Optional[str] = None
+        base_script: Optional[str] = None,
+        refine_from_script: Optional[str] = None,
+        refine_from_r2: float = 0.0,
+        refine_from_issues: Optional[list] = None,
     ) -> dict:
         stats = self._compute_statistics(curve_data)
         temp_data_path = self.output_dir / f"temp_spectrum_{spectrum_idx}.npy"
@@ -1691,7 +1738,12 @@ Your guidance: '''
                 if base_script is not None and attempt == 1:
                     script = self._adapt_script_for_spectrum(base_script, str(temp_data_path), output_prefix)
                 elif attempt == 1:
-                    script = self._generate_fitting_script(state, str(temp_data_path), stats)
+                    script = self._generate_fitting_script(
+                        state, str(temp_data_path), stats,
+                        prior_script=refine_from_script,
+                        prior_r2=refine_from_r2,
+                        prior_issues=refine_from_issues,
+                    )
                     # Check conformance with locked plan on fresh generation
                     conformance = self._check_plan_conformance(state, script)
                     if conformance and not conformance.get("conformant", True):
@@ -2352,11 +2404,17 @@ Return JSON with:
                     _prev_best_r2 = best_r2
                     _n_anneal_levels = len(self._CONSTRAINT_ANNEALING_SCHEDULE)
 
+                    # current_result tracks the latest refit (what the verifier
+                    # diagnoses next); best_result is the high-water mark used
+                    # as the refinement anchor and final return value.
+                    current_result = best_result
+                    current_r2 = best_r2
+
                     for verification_iter in range(self.max_verification_iterations):
                         self.logger.info(f"   Verification {verification_iter + 1}/{self.max_verification_iterations} (annealing level {_annealing_level})...")
 
                         verification = self._verify_fit_with_llm(
-                            state, best_result,
+                            state, current_result,
                             history=verification_history,
                             verification_iter=verification_iter,
                             annealing_level=_annealing_level,
@@ -2370,7 +2428,7 @@ Return JSON with:
 
                         # Store in history for next iteration's context
                         verification_history.append({
-                            "r_squared": best_r2,
+                            "r_squared": current_r2,
                             "config_used": state.get("locked_fitting_config", {}),
                             "issues_found": verification.get("issues_found", []),
                             "overall_assessment": verification.get("overall_assessment", ""),
@@ -2379,6 +2437,13 @@ Return JSON with:
                         })
 
                         if verification.get("fit_acceptable", True):
+                            # Verifier approval trumps the R² high-water mark —
+                            # the verifier may accept a lower-R² fit on physics
+                            # grounds (e.g. better peak shape).  Promote.
+                            best_r2 = current_r2
+                            best_result = current_result
+                            best_config = state.get("locked_fitting_config", {}).copy()
+                            state["locked_fitting_config"] = best_config
                             self.logger.info(f"   ✅ Fit approved (R² = {best_r2:.4f})")
                             fit_was_approved = True
                             break
@@ -2410,9 +2475,13 @@ Return JSON with:
                             self.logger.info(f"   No config changes suggested, escalating to annealing level {_annealing_level}")
                             continue
 
-                        # Clean up old visualization
-                        old_viz_path = best_result.get("visualization_path")
-                        if old_viz_path and Path(old_viz_path).exists():
+                        # Clean up old visualization (but not the best result's
+                        # viz — best_result and current_result share the same
+                        # path when current was just promoted).
+                        old_viz_path = current_result.get("visualization_path")
+                        if (old_viz_path
+                                and Path(old_viz_path).exists()
+                                and current_result is not best_result):
                             try:
                                 os.remove(old_viz_path)
                             except:
@@ -2423,16 +2492,38 @@ Return JSON with:
                         # Sync skill strictness with adaptive annealing level
                         state["_annealing_level"] = _annealing_level
 
-                        # Refit with refined config
-                        self.logger.info(f"   Refitting with verification feedback...")
+                        # Anchor the refinement on best_result.script (the
+                        # working version) so the LLM adapts known-good code
+                        # rather than regenerating from scratch.  Drop the
+                        # script when escalating to the hot annealing level
+                        # so the LLM can restructure freely.
+                        _just_escalated_to_hot = (
+                            _annealing_level >= _n_anneal_levels - 1
+                            and _cur_level < _n_anneal_levels - 1
+                        )
+                        _refine_from = (
+                            None if _just_escalated_to_hot
+                            else (best_result or {}).get("script")
+                        )
+
+                        if _just_escalated_to_hot:
+                            self.logger.info(f"   Refitting with verification feedback (fresh generation — hot annealing)...")
+                        elif _refine_from:
+                            self.logger.info(f"   Refitting with verification feedback (refining prior script)...")
+                        else:
+                            self.logger.info(f"   Refitting with verification feedback...")
+
                         verified_result = self._fit_single_spectrum(
                             state=state, curve_data=curve_data, data_path=data_path,
-                            spectrum_name=spectrum_name, spectrum_idx=spectrum_idx, base_script=None
+                            spectrum_name=spectrum_name, spectrum_idx=spectrum_idx,
+                            base_script=None,
+                            refine_from_script=_refine_from,
+                            refine_from_r2=best_r2,
+                            refine_from_issues=verification.get("issues_found", []),
                         )
 
                         if verified_result["success"]:
                             verified_r2 = verified_result.get("fit_quality", {}).get("r_squared", 0)
-                            self.logger.info(f"   Refit R² = {verified_r2:.4f} (was {best_r2:.4f})")
 
                             all_attempts.append({
                                 "model": f"Verification-{verification_iter + 1}",
@@ -2442,18 +2533,38 @@ Return JSON with:
                                 "verification": verification,
                             })
 
-                            # Always promote: the verifier rejected the previous
-                            # best, so the refit (produced to fix those issues)
-                            # should be what gets verified next.  The highest-R²
-                            # result is preserved in all_attempts for the judge.
-                            best_r2 = verified_r2
-                            best_result = verified_result
-                            best_config = state.get("locked_fitting_config", {}).copy()
+                            # Latest is always what the next verifier judges.
+                            current_result = verified_result
+                            current_r2 = verified_r2
 
-                            # Adaptive annealing: escalate only when the
-                            # improvement rate is too slow to reach threshold
-                            # within the remaining iterations.
-                            improvement = verified_r2 - _prev_best_r2
+                            # Conservative high-water promotion: keep the new
+                            # fit only if it improved.  The verifier-approval
+                            # branch above already overrides the R² ordering
+                            # when the verifier accepts a lower-R² fit on
+                            # physics grounds, so the strict gate here is the
+                            # right rule for the rejection path.
+                            if verified_r2 > best_r2:
+                                best_r2 = verified_r2
+                                best_result = verified_result
+                                best_config = state.get("locked_fitting_config", {}).copy()
+                                state["locked_fitting_config"] = best_config
+                                self.logger.info(
+                                    f"   Refit R² = {verified_r2:.4f} promoted (best now {best_r2:.4f})"
+                                )
+                            else:
+                                # Roll back the locked config so the next
+                                # refinement anchors on best_config, not the
+                                # regression that we just rejected.
+                                state["locked_fitting_config"] = best_config
+                                self.logger.info(
+                                    f"   Refit R² = {verified_r2:.4f} "
+                                    f"(best stays {best_r2:.4f} — regression rejected)"
+                                )
+
+                            # Adaptive annealing: escalate only when the actual
+                            # high-water mark is improving too slowly to reach
+                            # threshold within the remaining iterations.
+                            improvement = best_r2 - _prev_best_r2
                             remaining = max(self.max_verification_iterations - verification_iter - 1, 1)
                             required_rate = max(self.r2_threshold - best_r2, 0.0) / remaining
                             if improvement < required_rate:
@@ -2470,11 +2581,6 @@ Return JSON with:
                                     f"staying at level {_annealing_level}"
                                 )
                             _prev_best_r2 = best_r2
-
-                            # Keep state config synced with best result so the
-                            # next iteration refines the config that produced
-                            # the visualization it examines.
-                            state["locked_fitting_config"] = best_config
                         else:
                             self.logger.warning(f"   Refit failed, stopping verification")
                             break

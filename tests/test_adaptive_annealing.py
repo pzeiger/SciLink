@@ -486,6 +486,102 @@ def test_verification_loop_escalation():
     print("  PASS")
 
 
+def test_regression_does_not_overwrite_best_r2():
+    """
+    Reproduces the user's EELS-of-SrTiO3 trace where R² walked
+    0.164 -> 0.897 -> 0.000 -> 0.986 -> 0.974 across verification iterations.
+
+    Before the fix, best_r2 tracked the latest result, so a regression to
+    R²=0.000 wiped the previous high-water mark of 0.897.  The end-of-stage
+    judge would later recover it from all_attempts, but during the loop the
+    annealing math saw a phantom regression and the verifier inspected a
+    broken refit.
+
+    After the fix, best_r2 only moves forward (or when verifier approves).
+    Verifies the production loop directly — not the simulator that already
+    has the gate.
+    """
+    import numpy as np
+
+    ctrl = make_controller(
+        r2_threshold=0.95,
+        max_verification_iterations=7,
+        max_model_retries=0,  # skip the alternative-models tail
+    )
+
+    r2_seq = iter([0.164, 0.897, 0.000, 0.986, 0.974])
+
+    def mock_fit(state, curve_data, data_path, spectrum_name, spectrum_idx,
+                 base_script=None, refine_from_script=None,
+                 refine_from_r2=0.0, refine_from_issues=None):
+        try:
+            r2 = next(r2_seq)
+        except StopIteration:
+            return {"success": False, "error": "exhausted",
+                    "fit_quality": {}, "parameters": {},
+                    "script": "", "script_errors": []}
+        return {
+            "success": True,
+            "error": None,
+            "fit_quality": {"r_squared": r2},
+            "parameters": {},
+            "model_type": "test",
+            "visualization_path": None,
+            "visualization_bytes": b"",
+            "statistics": {},
+            "script": f"# script for r2={r2:.4f}",
+            "script_errors": [],
+        }
+
+    # Verifier rejects every iteration so the loop exhausts and we fall
+    # through to the post-loop R² threshold check (best_r2 >= 0.95).  This
+    # isolates the high-water-mark behavior from verifier-approval (which
+    # is by design allowed to override R² ordering).
+    def mock_verify(state, fit_result, history=None,
+                    verification_iter=0, annealing_level=None):
+        return {
+            "fit_acceptable": False,
+            "issues_found": [{"problem": f"iter{verification_iter}"}],
+            "recommended_action": "x",
+        }
+
+    config_counter = iter(range(100))
+
+    def mock_apply_feedback(state, verification):
+        config = state.get("locked_fitting_config", {}).copy()
+        config["_tweak"] = next(config_counter)
+        return config
+
+    ctrl._fit_single_spectrum = mock_fit
+    ctrl._verify_fit_with_llm = mock_verify
+    ctrl._apply_llm_verification_feedback = mock_apply_feedback
+    ctrl._log_verification_issues = MagicMock()
+    ctrl._build_quality_history = MagicMock(return_value={})
+
+    state = {"locked_fitting_config": {"physical_model": "test", "_tweak": -1}}
+
+    result = ctrl._fit_with_quality_control(
+        state=state,
+        curve_data=np.array([[0.0, 1.0], [1.0, 2.0]]),
+        data_path="/tmp/dummy",
+        spectrum_name="test_spectrum",
+        spectrum_idx=0,
+        is_regime_anchor=True,
+    )
+
+    final_r2 = result.get("fit_quality", {}).get("r_squared")
+    print(f"  Final returned R² = {final_r2}")
+
+    # The 0.986 fit should be the verifier-approved one, not the 0.974 refit
+    # that came after.  The 0.000 regression must NOT have overwritten the 0.897
+    # high-water mark in between.
+    assert final_r2 == 0.986, (
+        f"Expected best fit (R²=0.986) to be returned, got {final_r2}. "
+        "Regression at iter 3 (R²=0.000) likely overwrote the 0.897 high-water mark."
+    )
+    print("  Regression did not overwrite best: PASS")
+
+
 # ===========================================================================
 # Runner
 # ===========================================================================
@@ -532,6 +628,7 @@ if __name__ == "__main__":
 
     p, f = run_group("GROUP 3: Verification loop integration", [
         test_verification_loop_escalation,
+        test_regression_does_not_overwrite_best_r2,
     ])
     total_pass += p
     total_fail += f
