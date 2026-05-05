@@ -1185,6 +1185,483 @@ class SimulationOrchestratorTools:
             required=["log_path", "original_request"],
         )
 
+        # =====================================================================
+        # 12. SUBMIT VASP JOB
+        # =====================================================================
+        def submit_vasp_job(
+            structure_slug: str,
+            remote_dir: str,
+            job_name: str = "vasp",
+            partition: str = "",
+            n_nodes: int = 1,
+            n_tasks: int = 16,
+            time_limit: str = "04:00:00",
+            vasp_command: str = "vasp_std",
+            modules: str = "",
+            extra_directives: str = "",
+        ) -> str:
+            conn = self.orch.hpc_connection
+            sched = self.orch.hpc_scheduler
+            if conn is None or sched is None:
+                return json.dumps({
+                    "status": "error",
+                    "message": (
+                        "No HPC connection active. Construct "
+                        "SimulationOrchestratorAgent with hpc_connection= "
+                        "and hpc_scheduler= to enable job submission."
+                    ),
+                })
+            if not conn.is_connected:
+                return json.dumps({
+                    "status": "error",
+                    "message": "HPC connection is not active. Reconnect and retry.",
+                })
+
+            record = next(
+                (s for s in (self.orch.generated_structures or [])
+                 if s.get("slug") == structure_slug),
+                None,
+            )
+            if record is None:
+                return json.dumps({
+                    "status": "error",
+                    "message": (
+                        f"Structure '{structure_slug}' not found in this "
+                        "session. Call list_generated_structures to see "
+                        "available slugs."
+                    ),
+                })
+
+            poscar = record.get("poscar_path")
+            incar = record.get("incar_path")
+            kpoints = record.get("kpoints_path")
+            missing = [
+                n for n, p in [("POSCAR", poscar), ("INCAR", incar), ("KPOINTS", kpoints)]
+                if not p or not Path(p).exists()
+            ]
+            if missing:
+                return json.dumps({
+                    "status": "error",
+                    "message": (
+                        f"Missing local files before upload: {missing}. "
+                        "Run generate_vasp_inputs first."
+                    ),
+                })
+
+            try:
+                conn.mkdir_p(remote_dir)
+                for local_path, remote_name in [
+                    (poscar, "POSCAR"),
+                    (incar, "INCAR"),
+                    (kpoints, "KPOINTS"),
+                ]:
+                    conn.upload(local_path, f"{remote_dir}/{remote_name}")
+
+                script_content = self._generate_job_script(
+                    sched=sched,
+                    job_name=job_name,
+                    n_nodes=n_nodes,
+                    n_tasks=n_tasks,
+                    time_limit=time_limit,
+                    partition=partition,
+                    vasp_command=vasp_command,
+                    modules=modules,
+                    extra_directives=extra_directives,
+                )
+                local_script = Path(record["structure_dir"]) / "job.sh"
+                local_script.write_text(script_content)
+                remote_script = f"{remote_dir}/job.sh"
+                conn.upload(str(local_script), remote_script)
+
+                job_id = sched.submit(remote_script, work_dir=remote_dir)
+            except Exception as e:
+                return json.dumps({"status": "error", "message": str(e)})
+
+            record["hpc_job_id"] = job_id
+            record["hpc_remote_dir"] = remote_dir
+            record["hpc_results_dir"] = None
+
+            return json.dumps({
+                "status": "success",
+                "job_id": job_id,
+                "scheduler": sched.name,
+                "remote_dir": remote_dir,
+                "next_steps": (
+                    f"Monitor with get_job_status('{job_id}'). "
+                    "When status is Completed, call "
+                    f"download_vasp_results('{job_id}') to retrieve outputs."
+                ),
+            })
+
+        self._register_tool(
+            func=submit_vasp_job,
+            name="submit_vasp_job",
+            description=(
+                "Upload VASP input files (POSCAR, INCAR, KPOINTS) to a remote "
+                "HPC cluster and submit a job via the active scheduler "
+                "(SLURM / PBS / LSF). Requires hpc_connection and hpc_scheduler "
+                "to be set on the orchestrator. Call generate_vasp_inputs first "
+                "to ensure local inputs exist."
+            ),
+            parameters={
+                "structure_slug": {
+                    "type": "string",
+                    "description": "Session slug of the structure to submit (from list_generated_structures).",
+                },
+                "remote_dir": {
+                    "type": "string",
+                    "description": "Absolute remote path for the job working directory (e.g. /scratch/user/run1).",
+                },
+                "job_name": {
+                    "type": "string",
+                    "description": "Scheduler job name (default: 'vasp').",
+                },
+                "partition": {
+                    "type": "string",
+                    "description": "Scheduler partition / queue. Omit to use the cluster default.",
+                },
+                "n_nodes": {
+                    "type": "integer",
+                    "description": "Number of nodes (default: 1).",
+                },
+                "n_tasks": {
+                    "type": "integer",
+                    "description": "Number of MPI tasks / CPUs (default: 16).",
+                },
+                "time_limit": {
+                    "type": "string",
+                    "description": "Wall-time limit in HH:MM:SS (default: '04:00:00').",
+                },
+                "vasp_command": {
+                    "type": "string",
+                    "description": "VASP executable name on the cluster (default: 'vasp_std').",
+                },
+                "modules": {
+                    "type": "string",
+                    "description": (
+                        "Shell commands to load the VASP environment, written "
+                        "verbatim into the job script "
+                        "(e.g. 'module load vasp/6.3.2 intel/2023'). Omit if "
+                        "the user's .bashrc already loads VASP."
+                    ),
+                },
+                "extra_directives": {
+                    "type": "string",
+                    "description": (
+                        "Additional scheduler directives to inject into the "
+                        "job script header, one per line "
+                        "(e.g. '#SBATCH --gres=gpu:1')."
+                    ),
+                },
+            },
+            required=["structure_slug", "remote_dir"],
+        )
+
+        # =====================================================================
+        # 13. GET JOB STATUS
+        # =====================================================================
+        def get_job_status(job_id: str) -> str:
+            conn = self.orch.hpc_connection
+            sched = self.orch.hpc_scheduler
+            if conn is None or sched is None:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No HPC connection active.",
+                })
+            if not conn.is_connected:
+                return json.dumps({
+                    "status": "error",
+                    "message": "HPC connection is not active. Reconnect and retry.",
+                })
+            try:
+                job = sched.status(job_id)
+            except Exception as e:
+                return json.dumps({"status": "error", "message": str(e)})
+
+            return json.dumps({
+                "status": "success",
+                "job_id": job.job_id,
+                "job_status": job.status.value,
+                "is_terminal": job.status.is_terminal,
+                "raw_status": job.raw_status,
+                "partition": job.partition,
+                "nodes": job.nodes,
+                "ntasks": job.ntasks,
+                "time_limit": job.time_limit,
+                "time_used": job.time_used,
+                "work_dir": job.work_dir,
+                "start_time": job.start_time,
+                "end_time": job.end_time,
+                "exit_code": job.exit_code,
+                "node_list": job.node_list,
+                "next_steps": (
+                    f"download_vasp_results('{job_id}') to retrieve outputs."
+                    if job.status.is_terminal and job.status.value == "Completed"
+                    else (
+                        f"Call get_job_status('{job_id}') again to check progress."
+                        if not job.status.is_terminal
+                        else "Job ended in a non-success state. Use analyze_vasp_output or suggest_incar_fixes."
+                    )
+                ),
+            })
+
+        self._register_tool(
+            func=get_job_status,
+            name="get_job_status",
+            description=(
+                "Poll the HPC scheduler for the current status of a submitted "
+                "job. Returns job_status (Pending / Running / Completed / "
+                "Failed / Cancelled / Timeout), time used, and whether the "
+                "job has reached a terminal state. Use after submit_vasp_job "
+                "to check progress."
+            ),
+            parameters={
+                "job_id": {
+                    "type": "string",
+                    "description": "Scheduler job ID returned by submit_vasp_job.",
+                },
+            },
+            required=["job_id"],
+        )
+
+        # =====================================================================
+        # 14. DOWNLOAD VASP RESULTS
+        # =====================================================================
+        def download_vasp_results(job_id: str, local_dir: str = "") -> str:
+            conn = self.orch.hpc_connection
+            if conn is None:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No HPC connection active.",
+                })
+            if not conn.is_connected:
+                return json.dumps({
+                    "status": "error",
+                    "message": "HPC connection is not active. Reconnect and retry.",
+                })
+
+            record = self._find_structure_by_job_id(job_id)
+            if record is None:
+                return json.dumps({
+                    "status": "error",
+                    "message": (
+                        f"No session record found for job_id='{job_id}'. "
+                        "Only jobs submitted via submit_vasp_job in this "
+                        "session can be downloaded automatically."
+                    ),
+                })
+
+            remote_dir = record.get("hpc_remote_dir")
+            if not remote_dir:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No remote_dir recorded for this job.",
+                })
+
+            dest = Path(local_dir) if local_dir else Path(record["structure_dir"]) / "hpc_results"
+            dest.mkdir(parents=True, exist_ok=True)
+
+            target_files = [
+                "vasprun.xml", "OUTCAR", "CONTCAR", "OSZICAR",
+                "EIGENVAL", "DOSCAR", "vasp.stdout", "vasp.stderr",
+            ]
+
+            downloaded, skipped = [], []
+            for fname in target_files:
+                remote_path = f"{remote_dir}/{fname}"
+                local_path = dest / fname
+                try:
+                    conn.download(remote_path, str(local_path))
+                    downloaded.append(fname)
+                except Exception:
+                    skipped.append(fname)
+
+            if not downloaded:
+                return json.dumps({
+                    "status": "error",
+                    "message": (
+                        f"No output files found in {remote_dir}. "
+                        "The job may not have produced output yet."
+                    ),
+                })
+
+            record["hpc_results_dir"] = str(dest)
+            return json.dumps({
+                "status": "success",
+                "local_dir": str(dest),
+                "downloaded": downloaded,
+                "skipped": skipped,
+                "next_steps": (
+                    f"analyze_vasp_output('{dest}') to parse results, or "
+                    f"generate_final_report('{record['slug']}') for a full summary."
+                ),
+            })
+
+        self._register_tool(
+            func=download_vasp_results,
+            name="download_vasp_results",
+            description=(
+                "Download VASP output files (vasprun.xml, OUTCAR, CONTCAR, "
+                "OSZICAR, etc.) from the remote HPC directory to a local "
+                "directory. Skips files that don't exist (e.g. DOSCAR for "
+                "a plain relaxation). Call after get_job_status confirms "
+                "the job is Completed."
+            ),
+            parameters={
+                "job_id": {
+                    "type": "string",
+                    "description": "Scheduler job ID returned by submit_vasp_job.",
+                },
+                "local_dir": {
+                    "type": "string",
+                    "description": (
+                        "Local directory to save results. Defaults to "
+                        "<structure_dir>/hpc_results/ when omitted."
+                    ),
+                },
+            },
+            required=["job_id"],
+        )
+
+        # =====================================================================
+        # 15. GENERATE FINAL REPORT
+        # =====================================================================
+        def generate_final_report(
+            structure_slug: str,
+            output_path: str = "",
+        ) -> str:
+            record = next(
+                (s for s in (self.orch.generated_structures or [])
+                 if s.get("slug") == structure_slug),
+                None,
+            )
+            if record is None:
+                return json.dumps({
+                    "status": "error",
+                    "message": (
+                        f"Structure '{structure_slug}' not found. "
+                        "Call list_generated_structures to see available slugs."
+                    ),
+                })
+
+            # Run post-run analysis if results are available
+            vasp_analysis = None
+            results_dir = record.get("hpc_results_dir") or record.get("structure_dir")
+            if results_dir and (Path(results_dir) / "vasprun.xml").exists():
+                try:
+                    from .post_run_analysis import analyze_run_directory
+                    vasp_analysis = analyze_run_directory(results_dir)
+                except Exception as e:
+                    vasp_analysis = {"error": str(e)}
+
+            lines = [
+                "# VASP DFT Simulation Report",
+                f"\n## Structure: {record.get('description', structure_slug)}",
+                f"- **Slug:** `{structure_slug}`",
+                f"- **Created:** {record.get('created_at', 'unknown')}",
+                f"- **POSCAR:** `{record.get('poscar_path', 'N/A')}`",
+            ]
+
+            n_atoms = self._count_atoms(record.get("poscar_path", ""))
+            if n_atoms is not None:
+                lines.append(f"- **Atoms:** {n_atoms}")
+
+            val = record.get("validation") or {}
+            if val:
+                lines += [
+                    "\n## Structure Validation",
+                    f"- **Status:** {val.get('status', 'unknown')}",
+                    f"- **Assessment:** {val.get('overall_assessment', '')}",
+                ]
+                issues = val.get("all_identified_issues") or []
+                if issues:
+                    lines.append("- **Issues:**")
+                    for iss in issues:
+                        lines.append(f"  - {iss}")
+
+            if record.get("incar_path") and Path(record["incar_path"]).exists():
+                lines += [
+                    "\n## VASP Inputs",
+                    f"- **INCAR:** `{record['incar_path']}`",
+                    f"- **KPOINTS:** `{record.get('kpoints_path', 'N/A')}`",
+                ]
+                if record.get("vasp_summary"):
+                    lines.append(f"- **Summary:** {record['vasp_summary']}")
+
+            if record.get("hpc_job_id"):
+                sched_name = (
+                    self.orch.hpc_scheduler.name
+                    if self.orch.hpc_scheduler else "unknown"
+                )
+                lines += [
+                    "\n## HPC Job",
+                    f"- **Scheduler:** {sched_name}",
+                    f"- **Job ID:** {record['hpc_job_id']}",
+                    f"- **Remote dir:** `{record.get('hpc_remote_dir', 'N/A')}`",
+                    f"- **Local results:** `{record.get('hpc_results_dir', 'N/A')}`",
+                ]
+
+            if vasp_analysis:
+                lines.append("\n## Calculation Results")
+                if "error" in vasp_analysis:
+                    lines.append(f"- **Parse error:** {vasp_analysis['error']}")
+                else:
+                    vr = vasp_analysis.get("vasprun") or {}
+                    oc = vasp_analysis.get("outcar") or {}
+                    lines += [
+                        f"- **Convergence:** {vasp_analysis.get('convergence_status', 'unknown')}",
+                        f"- **Final energy:** {vr.get('final_energy_eV', 'N/A')} eV",
+                        f"- **Ionic steps:** {vr.get('n_ionic_steps', 'N/A')}",
+                        f"- **Max force (last step):** {oc.get('max_force_eV_per_A', 'N/A')} eV/Å",
+                    ]
+                    hints = vasp_analysis.get("error_hints") or []
+                    if hints:
+                        lines.append("- **Error hints:**")
+                        for h in hints:
+                            lines.append(f"  - {h}")
+
+            report_text = "\n".join(lines) + "\n"
+            out_path = (
+                Path(output_path) if output_path
+                else Path(record["structure_dir"]) / "final_report.md"
+            )
+            try:
+                out_path.write_text(report_text)
+            except Exception as e:
+                return json.dumps({"status": "error", "message": f"Failed to write report: {e}"})
+
+            return json.dumps({
+                "status": "success",
+                "report_path": str(out_path),
+                "report": report_text,
+            })
+
+        self._register_tool(
+            func=generate_final_report,
+            name="generate_final_report",
+            description=(
+                "Generate a Markdown summary report for a completed simulation "
+                "workflow: structure description, validation outcome, VASP input "
+                "settings, HPC job info, and parsed results (energy, convergence, "
+                "error hints). Saves to <structure_dir>/final_report.md by default. "
+                "Call after download_vasp_results to include calculation outcomes."
+            ),
+            parameters={
+                "structure_slug": {
+                    "type": "string",
+                    "description": "Session slug of the structure to report on.",
+                },
+                "output_path": {
+                    "type": "string",
+                    "description": (
+                        "Full local path for the report file. Defaults to "
+                        "<structure_dir>/final_report.md when omitted."
+                    ),
+                },
+            },
+            required=["structure_slug"],
+        )
+
         # ↓↓↓ CLI flesh-out (step 5), run_task (step 6), tests (step 7).
 
     # ------------------------------------------------------------------
@@ -1455,6 +1932,74 @@ class SimulationOrchestratorTools:
             except Exception:
                 continue
         return None
+
+    def _find_structure_by_job_id(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Find the session record that was submitted as the given HPC job."""
+        for record in self.orch.generated_structures or []:
+            if record.get("hpc_job_id") == job_id:
+                return record
+        return None
+
+    @staticmethod
+    def _generate_job_script(
+        sched,
+        job_name: str,
+        n_nodes: int,
+        n_tasks: int,
+        time_limit: str,
+        partition: str,
+        vasp_command: str,
+        modules: str,
+        extra_directives: str,
+    ) -> str:
+        """Generate a scheduler job script for VASP."""
+        sname = getattr(sched, "name", "SLURM").upper()
+        lines = ["#!/bin/bash"]
+
+        if sname == "PBS":
+            lines += [
+                f"#PBS -N {job_name}",
+                f"#PBS -l nodes={n_nodes}:ppn={n_tasks}",
+                f"#PBS -l walltime={time_limit}",
+                f"#PBS -o vasp.stdout",
+                f"#PBS -e vasp.stderr",
+            ]
+            if partition:
+                lines.append(f"#PBS -q {partition}")
+            if extra_directives:
+                lines.append(extra_directives)
+            lines.append("\ncd $PBS_O_WORKDIR")
+        elif sname == "LSF":
+            lines += [
+                f"#BSUB -J {job_name}",
+                f"#BSUB -n {n_tasks}",
+                f"#BSUB -W {time_limit}",
+                f"#BSUB -o vasp.stdout",
+                f"#BSUB -e vasp.stderr",
+            ]
+            if partition:
+                lines.append(f"#BSUB -q {partition}")
+            if extra_directives:
+                lines.append(extra_directives)
+        else:  # SLURM (default)
+            lines += [
+                f"#SBATCH --job-name={job_name}",
+                f"#SBATCH --nodes={n_nodes}",
+                f"#SBATCH --ntasks={n_tasks}",
+                f"#SBATCH --time={time_limit}",
+                f"#SBATCH --output=vasp.stdout",
+                f"#SBATCH --error=vasp.stderr",
+            ]
+            if partition:
+                lines.append(f"#SBATCH --partition={partition}")
+            if extra_directives:
+                lines.append(extra_directives)
+
+        if modules:
+            lines += ["", modules]
+
+        lines += ["", f"mpirun -np {n_tasks} {vasp_command}", ""]
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Registration + dispatch primitives (mirror analyze-mode shapes)

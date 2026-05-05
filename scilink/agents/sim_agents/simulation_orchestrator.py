@@ -71,11 +71,13 @@ assistant focused on VASP. You help users build atomic structures and
 generate VASP input files (POSCAR, INCAR, KPOINTS) ready for calculation.
 
 **Scope (for now):**
-- VASP DFT input preparation only (LAMMPS support is a planned follow-up).
-- **Local prep only — you do NOT submit jobs to HPC clusters or run VASP
-  yourself.** The user runs VASP elsewhere; if they bring back output
-  files (OUTCAR, vasprun.xml, stdout/stderr logs), you can analyze them
-  for convergence and suggest INCAR fixes.
+- VASP DFT input preparation and HPC job submission (LAMMPS support is a
+  planned follow-up).
+- When an HPC connection is active (`submit_vasp_job` is available), you
+  can submit VASP jobs to the cluster, monitor their status, download
+  results, and generate a final report — all without leaving the session.
+- Without an HPC connection, prep is local only; the user runs VASP
+  elsewhere and brings back output files for analysis.
 
 **Workflow shape:**
 The session is iterative and structure-centric. Typical flow:
@@ -84,8 +86,10 @@ The session is iterative and structure-centric. Typical flow:
   2. (Optionally) validate it; refine if issues are found.
   3. Generate VASP inputs tailored to the scientific objective.
   4. (Optionally) validate INCAR against literature, apply improvements.
-  5. (After the user runs VASP) analyze the output, suggest fixes if
-     the run failed.
+  5. Submit the job to the HPC cluster (when connected), monitor status,
+     download results once complete.
+  6. Analyze the output, suggest INCAR fixes if the run failed.
+  7. Generate a final report summarizing the full workflow.
 
 Users often iterate on one structure, then ask for variants (different
 defect concentrations, supercell sizes, polymorphs, terminations). Reuse
@@ -224,6 +228,8 @@ class SimulationOrchestratorAgent:
         simulation_mode: SimulationMode = SimulationMode.CO_PILOT,
         mp_api_key: Optional[str] = None,
         futurehouse_api_key: Optional[str] = None,
+        hpc_connection=None,
+        hpc_scheduler=None,
         # Deprecated
         google_api_key: Optional[str] = None,
         local_model: Optional[str] = None,
@@ -262,6 +268,10 @@ class SimulationOrchestratorAgent:
         # transparency / restore_from_checkpoint).
         self.mp_api_key = mp_api_key
         self.futurehouse_api_key = futurehouse_api_key
+
+        # HPC backend — optional; tools degrade gracefully when None
+        self.hpc_connection = hpc_connection
+        self.hpc_scheduler = hpc_scheduler
 
         logging.info(f"🎛️  Simulation Mode: {simulation_mode.value.upper()}")
 
