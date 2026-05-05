@@ -54,6 +54,7 @@ sim = [
     "aimsgb>=1.1.1",
     "atomate2>=0.0.21",
     "mdanalysis>=2.9.0",
+    "paramiko>=3.0.0",
 ]
 ui = [
     "streamlit>=1.37.0",
