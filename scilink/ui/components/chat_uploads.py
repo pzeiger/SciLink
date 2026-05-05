@@ -10,6 +10,7 @@ from ..config import (
     SUPPORTED_KNOWLEDGE_EXTENSIONS,
     SUPPORTED_METADATA_EXTENSIONS,
     SUPPORTED_PLANNING_DATA_EXTENSIONS,
+    extra_data_extensions_for,
 )
 from .sidebar import save_metadata_to_series, save_upload, save_upload_batch
 
@@ -39,14 +40,19 @@ def _render_analyze_uploads(start_task_fn) -> None:
         "</div>",
         unsafe_allow_html=True,
     )
+    extra_exts = extra_data_extensions_for(st.session_state.get("agent"))
+    data_exts = SUPPORTED_DATA_EXTENSIONS + extra_exts
+
     up_data, up_meta = st.columns(2)
     with up_data:
         main_data = st.file_uploader(
             "Data file(s)",
-            type=[e.lstrip(".") for e in SUPPORTED_DATA_EXTENSIONS],
+            type=[e.lstrip(".") for e in data_exts],
             key="main_uploader_data",
             accept_multiple_files=True,
         )
+        if extra_exts:
+            st.caption("Vendor formats enabled via SciFiReaders MCP")
         if main_data:
             if len(main_data) == 1:
                 save_upload(main_data[0], "data", auto_dispatch=False)

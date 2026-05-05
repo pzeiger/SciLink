@@ -582,6 +582,384 @@ class AnalysisOrchestratorTools:
             }
         return None
 
+    def _examine_hdf5(self, path: Path, result: dict) -> None:
+        """Populate *result* with shape/dimensions/metadata for an
+        HDF5 file.
+
+        Uses the official ``nexusformat`` library for NeXus-conformant
+        files (handles NXentry/NXdata/signal/axes per the standard,
+        including older conventions).  Falls back to a generic ``h5py``
+        walk for non-NeXus HDF5 so the LLM still gets useful structural
+        info (group/dataset shapes, dtypes, attrs).
+        """
+        try:
+            import h5py  # noqa: F401  (used in the fallback walk)
+        except ImportError:
+            result["data_type"] = "unknown"
+            result["suggested_agents"] = []
+            result["message"] = (
+                "Reading HDF5 files requires h5py. Install with: "
+                "pip install h5py"
+            )
+            return
+
+        # Try NeXus parse first.
+        parsed = None
+        nexus_error = None
+        try:
+            import nexusformat.nexus as nx
+            try:
+                nx_root = nx.nxload(str(path), mode="r")
+                parsed = self._parse_nexus(nx_root)
+            except Exception as exc:
+                nexus_error = str(exc)
+        except ImportError:
+            nexus_error = (
+                "nexusformat not installed; falling back to a generic "
+                "HDF5 walk. Install with: pip install nexusformat"
+            )
+
+        # Always run the generic content harvester — it surfaces auxiliary
+        # metadata groups (sidpy_metadata, hyperspy metadata, …) that the
+        # NeXus standards-aware parse doesn't touch, and is the bridge
+        # source for ``convert_metadata`` when an h5 happens to embed
+        # producer-specific metadata.  Producer-agnostic; bounded payload.
+        try:
+            harvested = self._harvest_dataset_contents(path)
+        except Exception as exc:
+            harvested = None
+            result.setdefault("hdf5_walk_error", str(exc))
+
+        if parsed is not None:
+            self._apply_nexus_to_result(parsed, result)
+            if harvested is not None:
+                # Don't duplicate the signal/axis arrays — the NeXus parse
+                # already surfaced shape/dtype/units for the primary
+                # data.  Auxiliary content (everything else) is what's
+                # genuinely new here.
+                result["root_attrs"] = harvested["root_attrs"]
+                result["hdf5_datasets"] = harvested["datasets"][:50]
+                result["dataset_count"] = harvested["dataset_count"]
+                if harvested["truncated"]:
+                    result["hdf5_content_truncated"] = True
+            return
+
+        # Generic fallback — no NeXus structure.
+        if nexus_error:
+            result["nexus_parse_error"] = nexus_error
+        if harvested is not None:
+            self._apply_harvested_to_result(harvested, result)
+        else:
+            result["data_type"] = "unknown"
+            result["suggested_agents"] = []
+            result.setdefault("message", "Failed to read HDF5")
+
+    @staticmethod
+    def _parse_nexus(nx_root) -> "dict | None":
+        """Extract NeXus-standard structure (signal, axes, dimensions)
+        from an HDF5 file via ``nexusformat``'s standards-aware accessors.
+
+        Producer-specific metadata layouts (sidpy's ``sidpy_metadata``
+        group, HyperSpy's ``signal.metadata`` tree, …) are *not*
+        interpreted here — bridging third-party metadata dialects to
+        SciLink's canonical schema is the job of ``convert_metadata``,
+        which is producer-agnostic.
+
+        Returns ``None`` if the file has no NXentry/NXdata or no signal.
+        """
+        entries = list(nx_root.NXentry)
+        if not entries:
+            return None
+        default_entry = nx_root.attrs.get("default")
+        entry = next(
+            (e for e in entries if e.nxname == default_entry),
+            entries[0],
+        )
+
+        nxdatas = list(entry.NXdata)
+        if not nxdatas:
+            return None
+        default_nxdata = entry.attrs.get("default")
+        nxdata = next(
+            (d for d in nxdatas if d.nxname == default_nxdata),
+            nxdatas[0],
+        )
+
+        signal = nxdata.nxsignal
+        if signal is None:
+            return None
+
+        def _attr(field, key, default=""):
+            v = field.attrs.get(key, default)
+            if isinstance(v, bytes):
+                return v.decode("utf-8", errors="replace")
+            return v
+
+        title = _attr(signal, "title") or _attr(signal, "long_name") or ""
+        units = _attr(signal, "units") or ""
+
+        try:
+            axes = list(nxdata.nxaxes or [])
+        except Exception:
+            axes = []
+
+        dims_info = []
+        for i, dim_len in enumerate(signal.shape):
+            entry_d = {"index": i, "length": int(dim_len)}
+            if i < len(axes):
+                ax = axes[i]
+                ax_name = getattr(ax, "nxname", None)
+                if ax_name:
+                    entry_d["name"] = ax_name
+                entry_d["units"] = _attr(ax, "units") or ""
+                try:
+                    vals = np.asarray(ax.nxdata)
+                    if vals.size >= 2:
+                        diffs = np.diff(vals)
+                        if diffs.size and np.allclose(diffs, diffs[0]):
+                            entry_d["start"] = float(vals[0])
+                            entry_d["stop"] = float(vals[-1])
+                            entry_d["step"] = float(diffs[0])
+                except Exception:
+                    pass
+            dims_info.append(entry_d)
+
+        return {
+            "shape": list(signal.shape),
+            "dtype": str(signal.dtype),
+            "title": title,
+            "units": units,
+            "dimensions": dims_info,
+        }
+
+    @staticmethod
+    def _apply_nexus_to_result(parsed: dict, result: dict) -> None:
+        """Copy the parsed NeXus payload into the examine_data result and
+        derive a shape-based agent suggestion."""
+        shape = parsed["shape"]
+
+        result["shape"] = shape
+        result["dtype"] = parsed["dtype"]
+        result["title"] = parsed["title"]
+        result["units"] = parsed["units"]
+        result["dimensions"] = parsed["dimensions"]
+
+        if len(shape) == 1:
+            result["data_type"] = "1d_data"
+            result["suggested_agents"] = [0]
+            result["primary_suggestion"] = 0
+        elif len(shape) == 2:
+            result["data_type"] = "image"
+            result["suggested_agents"] = [1]
+            result["primary_suggestion"] = 1
+        elif len(shape) == 3:
+            result["data_type"] = "hyperspectral"
+            result["suggested_agents"] = [2]
+            result["primary_suggestion"] = 2
+        else:
+            result["data_type"] = "nd_data"
+            result["suggested_agents"] = []
+
+        result["note"] = (
+            f"NeXus dataset: shape={shape}, "
+            f"{len(parsed['dimensions'])} dimension(s)"
+        )
+
+    # Per-dataset and total caps for embedded text/JSON content surfaced
+    # to the LLM.  Numeric arrays are *never* included — only their shape
+    # and dtype.  Object-dtype contents that don't decode cleanly as
+    # UTF-8 are dropped (avoids pickle hazard and binary mojibake).
+    _HDF5_PER_DATASET_CONTENT_CAP = 32 * 1024
+    _HDF5_TOTAL_CONTENT_BUDGET = 128 * 1024
+
+    @staticmethod
+    def _decode_h5_value(v):
+        """Best-effort decode of an h5py attribute or scalar value into a
+        JSON-serialisable Python object."""
+        if isinstance(v, bytes):
+            try:
+                return v.decode("utf-8")
+            except UnicodeDecodeError:
+                return v.decode("utf-8", errors="replace")
+        if isinstance(v, np.ndarray):
+            if v.dtype.kind in ("S", "O"):
+                return [
+                    item.decode("utf-8", errors="replace")
+                    if isinstance(item, bytes) else item
+                    for item in v.tolist()
+                ]
+            return v.tolist()
+        if isinstance(v, np.generic):
+            return v.item()
+        return v
+
+    @classmethod
+    def _try_decode_dataset_content(cls, raw):
+        """Decode a dataset value to a JSON object or text string, or
+        return ``None`` if it can't be safely decoded.
+
+        Refuses bytes that don't decode as UTF-8 (avoids surfacing
+        pickled Python objects or binary blobs to the LLM).
+        """
+        # Bytes scalar: try UTF-8 strictly (no replace — we want to know
+        # if it's actually text).
+        if isinstance(raw, bytes):
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+        elif isinstance(raw, str):
+            text = raw
+        elif isinstance(raw, np.ndarray):
+            if raw.dtype.kind in ("S", "O"):
+                pieces = []
+                items = raw.tolist() if raw.shape else [raw.item()]
+                if not isinstance(items, list):
+                    items = [items]
+                for item in items:
+                    if isinstance(item, bytes):
+                        try:
+                            pieces.append(item.decode("utf-8"))
+                        except UnicodeDecodeError:
+                            return None
+                    elif isinstance(item, str):
+                        pieces.append(item)
+                    else:
+                        return None
+                text = "\n".join(pieces)
+            elif raw.dtype.kind == "U":
+                items = raw.tolist() if raw.shape else [raw.item()]
+                text = "\n".join(items if isinstance(items, list) else [items])
+            else:
+                return None  # numeric — caller skips
+        else:
+            return None
+
+        # Try JSON parse first; if it parses, the structured form is more
+        # useful to the LLM than a giant text blob.
+        try:
+            return json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            return text
+
+    @classmethod
+    def _harvest_dataset_contents(cls, path: Path) -> dict:
+        """Walk an HDF5 file and return its structure plus the contents
+        of small text/JSON datasets, bounded by per-dataset and total
+        byte budgets.
+
+        Returns
+        -------
+        dict with keys: ``root_attrs``, ``datasets`` (list of descriptors,
+        each with ``path/shape/dtype/attrs`` and optionally ``content``),
+        ``dataset_count`` (total found), ``truncated`` (True if budget hit).
+        """
+        import h5py
+
+        per_cap = cls._HDF5_PER_DATASET_CONTENT_CAP
+        total_cap = cls._HDF5_TOTAL_CONTENT_BUDGET
+        spent = 0
+        truncated = False
+        descriptors: list[dict] = []
+
+        with h5py.File(str(path), "r") as f:
+            root_attrs = {
+                k: cls._decode_h5_value(v) for k, v in f.attrs.items()
+            }
+
+            def visit(name, obj):
+                nonlocal spent, truncated
+                if not isinstance(obj, h5py.Dataset):
+                    return
+                d = {
+                    "path": name,
+                    "shape": list(obj.shape),
+                    "dtype": str(obj.dtype),
+                    "attrs": {
+                        k: cls._decode_h5_value(v) for k, v in obj.attrs.items()
+                    },
+                }
+
+                # Only consider surfacing contents for text/object dtypes.
+                # Numeric arrays are intentionally skipped (would dump
+                # signal data).
+                if obj.dtype.kind in ("S", "U", "O"):
+                    # Estimate byte size; refuse large datasets entirely
+                    # before reading them.
+                    try:
+                        nbytes = int(obj.nbytes) if obj.size else 0
+                    except Exception:
+                        nbytes = 0
+                    if nbytes <= per_cap and spent < total_cap:
+                        try:
+                            raw = obj[()]
+                            decoded = cls._try_decode_dataset_content(raw)
+                        except Exception:
+                            decoded = None
+
+                        if decoded is not None:
+                            # Approximate cost as JSON-encoded length so
+                            # the budget tracks LLM token consumption.
+                            try:
+                                cost = len(
+                                    json.dumps(decoded, default=str).encode("utf-8")
+                                )
+                            except Exception:
+                                cost = per_cap  # be conservative
+                            if cost <= per_cap and spent + cost <= total_cap:
+                                d["content"] = decoded
+                                spent += cost
+                            else:
+                                truncated = True
+
+                descriptors.append(d)
+
+            f.visititems(visit)
+
+        return {
+            "root_attrs": root_attrs,
+            "datasets": descriptors,
+            "dataset_count": len(descriptors),
+            "truncated": truncated,
+        }
+
+    @staticmethod
+    def _apply_harvested_to_result(harvested: dict, result: dict) -> None:
+        """Populate the examine_data result from a generic harvest (used
+        when no NeXus structure was found)."""
+        datasets = harvested["datasets"]
+        result["root_attrs"] = harvested["root_attrs"]
+        result["hdf5_datasets"] = datasets[:50]
+        result["dataset_count"] = harvested["dataset_count"]
+        if harvested["truncated"]:
+            result["hdf5_content_truncated"] = True
+        result["note"] = (
+            f"HDF5 file with {harvested['dataset_count']} dataset(s); "
+            "non-NeXus or unparseable as NeXus."
+        )
+
+        # Best-effort agent suggestion from a single top-level dataset.
+        if harvested["dataset_count"] == 1:
+            shp = datasets[0]["shape"]
+            if len(shp) == 1:
+                result["data_type"] = "1d_data"
+                result["suggested_agents"] = [0]
+                result["primary_suggestion"] = 0
+            elif len(shp) == 2:
+                result["data_type"] = "image"
+                result["suggested_agents"] = [1]
+                result["primary_suggestion"] = 1
+            elif len(shp) == 3:
+                result["data_type"] = "hyperspectral"
+                result["suggested_agents"] = [2]
+                result["primary_suggestion"] = 2
+            else:
+                result["data_type"] = "nd_data"
+                result["suggested_agents"] = []
+        else:
+            result["data_type"] = "unknown"
+            result["suggested_agents"] = []
+
     def _register_all_tools(self):
         """Register all tools with OpenAI format."""
         
@@ -897,7 +1275,7 @@ class AnalysisOrchestratorTools:
                     result["data_type"] = "tabular"
                     result["suggested_agents"] = [0]  # CurveFitting
                     result["primary_suggestion"] = 0
-                    
+
                     # Try to peek at the file and count rows
                     try:
                         import csv
@@ -905,7 +1283,7 @@ class AnalysisOrchestratorTools:
                             # Read first few lines for preview
                             first_lines = [f.readline().strip() for _ in range(5)]
                             result["preview"] = first_lines
-                            
+
                             # Count total lines (approximate row count)
                             f.seek(0)
                             row_count = sum(1 for _ in f) - 1  # Subtract header
@@ -913,11 +1291,32 @@ class AnalysisOrchestratorTools:
                             result["note"] = f"Tabular data with ~{row_count} data points"
                     except Exception as e:
                         result["preview_error"] = str(e)
-                
+
+                elif extension in ['.h5', '.hdf5']:
+                    # NeXus / SID-style HDF5 — produced by the SciFiReaders
+                    # MCP server (read_scifireaders_file) or any sidpy
+                    # pipeline. Surface shape, dimensions, and metadata so
+                    # the LLM has enough to route to the right agent without
+                    # needing the raw array inline.
+                    self._examine_hdf5(path, result)
+
                 else:
                     result["data_type"] = "unknown"
                     result["message"] = f"Unknown file extension: {extension}"
                     result["suggested_agents"] = []
+                    # Hint when the user uploaded a vendor format that needs
+                    # to be converted via the SciFiReaders MCP server before
+                    # SciLink can examine it.
+                    from ...ui.config import VENDOR_DATA_EXTENSIONS
+                    if extension in VENDOR_DATA_EXTENSIONS:
+                        result["hint"] = (
+                            f"'{extension}' is a vendor format. If the "
+                            "SciFiReaders MCP server is connected, call "
+                            "read_scifireaders_file(file_path) to convert "
+                            "to NeXus HDF5, then re-run examine_data on "
+                            "the resulting '.nxs.h5' file to get shape, "
+                            "dimensions, and metadata."
+                        )
                 
                 # Store in orchestrator state
                 self.orch.current_data_path = str(path.absolute())

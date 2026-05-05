@@ -123,7 +123,9 @@ def create_unified_curve_fitting_pipeline(
         literature_agent: Optional literature search agent
         enable_human_feedback: Enable human-in-the-loop refinement
         r2_threshold: Minimum acceptable R² value (default: 0.95)
-        max_model_retries: Max alternative models to try if R² inadequate (default: 1)
+        max_model_retries: Vestigial — accepted for backward compatibility
+            but no longer affects behavior (alternative-models loop removed
+            in favor of patience-counter-driven hot annealing).
         outlier_sigma: Sigma threshold for outlier detection in series (default: 2.0)
         max_verification_iterations: Max LLM verification iterations for first spectrum (default: 7)
     

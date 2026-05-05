@@ -31,6 +31,37 @@ SUPPORTED_DATA_EXTENSIONS = (
     ".tif", ".tiff", ".png", ".jpg", ".npy", ".csv", ".txt", ".tsv", ".xlsx",
 )
 
+# Vendor formats that SciLink itself cannot read; surfaced in the upload
+# whitelist only when an MCP server exposing a compatible reader is
+# connected (see ``extra_data_extensions_for``).
+VENDOR_DATA_EXTENSIONS = (
+    ".dm3", ".dm4", ".emd", ".ndata",
+    ".ibw", ".ardf",
+    ".gwy", ".gsf",
+    ".spe", ".spc", ".spx",
+    ".asc", ".dat",
+    ".h5", ".hdf5",
+)
+
+
+def extra_data_extensions_for(agent) -> tuple:
+    """Return upload extensions enabled by external readers on *agent*.
+
+    Recognises the SciFiReaders MCP server via its ``read_scifireaders_file``
+    tool. Returns an empty tuple if no compatible reader server is
+    connected, so the uploader does not advertise formats SciLink cannot
+    actually handle.
+    """
+    if agent is None:
+        return ()
+    conns = getattr(agent, "_mcp_connections", None) or {}
+    for conn in conns.values():
+        for schema in getattr(conn, "tool_schemas", []) or []:
+            if schema.get("function", {}).get("name") == "read_scifireaders_file":
+                return VENDOR_DATA_EXTENSIONS
+    return ()
+
+
 SUPPORTED_METADATA_EXTENSIONS = (".json", ".txt")
 
 SUPPORTED_KNOWLEDGE_EXTENSIONS = (".pdf", ".txt", ".md", ".docx", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".csv", ".xlsx", ".tsv", ".json")

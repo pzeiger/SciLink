@@ -461,12 +461,18 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.logger.info("✅ Refined HTML report generated.")
 
     def _load_hyperspectral_data(self, data_path: str) -> np.ndarray:
-        """Load hyperspectral data from numpy array."""
+        """Load hyperspectral data from .npy or .h5/.hdf5 (NeXus)."""
         try:
-            if not data_path.endswith('.npy'):
-                raise ValueError(f"Expected .npy file, got: {data_path}")
-            
-            data = np.load(data_path)
+            lower = data_path.lower()
+            if lower.endswith('.npy'):
+                data = np.load(data_path)
+            elif lower.endswith(('.h5', '.hdf5')):
+                from ...tools.hdf5_utils import load_hdf5_signal
+                data = load_hdf5_signal(data_path)
+            else:
+                raise ValueError(
+                    f"Expected .npy or .h5/.hdf5 file, got: {data_path}"
+                )
             self.logger.info(f"Loaded hyperspectral data: shape {data.shape}")
             
             if data.ndim == 2:

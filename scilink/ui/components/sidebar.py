@@ -16,6 +16,7 @@ from ..config import (
     SUPPORTED_KNOWLEDGE_EXTENSIONS,
     SUPPORTED_METADATA_EXTENSIONS,
     SUPPORTED_PLANNING_DATA_EXTENSIONS,
+    extra_data_extensions_for,
 )
 
 
@@ -285,12 +286,17 @@ def _render_analyze_sidebar_uploads() -> None:
     """Sidebar upload widgets for analyze mode."""
     st.subheader("Upload Files")
 
+    extra_exts = extra_data_extensions_for(st.session_state.get("agent"))
+    data_exts = SUPPORTED_DATA_EXTENSIONS + extra_exts
+
     data_files = st.file_uploader(
         "Data file(s)",
-        type=[e.lstrip(".") for e in SUPPORTED_DATA_EXTENSIONS],
+        type=[e.lstrip(".") for e in data_exts],
         key="uploader_data",
         accept_multiple_files=True,
     )
+    if extra_exts:
+        st.caption("Vendor formats enabled via SciFiReaders MCP")
     if data_files:
         if len(data_files) == 1:
             save_upload(data_files[0], "data")

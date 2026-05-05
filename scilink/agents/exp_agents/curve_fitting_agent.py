@@ -104,7 +104,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         executor_timeout: Script timeout in seconds
         r2_threshold: Minimum acceptable R² value (default: 0.95). Spectra
             below this threshold are flagged for adaptive refit.
-        max_model_retries: Max alternative models to try (default: 1)
+        max_model_retries: Vestigial — alternative-models loop was removed
+            in favor of patience-counter-driven hot annealing inside the
+            verification loop.  Accepted for backward compatibility but no
+            longer affects behavior.
         outlier_sigma: Sigma threshold for outlier detection (default: 2.0)
         max_verification_iterations: Max LLM verification iterations (default: 7)
 
@@ -472,7 +475,14 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         
         self.logger.info("")
         self.logger.info(f"📈 CURVE FITTING ANALYSIS - {num_spectra} spectrum{'s' if num_spectra > 1 else ''}")
-        self.logger.info(f"   Quality: R² threshold={effective_r2_threshold}, max_retries={effective_max_retries}")
+        _accept = float(effective_r2_threshold)
+        _floor = max(_accept - 0.05, 0.0)
+        self.logger.info(
+            f"   Quality: R² ≥ {_accept:.2f} accepts (with clean residuals); "
+            f"R² < {_floor:.2f} hard-rejects; "
+            f"{_floor:.2f}–{_accept:.2f} is a soft band where the verifier "
+            f"can reject on physics grounds (systematic residuals, missing features)"
+        )
         if not is_single_spectrum:
             self.logger.info(f"   Outlier detection: {effective_outlier_sigma}σ")
         

@@ -10,7 +10,8 @@ logger = logging.getLogger(__name__)
 def load_curve_data(data_path: str) -> np.ndarray:
     """
     Robustly loads curve data (X, Y) from various file formats.
-    Handles .npy, CSV, TSV, and whitespace separation automatically.
+    Handles .npy, .h5/.hdf5 (NeXus), CSV, TSV, and whitespace separation
+    automatically.
     """
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"File not found: {data_path}")
@@ -18,6 +19,15 @@ def load_curve_data(data_path: str) -> np.ndarray:
     # Native numpy format
     if data_path.endswith('.npy'):
         return np.load(data_path)
+
+    # NeXus / HDF5 — pull the signal and (when present) its axis so we
+    # can return (X, Y) pairs for callers that expect a 2D layout.
+    if data_path.lower().endswith(('.h5', '.hdf5')):
+        from .hdf5_utils import load_hdf5_signal
+        signal, axes = load_hdf5_signal(data_path, return_axes=True)
+        if signal.ndim == 1 and axes and axes[0] is not None and axes[0].size == signal.size:
+            return np.column_stack([axes[0], signal])
+        return signal
 
     attempts = [
         dict(),                                # whitespace-delimited, no header

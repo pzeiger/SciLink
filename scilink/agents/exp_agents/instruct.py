@@ -2283,8 +2283,19 @@ PLAN_CONFORMANCE_CHECK_INSTRUCTIONS = """You are verifying that a Python script 
 {script}
 ```
 
+**EXECUTION CONTRACT (read before judging the script):**
+The script fits **exactly one spectrum at a time** — the data file already
+written to `temp_spectrum_<idx>.npy` for the current spectrum.  When the
+plan is for a series, the agent invokes the same script per spectrum and
+aggregates results at a higher layer; scripts must NOT loop over multiple
+spectrum files, build cross-spectrum trends or comparisons, or
+special-case particular spectra by index/identifier.  Only flag
+**per-spectrum** deviations from the plan's model, parameters, or skill
+rules.  Do NOT mark a script non-conformant for the absence of
+series-level orchestration that the plan happens to describe.
+
 Compare the script against the plan and determine if the script faithfully implements \
-what the plan describes.
+what the plan describes **for a single spectrum**.
 
 Check:
 1. **Mathematical model**: Does the script implement the same type of model? \
@@ -2294,7 +2305,8 @@ If "bi-exponential decay", does it use two exponentials — not a stretched expo
 the plan specifies?
 3. **Background/baseline treatment**: Does the script handle the baseline as the plan \
 describes?
-4. **Parameters**: Does the script compute and report the parameters the plan lists?
+4. **Parameters**: Does the script compute and report the parameters the plan lists \
+**for this spectrum** (cross-spectrum trends are aggregated by the agent, not the script).
 5. **Domain skill compliance**: If MANDATORY Domain Skill Rules are listed above, does \
 the script follow ALL of them? (e.g., if the skill requires Shirley background, does \
 the script implement Shirley — not linear or polynomial? If the skill specifies Voigt \

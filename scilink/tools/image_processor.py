@@ -11,17 +11,21 @@ logger = logging.getLogger(__name__)
 
 
 def load_image(image_path):
-    """Load an image from file (PNG, JPG, TIF, or .npy)."""
+    """Load an image from file (PNG, JPG, TIF, .npy, or .h5/.hdf5)."""
     try:
         _, ext = os.path.splitext(image_path)
         ext = ext.lower()
 
-        if ext == '.npy':
-            img_array = np.load(image_path)
+        if ext == '.npy' or ext in ('.h5', '.hdf5'):
+            if ext == '.npy':
+                img_array = np.load(image_path)
+            else:
+                from .hdf5_utils import load_hdf5_signal
+                img_array = load_hdf5_signal(image_path)
             if img_array.dtype == np.uint8:
                 return img_array
             else:
-                # Normalize float .npy arrays to uint8
+                # Normalize float arrays to uint8
                 float_array = img_array.astype(np.float64)
                 min_val, max_val = np.min(float_array), np.max(float_array)
                 if max_val - min_val > 1e-6:
