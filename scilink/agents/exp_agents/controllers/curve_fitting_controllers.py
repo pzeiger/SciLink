@@ -1862,13 +1862,26 @@ If ANY box above is checked: set fit_acceptable: FALSE, explain the data range o
 
 ## STEP 2: IF STEP 1 PASSED, evaluate fit quality
 
+The two R² thresholds form a **soft band** derived from the user's
+configured acceptance target:
+- **{accept_threshold:.2f}** = acceptance target ("accept floor")
+- **{reject_threshold:.2f}** = hard-reject floor (= accept floor − 0.05)
+
 **Accept if:**
 - R² ≥ {accept_threshold:.2f} AND residuals are mostly random noise AND main data features are captured
 
 **Reject if:**
-- R² < {reject_threshold:.2f}
-- Major systematic residual pattern across ENTIRE spectrum
-- A prominent data feature is completely missed by the model
+- R² < {reject_threshold:.2f} (hard-reject floor — numerical fit is too poor)
+- Major systematic residual pattern across ENTIRE spectrum (any R²)
+- A prominent data feature is completely missed by the model (any R²)
+
+**Soft band ({reject_threshold:.2f} ≤ R² < {accept_threshold:.2f}):**
+- Numerical R² is borderline. Reject ONLY if you find concrete physics
+  problems (systematic residuals, missing features, unphysical parameters).
+  Don't reject solely because R² is in the band.
+- When you reject in this band, **state the physics reason** in
+  `overall_assessment` rather than just citing the R² number, so the
+  trace is interpretable.
 
 **Do NOT reject for:**
 - Ambiguous or subtle features
@@ -3125,7 +3138,13 @@ Return JSON with:
         mode_str = "SINGLE SPECTRUM" if is_single else f"SERIES ({num_spectra} spectra)"
         self.logger.info("")
         self.logger.info(f"⚙️ FITTING: {mode_str}")
-        self.logger.info(f"   R² threshold: {self.r2_threshold}")
+        _accept = float(self.r2_threshold)
+        _floor = max(_accept - 0.05, 0.0)
+        self.logger.info(
+            f"   R² targets: accept ≥ {_accept:.2f} (with clean residuals); "
+            f"hard-reject below {_floor:.2f}; soft band {_floor:.2f}–{_accept:.2f} "
+            f"(verifier may reject on physics)"
+        )
         self.logger.info(f"   Max verification iterations: {self.max_verification_iterations}")
         if not is_single:
             self.logger.info(f"   Outlier detection: {self.outlier_sigma}σ")
