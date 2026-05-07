@@ -1196,7 +1196,7 @@ class SimulationOrchestratorTools:
             n_nodes: int = 1,
             n_tasks: int = 16,
             time_limit: str = "04:00:00",
-            vasp_command: str = "vasp_std",
+            vasp_command: str = "srun vasp_std",
             modules: str = "",
             extra_directives: str = "",
         ) -> str:
@@ -1334,7 +1334,11 @@ class SimulationOrchestratorTools:
                 },
                 "vasp_command": {
                     "type": "string",
-                    "description": "VASP executable name on the cluster (default: 'vasp_std').",
+                    "description": (
+                        "Full run command including MPI launcher "
+                        "(e.g. 'srun vasp_std', 'mpirun -np 16 vasp_std'). "
+                        "Written verbatim into the job script. Default: 'srun vasp_std'."
+                    ),
                 },
                 "modules": {
                     "type": "string",
@@ -1998,7 +2002,7 @@ class SimulationOrchestratorTools:
         if modules:
             lines += ["", modules]
 
-        lines += ["", f"mpirun -np {n_tasks} {vasp_command}", ""]
+        lines += ["", vasp_command, ""]
         return "\n".join(lines)
 
     # ------------------------------------------------------------------

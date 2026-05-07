@@ -50,6 +50,19 @@ def _require_env(*names):
         sys.exit(2)
 
 
+def _get_api_key(allow_dummy: bool = False) -> str:
+    """Return whichever LLM key is set, preferring SCILINK_API_KEY."""
+    key = (os.environ.get("SCILINK_API_KEY")
+           or os.environ.get("ANTHROPIC_API_KEY"))
+    if key:
+        return key
+    if allow_dummy:
+        return "dummy-not-used"
+    raise RuntimeError(
+        "Set SCILINK_API_KEY or ANTHROPIC_API_KEY to run live-LLM tests."
+    )
+
+
 def _make_orch(model_name: str, base_dir: str, autonomy: str = "co-pilot"):
     """Construct a fresh SimulationOrchestratorAgent for a test."""
     from scilink.agents.sim_agents import (
@@ -62,7 +75,7 @@ def _make_orch(model_name: str, base_dir: str, autonomy: str = "co-pilot"):
     }
     return SimulationOrchestratorAgent(
         base_dir=base_dir,
-        api_key=os.environ.get("ANTHROPIC_API_KEY", "dummy-not-used"),
+        api_key=_get_api_key(allow_dummy=True),
         model_name=model_name,
         simulation_mode=mode_map[autonomy],
         mp_api_key=os.environ.get("MP_API_KEY"),
@@ -608,7 +621,7 @@ def stress_5_hpc_workflow_mocked(model_name: str):
 
     orch = SimulationOrchestratorAgent(
         base_dir=str(workdir / "sim"),
-        api_key=os.environ["ANTHROPIC_API_KEY"],
+        api_key=_get_api_key(),
         model_name=model_name,
         simulation_mode=SimulationMode.AUTONOMOUS,
         hpc_connection=mock_conn,
@@ -705,10 +718,18 @@ def integration_1_hpc_slurm(model_name: str):
     from scilink.hpc.scheduler import SlurmScheduler, JobStatus
     from scilink.agents.sim_agents import SimulationOrchestratorAgent, SimulationMode
 
-    host      = os.environ["HPC_HOST"]
-    user      = os.environ["HPC_USER"]
-    key_path  = os.environ.get("HPC_KEY_PATH", "")
+    host        = os.environ["HPC_HOST"]
+    user        = os.environ["HPC_USER"]
+    key_path    = os.environ.get("HPC_KEY_PATH", "")
+    password    = os.environ.get("HPC_PASSWORD", "")
     remote_base = os.environ["HPC_REMOTE_DIR"].rstrip("/")
+
+    # Default: password auth if no key path given, key auth if key path given
+    auth_method = os.environ.get("HPC_AUTH_METHOD", "key" if key_path else "password")
+
+    if auth_method == "password" and not password:
+        import getpass
+        password = getpass.getpass(f"   Password for {user}@{host}: ")
 
     workdir = RUN_DIR / "integration_hpc"
     if workdir.exists():
@@ -730,11 +751,11 @@ def integration_1_hpc_slurm(model_name: str):
         name="test",
         hostname=host,
         username=user,
-        auth_method="key" if key_path else "key",
+        auth_method=auth_method,
         key_path=key_path,
     )
     conn = HPCConnection(profile)
-    conn.connect()
+    conn.connect(password=password)
     assert conn.is_connected, "SSH connection failed"
     print(f"   ✅ Connected to {user}@{host}")
 
@@ -766,13 +787,13 @@ def integration_1_hpc_slurm(model_name: str):
         "created_at": datetime.now().isoformat(),
     })
 
-    # Submit — use "sleep 10 && write fake outputs" instead of vasp_std
+    # Submit — use a plain bash command that writes fake VASP output files
     remote_dir = f"{remote_base}/scilink_integration_test"
     fake_vasp = (
-        "sleep 10 && "
-        "echo 'running on 1 core' > vasp.stdout && "
-        "printf 'Total CPU time used (sec): 10\\n' > OUTCAR && "
-        "cp POSCAR CONTCAR && "
+        "sleep 5\n"
+        "echo 'running on 1 core' > vasp.stdout\n"
+        "printf 'Total CPU time used (sec): 10\\n' > OUTCAR\n"
+        "cp POSCAR CONTCAR\n"
         "echo '  1 F= -.100E+03 E0= -.100E+03 d E =0.000' > OSZICAR"
     )
     r = json.loads(orch.tools.execute_tool(
@@ -873,7 +894,9 @@ def main():
 
     needs_keys = args.stress or args.e2e
     if needs_keys:
-        _require_env("ANTHROPIC_API_KEY")
+        if not (os.environ.get("SCILINK_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")):
+            print("❌ Set SCILINK_API_KEY or ANTHROPIC_API_KEY for live-LLM tests")
+            sys.exit(2)
     if args.integration:
         _require_env("HPC_HOST", "HPC_USER", "HPC_REMOTE_DIR")
 
