@@ -224,6 +224,7 @@ class BOAgent(BaseAgent):
             "current_config": None,
             "data_points_seen": 0,
             "experimental_budget": None,
+            "cat_dims": None,
         }
         
     def _load_history(self) -> List[Dict]:
@@ -248,6 +249,26 @@ class BOAgent(BaseAgent):
         if m_conf.get("input_transform", "none") not in ["none", "warp"]:
             logging.warning(f"Invalid input_transform '{m_conf.get('input_transform')}', defaulting to 'none'")
             m_conf["input_transform"] = "none"
+        if m_conf.get("surrogate", "single_task") not in ["single_task", "mixed", "dkl"]:
+            logging.warning(
+                f"Invalid surrogate '{m_conf.get('surrogate')}', defaulting to 'single_task'"
+            )
+            m_conf["surrogate"] = "single_task"
+        # Pairwise compatibility — warn but do not auto-substitute. Strategy LLM
+        # is expected to obey the prompt; the runtime factory will silently fall
+        # back where physically required (e.g., warp ignored under 'mixed').
+        surrogate = m_conf.get("surrogate", "single_task")
+        acq_type = clean.get("acquisition_strategy", {}).get("type")
+        if surrogate == "mixed" and acq_type == "thompson":
+            logging.warning(
+                "'mixed' surrogate + 'thompson' acquisition: posterior sampling "
+                "over categorical dims is unreliable; consider 'log_ei' or 'ucb'."
+            )
+        if surrogate in ("mixed", "dkl") and m_conf.get("input_transform") == "warp":
+            logging.warning(
+                f"'warp' input transform is incompatible with '{surrogate}' surrogate; "
+                "the factory will use a default Normalize instead."
+            )
         clean["model_config"] = m_conf
         return clean
 
@@ -719,7 +740,9 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                              strategy_hint: Optional[str] = None,
                              save_acq: bool = True,
                              plot_acq: bool = True,
-                             fixed_noise_std: Optional[float] = None) -> Dict[str, Any]:
+                             fixed_noise_std: Optional[float] = None,
+                             cat_dims: Optional[List[int]] = None,
+                             dkl_config: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
         """
         Run one iteration of the Bayesian Optimization loop.
         
@@ -784,8 +807,8 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             for col in input_cols + target_cols:
                 if col not in df.columns:
                     return {"error": f"Column '{col}' not found in data."}
-            X = df[input_cols].values
-            y = df[target_cols].values
+            X = np.asarray(df[input_cols].values, dtype=float).copy()
+            y = np.asarray(df[target_cols].values, dtype=float).copy()
 
             # Negate minimize targets so the optimizer always maximizes
             if target_directions:
@@ -816,6 +839,7 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         # Compute budget context
         budget_ctx = _compute_budget_context(experimental_budget, history)
         self.state["experimental_budget"] = experimental_budget
+        self.state["cat_dims"] = list(cat_dims) if cat_dims else None
         
         if budget_ctx["budget_phase"] != "unlimited":
             print(
@@ -868,6 +892,24 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             f"Steps completed so far: {budget_ctx['steps_completed']}. "
             f"Data points in dataset: {len(df)}."
         )
+
+        # Surrogate-relevant context (input shape, categorical presence)
+        n_cat = len(cat_dims) if cat_dims else 0
+        n_cont = len(input_cols) - n_cat
+        if cat_dims:
+            cat_names = [input_cols[i] for i in cat_dims]
+            surrogate_ctx = (
+                f"\n**Input Shape:** {len(input_cols)} input(s): "
+                f"{n_cont} continuous, {n_cat} categorical "
+                f"({', '.join(cat_names)}). "
+                f"Categorical columns are integer-encoded in the data."
+            )
+        else:
+            surrogate_ctx = (
+                f"\n**Input Shape:** {len(input_cols)} continuous input(s). "
+                f"No categorical inputs declared."
+            )
+        prompt_parts.append(surrogate_ctx)
         
         # Inform strategy LLM about constraints (for better acq strategy selection)
         if physical_constraints:
@@ -903,6 +945,7 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         acq_cfg = valid_config.get("acquisition_strategy", {})
         rationale = valid_config.get("rationale", "No rationale provided")
         print(f"    📋 Strategy config:")
+        print(f"       Surrogate: {model_cfg.get('surrogate', 'single_task')}")
         print(f"       Kernel: {model_cfg.get('kernel', 'N/A')}")
         print(f"       Noise: {model_cfg.get('noise', 'N/A')}")
         print(f"       Acquisition: {acq_cfg.get('type', 'N/A')}")
@@ -919,6 +962,8 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             model_config=valid_config["model_config"],
             feature_names=input_cols,
             fixed_noise_std=fixed_noise_std,
+            cat_dims=cat_dims,
+            dkl_config=dkl_config,
         )
         if fixed_noise_std is not None:
             # Echo the override back into the config so downstream history /
@@ -1061,6 +1106,20 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         # 6. Inspection
         print("  - 👀 BO Agent: Inspecting visuals...")
         visual_prompt = BO_VISUAL_INSPECTION_MOO_PROMPT if is_moo else BO_VISUAL_INSPECTION_PROMPT
+        # Anchor the inspector to the currently active config. The output
+        # spec already asks for "suggested_adjustments" — listing the active
+        # config alongside is enough context; no instruction needed.
+        active_cfg_lines = [
+            f"  Surrogate: {model_cfg.get('surrogate', 'single_task')}",
+            f"  Kernel: {model_cfg.get('kernel', 'matern_2.5')}",
+            f"  Noise: {model_cfg.get('noise', 'min_noise_low')}",
+            f"  Input transform: {model_cfg.get('input_transform', 'none')}",
+            f"  Acquisition: {acq_cfg.get('type', 'log_ei')}",
+        ]
+        acq_params = acq_cfg.get("params") or {}
+        if acq_params:
+            active_cfg_lines.append(f"  Acquisition params: {acq_params}")
+        visual_prompt += "\n\nCURRENT STRATEGY:\n" + "\n".join(active_cfg_lines)
         if sensitivity_data:
             sobol_text = "\n".join(f"  {k}: {v}" for k, v in sensitivity_data.items())
             visual_prompt += (
@@ -1135,6 +1194,8 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                 "physical_constraints": physical_constraints is not None,
                 "save_acq": save_acq,
                 "plot_acq": plot_acq,
+                "cat_dims": list(cat_dims) if cat_dims else None,
+                "surrogate": valid_config.get("model_config", {}).get("surrogate", "single_task"),
             },
             result=result,
             rationale=valid_config.get("rationale")

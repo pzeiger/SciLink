@@ -635,6 +635,8 @@ class PlanningOrchestratorAgent:
         self.expected_input_columns = None
         self.expected_target_columns = []
         self.target_directions = {}  # e.g. {"Yield": "maximize", "Defect_Density": "minimize"}
+        self.expected_input_types = None  # {col: "continuous" | "categorical"} from scalarizer
+        self.expected_input_levels = None  # {col: [level0, level1, ...]} for categorical inputs
         self.latest_tea_results = None
 
         # Custom tools / MCP state
@@ -1094,6 +1096,8 @@ class PlanningOrchestratorAgent:
                 self.expected_target_columns = []
 
             self.target_directions = state.get("target_directions", {})
+            self.expected_input_types = state.get("expected_input_types")
+            self.expected_input_levels = state.get("expected_input_levels")
             self.latest_tea_results = state.get("latest_tea_results")
             
             # Restore autonomy level if saved
@@ -1218,6 +1222,8 @@ class PlanningOrchestratorAgent:
                 "expected_input_columns": self.expected_input_columns,
                 "expected_target_columns": self.expected_target_columns,
                 "target_directions": self.target_directions,
+                "expected_input_types": self.expected_input_types,
+                "expected_input_levels": self.expected_input_levels,
                 "data_points_collected": len(pd.read_csv(self.bo_data_path)) if self.bo_data_path.exists() else 0,
                 "planner_state": self.planner.state,
                 "message_count": self.message_count,

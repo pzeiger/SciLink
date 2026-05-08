@@ -9,7 +9,7 @@ import logging
 import re
 import pandas as pd
 from pathlib import Path
-from typing import Dict, Any, Callable
+from typing import Dict, Any, Callable, List, Optional
 import hashlib
 
 
@@ -51,6 +51,47 @@ class OrchestratorTools:
         Returns True if not set (backwards compatible default).
         """
         return getattr(self.orch, '_enable_human_feedback', True)
+
+    def _decode_categorical_recs(self, recs: Any, level_maps: Dict[str, List[str]]) -> Any:
+        """Map integer-encoded categorical values back to their level names.
+
+        Recommendations may be either a dict (single experiment) or a list of
+        dicts (batch). Continuous values are passed through unchanged. The
+        decoded value lookup uses the nearest integer index, which the
+        MixedSingleTaskGP path already constrains to valid levels but other
+        surrogates may return as a float.
+        """
+        if isinstance(recs, list):
+            return [self._decode_categorical_recs(r, level_maps) for r in recs]
+        if not isinstance(recs, dict):
+            return recs
+        out = dict(recs)
+        for col, levels in level_maps.items():
+            if col not in out:
+                continue
+            try:
+                idx = int(round(float(out[col])))
+            except (TypeError, ValueError):
+                continue
+            idx = max(0, min(idx, len(levels) - 1))
+            out[col] = levels[idx]
+        return out
+
+    def _capture_input_types(self, column_roles: Dict, input_columns: List[str]) -> None:
+        """Persist scalarizer input_types onto the orchestrator state.
+
+        Filters to declared input columns only; missing entries default to
+        "continuous" downstream. No-op when column_roles has no input_types
+        field (backward-compat with older scalarizer outputs).
+        """
+        if not input_columns:
+            return
+        types_in = (column_roles or {}).get("input_types") or {}
+        if not types_in:
+            return
+        filtered = {c: types_in[c] for c in input_columns if c in types_in}
+        if filtered:
+            self.orch.expected_input_types = filtered
 
     def _compute_file_hash(self, file_path: str) -> str:
         """Compute MD5 hash of file content for deduplication."""
@@ -1664,11 +1705,12 @@ class OrchestratorTools:
                     
                     self.orch.expected_input_columns = inputs
                     self.orch.expected_target_columns = targets
-                    # Capture optimization direction from scalarizer
+                    # Capture optimization direction and input types from scalarizer
                     column_roles = res.get("column_roles", {})
                     opt_dir = column_roles.get("optimization_direction", {})
                     if opt_dir:
                         self.orch.target_directions = opt_dir
+                    self._capture_input_types(column_roles, inputs)
                     print(f"    📊 Schema Enforced (User-Specified):")
                     print(f"       Inputs: {self.orch.expected_input_columns}")
                     print(f"       Targets: {self.orch.expected_target_columns}")
@@ -1678,11 +1720,13 @@ class OrchestratorTools:
                 # Case 2: Schema already established from previous analysis
                 elif self.orch.expected_input_columns and self.orch.expected_target_columns:
                     # Still capture direction if scalarizer provided it and we don't have one yet
+                    column_roles = res.get("column_roles", {})
                     if not self.orch.target_directions:
-                        column_roles = res.get("column_roles", {})
                         opt_dir = column_roles.get("optimization_direction", {})
                         if opt_dir:
                             self.orch.target_directions = opt_dir
+                    if not getattr(self.orch, "expected_input_types", None):
+                        self._capture_input_types(column_roles, self.orch.expected_input_columns)
                     print(f"    📊 Schema Enforced (From Previous Analysis):")
                     print(f"       Inputs: {self.orch.expected_input_columns}")
                     print(f"       Targets: {self.orch.expected_target_columns}")
@@ -1730,6 +1774,7 @@ class OrchestratorTools:
                                 self.orch.expected_target_columns = proposed_targets
                                 if opt_dir:
                                     self.orch.target_directions = opt_dir
+                                self._capture_input_types(column_roles, proposed_inputs)
                                 print(f"    ✅ Schema auto-accepted: inputs={proposed_inputs}, targets={proposed_targets}")
 
                     # Targets found but no inputs — measurement-only data (e.g., spectra)
@@ -2112,6 +2157,7 @@ class OrchestratorTools:
                 # User-specified schema
                 self.orch.expected_input_columns = inputs
                 self.orch.expected_target_columns = targets
+                self._capture_input_types(first_column_roles or {}, inputs)
             elif condition_keys:
                 # Derive: inputs = condition keys, targets = remaining keys
                 proposed_targets = first_column_roles.get("targets", []) if first_column_roles else []
@@ -2120,6 +2166,7 @@ class OrchestratorTools:
                     proposed_targets = scalarizer_keys
                 self.orch.expected_input_columns = list(condition_keys)
                 self.orch.expected_target_columns = proposed_targets
+                self._capture_input_types(first_column_roles or {}, list(condition_keys))
             else:
                 # No conditions at all — check if scalarizer found inputs
                 proposed_inputs = first_column_roles.get("inputs", []) if first_column_roles else []
@@ -2127,6 +2174,7 @@ class OrchestratorTools:
                 if proposed_inputs and proposed_targets:
                     self.orch.expected_input_columns = proposed_inputs
                     self.orch.expected_target_columns = proposed_targets
+                    self._capture_input_types(first_column_roles or {}, proposed_inputs)
                 else:
                     # Return inputs_required with example template
                     file_names = [r["file"] for r in results]
@@ -2463,57 +2511,176 @@ class OrchestratorTools:
                 })
             
             # ============================================
-            # BOUNDS & CONSTRAINTS CALCULATION 
+            # BOUNDS & CONSTRAINTS CALCULATION
             # ============================================
-            scientific_bounds = {}
+            # Pull continuous-parameter bounds and categorical-parameter levels
+            # from the planner's current_plan. The planner schema supports both
+            # parameter_type="continuous" (with min_value/max_value) and
+            # parameter_type="categorical" (with levels). Missing parameter_type
+            # is treated as continuous for backward compatibility.
+            scientific_bounds: Dict[str, tuple] = {}
+            planner_levels: Dict[str, List[str]] = {}
             current_plan = self.orch.planner.state.get("current_plan", {})
-            
+
             if current_plan and "proposed_experiments" in current_plan:
                 for exp in current_plan["proposed_experiments"]:
                     for param in exp.get("optimization_params", []):
                         name = param.get("parameter_name")
+                        if not name:
+                            continue
+                        ptype = param.get("parameter_type", "continuous")
+                        if ptype == "categorical":
+                            levels = param.get("levels") or []
+                            if levels:
+                                planner_levels[name] = [str(lv) for lv in levels]
+                                print(f"  🔬 Scientific Constraint Found: {name} ∈ {planner_levels[name]}")
+                            continue
                         min_v = param.get("min_value")
                         max_v = param.get("max_value")
-                        
-                        if name and min_v is not None and max_v is not None:
+                        if min_v is not None and max_v is not None:
                             scientific_bounds[name] = (float(min_v), float(max_v))
                             print(f"  🔬 Scientific Constraint Found: {name} must be between {min_v} and {max_v}")
 
-            numeric_inputs = []
-            for col in self.orch.expected_input_columns:
-                if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
-                    numeric_inputs.append(col)
-                else:
-                    print(f"  ⚠️ Skipping non-numeric input column: {col}")
+            # Resolve input types: scalarizer is the source of truth on type;
+            # planner is the source of truth on the level universe (so BO can
+            # recommend levels not yet observed in the data).
+            input_types_state = getattr(self.orch, "expected_input_types", None) or {}
 
-            if not numeric_inputs:
+            optimization_inputs: List[str] = []
+            level_maps: Dict[str, List[str]] = {}
+            type_conflict_warnings: List[str] = []
+
+            for col in self.orch.expected_input_columns:
+                if col not in df.columns:
+                    print(f"  ⚠️ Skipping missing input column: {col}")
+                    continue
+
+                declared_type = input_types_state.get(col)
+                planner_says_cat = col in planner_levels
+
+                # Type resolution: scalarizer wins on type because it sees the
+                # actual data file. The planner's declaration of `levels` is
+                # only honored when the scalarizer agrees the column is
+                # categorical (or hasn't classified it). This avoids silently
+                # corrupting a continuous knob whose values happen to look
+                # discrete in the observed data.
+                if declared_type == "continuous":
+                    if planner_says_cat:
+                        type_conflict_warnings.append(
+                            f"{col}: scalarizer classified as continuous, planner declared "
+                            "categorical — honoring scalarizer (data shape wins). To force "
+                            "categorical, fix the scalarizer's input_types classification."
+                        )
+                    is_categorical = False
+                elif declared_type == "categorical" or planner_says_cat:
+                    is_categorical = True
+                else:
+                    is_categorical = False
+
+                if is_categorical:
+                    observed = sorted(df[col].dropna().astype(str).unique().tolist())
+                    if planner_levels.get(col):
+                        # Planner is authoritative on the level universe.
+                        # Observed values that aren't in the planner-declared
+                        # set are a real misalignment (data needs re-encoding,
+                        # or the planner's levels are wrong) — fail loudly
+                        # rather than silently append spurious levels.
+                        levels = list(planner_levels[col])
+                        unknown = [v for v in observed if v not in levels]
+                        if unknown:
+                            return json.dumps({
+                                "status": "error",
+                                "message": (
+                                    f"Input column '{col}' has values {unknown} that are not "
+                                    f"in the planner-declared level universe {levels}. Either "
+                                    f"re-encode the data to use the declared level names, or "
+                                    f"correct the planner's optimization_params.levels for "
+                                    f"this parameter."
+                                ),
+                            })
+                    else:
+                        levels = observed
+                    level_maps[col] = levels
+                    optimization_inputs.append(col)
+                else:
+                    if not pd.api.types.is_numeric_dtype(df[col]):
+                        return json.dumps({
+                            "status": "error",
+                            "message": (
+                                f"Input column '{col}' is non-numeric but not declared "
+                                f"categorical. Either fix the data or set its input_type "
+                                f"to 'categorical' in the scalarizer output."
+                            ),
+                            "available_columns": list(df.columns),
+                        })
+                    optimization_inputs.append(col)
+
+            for w in type_conflict_warnings:
+                print(f"  ⚠️ {w}")
+
+            if not optimization_inputs:
                 return json.dumps({
-                    "status": "error", 
-                    "message": "No numeric input parameters found."
+                    "status": "error",
+                    "message": "No usable input parameters found."
                 })
 
-            self.orch.expected_input_columns = numeric_inputs
+            self.orch.expected_input_columns = optimization_inputs
+            self.orch.expected_input_levels = level_maps if level_maps else None
 
+            # Build bounds (continuous: scientific or data-derived; categorical: [0, n-1])
             input_bounds = []
-            for col in numeric_inputs:
-                if col in scientific_bounds:
+            for col in optimization_inputs:
+                if col in level_maps:
+                    n = len(level_maps[col])
+                    input_bounds.append([0.0, float(n - 1)])
+                    print(f"     -> Bound for '{col}': [0, {n - 1}] (Source: CATEGORICAL — {n} levels)")
+                elif col in scientific_bounds:
                     sci_min, sci_max = scientific_bounds[col]
                     input_bounds.append([sci_min, sci_max])
                     print(f"     -> Bound for '{col}': [{sci_min}, {sci_max}] (Source: PLANNER)")
                 else:
                     data_min = float(df[col].min())
                     data_max = float(df[col].max())
-                    
+
                     if data_min == data_max:
                         margin = 1.0 if data_min == 0 else abs(data_min * 0.1)
                     else:
                         margin = (data_max - data_min) * 0.1
-                        
+
                     safe_min = data_min - margin
                     safe_max = data_max + margin
-                    
+
                     input_bounds.append([safe_min, safe_max])
                     print(f"     -> Bound for '{col}': [{safe_min:.2f}, {safe_max:.2f}] (Source: DATA)")
+
+            # Build cat_dims (positional indices) and integer-encode CSV
+            cat_dims = [
+                i for i, c in enumerate(optimization_inputs) if c in level_maps
+            ]
+            bo_data_path_for_run = str(self.orch.bo_data_path)
+            if level_maps:
+                df_encoded = df.copy()
+                for col, levels in level_maps.items():
+                    idx = {lv: i for i, lv in enumerate(levels)}
+                    encoded = df[col].astype(str).map(idx)
+                    if encoded.isnull().any():
+                        unknown = sorted(
+                            df.loc[encoded.isnull(), col].astype(str).unique().tolist()
+                        )
+                        return json.dumps({
+                            "status": "error",
+                            "message": (
+                                f"Unknown levels for categorical input '{col}': {unknown}. "
+                                f"Known levels: {levels}."
+                            )
+                        })
+                    df_encoded[col] = encoded.astype(float)
+                encoded_dir = self.orch.base_dir / "bo_artifacts"
+                encoded_dir.mkdir(exist_ok=True, parents=True)
+                encoded_path = encoded_dir / "optimization_data_encoded.csv"
+                df_encoded.to_csv(encoded_path, index=False)
+                bo_data_path_for_run = str(encoded_path)
+                print(f"  🔡 Encoded {len(level_maps)} categorical column(s) → {encoded_path.name}")
             
             # ============================================
             # BATCH SIZE DETERMINATION
@@ -2601,7 +2768,7 @@ class OrchestratorTools:
                     self.orch.expected_target_columns
                 )
                 res = self.orch.bo.run_optimization_loop(
-                    data_path=str(self.orch.bo_data_path),
+                    data_path=bo_data_path_for_run,
                     objective_text=bo_objective,
                     input_cols=self.orch.expected_input_columns,
                     input_bounds=input_bounds,
@@ -2614,6 +2781,7 @@ class OrchestratorTools:
                     strategy_hint=strategy_hint,
                     plot_acq=True,
                     save_acq=True,
+                    cat_dims=cat_dims if cat_dims else None,
                 )
                 
                 if res.get("status") != "success":
@@ -2625,7 +2793,11 @@ class OrchestratorTools:
                 
                 # Format response
                 next_params = res.get('next_parameters')
-                
+
+                # Decode categorical recommendations back to human-readable levels
+                if level_maps and next_params is not None:
+                    next_params = self._decode_categorical_recs(next_params, level_maps)
+
                 if parallel_capable:
                     hint = f"Run all {final_batch_size} experiments in parallel, then use analyze_file on each result file."
                     params_summary = f"Generated {final_batch_size} parameter sets"

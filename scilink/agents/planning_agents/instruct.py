@@ -29,11 +29,20 @@ You MUST respond with a single JSON object containing a key "proposed_experiment
     - If the experiment involves a grid or a gradient, include a Markdown table defining the exact layout.   
     - Must be fully understandable by a human WITHOUT referencing external code or files or other sections of the JSON file.
 - "required_equipment": (List of Strings) A list of key instruments or techniques mentioned in the context that are required for this experiment.
-- "optimization_params": (Optional List) If the experiment requires numerical optimization, provide:
+- "optimization_params": (Optional List) If the experiment requires optimization, provide one entry per parameter. Each entry is one of:
+
+    **Continuous parameter** (real-valued knob):
     - "parameter_name": (String) e.g., "Temperature"
+    - "parameter_type": (String) "continuous"  (optional; defaults to "continuous" if omitted)
     - "min_value": (Float) e.g., 20.0
     - "max_value": (Float) e.g., 100.0
     - "rationale": (String) e.g., "Literature suggests instability above 100C."
+
+    **Categorical parameter** (unordered identity from a fixed set, e.g., solvent / catalyst / substrate):
+    - "parameter_name": (String) e.g., "Solvent"
+    - "parameter_type": (String) "categorical"
+    - "levels": (List of Strings) e.g., ["DMSO", "DMF", "MeCN"]
+    - "rationale": (String) e.g., "Polar aprotic solvents commonly screened for this reaction."
 - "expected_outcome": (String) A description of what results would support or refute the hypothesis.
 - "justification": (String) A brief explanation of why this experiment is a logical step, citing information from the retrieved context.
 - "source_documents": (List of Strings) A list of the unique source filenames that informed this experimental plan.
@@ -102,11 +111,20 @@ You MUST respond with a single JSON object containing a key "proposed_experiment
 - "experiment_name": (String) A short, descriptive name for the experiment.
 - "experimental_steps": (List of Strings) A numbered or bulleted list of concrete steps to perform the experiment. Must be self-contained, i.e. fully understandable by a human WITHOUT referencing external code or files or other sections of the JSON file.
 - "required_equipment": (List of Strings) A list of common lab equipment.
-- "optimization_params": (Optional List) If the experiment requires numerical optimization, provide:
+- "optimization_params": (Optional List) If the experiment requires optimization, provide one entry per parameter. Each entry is one of:
+
+    **Continuous parameter** (real-valued knob):
     - "parameter_name": (String) e.g., "Temperature"
+    - "parameter_type": (String) "continuous"  (optional; defaults to "continuous" if omitted)
     - "min_value": (Float) e.g., 20.0
     - "max_value": (Float) e.g., 100.0
     - "rationale": (String) e.g., "Literature suggests instability above 100C."
+
+    **Categorical parameter** (unordered identity from a fixed set, e.g., solvent / catalyst / substrate):
+    - "parameter_name": (String) e.g., "Solvent"
+    - "parameter_type": (String) "categorical"
+    - "levels": (List of Strings) e.g., ["DMSO", "DMF", "MeCN"]
+    - "rationale": (String) e.g., "Polar aprotic solvents commonly screened for this reaction."
 - "expected_outcome": (String) A description of what results would support the hypothesis.
 - "justification": (String) **MUST be 'Warning: This proposal is based on general scientific knowledge as the provided documents lacked specific context.'** If external literature was used, append: ' External literature search results were incorporated.'
 - "source_documents": (List of Strings) If external literature was used, list relevant sources here. Otherwise, an empty list `[]`.
@@ -221,19 +239,35 @@ You are a Principal Investigator configuring a Single-Objective Bayesian Optimiz
 * `"none"`: **(Default)** Assume the response has similar smoothness everywhere.
 * `"warp"`: Per-axis Kumaraswamy warp. Use when LOO residuals stay large across multiple kernel/noise changes — likely signals the landscape is non-stationary (different regions have different effective scales, e.g., phase boundaries).
 
+**MENU 5: SURROGATE MODEL**
+* `"single_task"`: **(Default)** Standard MAP GP. Fast (seconds). Use unless one of the conditions below applies.
+* `"mixed"`: **MixedSingleTaskGP** for problems with categorical inputs.
+    * *Use when:* The Input Shape line above lists ≥1 categorical input.
+    * *Required:* Input Shape must declare categoricals — picking `"mixed"` without categoricals fails.
+    * *Incompatible with:* `thompson` acquisition, `warp` input transform, `min_noise_high` if you need a fixed-noise override.
+* `"dkl"`: **Deep Kernel Learning GP.** A small NN learns a latent representation, then a Matérn-2.5 kernel acts on the latent space.
+    * *Use when:* `input_dim ≥ 5` AND `n_data ≥ 50` AND the response surface is suspected non-stationary or includes interacting inputs that smooth kernels handle poorly.
+    * *Cost:* Each fit runs ~200 Adam epochs. Slower than `single_task` but still seconds. Avoid at budget ≤ 5 — the marginal benefit is small relative to fit-time risk.
+    * *Incompatible with:* `warp` input transform, fixed-noise overrides.
+
 **BUDGET DECISION RULES (in priority order):**
 1. If budget = 1: Use `log_ei` or `ucb` with beta < 0.3. Nothing else.
 2. If budget ≤ 3: Use `log_ei` or `ucb` with beta < 1.0. No `max_variance`.
 3. If budget is low (<25% of campaign): Favor exploitation (`log_ei`, low-beta `ucb`).
 4. If budget is high AND data is sparse: `max_variance` is acceptable.
 5. If batch_size > 10 AND budget > 3: `thompson` is acceptable.
+6. If surrogate is `dkl`, do not select it at budget ≤ 5 or n_data < 50.
 
 **OUTPUT FORMAT:**
 {
-  "model_config": { "kernel": "matern_2.5", "noise": "min_noise_low" },
-  "acquisition_strategy": { 
-      "type": "ucb", 
-      "params": { "beta": 0.1 } 
+  "model_config": {
+      "kernel": "matern_2.5",
+      "noise": "min_noise_low",
+      "surrogate": "single_task"
+  },
+  "acquisition_strategy": {
+      "type": "ucb",
+      "params": { "beta": 0.1 }
   },
   "rationale": "Budget is critical (2 remaining). We found a promising peak. Using UCB with low beta (0.1) to aggressively exploit this region with a batch of 8 points."
 }
@@ -285,15 +319,32 @@ You are a Principal Investigator configuring a Multi-Objective Optimization expe
 * `"none"`: **(Default)** Assume the response has similar smoothness everywhere.
 * `"warp"`: Per-axis Kumaraswamy warp. Use when LOO residuals stay large across multiple kernel/noise changes — likely signals the landscape is non-stationary (different regions have different effective scales, e.g., phase boundaries).
 
+**MENU 5: SURROGATE MODEL**
+The same surrogate is used for every objective — there is no per-output choice.
+* `"single_task"`: **(Default)** Independent MAP GPs per objective wrapped in a ModelListGP. Fast and the standard choice.
+* `"mixed"`: **MixedSingleTaskGP** per objective for problems with categorical inputs.
+    * *Use when:* The Input Shape line above lists ≥1 categorical input.
+    * *Required:* Input Shape must declare categoricals — picking `"mixed"` without categoricals fails.
+    * *Incompatible with:* `warp` input transform, fixed-noise overrides.
+* `"dkl"`: **Deep Kernel Learning GP** per objective. A small NN learns a latent representation, then a Matérn-2.5 kernel acts on the latent space.
+    * *Use when:* `input_dim ≥ 5` AND `n_data ≥ 50` AND the responses are suspected non-stationary or have interacting inputs that smooth kernels handle poorly.
+    * *Cost:* Each objective trains its own NN+GP via ~200 Adam epochs. Total fit time scales with output_dim. Avoid at budget ≤ 5.
+    * *Incompatible with:* `warp` input transform, fixed-noise overrides.
+
 **BUDGET DECISION RULES (in priority order):**
 1. If budget = 1: Use `pareto` or `weighted` with beta < 0.3. Nothing else.
 2. If budget ≤ 3: Use `pareto` or `weighted` with beta < 1.0. No `max_variance`.
 3. If budget is low (<25% of campaign): Favor `pareto` or exploit-heavy `weighted`.
 4. If budget is high AND frontier is sparse: `max_variance` is acceptable.
+5. If surrogate is `dkl`, do not select it at budget ≤ 5 or n_data < 50.
 
 **OUTPUT FORMAT:**
 {
-  "model_config": { "kernel": "matern_2.5", "noise": "min_noise_low" },
+  "model_config": {
+      "kernel": "matern_2.5",
+      "noise": "min_noise_low",
+      "surrogate": "single_task"
+  },
   "acquisition_strategy": {
     "type": "weighted",
     "params": { "weights": [0.8, 0.2], "beta": 0.1 }
@@ -601,6 +652,19 @@ row as a data point, computing derived targets from raw columns:
 After writing your analysis code, classify every column in the output metrics:
 - **inputs**: Controllable experimental parameters (e.g., temperature, concentration, time, composition)
 - **targets**: Measured outcomes to optimize (e.g., yield, purity, peak area, bandgap)
+- **input_types**: For each input, declare `"continuous"` or `"categorical"`.
+
+A column is **categorical** when its values are unordered identities drawn from a small fixed set — substituting one for another changes *what* the experiment is, not *how much*. Examples:
+- `Solvent ∈ {DMSO, DMF, MeCN}` → categorical (changing solvent is a different experiment).
+- `Catalyst_ID ∈ {Pd-A, Pd-B, Ni-C}` → categorical.
+- `Substrate ∈ {Glass, Si, ITO}` → categorical.
+
+A column is **continuous** when its values are scalar quantities on a real-valued axis, even if only a few discrete levels appear in the data. Examples:
+- `Temperature_C ∈ {25, 50, 75, 100}` → continuous (still a real-valued axis).
+- `Concentration_M` → continuous.
+- `pH` → continuous.
+
+When in doubt, ask: "If I picked a value between two observed values, would that be physically meaningful?" If yes → continuous. If no → categorical.
 
 Rules:
 - Use column names EXACTLY as they appear in your output metrics
@@ -636,10 +700,15 @@ You (the Agent) must return a single JSON object containing the code AND column 
   "thought_process": "Brief explanation of the approach...",
   "implementation_code": "import pandas as pd\\nimport numpy as np...",
   "column_roles": {
-    "inputs": ["Temperature_C", "Concentration_M"],
+    "inputs": ["Temperature_C", "Concentration_M", "Solvent"],
     "targets": ["Yield_Percent"],
+    "input_types": {
+      "Temperature_C": "continuous",
+      "Concentration_M": "continuous",
+      "Solvent": "categorical"
+    },
     "optimization_direction": {"Yield_Percent": "maximize"},
-    "reasoning": "Temperature and concentration are controllable parameters; yield is the measured outcome to maximize"
+    "reasoning": "Temperature and concentration are continuous knobs; Solvent is an unordered identity (DMSO/DMF/MeCN). Yield is the measured outcome to maximize."
   }
 }
 """

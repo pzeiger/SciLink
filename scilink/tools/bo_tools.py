@@ -1,9 +1,13 @@
+import logging
+from dataclasses import dataclass
+from typing import Callable, List, Tuple, Dict, Any, Optional
+
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import List, Tuple, Dict, Any, Optional
 
 from botorch.models import SingleTaskGP, ModelListGP
+from botorch.models.gp_regression_mixed import MixedSingleTaskGP
 from botorch.models.transforms import Standardize, Normalize
 from botorch.models.transforms.input import Warp, ChainedInputTransform
 from botorch.fit import fit_gpytorch_mll
@@ -16,6 +20,7 @@ from botorch.utils.sampling import draw_sobol_samples
 from botorch.generation import MaxPosteriorSampling
 from botorch.sampling import SobolQMCNormalSampler
 
+from gpytorch.distributions import MultivariateNormal
 from gpytorch.mlls import ExactMarginalLogLikelihood, SumMarginalLogLikelihood
 from gpytorch.kernels import MaternKernel, RBFKernel, ScaleKernel
 from gpytorch.likelihoods import GaussianLikelihood
@@ -36,6 +41,8 @@ ALLOWED_NOISE_PRIORS = {
 }
 
 ALLOWED_INPUT_TRANSFORMS = {"none", "warp"}
+
+ALLOWED_SURROGATES = {"single_task", "mixed", "dkl"}
 
 
 def build_input_transform(key: str, input_dim: int) -> "ChainedInputTransform | Normalize":
@@ -68,6 +75,263 @@ def build_likelihood(noise_key: str) -> GaussianLikelihood:
     # Initialize slightly above min to aid convergence
     likelihood.noise = torch.tensor(config["min_noise"] * 2.0)
     return likelihood
+
+
+# ===================================================================== #
+#  Surrogate factory
+# ===================================================================== #
+
+@dataclass
+class SurrogateCapabilities:
+    supports_fixed_noise: bool
+    supports_warp: bool
+    needs_cat_dims: bool
+    supports_thompson: bool
+
+
+@dataclass
+class SurrogateSpec:
+    """A surrogate descriptor returned by build_surrogate.
+
+    `model_factory(X, y)` is called once per output (SOO) or per objective (MOO),
+    so the spec must be reusable across calls. `fit_fn` accepts either a single
+    GP or a ModelListGP and handles both cases.
+    """
+    model_factory: Callable[[torch.Tensor, torch.Tensor], Any]
+    fit_fn: Callable[[Any], None]
+    capabilities: SurrogateCapabilities
+
+
+class _DKLFeatureExtractor(torch.nn.Module):
+    """2-layer MLP feature extractor for Deep Kernel Learning.
+
+    Tanh activations keep the latent space bounded, which helps the GP kernel
+    avoid degenerate length-scales when the NN over-spreads features early in
+    training.
+    """
+    def __init__(self, input_dim: int, hidden: int = 64, latent: int = 4):
+        super().__init__()
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(input_dim, hidden),
+            torch.nn.Tanh(),
+            torch.nn.Linear(hidden, hidden),
+            torch.nn.Tanh(),
+            torch.nn.Linear(hidden, latent),
+        )
+        self.latent_dim = latent
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+class DKLSingleTaskGP(SingleTaskGP):
+    """SingleTaskGP whose kernel operates on a learned latent space.
+
+    The feature extractor is jointly trained with GP hyperparameters via the
+    same MLL objective using Adam (see _fit_dkl). The covar_module is built
+    over the latent dimension, not the raw input dimension.
+    """
+    def __init__(
+        self,
+        train_X: torch.Tensor,
+        train_Y: torch.Tensor,
+        feature_extractor: _DKLFeatureExtractor,
+        likelihood: GaussianLikelihood,
+        input_transform: Optional[Any] = None,
+        outcome_transform: Optional[Any] = None,
+    ):
+        latent_dim = feature_extractor.latent_dim
+        covar_module = ScaleKernel(
+            MaternKernel(nu=2.5, ard_num_dims=latent_dim)
+        )
+        super().__init__(
+            train_X,
+            train_Y,
+            likelihood=likelihood,
+            covar_module=covar_module,
+            input_transform=input_transform,
+            outcome_transform=outcome_transform,
+        )
+        self.feature_extractor = feature_extractor
+
+    def forward(self, x: torch.Tensor) -> MultivariateNormal:
+        z = self.feature_extractor(x)
+        mean_x = self.mean_module(z)
+        covar_x = self.covar_module(z)
+        return MultivariateNormal(mean_x, covar_x)
+
+
+def _fit_dkl(model, *, lr: float = 1e-2, epochs: int = 200, patience: int = 25) -> None:
+    """Adam-based joint fit of feature extractor + GP hyperparameters.
+
+    Handles both DKLSingleTaskGP and ModelListGP-of-DKL by recursing per
+    sub-model. Each DKL has its own optimizer; objectives are not shared.
+    """
+    if hasattr(model, "models"):
+        for sub in model.models:
+            _fit_dkl(sub, lr=lr, epochs=epochs, patience=patience)
+        return
+
+    model.train()
+    model.likelihood.train()
+    mll = ExactMarginalLogLikelihood(model.likelihood, model)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    train_inputs = model.train_inputs[0]
+    train_targets = model.train_targets
+
+    best_loss = float("inf")
+    no_improve = 0
+    for _ in range(epochs):
+        optimizer.zero_grad()
+        output = model(train_inputs)
+        loss = -mll(output, train_targets)
+        loss.backward()
+        optimizer.step()
+        loss_val = loss.item()
+        if loss_val < best_loss - 1e-4:
+            best_loss = loss_val
+            no_improve = 0
+        else:
+            no_improve += 1
+            if no_improve >= patience:
+                break
+
+    model.eval()
+    model.likelihood.eval()
+
+
+def _continuous_normalize(input_dim: int, cat_dims: List[int]) -> Optional[Normalize]:
+    """Build a Normalize transform that skips categorical indices."""
+    cont_dims = [i for i in range(input_dim) if i not in cat_dims]
+    if not cont_dims:
+        return None
+    return Normalize(d=input_dim, indices=cont_dims)
+
+
+def build_surrogate(
+    key: str,
+    input_dim: int,
+    *,
+    kernel: str,
+    noise: str,
+    input_transform: str,
+    fixed_noise_std: Optional[float],
+    cat_dims: Optional[List[int]] = None,
+    dkl_config: Optional[Dict[str, int]] = None,
+) -> SurrogateSpec:
+    """Build a surrogate factory and matching fit function.
+
+    Returns a SurrogateSpec whose `model_factory(X, y)` yields a fresh model
+    instance — required because MOO instantiates one GP per output column and
+    wraps them in a ModelListGP. The same `fit_fn` works for either a single
+    model or a ModelListGP wrapper.
+    """
+    if key not in ALLOWED_SURROGATES:
+        logging.warning(f"Unknown surrogate '{key}', defaulting to 'single_task'")
+        key = "single_task"
+
+    if key == "single_task":
+        covar = build_covar_module(kernel, input_dim)
+        in_transform = build_input_transform(input_transform, input_dim)
+
+        def factory(X, y):
+            kwargs = dict(
+                covar_module=covar,
+                input_transform=in_transform,
+                outcome_transform=Standardize(m=1),
+            )
+            if fixed_noise_std is not None:
+                kwargs["train_Yvar"] = torch.full_like(y, float(fixed_noise_std) ** 2)
+            else:
+                kwargs["likelihood"] = build_likelihood(noise)
+            return SingleTaskGP(X, y, **kwargs)
+
+        return SurrogateSpec(
+            model_factory=factory,
+            fit_fn=lambda m: fit_gpytorch_mll(
+                SumMarginalLogLikelihood(m.likelihood, m) if hasattr(m, "models")
+                else ExactMarginalLogLikelihood(m.likelihood, m)
+            ),
+            capabilities=SurrogateCapabilities(
+                supports_fixed_noise=True,
+                supports_warp=True,
+                needs_cat_dims=False,
+                supports_thompson=True,
+            ),
+        )
+
+    if key == "mixed":
+        if not cat_dims:
+            raise ValueError("'mixed' surrogate requires non-empty cat_dims")
+        if input_transform == "warp":
+            logging.warning(
+                "'warp' input transform is incompatible with 'mixed' surrogate; "
+                "falling back to continuous-only Normalize."
+            )
+        if fixed_noise_std is not None:
+            logging.warning(
+                "'mixed' surrogate does not support fixed_noise_std; ignoring."
+            )
+        cont_normalize = _continuous_normalize(input_dim, cat_dims)
+
+        def factory(X, y):
+            return MixedSingleTaskGP(
+                X,
+                y,
+                cat_dims=list(cat_dims),
+                input_transform=cont_normalize,
+                outcome_transform=Standardize(m=1),
+            )
+
+        return SurrogateSpec(
+            model_factory=factory,
+            fit_fn=lambda m: fit_gpytorch_mll(
+                SumMarginalLogLikelihood(m.likelihood, m) if hasattr(m, "models")
+                else ExactMarginalLogLikelihood(m.likelihood, m)
+            ),
+            capabilities=SurrogateCapabilities(
+                supports_fixed_noise=False,
+                supports_warp=False,
+                needs_cat_dims=True,
+                supports_thompson=False,
+            ),
+        )
+
+    # key == "dkl"
+    cfg = dkl_config or {}
+    hidden = int(cfg.get("hidden", 64))
+    latent = int(cfg.get("latent", min(max(2, input_dim // 2), 4)))
+    epochs = int(cfg.get("epochs", 200))
+    lr = float(cfg.get("lr", 1e-2))
+    if fixed_noise_std is not None:
+        logging.warning("'dkl' surrogate does not support fixed_noise_std; ignoring.")
+
+    in_transform = Normalize(d=input_dim)
+
+    def factory(X, y):
+        feature_extractor = _DKLFeatureExtractor(input_dim, hidden=hidden, latent=latent)
+        feature_extractor = feature_extractor.to(dtype=X.dtype, device=X.device)
+        likelihood = build_likelihood(noise)
+        return DKLSingleTaskGP(
+            X,
+            y,
+            feature_extractor=feature_extractor,
+            likelihood=likelihood,
+            input_transform=in_transform,
+            outcome_transform=Standardize(m=1),
+        )
+
+    return SurrogateSpec(
+        model_factory=factory,
+        fit_fn=lambda m: _fit_dkl(m, lr=lr, epochs=epochs),
+        capabilities=SurrogateCapabilities(
+            supports_fixed_noise=False,
+            supports_warp=False,
+            needs_cat_dims=False,
+            supports_thompson=True,
+        ),
+    )
 
 
 def _acq_contour_levels(acq_map: np.ndarray, n_levels: int = 30) -> np.ndarray:
@@ -114,13 +378,18 @@ class SingleObjectiveOptimizer:
 
     def fit(self, X: np.ndarray, y: np.ndarray, bounds: List[Tuple[float, float]],
             model_config: Dict[str, str], feature_names: List[str] = None,
-            fixed_noise_std: Optional[float] = None):
-        """Fits the SingleTaskGP.
+            fixed_noise_std: Optional[float] = None,
+            cat_dims: Optional[List[int]] = None,
+            dkl_config: Optional[Dict[str, int]] = None):
+        """Fits the surrogate selected by ``model_config['surrogate']``.
 
-        If ``fixed_noise_std`` is provided, uses a FixedNoiseGaussianLikelihood
-        (via ``train_Yvar``) with noise variance = fixed_noise_std**2 applied
-        uniformly to all training points. In this case the ``noise`` entry in
-        ``model_config`` is ignored.
+        Default surrogate is ``"single_task"`` (vanilla SingleTaskGP). ``"mixed"``
+        uses MixedSingleTaskGP with the supplied ``cat_dims``. ``"dkl"`` uses a
+        Deep Kernel Learning GP fit with Adam over the joint MLL.
+
+        If ``fixed_noise_std`` is provided, the single_task surrogate uses a
+        FixedNoise likelihood (via ``train_Yvar``); other surrogates ignore it
+        with a warning.
         """
         self.X_train = torch.tensor(X, dtype=torch.double, device=self.device)
         self.y_train = torch.tensor(y, dtype=torch.double, device=self.device)
@@ -130,32 +399,20 @@ class SingleObjectiveOptimizer:
         self.bounds = torch.tensor(bounds, dtype=torch.double, device=self.device).T
         self.feature_names = feature_names or [f"x{i}" for i in range(self.input_dim)]
 
-        kernel_choice = model_config.get("kernel", "matern_2.5")
-        noise_choice = model_config.get("noise", "min_noise_low")
-        input_transform_choice = model_config.get("input_transform", "none")
-
-        covar = build_covar_module(kernel_choice, self.input_dim)
-        input_transform = build_input_transform(input_transform_choice, self.input_dim)
-
-        gp_kwargs = dict(
-            covar_module=covar,
-            input_transform=input_transform,
-            outcome_transform=Standardize(m=1),
+        spec = build_surrogate(
+            key=model_config.get("surrogate", "single_task"),
+            input_dim=self.input_dim,
+            kernel=model_config.get("kernel", "matern_2.5"),
+            noise=model_config.get("noise", "min_noise_low"),
+            input_transform=model_config.get("input_transform", "none"),
+            fixed_noise_std=fixed_noise_std,
+            cat_dims=cat_dims,
+            dkl_config=dkl_config,
         )
-        if fixed_noise_std is not None:
-            # train_Yvar activates the fixed-noise path internally; do NOT pass
-            # a likelihood alongside it.
-            gp_kwargs["train_Yvar"] = torch.full_like(
-                self.y_train, float(fixed_noise_std) ** 2
-            )
-        else:
-            gp_kwargs["likelihood"] = build_likelihood(noise_choice)
-
-        self.model = SingleTaskGP(self.X_train, self.y_train, **gp_kwargs)
-
+        self.model = spec.model_factory(self.X_train, self.y_train)
+        spec.fit_fn(self.model)
         self.mll = ExactMarginalLogLikelihood(self.model.likelihood, self.model)
-        fit_gpytorch_mll(self.mll)
-        
+
         # Clear stale acquisition function from previous fit
         self.acq_func = None
         self.acq_strategy_name = None
@@ -866,36 +1123,37 @@ class MultiObjectiveOptimizer:
 
     def fit(self, X: np.ndarray, y: np.ndarray, bounds: List[Tuple[float, float]],
             model_config: Dict[str, str], feature_names: List[str] = None,
-            fixed_noise_std: Optional[float] = None):
+            fixed_noise_std: Optional[float] = None,
+            cat_dims: Optional[List[int]] = None,
+            dkl_config: Optional[Dict[str, int]] = None):
+        """Fits independent surrogates per objective and wraps them in a
+        ModelListGP. Same surrogate kind is used for every objective.
+        """
         self.X_train = torch.tensor(X, dtype=torch.double, device=self.device)
         self.y_train = torch.tensor(y, dtype=torch.double, device=self.device)
         self.input_dim = self.X_train.shape[-1]
         self.output_dim = self.y_train.shape[-1]
         self.bounds = torch.tensor(bounds, dtype=torch.double, device=self.device).T
         self.feature_names = feature_names or [f"x{i}" for i in range(self.input_dim)]
-        # Independent GPs
-        models = []
-        for i in range(self.output_dim):
-            kernel_choice = model_config.get("kernel", "matern_2.5")
-            noise_choice = model_config.get("noise", "min_noise_low")
-            input_transform_choice = model_config.get("input_transform", "none")
 
-            y_i = self.y_train[:, i : i + 1]
-            gp_kwargs = dict(
-                covar_module=build_covar_module(kernel_choice, self.input_dim),
-                input_transform=build_input_transform(input_transform_choice, self.input_dim),
-                outcome_transform=Standardize(m=1),
-            )
-            if fixed_noise_std is not None:
-                gp_kwargs["train_Yvar"] = torch.full_like(y_i, float(fixed_noise_std) ** 2)
-            else:
-                gp_kwargs["likelihood"] = build_likelihood(noise_choice)
-
-            models.append(SingleTaskGP(self.X_train, y_i, **gp_kwargs))
+        spec = build_surrogate(
+            key=model_config.get("surrogate", "single_task"),
+            input_dim=self.input_dim,
+            kernel=model_config.get("kernel", "matern_2.5"),
+            noise=model_config.get("noise", "min_noise_low"),
+            input_transform=model_config.get("input_transform", "none"),
+            fixed_noise_std=fixed_noise_std,
+            cat_dims=cat_dims,
+            dkl_config=dkl_config,
+        )
+        models = [
+            spec.model_factory(self.X_train, self.y_train[:, i : i + 1])
+            for i in range(self.output_dim)
+        ]
         self.model = ModelListGP(*models)
+        spec.fit_fn(self.model)
         self.mll = SumMarginalLogLikelihood(self.model.likelihood, self.model)
-        fit_gpytorch_mll(self.mll)
-        
+
         # Clear stale acquisition function from previous fit
         self.acq_func = None
         self.acq_strategy_name = None
