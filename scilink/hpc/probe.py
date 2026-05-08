@@ -15,6 +15,8 @@ class HPCEnvironment:
     scratch: str = ""                         # $SCRATCH, $WORK, etc.
     lammps_binaries: list[str] = field(default_factory=list)
     lammps_modules: list[str] = field(default_factory=list)
+    vasp_binaries: list[str] = field(default_factory=list)
+    vasp_modules: list[str] = field(default_factory=list)
     container_runtimes: list[str] = field(default_factory=list)  # podman, singularity, …
     python_path: str = ""
     scheduler_name: str = ""
@@ -65,6 +67,34 @@ def probe_remote(conn: HPCConnection) -> HPCEnvironment:
             cleaned = tok.strip("()/")
             if "lammps" in cleaned.lower() and cleaned not in env.lammps_modules:
                 env.lammps_modules.append(cleaned)
+
+    # ── VASP binaries ─────────────────────────────────────
+    candidates = [
+        "vasp", "vasp_std", "vasp_gam", "vasp_ncl", "vasp_gpu",
+    ]
+    out, _, _ = conn.run(
+        " ; ".join(f'command -v {c} 2>/dev/null && echo "FOUND:{c}"' for c in candidates),
+        timeout=10,
+    )
+    for line in out.splitlines():
+        if line.startswith("FOUND:"):
+            env.vasp_binaries.append(line.split(":", 1)[1])
+
+    # ── VASP modules ──────────────────────────────────────
+    _, err, _ = conn.run(
+        'module avail vasp 2>&1 | grep -i vasp || true',
+        timeout=10,
+    )
+    out_combined = err
+    out2, _, _ = conn.run(
+        'module avail vasp 2>&1 | grep -i vasp || true',
+        timeout=10,
+    )
+    for text in (out_combined, out2):
+        for tok in text.split():
+            cleaned = tok.strip("()/")
+            if "vasp" in cleaned.lower() and cleaned not in env.vasp_modules:
+                env.vasp_modules.append(cleaned)
 
     # ── Container runtimes ────────────────────────────────
     for rt in ("podman", "docker", "singularity", "apptainer"):

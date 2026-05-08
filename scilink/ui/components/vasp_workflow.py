@@ -150,6 +150,42 @@ def _render_configure() -> None:
             "sidebar with a key set, or export SCILINK_API_KEY before starting."
         )
 
+    if has_hpc:
+        if _model:
+            st.caption(
+                f"Model: **{_model}** · HPC: 🟢 **{conn.profile.hostname}**"
+            )
+
+        env = st.session_state.get("hpc_env_probe")
+        if env is None:
+            from scilink.hpc.probe import probe_remote
+            with st.spinner("Probing remote environment…"):
+                env = probe_remote(conn)
+            st.session_state.hpc_env_probe = env
+
+        with st.expander("🔍 Detected environment"):
+            det_c1, det_c2 = st.columns(2)
+            with det_c1:
+                st.caption(f"**Home:** `{env.home}`")
+                if env.scratch:
+                    st.caption(f"**Scratch:** `{env.scratch}`")
+                if env.vasp_binaries:
+                    st.caption(
+                        f"**VASP binaries:** "
+                        f"{', '.join(f'`{b}`' for b in env.vasp_binaries)}"
+                    )
+                else:
+                    st.caption("**VASP binaries:** none found in PATH")
+            with det_c2:
+                if env.vasp_modules:
+                    st.caption(
+                        f"**VASP modules:** "
+                        f"{', '.join(f'`{m}`' for m in env.vasp_modules)}"
+                    )
+            if st.button("🔄 Re-probe", key="vasp_reprobe"):
+                st.session_state.hpc_env_probe = None
+                st.rerun()
+
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # Scientific objective
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
