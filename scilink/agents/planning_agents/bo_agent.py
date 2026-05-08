@@ -1106,6 +1106,20 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         # 6. Inspection
         print("  - 👀 BO Agent: Inspecting visuals...")
         visual_prompt = BO_VISUAL_INSPECTION_MOO_PROMPT if is_moo else BO_VISUAL_INSPECTION_PROMPT
+        # Anchor the inspector to the currently active config. The output
+        # spec already asks for "suggested_adjustments" — listing the active
+        # config alongside is enough context; no instruction needed.
+        active_cfg_lines = [
+            f"  Surrogate: {model_cfg.get('surrogate', 'single_task')}",
+            f"  Kernel: {model_cfg.get('kernel', 'matern_2.5')}",
+            f"  Noise: {model_cfg.get('noise', 'min_noise_low')}",
+            f"  Input transform: {model_cfg.get('input_transform', 'none')}",
+            f"  Acquisition: {acq_cfg.get('type', 'log_ei')}",
+        ]
+        acq_params = acq_cfg.get("params") or {}
+        if acq_params:
+            active_cfg_lines.append(f"  Acquisition params: {acq_params}")
+        visual_prompt += "\n\nCURRENT STRATEGY:\n" + "\n".join(active_cfg_lines)
         if sensitivity_data:
             sobol_text = "\n".join(f"  {k}: {v}" for k, v in sensitivity_data.items())
             visual_prompt += (
