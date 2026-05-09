@@ -1,3 +1,6 @@
+---
+description: VASP DFT input generation — INCAR parameter selection (functional, smearing, spin polarization, parallelization) and KPOINTS conventions for metals, semiconductors, slabs, molecules, and NEB calculations.
+---
 # VASP Input Generation Skill
 
 ## overview
@@ -51,7 +54,7 @@ MAGMOM values:
 Omitting ISPIN = 2 for magnetic systems will give incorrect energies,
 wrong magnetic ground states, and unreliable forces.
 
-## generation
+## implementation
 
 **CRITICAL: INCAR generation rules.** Always follow these:
 
