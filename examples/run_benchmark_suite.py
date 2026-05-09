@@ -280,10 +280,16 @@ def main() -> int:
                 max_refinement_cycles=args.max_cycles,
             )
             result = orchestrator.run_complete_workflow(case.description)
-            case_record["status"] = result.get("status", "unknown")
-            for key in ("structure_path", "incar_path", "kpoints_path"):
-                if key in result:
-                    case_record[key] = result[key]
+            # DFTOrchestrator returns workflow status under "final_status"
+            # ("success" / "failed_structure_generation" /
+            # "failed_vasp_generation"). Generated input filenames live
+            # in result["final_manifest"]["final_files"] (relative names).
+            case_record["status"] = result.get("final_status", "unknown")
+            case_record["steps_completed"] = result.get("steps_completed", [])
+            manifest = result.get("final_manifest", {})
+            if manifest.get("final_files"):
+                case_record["final_files"] = manifest["final_files"]
+                case_record["ready_for_vasp"] = bool(manifest.get("ready_for_vasp"))
 
             # Per-case submit.sh
             pseudo_dir = args.pseudo_dir or SLURM_DEFAULT_PSEUDO_DIR
@@ -311,8 +317,14 @@ def main() -> int:
     print()
     print("Per-case status:")
     for record in manifest["cases"]:
-        marker = "✓" if record["status"] != "input_generation_failed" else "✗"
-        print(f"  {marker} {record['label']:14s}  {record['status']}")
+        # ✓ only when the orchestrator reported success end-to-end.
+        # Anything else (failed_*, error, unknown, exception) → ✗.
+        is_ok = record.get("status") == "success"
+        marker = "✓" if is_ok else "✗"
+        ready = ""
+        if record.get("ready_for_vasp"):
+            ready = " (inputs ready for VASP)"
+        print(f"  {marker} {record['label']:14s}  {record['status']}{ready}")
     print()
     print("Next steps:")
     print(f"  1. Edit each */submit.sh: set PSEUDO_DIR + module loads to match your cluster.")
