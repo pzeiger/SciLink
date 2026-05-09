@@ -4,7 +4,7 @@ import atomai as aoi
 import json
 from typing import Callable
 
-from ....tools import atomistic_tools 
+from ....skills.image_analysis.atomic_stem import atomic_stem as atomistic_tools
 
 # --- TOOL CONTROLLERS ---
 

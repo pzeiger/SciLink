@@ -1,3 +1,6 @@
+---
+description: Segmentation of touching or overlapping objects (grains, particles, droplets, cells, bubbles) — separates detection from instance partitioning when binary masks merge neighbors.
+---
 # Overlapping / Touching Object Segmentation Skill
 
 ## overview
@@ -43,7 +46,7 @@ pipeline must include a splitting step between mask creation and
 measurement. The main approaches, in order of preference:
 
 1. **SAM instance segmentation** (preferred): Use `run_sam_analysis`
-   from `scilink.tools.sam`. SAM detects individual object instances
+   from `scilink.skills._shared.sam`. SAM detects individual object instances
    directly, even when they overlap, without requiring thresholding
    or binary masks. Works for any object shape. Tune via
    `sam_parameters` preset and `min_area`/`pruning_iou_threshold`.
@@ -86,7 +89,7 @@ channel (e.g., `image[:,:,0]`).
 **Tune all numeric parameters to the image** — the values below are
 syntax examples only, not recommended defaults.
 ```
-from scilink.tools.sam import run_sam_analysis
+from scilink.skills._shared.sam import run_sam_analysis
 result = run_sam_analysis(image_array, params={
     "sam_parameters": "default",     # always start from here; try "sensitive" if objects are missed
     "min_area": <tune>,              # minimum object area in pixels — set from image

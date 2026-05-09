@@ -10,8 +10,8 @@ from .instruct import (
     ATOMISTIC_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS
 )
 
-from ...tools import atomistic_tools 
-from ...tools.image_processor import (
+from ...skills.image_analysis.atomic_stem import atomic_stem as atomistic_tools
+from ...skills._shared.image_processor import (
     load_image, 
     preprocess_image, 
     convert_numpy_to_jpeg_bytes

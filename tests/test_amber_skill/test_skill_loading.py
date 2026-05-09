@@ -116,9 +116,9 @@ class TestAgentSkillIntegration:
                 # Build mass lookup
                 agent._mass_to_element = agent._build_mass_lookup()
 
-                # Initialize skill state
-                agent.skill_name = None
-                agent.skill_sections = None
+                # Initialize skill state (PR 3: self.skills is the canonical
+                # list; skill_name / skill_sections are read-only properties).
+                agent.skills = []
                 try:
                     from scilink.skills.loader import list_skills
                     agent._available_ff_skills = list_skills(domain="force_field")
@@ -162,7 +162,7 @@ class TestAgentSkillIntegration:
         """_get_skill_context() should return '' when no skill is loaded."""
         from unittest.mock import MagicMock
         agent = MagicMock()
-        agent.skill_sections = None
+        agent.skills = []
 
         # Call the real method
         from scilink.agents.sim_agents.force_field_agent import ForceFieldAgent
@@ -173,24 +173,21 @@ class TestAgentSkillIntegration:
         """_auto_select_skill should match AMBER FF names."""
         agent = agent_with_skill
         # Reset skill state
-        agent.skill_name = None
-        agent.skill_sections = None
+        agent.skills = []
 
         assert agent._auto_select_skill("AMBER ff19SB") is True
         assert agent.skill_name == "amber"
 
     def test_auto_select_skill_gaff(self, agent_with_skill):
         agent = agent_with_skill
-        agent.skill_name = None
-        agent.skill_sections = None
+        agent.skills = []
 
         assert agent._auto_select_skill("GAFF2") is True
         assert agent.skill_name == "amber"
 
     def test_auto_select_skill_non_amber(self, agent_with_skill):
         agent = agent_with_skill
-        agent.skill_name = None
-        agent.skill_sections = None
+        agent.skills = []
 
         # OPLS shouldn't match amber skill
         result = agent._auto_select_skill("OPLS-AA")

@@ -28,7 +28,7 @@ import pandas as pd
 
 os.environ.setdefault("UNSAFE_EXECUTION_OK", "true")
 
-from scilink.tools.bo_tools import get_optimizer
+from scilink.agents.planning_agents.bo_tools import get_optimizer
 from scilink.agents.planning_agents.bo_agent import BOAgent, _compute_budget_context
 from scilink.agents.planning_agents.planning_orchestrator import (
     PlanningOrchestratorAgent,

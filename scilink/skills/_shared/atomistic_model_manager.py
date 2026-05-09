@@ -94,7 +94,10 @@ def _download_and_extract_model(gdrive_id: str, output_dir: str, logger: logging
     Returns:
         bool: True if successful, False otherwise
     """
-    from . import atomistic_tools  # Import from current package
+    # atomistic_tools.py was renamed to atomic_stem.py and moved into the
+    # atomic_stem skill bundle. Imported with the legacy name to keep the
+    # call sites below stable.
+    from scilink.skills.image_analysis.atomic_stem import atomic_stem as atomistic_tools
     
     zip_filename = f"{output_dir}.zip"
     

@@ -45,7 +45,7 @@ def get_or_create_sam_model(params: dict) -> Any:
     Returns:
         Loaded SAM model (ParticleAnalyzer instance)
     """
-    from scilink.tools.particle_analyzer import ParticleAnalyzer
+    from scilink.skills._shared.particle_analyzer import ParticleAnalyzer
     
     # Create cache key from model-defining parameters
     cache_key = (
@@ -201,7 +201,7 @@ def calculate_sam_statistics(
             - mean_solidity: Mean solidity
             - Plus calibrated measurements if nm_per_pixel provided
     """
-    from scilink.tools.particle_analyzer import ParticleAnalyzer
+    from scilink.skills._shared.particle_analyzer import ParticleAnalyzer
     
     logger.info("   (Tool Info: Extracting morphological statistics...)")
     
@@ -304,7 +304,7 @@ def visualize_sam_results(
     Returns:
         RGB visualization array (uint8)
     """
-    from scilink.tools.particle_analyzer import ParticleAnalyzer
+    from scilink.skills._shared.particle_analyzer import ParticleAnalyzer
     
     # Use atomai's visualization
     overlay_image = ParticleAnalyzer.visualize_particles(
@@ -385,7 +385,7 @@ def get_particles_dataframe(sam_result: dict):
     Returns:
         pandas DataFrame with particle properties
     """
-    from scilink.tools.particle_analyzer import ParticleAnalyzer
+    from scilink.skills._shared.particle_analyzer import ParticleAnalyzer
     return ParticleAnalyzer.particles_to_dataframe(sam_result)
 
 
@@ -474,7 +474,7 @@ TOOL_SPEC = ToolSpec(
         "Segment Anything Model (SAM) instance segmentation. Detects individual "
         "object instances even when they touch or overlap."
     ),
-    import_line="from scilink.tools.sam import run_sam_analysis",
+    import_line="from scilink.skills._shared.sam import run_sam_analysis",
     signature="run_sam_analysis(image_array, params) -> dict",
     agents=["image_analysis"],
     when_to_use=(

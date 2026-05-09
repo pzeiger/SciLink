@@ -1,3 +1,6 @@
+---
+description: AMBER force-field parameterization for biomolecular and small-molecule MD via AmberTools (antechamber, tleap) and ParmEd export to LAMMPS data files.
+---
 ## Overview
 
 The AMBER (Assisted Model Building with Energy Refinement) family of force

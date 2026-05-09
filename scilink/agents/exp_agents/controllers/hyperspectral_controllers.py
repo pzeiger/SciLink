@@ -10,8 +10,8 @@ from typing import Callable
 
 import traceback
 
-from ....tools import hyperspectral_tools as tools
-from ....tools.image_processor import load_image
+from ....skills.hyperspectral.eels import eels as tools
+from ....skills._shared.image_processor import load_image
 from ..preprocess import HyperspectralPreprocessingAgent
 from ..instruct import (
     COMPONENT_INITIAL_ESTIMATION_INSTRUCTIONS,
@@ -24,7 +24,7 @@ from ..instruct import (
     SPECTROSCOPY_VISUAL_QC_INSTRUCTIONS,                  
 )
 
-from ....tools.hyperspectral_tools import AGENT_METADATA_KEYS_TO_STRIP
+from ....skills.hyperspectral.eels.eels import AGENT_METADATA_KEYS_TO_STRIP
 from ....executors import ExecutionTimeout
 
 

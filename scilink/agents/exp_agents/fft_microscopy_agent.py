@@ -21,9 +21,9 @@ from .instruct import (
 from .pipelines.fft_microscopy_pipelines import create_unified_microscopy_pipeline
 from ._deprecation import normalize_params
 
-from ...tools.image_processor import (
-    load_image, 
-    preprocess_image, 
+from ...skills._shared.image_processor import (
+    load_image,
+    preprocess_image,
     convert_numpy_to_jpeg_bytes
 )
 

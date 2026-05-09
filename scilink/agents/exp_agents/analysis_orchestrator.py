@@ -956,7 +956,7 @@ class AnalysisOrchestratorAgent:
         path = Path(data_path)
         ext = path.suffix.lower()
         if ext in {'.tif', '.tiff', '.png', '.jpg', '.jpeg', '.bmp'}:
-            from ...tools.image_processor import load_image
+            from ...skills._shared.image_processor import load_image
             return load_image(str(path))
         elif ext == '.npy':
             import numpy as np

@@ -10,7 +10,7 @@ import PIL.Image as PIL_Image
 
 from ...auth import get_internal_proxy_key
 from .parser_utils import parse_json_from_response 
-from ...tools.bo_tools import get_optimizer
+from .bo_tools import get_optimizer
 from .instruct import (
     BO_CONFIG_SOO_PROMPT,
     BO_CONFIG_MOO_PROMPT,

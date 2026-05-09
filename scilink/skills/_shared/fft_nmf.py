@@ -443,7 +443,7 @@ TOOL_SPEC = ToolSpec(
         "Sliding-window FFT + NMF decomposition. Factorizes local frequency patterns "
         "across an image into a small set of basis spectra and their spatial abundance maps."
     ),
-    import_line="from scilink.tools.fft_nmf import run_fft_nmf_analysis",
+    import_line="from scilink.skills._shared.fft_nmf import run_fft_nmf_analysis",
     signature="run_fft_nmf_analysis(image_array, params=None) -> dict",
     agents=["image_analysis"],
     when_to_use=(

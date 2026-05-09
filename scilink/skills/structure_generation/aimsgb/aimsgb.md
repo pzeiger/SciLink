@@ -1,3 +1,6 @@
+---
+description: Grain-boundary (CSL bicrystal) structure generation — tilt and twist boundaries with sigma-value parametrization for periodic DFT and MD simulations.
+---
 ## Overview
 
 The `aimsgb` library constructs **grain boundary (GB) structures** — bicrystals

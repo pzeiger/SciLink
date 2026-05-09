@@ -23,7 +23,7 @@ def load_curve_data(data_path: str) -> np.ndarray:
     # NeXus / HDF5 — pull the signal and (when present) its axis so we
     # can return (X, Y) pairs for callers that expect a 2D layout.
     if data_path.lower().endswith(('.h5', '.hdf5')):
-        from .hdf5_utils import load_hdf5_signal
+        from scilink.utils.hdf5_utils import load_hdf5_signal
         signal, axes = load_hdf5_signal(data_path, return_axes=True)
         if signal.ndim == 1 and axes and axes[0] is not None and axes[0].size == signal.size:
             return np.column_stack([axes[0], signal])

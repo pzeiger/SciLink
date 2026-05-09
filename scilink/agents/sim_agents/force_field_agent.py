@@ -20,7 +20,7 @@ from ...skills.loader import load_skill, list_skills
 
 # ── SKILL INTEGRATION ── amber tools (conditional import)
 try:
-    from ...tools import amber_tools
+    from ...skills.force_field.amber import amber as amber_tools
     _AMBER_TOOLS_AVAILABLE = True
 except ImportError:
     _AMBER_TOOLS_AVAILABLE = False
@@ -37,7 +37,8 @@ class ForceFieldAgent:
     4. Validates parameters for scientific rigor
 
     Now skill-aware: loads domain-specific knowledge from
-    scilink/skills/force_field/*.md and uses it as LLM context (RAG)
+    scilink/skills/force_field/<name>/<name>.md bundles and uses it as
+    LLM context (RAG)
     to make better decisions. When AmberTools are available and the AMBER
     skill is active, delegates to the full AMBER pipeline
     (antechamber → tleap → ParmEd → LAMMPS data file).
@@ -144,9 +145,8 @@ class ForceFieldAgent:
         }
         self._mass_to_element = self._build_mass_lookup()
 
-        # ── SKILL INTEGRATION ── Skill state
-        self.skill_name: Optional[str] = None
-        self.skill_sections: Optional[Dict[str, str]] = None
+        # ── SKILL INTEGRATION ── Skill state (multi-skill aware)
+        self.skills: list[Dict[str, Any]] = []
         try:
             self._available_ff_skills = list_skills(domain="force_field")
         except Exception:
@@ -155,45 +155,81 @@ class ForceFieldAgent:
         if skill:
             self._load_skill(skill)
 
+    # Backwards-compat singular accessors; reflect the *first* loaded skill so
+    # logging, output dicts, and conditional checks like
+    # ``if self.skill_name == "amber"`` continue to work without changes.
+
+    @property
+    def skill_name(self) -> Optional[str]:
+        return self.skills[0]["name"] if self.skills else None
+
+    @property
+    def skill_sections(self) -> Optional[Dict[str, str]]:
+        return self.skills[0] if self.skills else None
+
+    @property
+    def active_skill_names(self) -> list[str]:
+        """All currently-loaded skills, in load order."""
+        return [s["name"] for s in self.skills]
+
     # ================================================================
     # SKILL METHODS
     # ================================================================
 
-    def _load_skill(self, skill: str) -> bool:
+    def _load_skill(self, skill) -> bool:
         """
-        Load a force-field skill by name or path.
+        Load one or more force-field skills.
 
         Args:
-            skill: Skill name (e.g., "amber") or path to a .md file.
+            skill: Skill name string, path to a .md file, or a list mixing
+                names and paths. Multiple skills can be loaded simultaneously;
+                they're concatenated when injected into LLM prompts.
 
         Returns:
-            True if the skill was loaded successfully.
+            True if at least one skill loaded successfully.
         """
-        try:
-            parsed = load_skill(skill, domain="force_field")
-            self.skill_name = parsed["name"]
-            self.skill_sections = parsed
-            self.logger.info(f"📖 Loaded force field skill: {self.skill_name}")
-            return True
-        except FileNotFoundError:
-            self.logger.warning(
-                f"Skill '{skill}' not found. "
-                f"Available: {self._available_ff_skills}"
-            )
-            return False
+        skills_input: list[str] = (
+            [skill] if isinstance(skill, str) else list(skill or [])
+        )
+        loaded_any = False
+        for s in skills_input:
+            try:
+                parsed = load_skill(s, domain="force_field")
+            except FileNotFoundError:
+                self.logger.warning(
+                    f"Skill '{s}' not found. "
+                    f"Available: {self._available_ff_skills}"
+                )
+                continue
+            # Skip duplicates so callers can re-pass the same set safely.
+            if any(existing["name"] == parsed["name"] for existing in self.skills):
+                self.logger.info(f"Skill already loaded: {parsed['name']}")
+                continue
+            self.skills.append(parsed)
+            self.logger.info(f"📖 Loaded force field skill: {parsed['name']}")
+            loaded_any = True
+        return loaded_any
 
     def _auto_select_skill(self, force_field: str) -> bool:
         """
-        Automatically select and load the best skill for a force field.
+        Automatically select and load the best skill(s) for a force field.
+
+        A single ``force_field`` description may mention multiple families
+        (e.g., "AMBER ff14SB protein with GAFF small molecule"); every
+        family whose keywords match is loaded so the LLM gets context for
+        each. With only AMBER currently shipped, the multi-load path is
+        speculative but exercised by tests.
 
         Args:
             force_field: Force field name from LLM selection.
 
         Returns:
-            True if a skill was loaded.
+            True if at least one skill was loaded.
         """
-        if self.skill_sections is not None:
-            self.logger.info(f"Skill already loaded: {self.skill_name}")
+        if self.skills:
+            self.logger.info(
+                f"Skill already loaded: {', '.join(self.active_skill_names)}"
+            )
             return True
 
         ff_lower = (force_field or "").lower()
@@ -207,14 +243,18 @@ class ForceFieldAgent:
             # "opls": ["opls", "opls-aa"],
         }
 
+        matched: list[str] = []
         for skill_name, keywords in skill_map.items():
             if any(kw in ff_lower for kw in keywords):
                 if skill_name in self._available_ff_skills:
-                    return self._load_skill(skill_name)
+                    matched.append(skill_name)
                 else:
                     self.logger.info(
                         f"Skill '{skill_name}' would match but is not installed"
                     )
+
+        if matched:
+            return self._load_skill(matched)
 
         self.logger.info(f"No matching skill for '{force_field}'")
         return False
@@ -227,6 +267,9 @@ class ForceFieldAgent:
         """
         Get skill knowledge formatted for LLM prompt injection (RAG).
 
+        With multiple skills loaded, content from each is concatenated under
+        per-skill headers so the LLM can attribute guidance to its source.
+
         Args:
             section: Specific section to retrieve (e.g., "planning", "validation").
                      If None, returns the overview.
@@ -235,33 +278,35 @@ class ForceFieldAgent:
         Returns:
             Formatted context string, or "" if no skill loaded.
         """
-        if not self.skill_sections:
+        if not self.skills:
             return ""
 
-        if include_all:
-            parts = [f"=== Domain Knowledge: {self.skill_name} ==="]
-            for key in ("overview", "planning", "analysis", "interpretation",
-                        "validation", "implementation"):
-                content = self.skill_sections.get(key, "")
+        blocks: list[str] = []
+        for skill in self.skills:
+            name = skill["name"]
+            if include_all:
+                parts = [f"=== Domain Knowledge: {name} ==="]
+                for key in ("overview", "planning", "analysis", "interpretation",
+                            "validation", "implementation"):
+                    content = skill.get(key, "")
+                    if content:
+                        parts += [f"\n--- {key.upper()} ---", content]
+                blocks.append("\n".join(parts))
+            elif section:
+                content = skill.get(section, "")
                 if content:
-                    parts += [f"\n--- {key.upper()} ---", content]
-            return "\n".join(parts)
+                    blocks.append(
+                        f"=== Domain Knowledge ({name} — {section}) ===\n"
+                        f"{content}"
+                    )
+            else:
+                overview = skill.get("overview", "")
+                if overview:
+                    blocks.append(
+                        f"=== Domain Knowledge: {name} ===\n{overview}"
+                    )
 
-        if section:
-            content = self.skill_sections.get(section, "")
-            if content:
-                return (
-                    f"=== Domain Knowledge ({self.skill_name} — {section}) ===\n"
-                    f"{content}"
-                )
-            return ""
-
-        # Default: overview
-        overview = self.skill_sections.get("overview", "")
-        return (
-            f"=== Domain Knowledge: {self.skill_name} ===\n{overview}"
-            if overview else ""
-        )
+        return "\n\n".join(blocks)
 
     def _is_amber_force_field(self, force_field: str) -> bool:
         """Return True if the selected force field is AMBER-family."""
@@ -930,7 +975,7 @@ Provide a brief summary of what the results mean and any actions needed.
 
     def _convert_amber_to_lammps_inline(self, prmtop, inpcrd):
         output_data = os.path.join(self.working_dir, "system.data")
-        from ...tools.amber_tools import convert_amber_to_lammps
+        from ...skills.force_field.amber.amber import convert_amber_to_lammps
         return convert_amber_to_lammps(prmtop, inpcrd, output_data)
 
     # ================================================================
@@ -1107,8 +1152,11 @@ Provide a brief summary of what the results mean and any actions needed.
         # ── SKILL INTEGRATION ── Auto-select skill if not already loaded
         self._auto_select_skill(force_field)
 
-        # ── SKILL INTEGRATION ── Route to AMBER pipeline if skill + tools available
-        if self.skill_name == "amber" and self._is_amber_force_field(force_field):
+        # ── SKILL INTEGRATION ── Route to AMBER pipeline if skill + tools available.
+        # Use ``active_skill_names`` rather than the ``skill_name`` property so
+        # the gate works correctly when a non-AMBER skill is loaded first
+        # alongside ``amber`` (multi-skill support).
+        if "amber" in self.active_skill_names and self._is_amber_force_field(force_field):
             tools_status = self._check_amber_tools_available()
 
             if tools_status["available"] and pdb_file:
@@ -1912,7 +1960,7 @@ Include only the JSON response with no additional text.
                 validation["passed"] = False
 
             # ── SKILL INTEGRATION ── skill-informed range checks
-            if skill_validation and self.skill_name == "amber":
+            if skill_validation and "amber" in self.active_skill_names:
                 if epsilon > 0.5 and props.get("name", "") not in ["X", "?"]:
                     validation["warnings"].append(
                         f"Epsilon {epsilon} for type {atom_type} exceeds typical AMBER range (0-0.5 kcal/mol)"

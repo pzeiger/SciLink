@@ -281,7 +281,7 @@ Environment Variables:
 
 def _check_tools() -> int:
     """Check AmberTools availability and print status."""
-    from scilink.tools.amber_tools import check_amber_tools
+    from scilink.skills.force_field.amber.amber import check_amber_tools
 
     print("\n🔍 Checking AmberTools availability...\n")
     tools = check_amber_tools()
@@ -359,7 +359,7 @@ def _run_preparation(
 ) -> int:
     """Run the AMBER preparation pipeline."""
 
-    from scilink.tools.amber_tools import check_amber_tools
+    from scilink.skills.force_field.amber.amber import check_amber_tools
     from scilink.agents.sim_agents.force_field_agent import ForceFieldAgent
 
     output_path = Path(output_dir)

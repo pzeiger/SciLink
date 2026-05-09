@@ -745,8 +745,15 @@ You need to convert accumulated knowledge into a structured, reusable skill docu
 {planning_details}
 
 **Instructions:**
-Organize the knowledge into exactly five sections. Each section should contain actionable, \
-specific guidance derived from the source knowledge. Use markdown formatting.
+Begin the document with a YAML frontmatter block containing a single one-line `description:` \
+field — a self-contained sentence that lets a downstream agent decide whether this skill is \
+relevant. Do not end the description with a period. Then organize the knowledge into exactly \
+five sections, each containing actionable, specific guidance derived from the source knowledge. \
+Use markdown formatting.
+
+---
+description: <one-line, self-contained, no trailing period>
+---
 
 ## overview
 Describe what domain/technique this skill covers, what types of experiments it applies to, \
@@ -768,8 +775,8 @@ experimental outcomes. Include quantitative benchmarks from the key findings.
 Define quality criteria, acceptable tolerance ranges, failure indicators, and sanity checks. \
 Include any corrections from user feedback.
 
-Output ONLY the skill document content in markdown, starting with `## overview`. \
-Do not wrap in code blocks."""
+Output ONLY the skill document content in markdown, starting with the `---` frontmatter block \
+followed by `## overview`. Do not wrap in code blocks."""
 
 PLANNING_SKILL_UPDATE_INSTRUCTIONS = """You are an expert scientific research strategist. \
 You need to update an existing skill document with new knowledge while preserving what is already correct.
@@ -789,9 +796,13 @@ You need to update an existing skill document with new knowledge while preservin
 4. When there is a conflict, prefer the newer knowledge but note the discrepancy.
 5. Maintain the five-section structure (overview, planning, implementation, interpretation, validation).
 6. Add new quantitative details, parameter ranges, or heuristics from the new knowledge.
+7. Preserve the YAML frontmatter at the top (the `---`-delimited block). If the new knowledge \
+materially changes the skill's purpose, update the `description:` field; otherwise leave it intact. \
+If the existing skill has no frontmatter, add one with a one-line `description:` synthesized from \
+the overview.
 
-Output ONLY the updated skill document content in markdown, starting with `## overview`. \
-Do not wrap in code blocks."""
+Output ONLY the updated skill document content in markdown, starting with the `---` frontmatter \
+block followed by `## overview`. Do not wrap in code blocks."""
 
 
 KNOWLEDGE_QUERY_CODEGEN_PROMPT = """Complete the Python script below to answer a question about a data file.

@@ -21,8 +21,8 @@ from .pipelines.hyperspectral_pipelines import (
     create_hyperspectral_iteration_pipeline,
     create_hyperspectral_synthesis_pipeline
 )
-from ...tools.image_processor import load_image, convert_numpy_to_jpeg_bytes
-from ...tools.curve_fitting_tools import load_curve_data, plot_curve_to_bytes
+from ...skills._shared.image_processor import load_image, convert_numpy_to_jpeg_bytes
+from ...skills._shared.curve_fitting_tools import load_curve_data, plot_curve_to_bytes
 from ...executors import require_sandbox_approval
 from ...skills.loader import load_skill
 
@@ -261,17 +261,9 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Initialize and Run Pipeline
         self._init_state(data_path=data_path, metadata=system_info)
 
-        # Load skill if provided
-        skill_state = {"skill_name": None, "skill_sections": None}
-        if skill:
-            try:
-                parsed = load_skill(skill, domain="hyperspectral")
-                skill_state = {"skill_name": parsed["name"], "skill_sections": parsed}
-                self.logger.info(f"   📖 Skill loaded: {parsed['name']}")
-            except FileNotFoundError:
-                self.logger.warning(
-                    f"   Skill '{skill}' not found — proceeding without domain skill"
-                )
+        # Load skill(s) if provided. Accepts a single name/path or a list
+        # — see PR 3 multi-skill support.
+        skill_state = self._load_skills_to_state(skill, domain="hyperspectral")
 
         # Load auxiliary data if provided
         auxiliary_state = {
@@ -467,7 +459,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             if lower.endswith('.npy'):
                 data = np.load(data_path)
             elif lower.endswith(('.h5', '.hdf5')):
-                from ...tools.hdf5_utils import load_hdf5_signal
+                from ...utils.hdf5_utils import load_hdf5_signal
                 data = load_hdf5_signal(data_path)
             else:
                 raise ValueError(
@@ -611,7 +603,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         Main execution engine using Queue-Based Branching architecture.
         """
         if skill_state is None:
-            skill_state = {"skill_name": None, "skill_sections": None}
+            skill_state = {"skill_name": None, "skill_sections": None, "skills_loaded": []}
         if auxiliary_state is None:
             auxiliary_state = {
                 "auxiliary_plot_bytes": None,

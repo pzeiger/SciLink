@@ -1,3 +1,6 @@
+---
+description: EELS spectrum-image analysis — core-loss edges for elemental and chemical-state mapping, low-loss plasmons for dielectric response, on STEM datacubes.
+---
 # EELS Spectrum Imaging Skill
 
 ## overview

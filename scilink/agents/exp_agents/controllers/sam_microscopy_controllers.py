@@ -26,12 +26,12 @@ from ..instruct import (
     SAM_SINGLE_IMAGE_SYNTHESIS_INSTRUCTIONS,
 )
 
-from ....tools.image_processor import (
+from ....skills._shared.image_processor import (
     load_image,
     preprocess_image,
     convert_numpy_to_jpeg_bytes
 )
-from ....tools.sam import (
+from ....skills._shared.sam import (
     get_or_create_sam_model,
     run_sam_analysis,
     visualize_sam_results,

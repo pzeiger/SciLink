@@ -20,7 +20,7 @@ def load_image(image_path):
             if ext == '.npy':
                 img_array = np.load(image_path)
             else:
-                from .hdf5_utils import load_hdf5_signal
+                from scilink.utils.hdf5_utils import load_hdf5_signal
                 img_array = load_hdf5_signal(image_path)
             if img_array.dtype == np.uint8:
                 return img_array

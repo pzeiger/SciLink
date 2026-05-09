@@ -120,10 +120,13 @@ class SimulationOrchestratorTools:
         # =====================================================================
         # 1. GENERATE STRUCTURE  (build → validate → refine, internal)
         # =====================================================================
-        def generate_structure(description: str, skill: str = None,
+        def generate_structure(description: str, skill=None,
                                validate_and_refine: bool = True,
                                max_refinement_cycles: int = 3,
                                based_on_slug: str = None) -> str:
+            # ``skill`` accepts str | list[str] | None — multi-skill support
+            # via _load_skill_content. Single string and single-element list
+            # behave identically.
             slug = self._make_slug(description)
             workdir = self.orch.structures_dir / slug
             workdir.mkdir(parents=True, exist_ok=True)
@@ -281,13 +284,20 @@ class SimulationOrchestratorTools:
                     ),
                 },
                 "skill": {
-                    "type": "string",
+                    # Single skill name or list of names — multi-skill
+                    # support via _load_skill_content. Schema permits both
+                    # via JSON Schema ``oneOf``.
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
                     "description": (
-                        "Optional name of a built-in structure-generation "
-                        "skill to load as additional library guidance. "
-                        "Currently available: 'aimsgb' (grain boundaries, "
-                        "bicrystals, Σ-value parametrized interfaces). Omit "
-                        "for plain ASE / pymatgen workflows."
+                        "Optional name (or list of names) of built-in "
+                        "structure-generation skills to load as additional "
+                        "library guidance. Currently available: 'aimsgb' "
+                        "(grain boundaries, bicrystals, Σ-value parametrized "
+                        "interfaces). Omit for plain ASE / pymatgen "
+                        "workflows; pass a list to combine multiple skills."
                     ),
                 },
                 "validate_and_refine": {
@@ -1833,29 +1843,45 @@ class SimulationOrchestratorTools:
 
         return max_cycles, None
 
-    def _load_skill_content(self, skill_name: str) -> Optional[str]:
-        """Resolve a skill name to its content, formatted as a single block.
+    def _load_skill_content(self, skill) -> Optional[str]:
+        """Resolve one or more skill names to their content as a single block.
 
-        Resolution order:
-          1. Built-in skills under scilink/skills/structure_generation/
+        ``skill`` accepts a single name/path string, a list of names/paths,
+        or ``None``. With multiple skills, each is rendered as its own
+        ``# Skill: <name>`` section and the results are concatenated.
+
+        Resolution order per skill:
+          1. Built-in skills under scilink/skills/structure_generation/<name>/
           2. User-registered skills via orchestrator.register_skill()
 
         Returns None on any failure (fail-closed; the structure-gen prompt
-        falls through to the generic template). Doesn't raise.
+        falls through to the generic template). Skills that fail to resolve
+        are logged as warnings and dropped — others still render.
         """
-        if not skill_name:
+        if not skill:
             return None
+        names: list[str] = [skill] if isinstance(skill, str) else list(skill)
+        names = [n for n in names if n]
+        if not names:
+            return None
+
+        rendered = [block for n in names if (block := self._render_one_skill(n))]
+        if not rendered:
+            return None
+        return "\n\n".join(rendered)
+
+    def _render_one_skill(self, skill_name: str) -> Optional[str]:
+        """Resolve and render a single skill; helper for ``_load_skill_content``."""
         try:
             from scilink.skills.loader import load_skill
             parsed = load_skill(skill_name, domain="structure_generation")
         except FileNotFoundError:
-            # Fall back to user-registered skills (orchestrator-level)
             user_skills = getattr(self.orch, "_custom_skills", {}) or {}
             path = user_skills.get(skill_name)
             if not path:
                 self.logger.warning(
                     f"Skill '{skill_name}' not found in built-ins or "
-                    "user-registered skills. Proceeding without skill content."
+                    "user-registered skills. Skipping this skill."
                 )
                 return None
             try:
@@ -1868,7 +1894,9 @@ class SimulationOrchestratorTools:
             self.logger.warning(f"Failed to load skill '{skill_name}': {e}")
             return None
 
-        # Concatenate the populated sections in a stable order.
+        # Concatenate populated canonical sections, then any non-canonical
+        # ``extras`` so author-written content (e.g. "Common pitfalls")
+        # isn't silently dropped.
         section_order = ["overview", "planning", "implementation",
                          "validation", "interpretation", "analysis"]
         chunks = []
@@ -1876,6 +1904,10 @@ class SimulationOrchestratorTools:
             body = (parsed.get(sec) or "").strip()
             if body:
                 chunks.append(f"### {sec.capitalize()}\n\n{body}")
+        for heading, body in (parsed.get("extras") or {}).items():
+            body = (body or "").strip()
+            if body:
+                chunks.append(f"### {heading.capitalize()}\n\n{body}")
         if not chunks:
             return None
         header = f"# Skill: {parsed.get('name') or skill_name}"

@@ -1,0 +1,178 @@
+"""Auto-discovery registry for skill helper modules.
+
+Walks ``scilink/skills/_shared/`` and every per-skill bundle once, collects
+``TOOL_SPEC`` (single) or ``TOOL_SPECS`` (list) attributes from each public
+module, filters by agent tag, and caches the result.
+
+Adding a new tool:
+    1. Write the function as a module either under ``scilink/skills/_shared/``
+       (cross-skill helper) or inside the relevant ``scilink/skills/<domain>/<name>/``
+       skill bundle (skill-specific helper).
+    2. Add ``TOOL_SPEC = ToolSpec(...)`` (or append to ``TOOL_SPECS``) with
+       ``agents=["image_analysis", ...]``.
+    3. Done — no central list to edit.
+"""
+
+from __future__ import annotations
+
+import importlib
+import logging
+import pkgutil
+from functools import lru_cache
+
+from ._spec import ToolSpec
+
+_logger = logging.getLogger(__name__)
+
+
+# Libraries available in the execution sandbox (verified against the host
+# Python environment, which the sandbox shares via subprocess.Popen in
+# scilink.executors).
+IMAGE_ANALYSIS_LIBRARIES: list[tuple[str, str]] = [
+    ("numpy", "array ops, FFT, linear algebra"),
+    ("scipy", "signal / image processing (ndimage), optimize, stats, spatial"),
+    ("skimage", "segmentation, morphology, feature, measure, filters, transform"),
+    ("cv2", "OpenCV — thresholding, contours, morphology, template matching"),
+    ("sklearn", "clustering, PCA, classifiers for pixel / region classification"),
+    ("matplotlib", "plotting"),
+    ("pandas", "tabular output (particle lists, atom position tables)"),
+]
+
+
+def format_library_inventory() -> str:
+    """Render ``IMAGE_ANALYSIS_LIBRARIES`` as a compact markdown list."""
+    lines = [f"- `{name}` — {desc}" for name, desc in IMAGE_ANALYSIS_LIBRARIES]
+    return "\n".join(lines)
+
+
+def format_tool_inventory(
+    agent: str = "image_analysis",
+    active_skills: list[str] | None = None,
+) -> str:
+    """Render the full tool + library inventory for ``agent`` as one string.
+
+    Used by prompts that need a drop-in ``{tool_inventory}`` substitution
+    (code-gen, script-correction) — complements ``_append_tool_inventory``
+    which is list-based for multi-part prompts. Both draw from the same
+    registry so there is a single source of truth.
+
+    ``active_skills`` controls which per-skill bundle tools are visible;
+    see :func:`get_tools_for`.
+    """
+    parts: list[str] = []
+    specs = get_tools_for(agent, active_skills=active_skills)
+    if specs:
+        parts.append("## Available Tools")
+        parts.append(
+            "The following tools are registered and callable from generated scripts. "
+            "Prefer a tool when it fits; combine with custom numpy/scipy/skimage/cv2 "
+            "code for post-processing. A tool call anchoring the hard step followed "
+            "by custom code is usually more reliable than an all-custom pipeline."
+        )
+        for spec in specs:
+            parts.append(spec.to_prompt())
+
+    parts.append("## Available Libraries")
+    parts.append(
+        "These libraries are importable in the execution sandbox. Use them for "
+        "custom code when no registered tool fits."
+    )
+    parts.append(format_library_inventory())
+
+    return "\n\n".join(parts)
+
+
+def _collect_specs_from_module(mod) -> list[ToolSpec]:
+    """Return ToolSpec list declared by a module (supports TOOL_SPEC and TOOL_SPECS)."""
+    specs: list[ToolSpec] = []
+    single = getattr(mod, "TOOL_SPEC", None)
+    if isinstance(single, ToolSpec):
+        specs.append(single)
+    multi = getattr(mod, "TOOL_SPECS", None)
+    if isinstance(multi, (list, tuple)):
+        specs.extend(s for s in multi if isinstance(s, ToolSpec))
+    return specs
+
+
+@lru_cache(maxsize=None)
+def _shared_specs() -> tuple[ToolSpec, ...]:
+    """Specs declared by modules under ``scilink/skills/_shared/``.
+
+    These are cross-skill helpers; visibility is gated by the ``agents=`` tag.
+    Cached for the life of the process. Module import failures are logged
+    and skipped — an optional heavy dependency should not prevent discovery
+    of the other tools.
+    """
+    from . import __path__ as _shared_path  # scilink/skills/_shared/
+
+    collected: list[ToolSpec] = []
+    for info in pkgutil.iter_modules(_shared_path):
+        if info.name.startswith("_"):
+            continue
+        module_path = f"scilink.skills._shared.{info.name}"
+        try:
+            mod = importlib.import_module(module_path)
+        except Exception as exc:
+            _logger.debug("Skipping %s: %s", module_path, exc)
+            continue
+        collected.extend(_collect_specs_from_module(mod))
+    return tuple(collected)
+
+
+@lru_cache(maxsize=None)
+def _per_skill_specs() -> dict[tuple[str, str], tuple[ToolSpec, ...]]:
+    """Specs declared inside skill bundles, keyed by ``(domain, skill_name)``.
+
+    Visibility is gated by *bundle membership*, not the ``agents=`` tag —
+    a tool living inside a skill folder is implicitly scoped to that skill.
+    """
+    from scilink.skills.loader import list_all_skills, _SKILLS_DIR
+
+    result: dict[tuple[str, str], list[ToolSpec]] = {}
+    for domain, names in list_all_skills().items():
+        for name in names:
+            skill_dir = _SKILLS_DIR / domain / name
+            specs: list[ToolSpec] = []
+            for py_file in sorted(skill_dir.glob("*.py")):
+                if py_file.stem.startswith("_"):
+                    continue
+                module_path = f"scilink.skills.{domain}.{name}.{py_file.stem}"
+                try:
+                    mod = importlib.import_module(module_path)
+                except Exception as exc:
+                    _logger.debug("Skipping %s: %s", module_path, exc)
+                    continue
+                specs.extend(_collect_specs_from_module(mod))
+            if specs:
+                result[(domain, name)] = specs
+    return {k: tuple(v) for k, v in result.items()}
+
+
+def _all_specs() -> tuple[ToolSpec, ...]:
+    """Every declared ToolSpec, shared + per-skill. Used by tests / introspection."""
+    out: list[ToolSpec] = list(_shared_specs())
+    for specs in _per_skill_specs().values():
+        out.extend(specs)
+    return tuple(out)
+
+
+def get_tools_for(agent: str, active_skills: list[str] | None = None) -> list[ToolSpec]:
+    """Return ToolSpecs visible to ``agent`` given the currently-active skills.
+
+    Visibility rules:
+      * Specs from ``_shared/`` are always considered, filtered by the spec's
+        ``agents=`` tag.
+      * Specs from a skill bundle are considered only when the skill's name
+        appears in ``active_skills``. The bundle's location implies scope —
+        the spec's ``agents=`` field is ignored for per-skill specs.
+
+    Passing ``active_skills=None`` returns only shared specs (no skill is
+    loaded). Pass an empty list for the same behavior.
+    """
+    visible = [s for s in _shared_specs() if agent in s.agents]
+    if active_skills:
+        active_set = set(active_skills)
+        for (_domain, name), specs in _per_skill_specs().items():
+            if name in active_set:
+                visible.extend(specs)
+    return visible

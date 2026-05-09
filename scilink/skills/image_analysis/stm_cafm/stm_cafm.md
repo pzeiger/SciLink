@@ -1,3 +1,6 @@
+---
+description: STM and low-bias conductive-AFM image analysis — interprets bias-dependent features as local density of states or conductance rather than directly as atomic positions.
+---
 # STM & Conductive AFM (low-bias) Imaging Skill
 
 ## overview

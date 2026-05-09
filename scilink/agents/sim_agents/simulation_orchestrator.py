@@ -120,7 +120,7 @@ inside `generate_structure` when MP_API_KEY is available.
 
 
 def _list_builtin_structure_skills() -> list:
-    """List built-in skills under scilink/skills/structure_generation/.
+    """List built-in skills under scilink/skills/structure_generation/<name>/.
 
     Returns an empty list on any error (the system prompt simply omits the
     section when there's nothing to show)."""

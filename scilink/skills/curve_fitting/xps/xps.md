@@ -1,3 +1,6 @@
+---
+description: X-ray photoelectron spectroscopy peak fitting (Shirley/Tougaard backgrounds, asymmetric line shapes) for chemical-state analysis from binding energies.
+---
 # XPS Curve Fitting Skill
 
 ## overview

@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from io import BytesIO
 from .spectral_unmixer import SpectralUnmixer
-from .image_processor import create_multi_abundance_overlays
+from scilink.skills._shared.image_processor import create_multi_abundance_overlays
 import matplotlib.gridspec as gridspec
 from sklearn.decomposition import PCA
 import cv2

@@ -373,7 +373,7 @@ class SeriesScoutController:
             return spectrum_stack[idx]
         data_path = state.get("spectrum_paths", [])[idx]
         try:
-            from ....tools.curve_fitting_tools import load_curve_data
+            from ....skills._shared.curve_fitting_tools import load_curve_data
             return load_curve_data(data_path)
         except ImportError:
             if data_path.endswith('.npy'):
@@ -1641,7 +1641,7 @@ Your guidance: '''
         """Load curve data from file, handling various formats."""
         # Try using the project's load_curve_data function first
         try:
-            from ....tools.curve_fitting_tools import load_curve_data
+            from ....skills._shared.curve_fitting_tools import load_curve_data
             return load_curve_data(data_path)
         except ImportError:
             pass

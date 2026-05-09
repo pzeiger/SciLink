@@ -12,7 +12,7 @@ Tool modules in ``scilink/tools/`` declare their spec at module level:
     # multi-function module
     TOOL_SPECS = [ToolSpec(...), ToolSpec(...)]
 
-The walker in ``scilink.tools._registry`` discovers these and filters by the
+The walker in ``scilink.skills._shared._registry`` discovers these and filters by the
 ``agents`` tag.
 """
 

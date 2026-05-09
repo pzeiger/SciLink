@@ -13,7 +13,7 @@ import pytest
 import os
 import json
 
-from scilink.tools.amber_tools import check_amber_tools
+from scilink.skills.force_field.amber.amber import check_amber_tools
 
 _tools = check_amber_tools()
 requires_full_stack = pytest.mark.skipif(

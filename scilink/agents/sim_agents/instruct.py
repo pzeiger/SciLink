@@ -126,7 +126,7 @@ Ensure your output is ONLY the valid JSON object described above. Do not include
 # specialized-library counterparts to the regular templates above, picked
 # via keyword-routed TOOL_CONFIGS in StructureGenerator. That routing has
 # been replaced by an explicit `skill` parameter on the simulate-orchestrator's
-# tools (see scilink/skills/structure_generation/aimsgb.md and
+# tools (see scilink/skills/structure_generation/aimsgb/aimsgb.md and
 # StructureGenerator._format_skill_block). The skill content is now appended
 # as a section to the regular templates rather than swapping the whole prompt.
 

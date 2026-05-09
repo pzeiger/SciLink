@@ -1,3 +1,6 @@
+---
+description: Atomic-resolution STEM (HAADF, MAADF) image analysis — column detection, sublattice separation, lattice metrology, and defect identification on zone-axis crystalline materials.
+---
 # STEM Atomic Resolution Image Analysis Skill
 
 ## overview
@@ -86,7 +89,7 @@ for this when designing the step's `quality_criteria`:
 
 ### advanced
 **Tool reference:** detection and refinement helpers live in
-`scilink.tools.atom_finding_tools` (`detect_atoms`, `detect_atoms_dcnn`,
+`scilink.skills.image_analysis.atomic_stem.atom_finding` (`detect_atoms`, `detect_atoms_dcnn`,
 `refine_positions`, `find_zone_axes`, `find_missing_atoms`,
 `subtract_atoms`). Detailed parameter docs and per-tool usage are in
 the `analysis` section below — refer to it when the goal you picked

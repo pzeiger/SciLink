@@ -9,7 +9,7 @@ import pytest
 import os
 import shutil
 
-from scilink.tools.amber_tools import (
+from scilink.skills.force_field.amber.amber import (
     check_amber_tools,
     run_pdb4amber,
     run_antechamber,

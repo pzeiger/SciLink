@@ -1228,7 +1228,7 @@ class LAMMPSOrchestrator:
         # ── Try AMBER pipeline ───────────────────────────────────
         if prefer_amber:
             try:
-                from ...tools.amber_tools import check_amber_tools
+                from ...skills.force_field.amber.amber import check_amber_tools
                 tools_status = check_amber_tools()
             except ImportError:
                 tools_status = {"available": False, "missing": ["amber_tools module"]}

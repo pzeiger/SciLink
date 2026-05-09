@@ -652,15 +652,15 @@ def detect_atoms_dcnn(
     import logging
 
     try:
-        from ..tools.atomistic_tools import rescale_for_model, predict_with_ensemble
-        from ..tools.atomistic_model_manager import get_or_download_atomistic_model
+        from .atomic_stem import rescale_for_model, predict_with_ensemble
+        from scilink.skills._shared.atomistic_model_manager import get_or_download_atomistic_model
     except ImportError as exc:
         raise ImportError(
             "detect_atoms_dcnn requires atomai and opencv-python. "
             "Install with: pip install atomai opencv-python"
         ) from exc
 
-    logger = logging.getLogger("scilink.tools.atom_finding_tools")
+    logger = logging.getLogger(__name__)
 
     # --- Resolve model directory ---
     global _cached_model_dir
@@ -851,7 +851,7 @@ def local_env_gmm(
 # Tool specs
 # ---------------------------------------------------------------------------
 
-from ._spec import ToolSpec
+from scilink.skills._shared._spec import ToolSpec
 
 TOOL_SPECS = [
     ToolSpec(
@@ -860,7 +860,7 @@ TOOL_SPECS = [
             "Classical atom-column detection: peak detection plus optional 2D Gaussian "
             "refinement. Returns sub-pixel positions and per-atom Gaussian parameters."
         ),
-        import_line="from scilink.tools.atom_finding_tools import detect_atoms",
+        import_line="from scilink.skills.image_analysis.atomic_stem.atom_finding import detect_atoms",
         signature=(
             "detect_atoms(image, separation, threshold_rel=0.02, refine=True, "
             "percent_to_nn=0.40, subtract_background=False, normalize_intensity=True) -> dict"
@@ -912,7 +912,7 @@ TOOL_SPECS = [
             "AtomNet3 deep-CNN ensemble detection. Produces atom positions and a "
             "probability heatmap."
         ),
-        import_line="from scilink.tools.atom_finding_tools import detect_atoms_dcnn",
+        import_line="from scilink.skills.image_analysis.atomic_stem.atom_finding import detect_atoms_dcnn",
         signature=(
             "detect_atoms_dcnn(image, fov_nm, model_dir=None, "
             "target_pixel_size=0.25, threshold=0.8, refine=True) -> dict"
@@ -963,7 +963,7 @@ TOOL_SPECS = [
             "Fit 2D Gaussians at known atom positions to obtain sub-pixel coordinates "
             "and per-atom sigma, amplitude, and rotation values."
         ),
-        import_line="from scilink.tools.atom_finding_tools import refine_positions",
+        import_line="from scilink.skills.image_analysis.atomic_stem.atom_finding import refine_positions",
         signature="refine_positions(image, positions, percent_to_nn=0.40) -> dict",
         agents=["image_analysis"],
         when_to_use=(
@@ -994,7 +994,7 @@ TOOL_SPECS = [
             "Detect lattice translation vectors from a set of atom positions. Returns "
             "the unique shortest lattice vectors."
         ),
-        import_line="from scilink.tools.atom_finding_tools import find_zone_axes",
+        import_line="from scilink.skills.image_analysis.atomic_stem.atom_finding import find_zone_axes",
         signature="find_zone_axes(positions, n_neighbors=9, distance_tolerance=None) -> list",
         agents=["image_analysis"],
         when_to_use=(
@@ -1024,7 +1024,7 @@ TOOL_SPECS = [
             "Predict atom positions at fractional lattice sites along a zone vector "
             "(e.g. midpoints for a second sublattice)."
         ),
-        import_line="from scilink.tools.atom_finding_tools import find_missing_atoms",
+        import_line="from scilink.skills.image_analysis.atomic_stem.atom_finding import find_missing_atoms",
         signature="find_missing_atoms(positions, zone_vector, fraction=0.5, min_distance=3.0) -> ndarray",
         agents=["image_analysis"],
         when_to_use=(
@@ -1059,7 +1059,7 @@ TOOL_SPECS = [
             "Subtract fitted 2D Gaussians from an image to produce a residual that "
             "reveals weaker sublattices or features."
         ),
-        import_line="from scilink.tools.atom_finding_tools import subtract_atoms",
+        import_line="from scilink.skills.image_analysis.atomic_stem.atom_finding import subtract_atoms",
         signature=(
             "subtract_atoms(image, positions, sigma_x, sigma_y, amplitude, "
             "rotation=None) -> ndarray"
@@ -1099,7 +1099,7 @@ TOOL_SPECS = [
             "just peak intensity) for sublattice separation in complex structures where "
             "intensity alone is ambiguous."
         ),
-        import_line="from scilink.tools.atom_finding_tools import local_env_gmm",
+        import_line="from scilink.skills.image_analysis.atomic_stem.atom_finding import local_env_gmm",
         signature=(
             "local_env_gmm(image, positions, n_components=4, window_size=32, "
             "covariance='diag', random_state=1) -> dict"

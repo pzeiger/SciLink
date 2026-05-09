@@ -38,7 +38,7 @@ from ...executors import ScriptExecutor, require_sandbox_approval
 from ..lit_agents.literature_agent import FittingModelLiteratureAgent
 from .preprocess import CurvePreprocessingAgent
 from .pipelines.curve_fitting_pipelines import create_unified_curve_fitting_pipeline
-from ...tools.curve_fitting_tools import load_curve_data, plot_curve_to_bytes
+from ...skills._shared.curve_fitting_tools import load_curve_data, plot_curve_to_bytes
 from ._deprecation import normalize_params
 from ...skills.loader import load_skill
 
@@ -536,17 +536,11 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             if aux_state.get("auxiliary_plot_bytes"):
                 self.logger.info(f"   Auxiliary data loaded: {aux_state['auxiliary_label']}")
 
-        # Load skill if provided
-        skill_state = {"skill_name": None, "skill_sections": None}
-        if skill:
-            try:
-                parsed = load_skill(skill, domain="curve_fitting")
-                skill_state = {"skill_name": parsed["name"], "skill_sections": parsed}
-                self.logger.info(f"   📖 Skill loaded: {parsed['name']}")
-            except FileNotFoundError:
-                self.logger.warning(
-                    f"   Skill '{skill}' not found — proceeding without domain skill"
-                )
+        # Load skill(s) if provided. ``skill`` accepts a single name/path or
+        # a list — see PR 3 multi-skill support. Singular state fields
+        # (``skill_name``, ``skill_sections``) reflect the *first* skill for
+        # backwards compat; ``skills_loaded`` carries the full list.
+        skill_state = self._load_skills_to_state(skill, domain="curve_fitting")
 
         # Extract series metadata from system_info if not provided explicitly
         handled_system_info = self._handle_system_info(system_info)
@@ -806,7 +800,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 result["auxiliary_mime_type"] = "image/png"
 
             elif is_image:
-                from ...tools.image_processor import (
+                from ...skills._shared.image_processor import (
                     load_image,
                     convert_numpy_to_jpeg_bytes,
                 )

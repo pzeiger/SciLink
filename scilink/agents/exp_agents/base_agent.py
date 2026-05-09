@@ -514,9 +514,60 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
         self._stored_analysis_metadata: Dict[str, Any] = {}
 
     # =========================================================================
+    # SHARED SKILL HANDLING
+    # =========================================================================
+
+    def _load_skills_to_state(
+        self,
+        skill: Union[str, List[str], None],
+        domain: str,
+    ) -> Dict[str, Any]:
+        """Load one or more skills and return a state-dict fragment.
+
+        Accepts a single name/path or a list. Returns a dict with both the
+        legacy singular fields (``skill_name``, ``skill_sections`` — first
+        loaded skill, for back-compat with controller code) and the multi-
+        skill ``skills_loaded`` list.
+
+        Skills that fail to load are logged as warnings and silently dropped;
+        an empty list is fine.
+        """
+        from ...skills.loader import load_skill
+
+        if skill is None or skill == "":
+            inputs: List[str] = []
+        elif isinstance(skill, str):
+            inputs = [skill]
+        else:
+            inputs = list(skill)
+
+        loaded: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for s in inputs:
+            try:
+                parsed = load_skill(s, domain=domain)
+            except FileNotFoundError:
+                self.logger.warning(
+                    f"   Skill '{s}' not found — skipping (proceeding with the rest)"
+                )
+                continue
+            if parsed["name"] in seen:
+                continue
+            seen.add(parsed["name"])
+            loaded.append(parsed)
+            self.logger.info(f"   📖 Skill loaded: {parsed['name']}")
+
+        first = loaded[0] if loaded else None
+        return {
+            "skill_name": first["name"] if first else None,
+            "skill_sections": first,
+            "skills_loaded": loaded,
+        }
+
+    # =========================================================================
     # PRIMARY ENTRY POINTS
     # =========================================================================
-    
+
     @abstractmethod
     def analyze(
         self,

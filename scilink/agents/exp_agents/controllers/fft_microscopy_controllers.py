@@ -29,14 +29,14 @@ from ..instruct import (
     SERIES_ANALYSIS_INSTRUCTIONS,
 )
 
-from ....tools.image_processor import (
+from ....skills._shared.image_processor import (
     load_image,
     preprocess_image,
     convert_numpy_to_jpeg_bytes,
     normalize_and_convert_to_image_bytes,
     calculate_global_fft
 )
-from ....tools.fft_nmf import SlidingFFTNMF
+from ....skills._shared.fft_nmf import SlidingFFTNMF
 
 
 # ============================================================================

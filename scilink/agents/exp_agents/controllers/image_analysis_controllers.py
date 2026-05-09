@@ -93,7 +93,7 @@ def load_image_file(image_path: str) -> np.ndarray:
     ``load_image_data`` from tools first, then falls back to cv2/PIL.
     """
     try:
-        from ...tools.image_analysis_tools import load_image_data
+        from ...skills._shared.image_analysis_tools import load_image_data
         return load_image_data(image_path)
     except ImportError:
         pass
@@ -234,19 +234,23 @@ def _append_auxiliary_context(prompt: list, state: dict) -> None:
     })
 
 
-def _append_tool_inventory(prompt: list, agent: str = "image_analysis") -> None:
+def _append_tool_inventory(
+    prompt: list,
+    agent: str = "image_analysis",
+    active_skills: list[str] | None = None,
+) -> None:
     """Append the registered tool inventory and library list for ``agent``.
 
-    Tools come from ``scilink.tools._registry.get_tools_for(agent)``; libraries
-    come from ``IMAGE_ANALYSIS_LIBRARIES``. Injected before skill context so
-    skill prose can reference tools introduced here by name.
+    Tools come from ``scilink.skills._shared._registry.get_tools_for(agent, active_skills)``;
+    libraries come from ``IMAGE_ANALYSIS_LIBRARIES``. Injected before skill
+    context so skill prose can reference tools introduced here by name.
     """
-    from ....tools._registry import (
+    from ....skills._shared._registry import (
         format_library_inventory,
         get_tools_for,
     )
 
-    specs = get_tools_for(agent)
+    specs = get_tools_for(agent, active_skills=active_skills)
     if specs:
         prompt.append("\n## Available Tools")
         prompt.append(
@@ -266,36 +270,62 @@ def _append_tool_inventory(prompt: list, agent: str = "image_analysis") -> None:
     prompt.append(format_library_inventory())
 
 
+def _active_skill_names(state: dict) -> list[str]:
+    """Return names of all currently-loaded skills from a pipeline state dict.
+
+    Falls back to the legacy singular field if ``skills_loaded`` is absent
+    so older state dicts continue to work.
+    """
+    loaded = state.get("skills_loaded")
+    if loaded:
+        return [s.get("name") for s in loaded if s and s.get("name")]
+    legacy = state.get("skill_name")
+    return [legacy] if legacy else []
+
+
 def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     """Append domain skill knowledge to an LLM prompt for the given stage.
 
+    With multiple skills loaded, sections from each are appended in order
+    so the LLM can attribute guidance to its source.
+
     Args:
         prompt: Mutable list of prompt parts to extend.
-        state: Pipeline state dict containing ``skill_sections`` and ``skill_name``.
+        state: Pipeline state dict containing ``skills_loaded`` (or the
+            legacy ``skill_sections`` / ``skill_name`` for single-skill).
         stage: One of ``"planning"``, ``"analysis"``, ``"interpretation"``, ``"validation"``.
     """
-    sections = state.get("skill_sections")
-    if not sections:
-        return
-
-    skill_name = state.get("skill_name", "domain skill")
-    content = sections.get(stage, "")
-    if not content:
-        return
-
-    prompt.append(f"\n## Domain Expertise: {skill_name} ({stage})")
-    prompt.append(
-        "The following guidance is from validated domain expertise. "
-        "Use it to inform your approach."
+    skills = state.get("skills_loaded") or (
+        [state["skill_sections"]]
+        if state.get("skill_sections")
+        else []
     )
-    prompt.append(content)
+    if not skills:
+        return
 
-    # Include validation rules during planning and interpretation
-    if stage in ("planning", "interpretation"):
-        validation = sections.get("validation", "")
-        if validation:
-            prompt.append(f"\n## Domain Validation Guidance: {skill_name}")
-            prompt.append(validation)
+    intro_appended = False
+    for sections in skills:
+        if not sections:
+            continue
+        content = sections.get(stage, "")
+        if not content:
+            continue
+        skill_name = sections.get("name", "domain skill")
+        prompt.append(f"\n## Domain Expertise: {skill_name} ({stage})")
+        if not intro_appended:
+            prompt.append(
+                "The following guidance is from validated domain expertise. "
+                "Use it to inform your approach."
+            )
+            intro_appended = True
+        prompt.append(content)
+
+        # Include validation rules during planning and interpretation
+        if stage in ("planning", "interpretation"):
+            validation = sections.get("validation", "")
+            if validation:
+                prompt.append(f"\n## Domain Validation Guidance: {skill_name}")
+                prompt.append(validation)
 
 
 def _append_prior_knowledge_context(prompt: list, state: dict) -> None:
@@ -1083,7 +1113,7 @@ class ImagePlanningController:
             prompt.append(f"\n## User Guidance\n{state['analysis_hints']}")
 
         _append_auxiliary_context(prompt, state)
-        _append_tool_inventory(prompt, agent="image_analysis")
+        _append_tool_inventory(prompt, agent="image_analysis", active_skills=_active_skill_names(state))
         _append_skill_context(prompt, state, "planning")
         _append_prior_knowledge_context(prompt, state)
         _append_prior_analysis_state(prompt, state)
@@ -1387,7 +1417,7 @@ class ImagePlanningController:
             prompt.append(f"\n## Original Guidance\n{state['analysis_hints']}")
 
         _append_auxiliary_context(prompt, state)
-        _append_tool_inventory(prompt, agent="image_analysis")
+        _append_tool_inventory(prompt, agent="image_analysis", active_skills=_active_skill_names(state))
         _append_skill_context(prompt, state, "planning")
         _append_prior_knowledge_context(prompt, state)
         _append_prior_analysis_state(prompt, state)
@@ -1772,7 +1802,7 @@ class UnifiedImageProcessingController:
         # T=0 strict
         "\n**Registered tool constraints:**\n"
         "When the pipeline uses a registered tool (any function imported from "
-        "`scilink.tools.*`), your suggested fixes must be achievable via that "
+        "`scilink.skills.*`), your suggested fixes must be achievable via that "
         "tool's documented parameters OR via preprocessing / postprocessing that "
         "happens OUTSIDE the tool call. Do not suggest modifications to the "
         "tool's internal algorithm. If the tool's documented parameters cannot "
@@ -1999,8 +2029,9 @@ Your guidance: '''
                         lines.append(f"- `{path_str}`")
                 context_parts.append("\n".join(lines))
 
-        from ....tools._registry import format_tool_inventory
+        from ....skills._shared._registry import format_tool_inventory
 
+        active_skills = _active_skill_names(state)
         format_kwargs = dict(
             analysis_approach=config.get("analysis_approach", "Analyze the image"),
             processing_pipeline=config.get("processing_pipeline", "Standard processing"),
@@ -2011,7 +2042,7 @@ Your guidance: '''
             dtype=stats.get("dtype", "unknown"),
             intensity_min=stats.get("intensity_range", [0, 255])[0],
             intensity_max=stats.get("intensity_range", [0, 255])[1],
-            tool_inventory=format_tool_inventory("image_analysis"),
+            tool_inventory=format_tool_inventory("image_analysis", active_skills=active_skills),
         )
 
         if base_script and self.refinement_instructions:
@@ -2040,14 +2071,15 @@ Your guidance: '''
             explanation of what went wrong and how it was fixed, or None.
         """
         config = state.get("locked_analysis_config", {})
-        from ....tools._registry import format_tool_inventory
+        from ....skills._shared._registry import format_tool_inventory
 
+        active_skills = _active_skill_names(state)
         prompt = self.correction_instructions.format(
             analysis_approach=config.get("analysis_approach", ""),
             processing_pipeline=config.get("processing_pipeline", ""),
             failed_script=script,
             error_message=error_msg,
-            tool_inventory=format_tool_inventory("image_analysis"),
+            tool_inventory=format_tool_inventory("image_analysis", active_skills=active_skills),
         )
         skill_sections = state.get("skill_sections")
         if skill_sections and skill_sections.get("analysis"):
