@@ -286,10 +286,12 @@ def main() -> int:
             # in result["final_manifest"]["final_files"] (relative names).
             case_record["status"] = result.get("final_status", "unknown")
             case_record["steps_completed"] = result.get("steps_completed", [])
-            manifest = result.get("final_manifest", {})
-            if manifest.get("final_files"):
-                case_record["final_files"] = manifest["final_files"]
-                case_record["ready_for_vasp"] = bool(manifest.get("ready_for_vasp"))
+            case_manifest = result.get("final_manifest", {})
+            if case_manifest.get("final_files"):
+                case_record["final_files"] = case_manifest["final_files"]
+                case_record["ready_for_vasp"] = bool(
+                    case_manifest.get("ready_for_vasp")
+                )
 
             # Per-case submit.sh
             pseudo_dir = args.pseudo_dir or SLURM_DEFAULT_PSEUDO_DIR
