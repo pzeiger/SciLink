@@ -547,6 +547,11 @@ def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key
         scilink.set_api_key('materials_project', mp_api_key)
 
     app_mode = st.session_state.app_mode or "analyze"
+
+    if app_mode == "simulate":
+        _start_simulate_session(model, api_key, base_url, mode, fh_api_key)
+        return
+
     prefix = SESSION_DIR_PREFIXES.get(app_mode, "session")
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     session_dir = Path(f"{prefix}_{ts}").resolve()

@@ -73,6 +73,7 @@ class HPCConnection:
             )
             client.connect(**kw)
             self._client = client
+            self._enable_keepalive()
             return
     
         # Resolve all IPs and try each with a short per-IP timeout
@@ -109,6 +110,7 @@ class HPCConnection:
                 kw["timeout"] = 30
                 client.connect(**kw)
                 self._client = client
+                self._enable_keepalive()
                 return
             except Exception as exc:
                 last_err = exc
@@ -125,6 +127,20 @@ class HPCConnection:
             f"All IPs for {self.profile.hostname} failed. "
             f"Tried: {unique_ips}. Last error: {last_err}"
         )
+
+    def _enable_keepalive(self, interval: int = 30) -> None:
+        """Send an SSH keepalive every `interval` seconds so idle transports
+        don't get silently dropped by the server / firewall / NAT.
+
+        Without this, a transport can sit idle long enough that the remote
+        forgets the session; the next exec_command opens a channel that
+        never receives an exit status, and recv_exit_status blocks forever.
+        """
+        if self._client is None:
+            return
+        transport = self._client.get_transport()
+        if transport is not None:
+            transport.set_keepalive(interval)
 
     def disconnect(self) -> None:
         with self._lock:
@@ -156,7 +172,17 @@ class HPCConnection:
             raise ConnectionError("SSH session is not active")
         with self._lock:
             _, out, err = self._client.exec_command(cmd, timeout=timeout)
-            rc = out.channel.recv_exit_status()
+            channel = out.channel
+            # status_event.wait honors the timeout; recv_exit_status doesn't.
+            if not channel.status_event.wait(timeout):
+                try:
+                    channel.close()
+                except Exception:
+                    pass
+                raise TimeoutError(
+                    f"Command timed out after {timeout}s: {cmd!r}"
+                )
+            rc = channel.recv_exit_status()
             return (
                 out.read().decode(errors="replace"),
                 err.read().decode(errors="replace"),

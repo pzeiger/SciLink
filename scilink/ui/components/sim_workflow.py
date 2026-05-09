@@ -12,6 +12,11 @@ from typing import Any, Dict, List, Optional, Set
 
 import streamlit as st
 
+from scilink.ui.components.wizard_state import (
+    apply_lammps_defaults,
+    save_lammps,
+)
+
 
 # ══════════════════════════════════════════════════════════════
 # Script templates
@@ -534,6 +539,10 @@ def _show_path_mapping(
         st.warning("Add a volume mount that covers the unmapped paths.")
 
 def _render_configure() -> None:
+    # Pre-fill infrastructure fields from the last successful Prepare Scripts
+    # before any widget is created.
+    apply_lammps_defaults()
+
     st.subheader("🧪 LAMMPS Simulation")
 
     cfg = st.session_state.get("agent_config", {})
@@ -890,6 +899,7 @@ def _render_configure() -> None:
         disabled=not can_proceed,
         key="hpc_prepare_btn",
     ):
+        save_lammps()
         # ── Build path mapping for container mode ─────────
         data_exec_path = remote_data_path  # direct mode: same path
         work_exec_path = remote_work_dir
@@ -1017,7 +1027,7 @@ def _render_review_scripts() -> None:
                         conn, slurm_script,
                         f"{remote_dir}/submit.sh",
                     )
-                    conn.run(f"chmod +x {_q(remote_dir + '/submit.sh')}")
+                    conn.run(f"chmod +x {_q(remote_dir + '/submit.sh')}", timeout=30)
 
                     # Submit
                     job_id = sched.submit(f"{remote_dir}/submit.sh", work_dir=remote_dir)
@@ -1179,8 +1189,9 @@ def _render_monitoring() -> None:
         with t_files:
             _render_remote_output_files(_conn, _job)
 
-        # ── Transition to results when terminal ───────────
-        if _job.status.is_terminal and not old_status.is_terminal:
+        # Rerun the parent on any status change so the connection-bar
+        # job counts (rendered outside this fragment) stay fresh.
+        if _job.status != old_status:
             st.rerun(scope="app")
 
     _monitor_fragment()
