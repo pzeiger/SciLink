@@ -453,7 +453,7 @@ IMPORTANT: Return ONLY the raw LAMMPS script content without any markdown format
 # but tailored to VASP / sim-side vocabulary.
 
 VASP_KNOWLEDGE_TO_SKILL_INSTRUCTIONS = """You are an expert VASP computational materials scientist. \
-Convert accumulated VASP-running knowledge into a structured, reusable skill document for downstream agents.
+Convert accumulated VASP-running knowledge into a structured skill description for downstream agents.
 
 **Skill Name:** {skill_name}
 **Domain:** {domain}
@@ -462,45 +462,28 @@ Convert accumulated VASP-running knowledge into a structured, reusable skill doc
 {knowledge_text}
 
 **Instructions:**
-Begin the document with a YAML frontmatter block containing a single one-line `description:` field — \
-a self-contained sentence that lets a downstream agent decide whether this skill is relevant. \
-Do not end the description with a period. Then organize the knowledge into exactly five sections, \
-each containing actionable, specific guidance derived from the source knowledge. Use markdown formatting.
+Return a JSON object with exactly the following keys. Each value contains actionable, specific guidance \
+derived from the source knowledge. Use markdown formatting *within* section values when helpful (lists, \
+inline code), but do not include section headings (`##`) or YAML frontmatter — those are added by the caller.
 
----
-description: <one-line, self-contained, no trailing period>
----
+{{
+  "description": "<one self-contained sentence (no trailing period) that lets a downstream agent decide if this skill is relevant>",
+  "overview": "<what kinds of VASP calculations or error patterns this skill covers, and when to apply it>",
+  "planning": "<INCAR parameter rules, parameter compatibility constraints, decision criteria. Be specific (e.g. 'ALGO = All is incompatible with ISMEAR = -5; use ALGO = Normal with tetrahedron, or switch ISMEAR = 0').>",
+  "implementation": "<concrete fix recipes — specific INCAR keys and values to set when each pattern is detected. Include parameter values that worked and reference the relevant log-message substring where possible.>",
+  "interpretation": "<what outputs / log lines / convergence patterns indicate this rule applies; include short log excerpts where helpful>",
+  "validation": "<sanity checks after applying the rule, expected outcomes, and known interactions with other settings>"
+}}
 
-## overview
-What kinds of VASP calculations or error patterns this skill covers, and when to apply it.
-
-## planning
-INCAR parameter rules, parameter compatibility constraints, and decision criteria for choosing settings. \
-Be specific. Example: "ALGO = All is incompatible with ISMEAR = -5 (tetrahedron is not variational); \
-when both an algorithm change and tetrahedron smearing are wanted, use ALGO = Normal, or switch ISMEAR = 0 first."
-
-## implementation
-Concrete fix recipes — the specific INCAR keys and values to set when each pattern is detected. \
-Include actual parameter values that worked. Reference the original error pattern by its log substring \
-where possible.
-
-## interpretation
-What outputs / log lines / convergence patterns indicate this rule applies. Include short log-message \
-excerpts where helpful so future agents can match the same situation.
-
-## validation
-Sanity checks after applying the rule, expected outcomes, and known interactions with other settings.
-
-Output ONLY the skill document content in markdown, starting with the `---` frontmatter block followed \
-by `## overview`. Do not wrap in code blocks."""
+Output ONLY the JSON object. Do not wrap in code blocks. Do not include any prose outside the JSON."""
 
 
 VASP_SKILL_UPDATE_INSTRUCTIONS = """You are an expert VASP computational materials scientist. \
-Update an existing VASP skill document with new knowledge while preserving what is already correct.
+Update an existing VASP skill with new knowledge while preserving what is already correct.
 
 **Skill Name:** {skill_name}
 
-**Existing Skill Content:**
+**Existing Skill (as JSON):**
 {existing_skill}
 
 **New Knowledge to Incorporate:**
@@ -512,10 +495,11 @@ Update an existing VASP skill document with new knowledge while preserving what 
    prefer merging into an existing rule over restating in a new sentence.
 3. Do NOT remove existing content unless the new knowledge explicitly contradicts it.
 4. When there is a conflict, prefer the newer knowledge but note the discrepancy briefly.
-5. Maintain the five-section structure (overview, planning, implementation, interpretation, validation).
-6. Preserve the YAML frontmatter at the top (the `---`-delimited block). If the new knowledge \
-   materially changes the skill's purpose, update the `description:` field; otherwise leave it intact.
-7. Keep prose tight. The skill is read into LLM context every time, so length matters.
+5. If the new knowledge materially changes the skill's purpose, update the description; \
+   otherwise leave it intact.
+6. Keep prose tight. The skill is read into LLM context every time.
 
-Output ONLY the updated skill document content in markdown, starting with the `---` frontmatter \
-block. Do not wrap in code blocks."""
+Return a JSON object with the SAME keys as the existing skill (description, overview, planning, \
+implementation, interpretation, validation) reflecting the merged skill content.
+
+Output ONLY the JSON object. Do not wrap in code blocks. Do not include any prose outside the JSON."""

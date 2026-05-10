@@ -1,9 +1,10 @@
 """Unit tests for sim_agents skill graduation.
 
-No real LLM calls. The graduate_to_skill_file helper takes the LLM as
-a callable, so we inject a fake one whose return value we control.
+The graduate_to_skill_file helper takes the LLM as a callable, so we
+inject a fake one whose return value we control. No real LLM calls.
 """
 
+import copy
 import json
 from pathlib import Path
 
@@ -13,46 +14,39 @@ from scilink.agents.sim_agents.skill_graduation import (
     GRADUATED_SKILLS_DIR,
     KnowledgeStore,
     WORD_COUNT_WARN_THRESHOLD,
-    _FRONTMATTER_RE,
-    _ensure_frontmatter,
     _format_knowledge,
-    _strip_code_fences,
     format_graduated_skills_block,
+    format_skill_as_markdown,
     graduate_to_skill_file,
     load_graduated_skills,
+    parse_json_response,
 )
 
 
-# ── Minimal templates that just echo their inputs back. The real
-# prompts are in scilink.agents.sim_agents.instruct; we don't test
-# their text here — we test the plumbing.
+# ── Templates and JSON fakes ─────────────────────────────────
 
+# Minimal templates that just echo their inputs back; the real
+# prompts in scilink.agents.sim_agents.instruct ask the LLM for
+# JSON. Plumbing tests don't care about prompt text.
 FAKE_FRESH = "FRESH skill={skill_name} domain={domain}\n{knowledge_text}"
 FAKE_UPDATE = "UPDATE skill={skill_name}\nEXISTING:\n{existing_skill}\nNEW:\n{new_knowledge}"
 
-# ── A canonical valid skill .md the loader can actually parse, used
-# both as a fake-LLM "response" for fresh graduation and as a fixture
-# for update tests.
+# What a well-formed LLM JSON response looks like.
+VALID_SKILL_JSON = json.dumps({
+    "description": "test rule for graduation",
+    "overview": "Covers a single VASP error class.",
+    "planning": "Apply this rule when X.",
+    "implementation": "Set INCAR key Y to value Z.",
+    "interpretation": "Log line 'X' indicates the rule applies.",
+    "validation": "After applying, verify W.",
+})
 
-VALID_SKILL_MD = """\
----
-description: test rule for graduation
----
-## overview
-Covers a single VASP error class.
 
-## planning
-Apply this rule when X.
-
-## implementation
-Set INCAR key Y to value Z.
-
-## interpretation
-Log line "X" indicates the rule applies.
-
-## validation
-After applying, verify W.
-"""
+def _fake_llm(response: str):
+    """Return a callable matching the llm_call signature."""
+    def _fn(prompt: str) -> str:
+        return response
+    return _fn
 
 
 # ──────────────────────────────────────────────────────────────
@@ -101,137 +95,108 @@ class TestKnowledgeStore:
 
 
 # ──────────────────────────────────────────────────────────────
-# Helpers
+# JSON parsing
 # ──────────────────────────────────────────────────────────────
 
-class TestFormatKnowledge:
-    def test_skips_id_field(self):
-        text = _format_knowledge({"id": "abc", "summary": "thing"})
-        assert "abc" not in text
-        assert "Summary" in text and "thing" in text
+class TestParseJsonResponse:
+    def test_pure_json(self):
+        assert parse_json_response('{"a": 1}') == {"a": 1}
 
-    def test_pretty_prints_keys(self):
-        text = _format_knowledge({"error_pattern": "ZBRENT"})
-        assert "Error Pattern" in text
-
-
-class TestEnsureFrontmatter:
-    """The LLM occasionally forgets the opening `---`; auto-repair so the
-    skill loader can still parse the resulting file."""
-
-    def test_passthrough_when_frontmatter_present(self):
-        good = "---\ndescription: x\n---\n\n## overview\nbody\n"
-        assert _ensure_frontmatter(good) == good
-
-    def test_repairs_missing_opening_delimiter(self):
-        broken = (
-            "VASP rule about ALGO=All + ISMEAR=-5 incompatibility\n"
-            "---\n"
-            "\n"
-            "## overview\n"
-            "body content\n"
-        )
-        repaired = _ensure_frontmatter(broken)
-        assert repaired.startswith("---\n")
-        # Description text survives (now YAML-quoted, so don't assume the
-        # exact "description: <text>" substring).
-        assert "VASP rule about ALGO=All + ISMEAR=-5" in repaired
-        assert "description:" in repaired
-        # Body is preserved.
-        assert "## overview" in repaired
-        assert "body content" in repaired
-
-    def test_repairs_completely_missing_frontmatter(self):
-        broken = "Some description text\n\n## overview\nbody\n"
-        repaired = _ensure_frontmatter(broken)
-        assert repaired.startswith("---\n")
-        assert "Some description text" in repaired
-        assert "description:" in repaired
-
-    def test_strips_description_prefix_if_llm_included_it(self):
-        broken = (
-            "description: foo bar baz\n"
-            "---\n"
-            "\n"
-            "## overview\nbody\n"
-        )
-        repaired = _ensure_frontmatter(broken)
-        assert "foo bar baz" in repaired
-        # Should not nest the prefix (i.e. "description: 'description:"
-        # would mean we kept the LLM's prefix as part of the value).
-        assert "description: 'description:" not in repaired
-        assert "description: description:" not in repaired
-
-    def test_quotes_description_starting_with_yaml_special(self):
-        """Descriptions that begin with `{`, `"`, etc. must be quoted so the
-        skill loader's YAML parser doesn't mis-read them as inline mappings."""
-        broken = (
-            "{All,Veryfast,Damped} (IALGO=5X) + ISMEAR=-5 produces a "
-            "tetrahedron-not-variational warning\n"
-            "---\n"
-            "\n"
-            "## overview\nbody\n"
-        )
-        repaired = _ensure_frontmatter(broken)
-        # The description value should be single-quoted so YAML parses it as
-        # a literal string, not an inline mapping.
-        first_lines = repaired.splitlines()[:3]
-        assert first_lines[0] == "---"
-        assert first_lines[1].startswith("description: '")
-        assert first_lines[1].endswith("'")
-        # Round-trip through PyYAML to prove the loader's parser will accept it.
-        import re
-        import yaml
-        m = re.match(r"\A---\s*\n(.*?)\n---\s*\n", repaired, re.DOTALL)
-        assert m is not None
-        meta = yaml.safe_load(m.group(1))
-        assert isinstance(meta, dict)
-        assert "description" in meta
-        assert "{All,Veryfast,Damped}" in meta["description"]
-
-    def test_collapses_multiline_description_to_single_line(self):
-        broken = (
-            "Multiline description\n"
-            "with a wrapped second line\n"
-            "---\n"
-            "\n"
-            "## overview\nbody\n"
-        )
-        repaired = _ensure_frontmatter(broken)
-        # Description survives as one line in the frontmatter.
-        first_lines = repaired.splitlines()[:3]
-        assert first_lines[0] == "---"
-        assert first_lines[1].startswith("description:")
-        assert "Multiline description with a wrapped second line" in first_lines[1]
-
-
-class TestStripCodeFences:
-    def test_passthrough_when_no_fence(self):
-        out = _strip_code_fences("---\nfoo: bar\n---\n## overview\nhi\n")
-        assert out.startswith("---")
-        assert out.endswith("\n")
-
-    def test_strips_markdown_fence(self):
-        wrapped = "```markdown\n---\ndescription: x\n---\n## overview\nhi\n```"
-        assert _strip_code_fences(wrapped).startswith("---")
+    def test_strips_json_fence(self):
+        wrapped = '```json\n{"a": 1}\n```'
+        assert parse_json_response(wrapped) == {"a": 1}
 
     def test_strips_bare_fence(self):
-        wrapped = "```\n---\ndescription: x\n---\n## overview\nhi\n```"
-        assert _strip_code_fences(wrapped).startswith("---")
+        wrapped = '```\n{"a": 1}\n```'
+        assert parse_json_response(wrapped) == {"a": 1}
+
+    def test_extracts_json_from_surrounding_prose(self):
+        wrapped = 'Here is the result:\n{"a": 1}\nHope that helps!'
+        assert parse_json_response(wrapped) == {"a": 1}
+
+    def test_raises_when_no_json_present(self):
+        with pytest.raises(ValueError):
+            parse_json_response("nothing useful here")
+
+
+# ──────────────────────────────────────────────────────────────
+# Markdown emission
+# ──────────────────────────────────────────────────────────────
+
+class TestFormatSkillAsMarkdown:
+    def test_basic(self):
+        data = {
+            "description": "test rule",
+            "overview": "an overview paragraph",
+            "planning": "planning notes",
+        }
+        out = format_skill_as_markdown(data)
+        assert out.startswith("---\n")
+        assert "description: test rule" in out
+        assert "## overview" in out
+        assert "an overview paragraph" in out
+        assert "## planning" in out
+        assert "planning notes" in out
+
+    def test_round_trips_through_loader(self, tmp_path):
+        """Files emitted by format_skill_as_markdown must be parseable
+        by scilink.skills.loader without warnings."""
+        from scilink.skills.loader import load_skill
+
+        data = {
+            "description": "round-trip test",
+            "overview": "ov",
+            "planning": "pl",
+            "implementation": "im",
+            "validation": "va",
+        }
+        out = format_skill_as_markdown(data)
+        skill_dir = tmp_path / "vasp" / "round_trip"
+        skill_dir.mkdir(parents=True)
+        path = skill_dir / "round_trip.md"
+        path.write_text(out)
+        parsed = load_skill(str(path), domain="vasp")
+        assert parsed["meta"]["description"] == "round-trip test"
+        assert parsed.get("overview", "").strip() == "ov"
+        assert parsed.get("planning", "").strip() == "pl"
+
+    def test_yaml_special_descriptions_round_trip(self, tmp_path):
+        """A description starting with `{` (which YAML treats as a
+        flow-mapping opener if unquoted) must still parse cleanly."""
+        from scilink.skills.loader import load_skill
+
+        data = {
+            "description": "{All,Veryfast} + ISMEAR=-5 produces a tetrahedron warning",
+            "overview": "ov",
+        }
+        out = format_skill_as_markdown(data)
+        skill_dir = tmp_path / "vasp" / "yaml_special"
+        skill_dir.mkdir(parents=True)
+        path = skill_dir / "yaml_special.md"
+        path.write_text(out)
+        parsed = load_skill(str(path), domain="vasp")
+        assert parsed["meta"]["description"].startswith("{All,Veryfast}")
+
+    def test_skips_empty_sections(self):
+        data = {
+            "description": "x",
+            "overview": "",
+            "planning": "real content",
+            "implementation": None,
+        }
+        out = format_skill_as_markdown(data)
+        assert "## planning" in out
+        assert "## overview" not in out
+        assert "## implementation" not in out
+
+    def test_default_description_when_missing(self):
+        out = format_skill_as_markdown({"overview": "x"})
+        assert "description:" in out
 
 
 # ──────────────────────────────────────────────────────────────
 # Graduation: fresh
 # ──────────────────────────────────────────────────────────────
-
-def _make_fake_llm(response):
-    """Returns a callable matching the llm_call signature."""
-    def _fn(prompt: str) -> str:
-        # Return whatever was configured; tests can use this to fake
-        # the LLM's structured-skill response.
-        return response
-    return _fn
-
 
 class TestGraduateFresh:
     def test_creates_file_at_expected_path(self, tmp_path):
@@ -239,7 +204,7 @@ class TestGraduateFresh:
             knowledge_entry={"id": "abc", "summary": "the thing"},
             skill_name="my_rule",
             domain="vasp",
-            llm_call=_make_fake_llm(VALID_SKILL_MD),
+            llm_call=_fake_llm(VALID_SKILL_JSON),
             fresh_template=FAKE_FRESH,
             update_template=FAKE_UPDATE,
             skills_root=tmp_path,
@@ -249,29 +214,45 @@ class TestGraduateFresh:
         skill_path = Path(result["skill_path"])
         assert skill_path == tmp_path / "vasp" / "my_rule" / "my_rule.md"
         assert skill_path.exists()
-        # __init__.py also created in the bundle dir for layout parity.
         assert (skill_path.parent / "__init__.py").exists()
 
-    def test_file_content_matches_llm_output(self, tmp_path):
+    def test_emitted_file_has_well_formed_yaml_frontmatter(self, tmp_path):
         graduate_to_skill_file(
             knowledge_entry={"summary": "x"},
             skill_name="r",
             domain="vasp",
-            llm_call=_make_fake_llm(VALID_SKILL_MD),
+            llm_call=_fake_llm(VALID_SKILL_JSON),
             fresh_template=FAKE_FRESH,
             update_template=FAKE_UPDATE,
             skills_root=tmp_path,
         )
         content = (tmp_path / "vasp" / "r" / "r.md").read_text()
+        # Frontmatter must be parseable by the loader.
+        from scilink.skills.loader import load_skill
+        parsed = load_skill(str(tmp_path / "vasp" / "r" / "r.md"), domain="vasp")
+        assert parsed["meta"]["description"] == "test rule for graduation"
         assert "## overview" in content
-        assert "## planning" in content
+        assert "Covers a single VASP error class." in parsed.get("overview", "")
+
+    def test_handles_fenced_json(self, tmp_path):
+        wrapped = f"```json\n{VALID_SKILL_JSON}\n```"
+        result = graduate_to_skill_file(
+            knowledge_entry={"summary": "x"},
+            skill_name="r",
+            domain="vasp",
+            llm_call=_fake_llm(wrapped),
+            fresh_template=FAKE_FRESH,
+            update_template=FAKE_UPDATE,
+            skills_root=tmp_path,
+        )
+        assert result["status"] == "success"
 
     def test_no_warning_below_word_threshold(self, tmp_path):
         result = graduate_to_skill_file(
             knowledge_entry={"summary": "x"},
             skill_name="r",
             domain="vasp",
-            llm_call=_make_fake_llm(VALID_SKILL_MD),
+            llm_call=_fake_llm(VALID_SKILL_JSON),
             fresh_template=FAKE_FRESH,
             update_template=FAKE_UPDATE,
             skills_root=tmp_path,
@@ -282,13 +263,16 @@ class TestGraduateFresh:
 
 class TestGraduateLargeFile:
     def test_warning_fires_above_threshold(self, tmp_path):
-        # Synthetic huge skill — way over 8000 words.
-        big = VALID_SKILL_MD + "\n\n" + ("word " * (WORD_COUNT_WARN_THRESHOLD + 100))
+        big_section = "word " * (WORD_COUNT_WARN_THRESHOLD + 100)
+        big_json = json.dumps({
+            "description": "huge skill",
+            "overview": big_section,
+        })
         result = graduate_to_skill_file(
             knowledge_entry={"summary": "x"},
             skill_name="big_rule",
             domain="vasp",
-            llm_call=_make_fake_llm(big),
+            llm_call=_fake_llm(big_json),
             fresh_template=FAKE_FRESH,
             update_template=FAKE_UPDATE,
             skills_root=tmp_path,
@@ -303,25 +287,32 @@ class TestGraduateLargeFile:
 # ──────────────────────────────────────────────────────────────
 
 class TestGraduateUpdate:
-    def test_uses_update_template_when_skill_exists(self, tmp_path):
-        # First call: creates the skill.
+    def test_update_path_passes_existing_skill_as_json(self, tmp_path):
+        # Step 1: create the skill via fresh path.
         graduate_to_skill_file(
             knowledge_entry={"summary": "first"},
             skill_name="r",
             domain="vasp",
-            llm_call=_make_fake_llm(VALID_SKILL_MD),
+            llm_call=_fake_llm(VALID_SKILL_JSON),
             fresh_template=FAKE_FRESH,
             update_template=FAKE_UPDATE,
             skills_root=tmp_path,
         )
 
-        # Second call: should detect the existing file and use update_template.
-        # Capture the prompt the fake LLM saw to verify which template was used.
+        # Step 2: capture the prompt the LLM sees on the second call.
         seen = {"prompt": None}
 
-        def capture_llm(prompt):
+        def capture_llm(prompt: str) -> str:
             seen["prompt"] = prompt
-            return VALID_SKILL_MD  # fake an updated skill
+            updated_json = json.dumps({
+                "description": "test rule for graduation (updated)",
+                "overview": "Now covers two error classes.",
+                "planning": "Apply this rule when X or Y.",
+                "implementation": "Set Y or Z.",
+                "interpretation": "Log line X or Y indicates the rule applies.",
+                "validation": "After applying, verify W.",
+            })
+            return updated_json
 
         result = graduate_to_skill_file(
             knowledge_entry={"summary": "second"},
@@ -333,10 +324,20 @@ class TestGraduateUpdate:
             skills_root=tmp_path,
         )
         assert result["method"] == "updated"
-        # The prompt must have been built from update_template.
+        # The prompt should have been built from the update template.
         assert seen["prompt"].startswith("UPDATE skill=r")
         assert "EXISTING:" in seen["prompt"]
         assert "NEW:" in seen["prompt"]
+        # The existing-skill payload is JSON; the original description
+        # should be in there.
+        assert "test rule for graduation" in seen["prompt"]
+        # The merged file uses the LLM's new content.
+        from scilink.skills.loader import load_skill
+        parsed = load_skill(
+            str(tmp_path / "vasp" / "r" / "r.md"), domain="vasp"
+        )
+        assert "(updated)" in parsed["meta"]["description"]
+        assert "two error classes" in parsed.get("overview", "")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -352,7 +353,7 @@ class TestLoadGraduatedSkills:
             knowledge_entry={"summary": "first"},
             skill_name="my_rule",
             domain="vasp",
-            llm_call=_make_fake_llm(VALID_SKILL_MD),
+            llm_call=_fake_llm(VALID_SKILL_JSON),
             fresh_template=FAKE_FRESH,
             update_template=FAKE_UPDATE,
             skills_root=tmp_path,
@@ -361,21 +362,18 @@ class TestLoadGraduatedSkills:
         assert len(skills) == 1
         sk = skills[0]
         assert sk["name"] == "my_rule"
-        # Description came from frontmatter.
         assert sk["meta"]["description"] == "test rule for graduation"
 
     def test_skips_dotted_and_underscored_dirs(self, tmp_path):
-        # Make a real graduated skill alongside two ignored dirs.
         graduate_to_skill_file(
             knowledge_entry={"summary": "x"},
             skill_name="real",
             domain="vasp",
-            llm_call=_make_fake_llm(VALID_SKILL_MD),
+            llm_call=_fake_llm(VALID_SKILL_JSON),
             fresh_template=FAKE_FRESH,
             update_template=FAKE_UPDATE,
             skills_root=tmp_path,
         )
-        # These shouldn't get loaded.
         (tmp_path / "vasp" / "_internal").mkdir()
         (tmp_path / "vasp" / ".cache").mkdir()
         skills = load_graduated_skills("vasp", skills_root=tmp_path)
@@ -385,7 +383,6 @@ class TestLoadGraduatedSkills:
 
 class TestFormatGraduatedSkillsBlock:
     def test_empty_list_returns_empty_string(self):
-        # Caller should be able to unconditionally concatenate the result.
         assert format_graduated_skills_block([]) == ""
 
     def test_renders_skill_with_description(self):
@@ -401,8 +398,25 @@ class TestFormatGraduatedSkillsBlock:
         assert "### demo" in block
         assert "demo rule for testing" in block
         assert "#### planning" in block
-        assert "#### implementation" in block
-        assert "#### validation" in block
+
+    def test_default_includes_all_canonical_sections(self):
+        """Default section list should include every canonical section
+        so newly-graduated rules can't be hidden by an over-restrictive
+        filter."""
+        skill = {
+            "name": "demo",
+            "meta": {"description": "x"},
+            "overview": "O",
+            "planning": "P",
+            "analysis": "A",
+            "interpretation": "I",
+            "validation": "V",
+            "implementation": "Im",
+        }
+        block = format_graduated_skills_block([skill])
+        for section in ["overview", "planning", "analysis",
+                        "interpretation", "validation", "implementation"]:
+            assert f"#### {section}" in block
 
     def test_section_filter(self):
         skill = {
@@ -416,6 +430,5 @@ class TestFormatGraduatedSkillsBlock:
             [skill], sections=["planning"],
         )
         assert "#### planning" in block
-        # Only requested sections rendered.
         assert "#### implementation" not in block
         assert "#### validation" not in block

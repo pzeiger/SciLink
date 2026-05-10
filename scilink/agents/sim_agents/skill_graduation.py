@@ -11,15 +11,18 @@ Two-tier memory:
   - graduated skills (.md files on disk): durable rules the agent
     has crystallized. Loaded back into LLM context next session.
 
-Graduation uses an LLM to integrate a knowledge entry into either a
-fresh skill or an existing one (auto-detected based on whether a file
-with the target name already exists). This is the same merge-not-
-append pattern the planning side uses.
+**Structured I/O contract.** The LLM is asked to return a JSON object
+with named fields; this module deterministically formats that JSON
+into a YAML+markdown skill file (using PyYAML for the frontmatter, so
+quoting is always correct). The LLM never has to produce valid YAML.
+This eliminates a class of LLM-format-bug failures we saw with an
+earlier free-form-markdown contract.
 
 Default storage: ~/.scilink/graduated_skills/<domain>/<name>/<name>.md
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import uuid
@@ -29,6 +32,18 @@ from typing import Any, Callable, Dict, List, Optional
 
 GRADUATED_SKILLS_DIR = Path.home() / ".scilink" / "graduated_skills"
 WORD_COUNT_WARN_THRESHOLD = 8000
+
+# Section keys in the structured skill JSON. Order matches what
+# scilink/skills/loader.py knows about; rendered into markdown in this
+# order so the file structure is consistent.
+_SECTION_KEYS: tuple[str, ...] = (
+    "overview",
+    "planning",
+    "analysis",
+    "interpretation",
+    "validation",
+    "implementation",
+)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -82,10 +97,7 @@ class KnowledgeStore:
 # ──────────────────────────────────────────────────────────────
 
 def _format_knowledge(entry: Dict[str, Any]) -> str:
-    """Format a knowledge entry as readable text for the LLM prompt.
-
-    Skips the auto-assigned id; renders each remaining key as a
-    `**Key:** value` line."""
+    """Format a knowledge entry as readable text for the LLM prompt."""
     lines = []
     for key, value in entry.items():
         if key == "id":
@@ -95,77 +107,76 @@ def _format_knowledge(entry: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _strip_code_fences(text: str) -> str:
-    """Strip ```markdown ... ``` wrapping if the LLM fenced its output."""
-    stripped = text.strip()
-    fenced = re.match(
-        r"^```(?:markdown|md)?\s*\n(.*?)\n```\s*$",
-        stripped,
-        re.DOTALL,
-    )
-    if fenced:
-        return fenced.group(1).strip() + "\n"
-    return stripped + "\n"
+def parse_json_response(raw: str) -> Dict[str, Any]:
+    """Tolerant JSON parse for an LLM response.
 
-
-# Regex for a well-formed YAML frontmatter block at the top of a file.
-# Mirrors the pattern in scilink/skills/loader.py so we can detect when
-# the LLM forgot to wrap the description.
-_FRONTMATTER_RE = re.compile(r"\A---\s*\n.*?\n---\s*\n", re.DOTALL)
-
-
-def _yaml_safe_single_line(value: str) -> str:
-    """Quote a single-line scalar so YAML parses it as a literal string,
-    even when it begins with characters YAML treats specially ({ [ * & ! |
-    > ' " % @ #).
-
-    Uses single-quoted style: any embedded single quotes are doubled. Newlines
-    are collapsed (single-quoted style cannot encode them; descriptions are
-    declared single-line in the prompt anyway)."""
-    collapsed = " ".join(value.split())
-    escaped = collapsed.replace("'", "''")
-    return f"'{escaped}'"
-
-
-def _ensure_frontmatter(text: str) -> str:
-    """Repair a graduated-skill body whose LLM forgot the YAML frontmatter.
-
-    The fresh-graduation prompt asks the LLM to emit::
-
-        ---
-        description: <one-line>
-        ---
-
-        ## overview
-        ...
-
-    In practice the LLM occasionally drops the opening ``---`` and emits
-    the description as a bare top line. The skill loader then can't
-    parse the frontmatter and the rule never reaches downstream prompts.
-    Auto-repair: if the text doesn't start with a frontmatter block,
-    promote whatever's before the first ``## <section>`` heading into a
-    ``description:`` field and wrap it.
+    Handles three common shapes:
+      1. Pure JSON (the documented contract).
+      2. JSON wrapped in ``` or ```json fences.
+      3. JSON embedded in surrounding prose (matches the largest
+         brace-balanced block).
+    Raises ValueError if no JSON object can be located.
     """
-    if _FRONTMATTER_RE.match(text):
-        return text
-    # Find the first markdown section heading; everything before it is
-    # candidate description text.
-    match = re.search(r"^##\s", text, re.MULTILINE)
-    if match is None:
-        # No body to anchor on -- give up, return as-is.
-        return text
-    head = text[: match.start()].strip()
-    body = text[match.start():]
-    # Promote any leading "description:" prefix the LLM might have used,
-    # otherwise take the head verbatim. Strip a trailing standalone "---"
-    # if the LLM emitted one (the closing delimiter without an opener).
-    head = re.sub(r"^description:\s*", "", head, flags=re.IGNORECASE)
-    head = re.sub(r"\n?---\s*$", "", head).strip()
-    if not head:
-        head = "auto-generated description (LLM omitted frontmatter)"
-    # YAML-quote the value so descriptions starting with `{`, `"`, etc.
-    # don't trip the loader's YAML parser.
-    return f"---\ndescription: {_yaml_safe_single_line(head)}\n---\n\n{body}"
+    text = raw.strip()
+    fenced = re.match(r"^```(?:json)?\s*\n(.*?)\n```\s*$", text, re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        return json.loads(match.group(0))
+    raise ValueError(
+        f"No JSON object found in LLM response (first 200 chars): {raw[:200]!r}"
+    )
+
+
+def format_skill_as_markdown(data: Dict[str, str]) -> str:
+    """Deterministic JSON-dict → YAML+markdown skill file.
+
+    Frontmatter is emitted via yaml.safe_dump so any value (including
+    those starting with `{`, `"`, etc.) is correctly quoted. Sections
+    follow in the canonical order; empty values are skipped.
+    """
+    import yaml
+
+    description = (data.get("description") or "").strip()
+    if not description:
+        description = "auto-generated skill (LLM omitted description)"
+
+    frontmatter = yaml.safe_dump(
+        {"description": description},
+        default_flow_style=False,
+        sort_keys=False,
+        allow_unicode=True,
+        width=10_000,  # don't line-wrap the description
+    ).strip()
+
+    sections: List[str] = []
+    for key in _SECTION_KEYS:
+        content = (data.get(key) or "").strip()
+        if content:
+            sections.append(f"## {key}\n\n{content}")
+
+    body = "\n\n".join(sections)
+    return f"---\n{frontmatter}\n---\n\n{body}\n"
+
+
+def _read_skill_as_dict(skill_path: Path, *, domain: str) -> Dict[str, str]:
+    """Load an existing skill file and return its data as a flat dict
+    of {description, overview, planning, ...}. Uses the same loader the
+    runtime uses, so frontmatter parsing is consistent."""
+    from ...skills.loader import load_skill
+
+    parsed = load_skill(str(skill_path), domain=domain)
+    data: Dict[str, str] = {
+        "description": (parsed.get("meta") or {}).get("description", ""),
+    }
+    for key in _SECTION_KEYS:
+        data[key] = parsed.get(key) or ""
+    return data
 
 
 # ──────────────────────────────────────────────────────────────
@@ -184,12 +195,15 @@ def graduate_to_skill_file(
 ) -> Dict[str, Any]:
     """Graduate a knowledge entry into a skill .md file.
 
-    If a skill with this name exists at
-    ``<skills_root>/<domain>/<skill_name>/<skill_name>.md``, the LLM is
-    asked to merge the new knowledge into it via `update_template`.
-    Otherwise a fresh skill is created via `fresh_template`. Either way
-    the result lands at that same path so subsequent sessions auto-load
-    it via `load_graduated_skills`.
+    Structured-I/O flow: the LLM returns a JSON object with named
+    fields (description + canonical sections), and this function emits
+    the YAML+markdown skill file deterministically. The LLM never has
+    to produce valid YAML or markdown structure on its own.
+
+    If a skill with this name already exists at
+    ``<skills_root>/<domain>/<skill_name>/<skill_name>.md``, the LLM
+    receives the existing skill as JSON via ``update_template`` and
+    returns a merged JSON object. Otherwise ``fresh_template`` is used.
 
     Args:
         knowledge_entry: dict from `KnowledgeStore.get` or hand-built.
@@ -198,11 +212,13 @@ def graduate_to_skill_file(
         domain: skill domain (e.g. "vasp").
         llm_call: callable taking a prompt and returning the LLM's
             response text.
-        fresh_template: prompt template for first-time graduation. Must
-            accept {skill_name}, {domain}, {knowledge_text} keys.
+        fresh_template: prompt template for first-time graduation.
+            Must accept {skill_name}, {domain}, {knowledge_text} keys
+            and instruct the LLM to return a JSON object.
         update_template: prompt template for merging into an existing
             skill. Must accept {skill_name}, {existing_skill},
-            {new_knowledge} keys.
+            {new_knowledge} keys and instruct the LLM to return a JSON
+            object.
         skills_root: where graduated skills live. Defaults to
             GRADUATED_SKILLS_DIR (~/.scilink/graduated_skills).
 
@@ -220,10 +236,10 @@ def graduate_to_skill_file(
 
     is_update = skill_path.exists()
     if is_update:
-        existing = skill_path.read_text()
+        existing_data = _read_skill_as_dict(skill_path, domain=domain)
         prompt = update_template.format(
             skill_name=skill_name,
-            existing_skill=existing,
+            existing_skill=json.dumps(existing_data, indent=2),
             new_knowledge=knowledge_text,
         )
     else:
@@ -234,10 +250,8 @@ def graduate_to_skill_file(
         )
 
     raw = llm_call(prompt)
-    skill_content = _strip_code_fences(raw)
-    # Auto-repair if the LLM forgot the frontmatter -- otherwise the
-    # rule never makes it into downstream prompts via the loader.
-    skill_content = _ensure_frontmatter(skill_content)
+    parsed = parse_json_response(raw)
+    skill_content = format_skill_as_markdown(parsed)
 
     # Loader-style bundles include __init__.py; harmless for path-loaded
     # skills, but keeps the layout consistent with built-ins.
@@ -317,12 +331,13 @@ def format_graduated_skills_block(
     Args:
         skills: list returned by `load_graduated_skills`.
         sections: which canonical sections to include. Defaults to
-            ["planning", "implementation", "validation"] -- the
-            sections most likely to carry actionable rules.
+            all six canonical sections so newly-graduated rules can't
+            be hidden by the section filter — they get the prompt
+            visibility they were graduated to provide.
     """
     if not skills:
         return ""
-    sections = sections or ["planning", "implementation", "validation"]
+    sections = sections or list(_SECTION_KEYS)
     lines = ["", "## LEARNED RULES (graduated skills)", ""]
     for sk in skills:
         name = sk.get("name", "graduated")
