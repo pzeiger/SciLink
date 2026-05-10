@@ -114,6 +114,19 @@ def _strip_code_fences(text: str) -> str:
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n.*?\n---\s*\n", re.DOTALL)
 
 
+def _yaml_safe_single_line(value: str) -> str:
+    """Quote a single-line scalar so YAML parses it as a literal string,
+    even when it begins with characters YAML treats specially ({ [ * & ! |
+    > ' " % @ #).
+
+    Uses single-quoted style: any embedded single quotes are doubled. Newlines
+    are collapsed (single-quoted style cannot encode them; descriptions are
+    declared single-line in the prompt anyway)."""
+    collapsed = " ".join(value.split())
+    escaped = collapsed.replace("'", "''")
+    return f"'{escaped}'"
+
+
 def _ensure_frontmatter(text: str) -> str:
     """Repair a graduated-skill body whose LLM forgot the YAML frontmatter.
 
@@ -148,11 +161,11 @@ def _ensure_frontmatter(text: str) -> str:
     # if the LLM emitted one (the closing delimiter without an opener).
     head = re.sub(r"^description:\s*", "", head, flags=re.IGNORECASE)
     head = re.sub(r"\n?---\s*$", "", head).strip()
-    # Collapse to a single line so it survives YAML parsing as a scalar.
-    head = " ".join(head.split())
     if not head:
         head = "auto-generated description (LLM omitted frontmatter)"
-    return f"---\ndescription: {head}\n---\n\n{body}"
+    # YAML-quote the value so descriptions starting with `{`, `"`, etc.
+    # don't trip the loader's YAML parser.
+    return f"---\ndescription: {_yaml_safe_single_line(head)}\n---\n\n{body}"
 
 
 # ──────────────────────────────────────────────────────────────

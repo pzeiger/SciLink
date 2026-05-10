@@ -13,6 +13,7 @@ from scilink.agents.sim_agents.skill_graduation import (
     GRADUATED_SKILLS_DIR,
     KnowledgeStore,
     WORD_COUNT_WARN_THRESHOLD,
+    _FRONTMATTER_RE,
     _ensure_frontmatter,
     _format_knowledge,
     _strip_code_fences,
@@ -132,7 +133,10 @@ class TestEnsureFrontmatter:
         )
         repaired = _ensure_frontmatter(broken)
         assert repaired.startswith("---\n")
-        assert "description: VASP rule about ALGO=All + ISMEAR=-5" in repaired
+        # Description text survives (now YAML-quoted, so don't assume the
+        # exact "description: <text>" substring).
+        assert "VASP rule about ALGO=All + ISMEAR=-5" in repaired
+        assert "description:" in repaired
         # Body is preserved.
         assert "## overview" in repaired
         assert "body content" in repaired
@@ -141,7 +145,8 @@ class TestEnsureFrontmatter:
         broken = "Some description text\n\n## overview\nbody\n"
         repaired = _ensure_frontmatter(broken)
         assert repaired.startswith("---\n")
-        assert "description: Some description text" in repaired
+        assert "Some description text" in repaired
+        assert "description:" in repaired
 
     def test_strips_description_prefix_if_llm_included_it(self):
         broken = (
@@ -151,9 +156,38 @@ class TestEnsureFrontmatter:
             "## overview\nbody\n"
         )
         repaired = _ensure_frontmatter(broken)
-        assert "description: foo bar baz" in repaired
-        # Should not have nested "description: description:".
+        assert "foo bar baz" in repaired
+        # Should not nest the prefix (i.e. "description: 'description:"
+        # would mean we kept the LLM's prefix as part of the value).
+        assert "description: 'description:" not in repaired
         assert "description: description:" not in repaired
+
+    def test_quotes_description_starting_with_yaml_special(self):
+        """Descriptions that begin with `{`, `"`, etc. must be quoted so the
+        skill loader's YAML parser doesn't mis-read them as inline mappings."""
+        broken = (
+            "{All,Veryfast,Damped} (IALGO=5X) + ISMEAR=-5 produces a "
+            "tetrahedron-not-variational warning\n"
+            "---\n"
+            "\n"
+            "## overview\nbody\n"
+        )
+        repaired = _ensure_frontmatter(broken)
+        # The description value should be single-quoted so YAML parses it as
+        # a literal string, not an inline mapping.
+        first_lines = repaired.splitlines()[:3]
+        assert first_lines[0] == "---"
+        assert first_lines[1].startswith("description: '")
+        assert first_lines[1].endswith("'")
+        # Round-trip through PyYAML to prove the loader's parser will accept it.
+        import re
+        import yaml
+        m = re.match(r"\A---\s*\n(.*?)\n---\s*\n", repaired, re.DOTALL)
+        assert m is not None
+        meta = yaml.safe_load(m.group(1))
+        assert isinstance(meta, dict)
+        assert "description" in meta
+        assert "{All,Veryfast,Damped}" in meta["description"]
 
     def test_collapses_multiline_description_to_single_line(self):
         broken = (
