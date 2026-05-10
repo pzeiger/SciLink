@@ -30,17 +30,31 @@ searches the wrong directory.
 4. Does it contain hydrogen (requires adequate ENCUT)?
 5. Is it a relaxation, single-point, NEB, or MD calculation?
 
-**Smearing:** The choice of ISMEAR depends on the system:
+**Smearing:** The choice of ISMEAR is dictated primarily by the
+system type, NOT by whether the calculation is static or a
+relaxation. The system type rule comes first; the
+"tetrahedron-for-accurate-energies" exception applies only to
+insulators.
+
 - Metals and metallic surfaces: ISMEAR = 1 or 2 (Methfessel-Paxton),
-  SIGMA = 0.1-0.2 eV. Check that the entropy term T*S is less than
-  1 meV/atom in the OUTCAR.
-- Semiconductors and insulators: ISMEAR = 0 (Gaussian), SIGMA = 0.05 eV.
+  SIGMA = 0.1-0.2 eV. This is the right choice for metals in BOTH
+  static SCF and relaxation calculations. Check that the entropy
+  term T*S is less than 1 meV/atom in the OUTCAR. Do NOT default to
+  ISMEAR = -5 for metals just because the calculation is static --
+  tetrahedron is brittle for metals (sensitive to k-mesh symmetry,
+  problems at Gamma) and is only worth the cost when you are
+  specifically computing tetrahedron-method DOS or band-structure
+  data on a fully-converged k-mesh.
+- Semiconductors and insulators (relaxations): ISMEAR = 0 (Gaussian),
+  SIGMA = 0.05 eV.
+- Semiconductors and insulators (static, NSW = 0): ISMEAR = -5
+  (tetrahedron with Blochl corrections) is preferred for accurate
+  total energies and DOS. ISMEAR = 0 is also acceptable.
 - Molecules in a box: ISMEAR = 0 (Gaussian), SIGMA = 0.01-0.05 eV.
-- Accurate total energies or DOS: ISMEAR = -5 (tetrahedron method with
-  Blochl corrections). ONLY for static calculations (NSW = 0), never
-  for relaxations or MD.
-Using ISMEAR = -5 for a relaxation will cause erratic forces and
-likely fail to converge.
+
+NEVER use ISMEAR = -5 for an ionic relaxation or MD run regardless
+of system type -- it produces erratic forces and typically fails
+to converge.
 
 **Spin polarization:** Systems containing Ni, Fe, Co, Mn, or Cr MUST
 use ISPIN = 2 with appropriate MAGMOM initial values. Common initial
@@ -177,8 +191,11 @@ wrong magnetic ground states, and unreliable forces.
   is the single most common cause of POTCAR lookup failures.
 - ENCUT must be at least 1.3x the maximum ENMAX in any POTCAR used. For
   systems with H, this means at least 400 eV minimum.
-- ISMEAR must match the system type: 1 or 2 for metals, 0 for
-  molecules and semiconductors, -5 only for static calculations.
+- ISMEAR must match the system type. Metals: 1 or 2 (MP) for both
+  static and relaxation calcs -- do not switch to -5 just because
+  NSW = 0. Molecules and semiconductor relaxations: 0 (Gaussian).
+  Static (NSW = 0) insulators: -5 (tetrahedron) preferred for
+  accurate energies, 0 also acceptable.
 - ISIF must match the calculation type: 2 for slabs, 3 for bulk
   cell optimization, 0 for fixed-cell single points.
 - ISPIN = 2 must be present for any system containing Ni, Fe, Co, Mn, Cr.
