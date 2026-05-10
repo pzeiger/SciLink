@@ -113,7 +113,7 @@ class MLIPAgent:
         self.skill_name: Optional[str] = None
         self.skill_sections: Optional[Dict[str, str]] = None
         try:
-            self._available_skills = list_skills(domain="mlip")
+            self._available_skills = list_skills(domain="machine_learning_potentials")
         except Exception:
             self._available_skills = []
 
@@ -134,7 +134,7 @@ class MLIPAgent:
 
     def _load_skill(self, skill: str) -> bool:
         try:
-            parsed = load_skill(skill, domain="mlip")
+            parsed = load_skill(skill, domain="machine_learning_potentials")
             self.skill_name = parsed["name"]
             self.skill_sections = parsed
             self.logger.info(f"📖 Loaded MLIP skill: {self.skill_name}")
@@ -146,7 +146,7 @@ class MLIPAgent:
     def _load_backend_skill(self, backend: str) -> bool:
         """Load backend-specific skill and merge into existing sections."""
         try:
-            parsed = load_skill(backend, domain="mlip")
+            parsed = load_skill(backend, domain="machine_learning_potentials")
             if self.skill_sections is None:
                 self.skill_sections = parsed
             else:
