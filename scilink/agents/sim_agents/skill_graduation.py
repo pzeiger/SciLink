@@ -108,6 +108,53 @@ def _strip_code_fences(text: str) -> str:
     return stripped + "\n"
 
 
+# Regex for a well-formed YAML frontmatter block at the top of a file.
+# Mirrors the pattern in scilink/skills/loader.py so we can detect when
+# the LLM forgot to wrap the description.
+_FRONTMATTER_RE = re.compile(r"\A---\s*\n.*?\n---\s*\n", re.DOTALL)
+
+
+def _ensure_frontmatter(text: str) -> str:
+    """Repair a graduated-skill body whose LLM forgot the YAML frontmatter.
+
+    The fresh-graduation prompt asks the LLM to emit::
+
+        ---
+        description: <one-line>
+        ---
+
+        ## overview
+        ...
+
+    In practice the LLM occasionally drops the opening ``---`` and emits
+    the description as a bare top line. The skill loader then can't
+    parse the frontmatter and the rule never reaches downstream prompts.
+    Auto-repair: if the text doesn't start with a frontmatter block,
+    promote whatever's before the first ``## <section>`` heading into a
+    ``description:`` field and wrap it.
+    """
+    if _FRONTMATTER_RE.match(text):
+        return text
+    # Find the first markdown section heading; everything before it is
+    # candidate description text.
+    match = re.search(r"^##\s", text, re.MULTILINE)
+    if match is None:
+        # No body to anchor on -- give up, return as-is.
+        return text
+    head = text[: match.start()].strip()
+    body = text[match.start():]
+    # Promote any leading "description:" prefix the LLM might have used,
+    # otherwise take the head verbatim. Strip a trailing standalone "---"
+    # if the LLM emitted one (the closing delimiter without an opener).
+    head = re.sub(r"^description:\s*", "", head, flags=re.IGNORECASE)
+    head = re.sub(r"\n?---\s*$", "", head).strip()
+    # Collapse to a single line so it survives YAML parsing as a scalar.
+    head = " ".join(head.split())
+    if not head:
+        head = "auto-generated description (LLM omitted frontmatter)"
+    return f"---\ndescription: {head}\n---\n\n{body}"
+
+
 # ──────────────────────────────────────────────────────────────
 # Graduation
 # ──────────────────────────────────────────────────────────────
@@ -175,6 +222,9 @@ def graduate_to_skill_file(
 
     raw = llm_call(prompt)
     skill_content = _strip_code_fences(raw)
+    # Auto-repair if the LLM forgot the frontmatter -- otherwise the
+    # rule never makes it into downstream prompts via the loader.
+    skill_content = _ensure_frontmatter(skill_content)
 
     # Loader-style bundles include __init__.py; harmless for path-loaded
     # skills, but keeps the layout consistent with built-ins.

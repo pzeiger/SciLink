@@ -13,6 +13,7 @@ from scilink.agents.sim_agents.skill_graduation import (
     GRADUATED_SKILLS_DIR,
     KnowledgeStore,
     WORD_COUNT_WARN_THRESHOLD,
+    _ensure_frontmatter,
     _format_knowledge,
     _strip_code_fences,
     format_graduated_skills_block,
@@ -111,6 +112,63 @@ class TestFormatKnowledge:
     def test_pretty_prints_keys(self):
         text = _format_knowledge({"error_pattern": "ZBRENT"})
         assert "Error Pattern" in text
+
+
+class TestEnsureFrontmatter:
+    """The LLM occasionally forgets the opening `---`; auto-repair so the
+    skill loader can still parse the resulting file."""
+
+    def test_passthrough_when_frontmatter_present(self):
+        good = "---\ndescription: x\n---\n\n## overview\nbody\n"
+        assert _ensure_frontmatter(good) == good
+
+    def test_repairs_missing_opening_delimiter(self):
+        broken = (
+            "VASP rule about ALGO=All + ISMEAR=-5 incompatibility\n"
+            "---\n"
+            "\n"
+            "## overview\n"
+            "body content\n"
+        )
+        repaired = _ensure_frontmatter(broken)
+        assert repaired.startswith("---\n")
+        assert "description: VASP rule about ALGO=All + ISMEAR=-5" in repaired
+        # Body is preserved.
+        assert "## overview" in repaired
+        assert "body content" in repaired
+
+    def test_repairs_completely_missing_frontmatter(self):
+        broken = "Some description text\n\n## overview\nbody\n"
+        repaired = _ensure_frontmatter(broken)
+        assert repaired.startswith("---\n")
+        assert "description: Some description text" in repaired
+
+    def test_strips_description_prefix_if_llm_included_it(self):
+        broken = (
+            "description: foo bar baz\n"
+            "---\n"
+            "\n"
+            "## overview\nbody\n"
+        )
+        repaired = _ensure_frontmatter(broken)
+        assert "description: foo bar baz" in repaired
+        # Should not have nested "description: description:".
+        assert "description: description:" not in repaired
+
+    def test_collapses_multiline_description_to_single_line(self):
+        broken = (
+            "Multiline description\n"
+            "with a wrapped second line\n"
+            "---\n"
+            "\n"
+            "## overview\nbody\n"
+        )
+        repaired = _ensure_frontmatter(broken)
+        # Description survives as one line in the frontmatter.
+        first_lines = repaired.splitlines()[:3]
+        assert first_lines[0] == "---"
+        assert first_lines[1].startswith("description:")
+        assert "Multiline description with a wrapped second line" in first_lines[1]
 
 
 class TestStripCodeFences:
