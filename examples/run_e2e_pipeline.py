@@ -66,12 +66,31 @@ class CaseResult:
 # Classification
 # ══════════════════════════════════════════════════════════════
 
+def _read_outcar_tail(case_dir: Path, max_bytes: int = 50_000) -> str:
+    """Read the tail of OUTCAR (which carries the success/failure footers)
+    without loading multi-GB files into memory."""
+    outcar = case_dir / "OUTCAR"
+    if not outcar.exists():
+        return ""
+    try:
+        size = outcar.stat().st_size
+        with outcar.open("rb") as f:
+            f.seek(max(0, size - max_bytes))
+            return f.read().decode(errors="replace")
+    except Exception:
+        return ""
+
+
 def classify_case(case_dir: Path, facts: Dict[str, Any]) -> str:
     """Decide whether a case run succeeded, failed, or is incomplete.
 
-    Convergence flags from vasprun.xml are the primary signal. When
-    the file isn't present (e.g. VASP died very early), fall back to
-    looking for a SLURM stdout / vasp.out tail."""
+    Primary signal: convergence flags from vasprun.xml (parsed by
+    post_run_analysis). When vasprun.xml is missing -- common when only
+    OUTCAR was pulled back from the cluster -- fall back to OUTCAR tail
+    inspection. VASP writes "reached required accuracy" on a converged
+    relaxation and a timing footer ("General timing and accounting") on
+    any clean exit, so those strings let us distinguish a successful
+    run from a partial one."""
     if facts.get("converged") is True:
         return "success"
     if facts.get("converged_electronic") is False:
@@ -80,10 +99,22 @@ def classify_case(case_dir: Path, facts: Dict[str, Any]) -> str:
         return "failure"
     if facts.get("error_hints") or facts.get("classified_errors"):
         return "failure"
-    # No vasprun.xml at all -> either VASP didn't run, or the run is
-    # mid-flight. Look for any *.out / vasp.out as a hint.
+
+    # Fallback: read OUTCAR directly (vasprun.xml may not be present).
+    outcar_tail = _read_outcar_tail(case_dir)
+    if outcar_tail:
+        if "reached required accuracy" in outcar_tail:
+            return "success"
+        if "General timing and accounting informations" in outcar_tail:
+            # Clean exit but didn't converge to required accuracy --
+            # could be a static SCF that finished, or a relaxation that
+            # ran out of NSW. Treat as success and let the quality
+            # agent decide; it has more nuance for these cases.
+            return "success"
+
+    # Some output exists but no clear success indicator -- treat as failure.
     if list(case_dir.glob("*.out")) or (case_dir / "vasp.out").exists():
-        return "failure"  # something ran but didn't converge
+        return "failure"
     return "unknown"
 
 
