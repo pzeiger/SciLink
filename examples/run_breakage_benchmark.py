@@ -221,9 +221,17 @@ echo "this script with 'analyze' once they're done."
 """
 
 
-def build_submit_fix_script(case_label: str, *, walltime: str = "00:15:00") -> str:
-    """SLURM script to run the corrected INCAR. Identical structure to
-    submit.sh but renames so the original failure log isn't overwritten."""
+def build_submit_fix_script(
+    case_label: str,
+    *,
+    pseudo_dir: str,
+    modules: str,
+    vasp_command: str,
+    walltime: str = "00:15:00",
+) -> str:
+    """SLURM script to run the corrected INCAR. Self-contained: same
+    module loads + POTCAR assembly as submit.sh, but renames the job
+    so the original failure log isn't overwritten."""
     job_name = f"scilink_breakage_fix_{case_label}"
     return f"""#!/bin/bash
 #SBATCH --job-name={job_name}
@@ -236,19 +244,32 @@ def build_submit_fix_script(case_label: str, *, walltime: str = "00:15:00") -> s
 set -e
 cd "$SLURM_SUBMIT_DIR"
 
-# Same module / POTCAR setup as submit.sh -- edit there if needed.
-PSEUDO_DIR="$(grep '^PSEUDO_DIR' submit.sh | head -1 | cut -d'"' -f2)"
-ELEMENTS=($(sed -n '6p' POSCAR))
-: > POTCAR
-for e in "${{ELEMENTS[@]}}"; do
-    cat "$PSEUDO_DIR/$e/POTCAR" >> POTCAR
-done
+# ---- Module environment ----
+{modules}
 
-# Move the original INCAR out of the way and use the fix.
+# ---- Move original INCAR aside and use the fix ----
 [ -f INCAR.original ] || cp INCAR INCAR.original
 cp INCAR.fixed INCAR
 
-mpirun vasp_std
+# ---- Assemble POTCAR from pseudo dir ----
+PSEUDO_DIR="{pseudo_dir}"
+
+ELEMENTS=($(sed -n '6p' POSCAR))
+if [ ${{#ELEMENTS[@]}} -eq 0 ]; then
+    echo "No elements parsed from POSCAR; aborting." >&2
+    exit 1
+fi
+: > POTCAR
+for e in "${{ELEMENTS[@]}}"; do
+    if [ ! -f "$PSEUDO_DIR/$e/POTCAR" ]; then
+        echo "Missing POTCAR for element $e at $PSEUDO_DIR/$e/POTCAR" >&2
+        exit 1
+    fi
+    cat "$PSEUDO_DIR/$e/POTCAR" >> POTCAR
+done
+
+# ---- Run VASP with the corrected INCAR ----
+{vasp_command}
 """
 
 
@@ -288,6 +309,11 @@ def cmd_prep(args: argparse.Namespace) -> int:
         "stage": "prep",
         "started_at": datetime.now().isoformat(),
         "baseline": str(baseline),
+        # Persist the cluster-side settings so analyze-stage submit_fix
+        # scripts can be regenerated self-contained.
+        "pseudo_dir": args.pseudo_dir,
+        "modules": args.modules or SLURM_DEFAULT_MODULES,
+        "vasp_command": args.vasp_cmd,
         "cases": [],
     }
 
@@ -475,10 +501,28 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         (case_dir / "analysis.json").write_text(json.dumps(analysis, indent=2))
 
         # Save the corrected INCAR + a fix-resubmit script.
+        # Cluster-side knobs: CLI args > manifest (from prep) > defaults.
         if "suggested_incar" in result:
             (case_dir / "INCAR.fixed").write_text(result["suggested_incar"])
             fix_script = case_dir / "submit_fix.sh"
-            fix_script.write_text(build_submit_fix_script(record["label"]))
+            fix_script.write_text(build_submit_fix_script(
+                record["label"],
+                pseudo_dir=(
+                    args.pseudo_dir
+                    or manifest.get("pseudo_dir")
+                    or SLURM_DEFAULT_PSEUDO_DIR
+                ),
+                modules=(
+                    args.modules
+                    or manifest.get("modules")
+                    or SLURM_DEFAULT_MODULES
+                ),
+                vasp_command=(
+                    args.vasp_cmd
+                    or manifest.get("vasp_command")
+                    or SLURM_DEFAULT_VASP_CMD
+                ),
+            ))
             fix_script.chmod(0o755)
 
         marker = "✓" if match else ("⚠" if actual_fix_keys else "✗")
@@ -550,11 +594,31 @@ def main() -> int:
              "doesn't need it for our patterns).",
     )
     p_an.add_argument("--api-key", default=None, help="Explicit LLM API key.")
+    # Cluster-side knobs for the generated submit_fix.sh files. Default to
+    # whatever was stored in breakage_manifest.json at prep time; CLI
+    # overrides take priority for older manifests that lack these keys.
+    p_an.add_argument(
+        "--pseudo-dir",
+        default=None,
+        help="Override PSEUDO_DIR baked into submit_fix.sh.",
+    )
+    p_an.add_argument(
+        "--modules",
+        default=None,
+        help='Override module-load block baked into submit_fix.sh. Same '
+             '"\\n -> newline" translation as prep --modules.',
+    )
+    p_an.add_argument(
+        "--vasp-cmd",
+        default=None,
+        help="Override VASP launch command in submit_fix.sh.",
+    )
     p_an.set_defaults(func=cmd_analyze)
 
     args = parser.parse_args()
     # Bash's double-quoted "\n" is a literal backslash-n, not a newline.
     # Accept the obvious-looking shell invocation and translate before use.
+    # Applies to both prep and analyze, since both expose --modules.
     if getattr(args, "modules", None):
         args.modules = args.modules.replace("\\n", "\n")
     return args.func(args)
