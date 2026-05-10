@@ -349,6 +349,24 @@ def cmd_prep(args: argparse.Namespace) -> int:
 # Stage 2: ANALYZE
 # ══════════════════════════════════════════════════════════════
 
+def _parse_incar_keys(incar_text: str) -> Dict[str, str]:
+    """Extract KEY → value dict from an INCAR. Reuses _INCAR_LINE_RE."""
+    keys: Dict[str, str] = {}
+    for line in incar_text.splitlines():
+        m = _INCAR_LINE_RE.match(line)
+        if m:
+            keys[m.group(1).upper()] = m.group(2).strip()
+    return keys
+
+
+def _diff_incar_keys(original: str, suggested: str) -> Set[str]:
+    """Set of INCAR keys whose values differ between original and
+    suggested (added, removed, or changed)."""
+    a = _parse_incar_keys(original)
+    b = _parse_incar_keys(suggested)
+    return {k for k in (set(a) | set(b)) if a.get(k) != b.get(k)}
+
+
 def _find_failure_log(case_dir: Path) -> Optional[Path]:
     """Locate the captured VASP failure log. Prefer the SLURM .out file
     (which contains stdout from VASP), fall back to vasp.out if present."""
@@ -413,16 +431,43 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             continue
 
         explanation = result.get("explanation", {}) or {}
-        actual_fix_keys = set((explanation.get("fixes_applied") or {}).keys())
+        # The result's explanation key shape varies by method:
+        #   "deterministic"        -> {diagnoses, fixes_applied}
+        #   "deterministic_only"   -> {diagnoses, fixes_applied, llm_error, ...}
+        #   "deterministic+llm"    -> {deterministic_diagnoses, deterministic_fixes, llm_explanation}
+        #   "llm"                  -> same as deterministic+llm but det dicts are empty
+        # Pull diagnoses from whichever key is populated.
+        diagnoses = (
+            explanation.get("diagnoses")
+            or explanation.get("deterministic_diagnoses")
+            or []
+        )
+        det_fixes = (
+            explanation.get("fixes_applied")
+            or explanation.get("deterministic_fixes")
+            or {}
+        )
+
+        # Most robust measure of "what the updater changed" -- diff the
+        # original INCAR vs the suggested one. Captures both the
+        # deterministic fixes and any LLM-side additions in one set.
+        original_incar = (case_dir / "INCAR").read_text()
+        suggested_incar = result.get("suggested_incar", "")
+        actual_fix_keys = _diff_incar_keys(original_incar, suggested_incar)
+
         expected = set(record["expected_fix_keys"])
-        match = actual_fix_keys == expected
+        # Superset match: the agent might add MORE keys than the minimal
+        # fix (e.g. the LLM tightens an unrelated parameter); we only
+        # require that the expected keys are all present.
+        match = expected.issubset(actual_fix_keys)
 
         analysis = {
             "label": record["label"],
             "targets": record["targets"],
             "log": str(log_path),
             "method": result.get("method"),
-            "diagnoses": explanation.get("diagnoses", []),
+            "diagnoses": diagnoses,
+            "deterministic_fix_keys": sorted(det_fixes.keys()),
             "expected_fix_keys": sorted(expected),
             "actual_fix_keys": sorted(actual_fix_keys),
             "match": match,
@@ -439,7 +484,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         marker = "✓" if match else ("⚠" if actual_fix_keys else "✗")
         print(
             f"  {marker} {record['label']:14s}  "
-            f"method={result.get('method', '—'):12s}  "
+            f"method={result.get('method', '—'):20s}  "
             f"expected={sorted(expected)}  actual={sorted(actual_fix_keys)}"
         )
         summary.append(analysis)
