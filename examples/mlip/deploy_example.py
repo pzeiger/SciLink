@@ -113,28 +113,47 @@ def check_mace_availability():
     return mace_info.get("available", False), mace_info
 
 
-def run_with_mace(agent, system_info_dict, out_dir, temperature, pressure):
-    print("  MACE available — running full deploy_pretrained pipeline.")
-    deployment = agent.deploy_pretrained(
-        system_info=system_info_dict,
-        research_goal=system_info_dict["research_goal"],
-        simulation_params={
-            "timestep": 0.5,
+def run_with_mace(
+    agent, system_info_dict, out_dir, temperature, pressure,
+    runner, structure_file, n_steps, device,
+):
+    print(f"  MACE available — running deploy_pretrained (runner={runner}).")
+    if runner == "lammps":
+        sim_params = {
+            "timestep": 0.5,            # ps (LAMMPS metal units)
             "temperature": temperature,
             "pressure": pressure,
-        },
+        }
+        kwargs = dict(runner="lammps")
+    else:  # ase
+        sim_params = {
+            "timestep": 1.0,            # fs (ASE convention)
+            "temperature": temperature,
+            "pressure": pressure,
+            "n_steps": n_steps,
+            "device": device,
+        }
+        kwargs = dict(runner="ase", structure_file=str(structure_file))
+
+    return agent.deploy_pretrained(
+        system_info=system_info_dict,
+        research_goal=system_info_dict["research_goal"],
+        simulation_params=sim_params,
+        **kwargs,
     )
-    return deployment
 
 
-def run_without_mace(agent, system, out_dir, temperature, pressure):
+def run_without_mace(
+    agent, system, out_dir, temperature, pressure,
+    runner, structure_file, n_steps, device,
+):
     """
     Demonstrate the orchestration without MACE installed: drive
-    skill context lookup + direct LAMMPS input generation with a
+    skill context lookup + direct script/input generation with a
     placeholder model path. Documents what the cluster run would do.
     """
-    print("  MACE not installed locally — exercising the deterministic")
-    print("  pieces only (skill context + LAMMPS input generation).")
+    print(f"  MACE not installed locally — exercising deterministic")
+    print(f"  pieces only (skill context + {runner} script generation).")
 
     agent._load_backend_skill("mace")
     planning = agent._get_skill_context(section="planning")
@@ -159,22 +178,41 @@ def run_without_mace(agent, system, out_dir, temperature, pressure):
     print(f"  rationale:       {rationale}")
 
     from scilink.skills._shared import mlip_tools
-    lammps_input = mlip_tools.generate_lammps_input(
-        backend="mace",
-        model_file="/CLUSTER_PATH/to/mace-mp-0.model",
-        elements=system["elements"],
-        working_dir=str(out_dir),
-        timestep=0.5,
-        temperature=temperature,
-        pressure=pressure,
-    )
-    return {
-        "backend": "mace",
-        "model_name": chosen,
-        "lammps_input": lammps_input,
-        "elements": system["elements"],
-        "note": "PLACEHOLDER MODEL PATH — update on the cluster",
-    }
+    if runner == "lammps":
+        out_path = mlip_tools.generate_lammps_input(
+            backend="mace",
+            model_file="/CLUSTER_PATH/to/mace-mp-0.model",
+            elements=system["elements"],
+            working_dir=str(out_dir),
+            timestep=0.5,
+            temperature=temperature,
+            pressure=pressure,
+        )
+        return {
+            "backend": "mace", "model_name": chosen,
+            "elements": system["elements"], "runner": "lammps",
+            "lammps_input": out_path,
+            "note": "PLACEHOLDER MODEL PATH — update on the cluster",
+        }
+    else:  # ase
+        out_path = mlip_tools.generate_ase_script(
+            backend="mace",
+            model_name=chosen,
+            elements=system["elements"],
+            working_dir=str(out_dir),
+            structure_file=Path(structure_file).name,
+            timestep=1.0,
+            temperature=temperature,
+            pressure=pressure,
+            n_steps=n_steps,
+            device=device,
+        )
+        return {
+            "backend": "mace", "model_name": chosen,
+            "elements": system["elements"], "runner": "ase",
+            "ase_script": out_path,
+            "note": "MACE not installed locally — script needs MACE+torch to run",
+        }
 
 
 def main():
@@ -192,6 +230,25 @@ def main():
     )
     parser.add_argument("--model-name", default="gemini-2.5-pro")
     parser.add_argument("--out-dir", default=None)
+    parser.add_argument(
+        "--runner", choices=["lammps", "ase"], default="lammps",
+        help="lammps: write a LAMMPS+MACE input file. "
+             "ase: write a runnable Python MD script using mace-torch.",
+    )
+    parser.add_argument(
+        "--n-steps", type=int, default=200,
+        help="ASE only: number of MD steps in the generated script.",
+    )
+    parser.add_argument(
+        "--device", default="cuda",
+        help="ASE only: device the generated script will run on.",
+    )
+    parser.add_argument(
+        "--run", action="store_true",
+        help="ASE only: after generation, also execute the script "
+             "in-process (requires MACE installed). Useful for "
+             "single-command end-to-end demos on a GPU node.",
+    )
     args = parser.parse_args()
 
     mace_available, mace_info = check_mace_availability()
@@ -247,28 +304,56 @@ def main():
                 result = run_with_mace(
                     agent, system_info, system_dir,
                     args.temperature, args.pressure,
+                    args.runner, data_path,
+                    args.n_steps, args.device,
                 )
             except Exception as exc:
                 print(f"  deploy_pretrained failed: {exc}")
                 result = run_without_mace(
                     agent, system, system_dir,
                     args.temperature, args.pressure,
+                    args.runner, data_path,
+                    args.n_steps, args.device,
                 )
         else:
             result = run_without_mace(
                 agent, system, system_dir,
                 args.temperature, args.pressure,
+                args.runner, data_path,
+                args.n_steps, args.device,
             )
 
+        output_file = result.get("lammps_input") or result.get("ase_script")
+        label = "LAMMPS input" if args.runner == "lammps" else "ASE MD script"
         print()
-        print("  --- generated LAMMPS input (head) ---")
-        with open(result["lammps_input"]) as f:
-            head = "".join(f.readlines()[:12])
+        print(f"  --- generated {label} (head) ---")
+        with open(output_file) as f:
+            head = "".join(f.readlines()[:14])
         print(textwrap.indent(head, "    "))
+
+        if args.run and args.runner == "ase" and mace_available:
+            print()
+            print("  --- executing ASE MD script in-process ---")
+            import subprocess
+            r = subprocess.run(
+                [sys.executable, output_file],
+                cwd=str(system_dir),
+                env={**os.environ, "MACE_DEVICE": args.device},
+            )
+            print(f"  script exit code: {r.returncode}")
+            for artifact in ("thermo.log", "traj.traj"):
+                p = system_dir / artifact
+                if p.exists():
+                    print(f"  produced: {p} ({p.stat().st_size} bytes)")
+        elif args.run and args.runner == "lammps":
+            print("  --run is ASE-only; for LAMMPS runs, submit `lmp -in in.lammps` separately.")
+        elif args.run and not mace_available:
+            print("  --run skipped: MACE not installed.")
 
         summary["systems"][system["name"]] = {
             "data_file": str(data_path),
-            "lammps_input": result["lammps_input"],
+            "runner": args.runner,
+            "output_file": output_file,
             "backend": result.get("backend"),
             "model_name": result.get("model_name"),
         }
