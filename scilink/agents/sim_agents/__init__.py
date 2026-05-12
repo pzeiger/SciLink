@@ -2,6 +2,8 @@ from .structure_agent import StructureGenerator
 from .val_agent import StructureValidatorAgent, IncarValidatorAgent
 from .vasp_agent import VaspInputAgent
 from .vasp_quality import VaspQualityAgent
+from .base_agent import SimulationAgent
+from .md_simulation_agent import MDSimulationAgent
 from .lammps_agent import LAMMPSSimulationAgent
 from .lammps_updater import LAMMPSUpdater
 from .force_field_agent import ForceFieldAgent
