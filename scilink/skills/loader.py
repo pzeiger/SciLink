@@ -22,9 +22,10 @@ under the ``extras`` key (lowercased heading → body) and a warning is logged.
 """
 
 import logging
+import os
 import re
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List
 
 import yaml
 
@@ -37,12 +38,52 @@ _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _logger = logging.getLogger(__name__)
 
 
-def list_skills(domain: str = "curve_fitting") -> list:
-    """Return names of available built-in skills for a domain.
+# ─── User-provided skill roots ─────────────────────────────────────
+# Users can add their own skill bundles without modifying SciLink source
+# by pointing the ``SCILINK_SKILLS_PATH`` env var at one (or several,
+# os.pathsep-separated) extra skill-root directories. Each user root
+# follows the same layout as the built-in tree:
+#     <root>/<domain>/<name>/<name>.md
+# User roots are searched BEFORE the built-in tree, so a user-provided
+# ``<root>/periodic_dft/vasp/vasp.md`` overrides the bundled one of the
+# same name. Each agent's capability-discovery (``supported_software``)
+# automatically picks up new bundles dropped into a user root with no
+# code changes required.
 
-    A built-in skill is a folder ``<domain>/<name>/`` containing a
+def _skill_roots() -> List[Path]:
+    """Return ordered list of directories to search for skill bundles.
+
+    User-provided roots from ``$SCILINK_SKILLS_PATH`` come first
+    (highest precedence), then the built-in ``scilink/skills/`` tree.
+    Re-evaluated on each call so adding to the env var mid-process is
+    visible without a reload.
+    """
+    roots: List[Path] = []
+    extra = os.environ.get("SCILINK_SKILLS_PATH", "").strip()
+    if extra:
+        for raw in extra.split(os.pathsep):
+            if not raw.strip():
+                continue
+            p = Path(raw).expanduser().resolve()
+            if p.is_dir():
+                roots.append(p)
+            else:
+                _logger.warning(
+                    "SCILINK_SKILLS_PATH entry not found or not a directory: %s", p
+                )
+    roots.append(_SKILLS_DIR)
+    return roots
+
+
+def list_skills(domain: str = "curve_fitting") -> list:
+    """Return all available skill names for a domain, across all roots.
+
+    A skill is a folder ``<root>/<domain>/<name>/`` containing a
     matching ``<name>.md`` (Anthropic-Skills-style bundle). Folders
     starting with ``_`` or ``.`` (e.g. ``_shared/``) are skipped.
+    User-provided skill roots (via ``$SCILINK_SKILLS_PATH``) and the
+    built-in tree are unioned; duplicate names across roots collapse
+    to one entry (user root wins at load time).
 
     Args:
         domain: Skill domain subdirectory (default: "curve_fitting").
@@ -50,31 +91,35 @@ def list_skills(domain: str = "curve_fitting") -> list:
     Returns:
         Sorted list of skill name strings.
     """
-    skills_dir = _SKILLS_DIR / domain
-    if not skills_dir.is_dir():
-        return []
-    return sorted(_iter_skill_names(skills_dir))
+    names: set = set()
+    for root in _skill_roots():
+        domain_dir = root / domain
+        if domain_dir.is_dir():
+            names.update(_iter_skill_names(domain_dir))
+    return sorted(names)
 
 
 def list_all_skills() -> dict:
-    """Auto-discover all built-in skill domains and their skills.
+    """Auto-discover all skill domains across user + built-in roots.
 
-    Scans subdirectories of the skills package directory for skill
-    bundles (folders named ``<skill>/`` containing ``<skill>.md``).
+    Scans subdirectories of every skill root (user-provided via
+    ``$SCILINK_SKILLS_PATH`` and the built-in ``scilink/skills/``) for
+    skill bundles. Domains from different roots are merged.
 
     Returns:
         Dict mapping domain names to sorted lists of skill names,
-        e.g. ``{"curve_fitting": ["xps"], "hyperspectral": ["eels"]}``.
+        e.g. ``{"periodic_dft": ["vasp", "cp2k"], ...}``.
         Empty domains are omitted.
     """
-    result = {}
-    for sub in sorted(_SKILLS_DIR.iterdir()):
-        if not sub.is_dir() or sub.name.startswith(("_", ".")):
-            continue
-        names = sorted(_iter_skill_names(sub))
-        if names:
-            result[sub.name] = names
-    return result
+    result: dict = {}
+    for root in _skill_roots():
+        for sub in sorted(root.iterdir()):
+            if not sub.is_dir() or sub.name.startswith(("_", ".")):
+                continue
+            names = set(_iter_skill_names(sub))
+            if names:
+                result.setdefault(sub.name, set()).update(names)
+    return {k: sorted(v) for k, v in result.items()}
 
 
 def _iter_skill_names(domain_dir: Path):
@@ -123,9 +168,11 @@ def load_skill(skill: str, domain: str = "curve_fitting") -> Dict:
 def _resolve_skill_path(skill: str, domain: str) -> Path:
     """Resolve a skill name or path to an actual file path.
 
-    Built-in skills live at ``<skills>/<domain>/<name>/<name>.md`` (Tier C
-    bundle layout). User-provided skills can be passed as a direct ``.md``
-    path; that case bypasses the bundle lookup.
+    Skills live at ``<root>/<domain>/<name>/<name>.md`` (Tier C bundle
+    layout). Searches user-provided roots from ``$SCILINK_SKILLS_PATH``
+    first (so user bundles can override built-in ones of the same
+    name), then the built-in ``scilink/skills/`` tree. A direct path to
+    a ``.md`` file is also accepted and bypasses the bundle lookup.
     """
     candidate = Path(skill)
     if candidate.suffix.lower() == ".md":
@@ -133,14 +180,15 @@ def _resolve_skill_path(skill: str, domain: str) -> Path:
             return candidate
         raise FileNotFoundError(f"Skill file not found: {candidate}")
 
-    built_in = _SKILLS_DIR / domain / skill / f"{skill}.md"
-    if built_in.exists():
-        return built_in
+    for root in _skill_roots():
+        bundle = root / domain / skill / f"{skill}.md"
+        if bundle.exists():
+            return bundle
 
-    domain_dir = _SKILLS_DIR / domain
-    available = sorted(_iter_skill_names(domain_dir)) if domain_dir.is_dir() else []
+    available = list_skills(domain=domain)
     raise FileNotFoundError(
-        f"Skill '{skill}' not found. Available built-in skills for '{domain}': {available}"
+        f"Skill '{skill}' not found for domain '{domain}'. "
+        f"Available (user + built-in): {available}"
     )
 
 

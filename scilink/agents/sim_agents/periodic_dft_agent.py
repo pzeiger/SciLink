@@ -42,7 +42,23 @@ class PeriodicDFTAgent:
 
     SKILL_DOMAIN = "periodic_dft"
 
-    SUPPORTED_SOFTWARE = ("vasp",)
+    @classmethod
+    def supported_software(cls) -> list:
+        """
+        Auto-discover engine names this agent can currently handle.
+
+        Returns every skill bundle name found for the agent's
+        ``SKILL_DOMAIN`` across both built-in skills and any user-
+        provided roots from ``$SCILINK_SKILLS_PATH``. A user dropping
+        in their own ``periodic_dft/cp2k/cp2k.md`` will see ``cp2k``
+        appear in the list with no source-code changes.
+
+        Re-evaluated on each call so adding bundles or env-var entries
+        mid-process takes effect immediately. Used by the orchestrator's
+        routing layer to decide which engines are reachable.
+        """
+        from ...skills.loader import list_skills
+        return list_skills(domain=cls.SKILL_DOMAIN)
 
     def __init__(self, api_key: str = None,
                  model_name: str = "gemini-3.1-pro-preview",
