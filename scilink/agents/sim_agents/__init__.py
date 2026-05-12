@@ -13,3 +13,4 @@ from .lammps_analysis_updater import LAMMPSAnalysisUpdater
 from .lammps_orchestrator import LAMMPSOrchestrator
 from .dft_orchestrator import DFTOrchestrator
 from .simulation_orchestrator import SimulationOrchestratorAgent, SimulationMode
+from .simulation_router import SimulationRouter, discover_scale_agents
