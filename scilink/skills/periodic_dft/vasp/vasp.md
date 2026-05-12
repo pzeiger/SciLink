@@ -1,5 +1,17 @@
 ---
 description: VASP DFT input generation — INCAR parameter selection (functional, smearing, spin polarization, parallelization) and KPOINTS conventions for metals, semiconductors, slabs, molecules, and NEB calculations.
+detect:
+  binaries: [vasp_std, vasp_gam, vasp_ncl, vasp]
+  env_vars: [VASP_HOME, VASP_DIR]
+  python_modules: []
+  guidance: |
+    VASP ships several binaries flavored by k-point sampling:
+    vasp_std (general k-points), vasp_gam (gamma-only, fastest for
+    large cells), vasp_ncl (noncollinear / spin-orbit). Some sites
+    install them under $VASP_HOME/<flavor> or $VASP_DIR/bin/. On
+    HPC clusters with Lmod or similar, the binary may only be on
+    $PATH after `module load vasp/<version>`. Detection should
+    consider any of the above as a positive hit.
 ---
 # VASP Input Generation Skill
 

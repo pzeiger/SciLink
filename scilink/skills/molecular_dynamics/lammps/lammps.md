@@ -1,3 +1,18 @@
+---
+description: LAMMPS classical molecular dynamics — input scripts for materials, biomolecular, and reactive systems with pair styles spanning EAM, Tersoff, ReaxFF, OPLS-AA, AMBER, and MLIP backends.
+detect:
+  binaries: [lmp, lmp_mpi, lmp_serial, lmp_kokkos_cuda_mpi, lammps]
+  env_vars: [LAMMPS_HOME, LAMMPS_DIR]
+  python_modules: [lammps]
+  guidance: |
+    LAMMPS binaries follow the pattern lmp[_<variant>] where variant
+    is a build-time suffix (e.g. lmp_serial, lmp_mpi, lmp_kokkos_cuda).
+    The plain `lmp` is the conda-forge / pip default. The `lammps`
+    Python module (PYTHON package binding) is also a valid runtime
+    surface — if importable, the engine is usable even without a
+    standalone binary on $PATH.
+---
+
 ## Overview
 
 LAMMPS is a general-purpose classical molecular dynamics engine for materials
