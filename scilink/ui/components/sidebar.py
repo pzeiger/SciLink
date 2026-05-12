@@ -209,7 +209,6 @@ def render_sidebar() -> None:
         else:
             st.title("SciLink")
         _locked = st.session_state.agent_initialized
-        _is_simulate = st.session_state.app_mode == "simulate"
         preset = st.selectbox(
             "Model",
             MODEL_OPTIONS + ["Custom"],
@@ -225,7 +224,9 @@ def render_sidebar() -> None:
         fh_api_key = st.text_input("FutureHouse API key (optional)", type="password", key="cfg_fh_api_key", disabled=_locked)
         mp_api_key = st.text_input("Materials Project API key (optional)", type="password", key="cfg_mp_api_key", disabled=_locked)
 
-        _render_hpc_connection()
+        from scilink.ui._features import simulate_enabled
+        if simulate_enabled():
+            _render_hpc_connection()
 
         # Planning mode: embedding model
         if st.session_state.app_mode == "plan":
@@ -411,7 +412,7 @@ def render_sidebar() -> None:
                 'height:100vh;font-family:sans-serif;color:#888;background:#0e1117;">'
                 '<h2>Server stopped. You can close this window.</h2></div>\';'
                 '</script>',
-                height=0,
+                height=1,
             )
             import time, signal
             time.sleep(1)
@@ -1012,43 +1013,3 @@ def _start_simulate_session(
     st.rerun()
 
 
-def _render_simulate_sidebar_status() -> None:
-    """Show HPC and simulation agent status in the sidebar."""
-    conn = st.session_state.get("hpc_connection")
-    if conn and conn.is_connected:
-        st.markdown(f"🟢 **{conn.profile.hostname}**")
-        sched = st.session_state.get("hpc_scheduler")
-        if sched:
-            st.caption(f"Scheduler: {sched.name}")
-    else:
-        st.caption("🔴 No HPC connection")
-        st.caption("Connect via the HPC section above, or work offline.")
-
-
-def _render_simulate_status() -> None:
-    """Show simulate-mode agent status metrics."""
-    agent = st.session_state.get("hpc_sim_agent")
-    result = st.session_state.get("hpc_gen_result")
-    conn = st.session_state.get("hpc_connection")
-
-    r1, r2 = st.columns(2)
-    with r1:
-        if agent and agent.skill_name:
-            st.metric("Engine", agent.skill_name)
-        else:
-            st.metric("Engine", "—")
-    with r2:
-        connected = conn is not None and conn.is_connected
-        st.metric("HPC", "Connected" if connected else "Offline")
-
-    if result:
-        sys_info = result.get("system_info", {})
-        st.metric("Last system", sys_info.get("system_category", "—"))
-        st.metric("Atoms", f"{sys_info.get('atom_count', '—'):,}")
-
-    tracked = st.session_state.get("hpc_tracked_jobs", {})
-    if tracked:
-        from scilink.hpc.scheduler import JobStatus
-        n_run = sum(1 for j in tracked.values() if j.status == JobStatus.RUNNING)
-        n_done = sum(1 for j in tracked.values() if j.status.is_terminal)
-        st.metric("Jobs", f"{n_run} running · {n_done} completed")

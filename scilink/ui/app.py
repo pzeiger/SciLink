@@ -14,7 +14,7 @@ from scilink.ui.components.chat_uploads import render_pre_chat_uploads
 from scilink.ui.components.file_viewer import render_file_preview
 from scilink.ui.components.tools_agents import render_tools_agents_tab
 from scilink.ui.components.skills import render_skills_tab
-from scilink.ui.components.simulations import render_simulations_tab
+from scilink.ui._features import simulate_enabled
 from scilink.ui.output_capture import AgentStoppedError, OutputCapture
 from scilink.ui.theme import inject_theme
 from scilink.ui.config import AVATAR_USER, AVATAR_AGENT, APP_MODES, SESSION_DIR_PREFIXES
@@ -355,9 +355,17 @@ if not st.session_state.agent_initialized:
         # Mode selector — centered above the logo
         if st.session_state.app_mode is None:
             st.session_state.app_mode = "analyze"
+        # Fall back if a stale session_state still says "simulate" but the
+        # [sim] extras are no longer installed.
+        if st.session_state.app_mode == "simulate" and not simulate_enabled():
+            st.session_state.app_mode = "analyze"
         _mode_map = {m["key"]: m for m in APP_MODES}
         st.markdown('<div class="mode-selector-anchor"></div>', unsafe_allow_html=True)
-        _, _mc1, _mc2, _mc3, _ = st.columns([1.5, 1, 1, 1, 1.5])
+        if simulate_enabled():
+            _, _mc1, _mc2, _mc3, _ = st.columns([1.5, 1, 1, 1, 1.5])
+        else:
+            _, _mc1, _mc2, _ = st.columns([1.5, 1.5, 1.5, 1.5])
+            _mc3 = None
         with _mc1:
             _atype = "primary" if st.session_state.app_mode == "analyze" else "secondary"
             if st.button("Analyze", type=_atype, use_container_width=True, key="mode_analyze"):
@@ -368,11 +376,12 @@ if not st.session_state.agent_initialized:
             if st.button("Plan", type=_ptype, use_container_width=True, key="mode_plan"):
                 st.session_state.app_mode = "plan"
                 st.rerun()
-        with _mc3:
-            _stype = "primary" if st.session_state.app_mode == "simulate" else "secondary"
-            if st.button("Simulate", type=_stype, use_container_width=True, key="mode_simulate"):
-                st.session_state.app_mode = "simulate"
-                st.rerun()
+        if _mc3 is not None:
+            with _mc3:
+                _stype = "primary" if st.session_state.app_mode == "simulate" else "secondary"
+                if st.button("Simulate", type=_stype, use_container_width=True, key="mode_simulate"):
+                    st.session_state.app_mode = "simulate"
+                    st.rerun()
         _cur_desc = _mode_map[st.session_state.app_mode]["description"]
         st.markdown(
             f'<p style="text-align:center;color:#6B7A8C;font-size:0.85em;'
@@ -451,8 +460,9 @@ if not st.session_state.agent_initialized:
 # Active session — Chat + File Explorer tabs
 # ══════════════════════════════════════════════════════════════════
 
-if st.session_state.app_mode == "simulate":
+if st.session_state.app_mode == "simulate" and simulate_enabled():
     # ── Simulate mode: no agent, just HPC UI ─────────────────
+    from scilink.ui.components.simulations import render_simulations_tab
     sim_tab, terminal_note = st.tabs(["Simulations", "About"])
     with sim_tab:
         render_simulations_tab()
@@ -466,9 +476,15 @@ if st.session_state.app_mode == "simulate":
         )
 else:
     # ── Analyze / Plan modes: full agent UI ──────────────────
-    chat_tab, files_tab, tools_tab, skills_tab, sim_tab = st.tabs(
-        ["Chat", "File Explorer", "Tools", "Skills", "Simulations"]
-    )
+    if simulate_enabled():
+        chat_tab, files_tab, tools_tab, skills_tab, sim_tab = st.tabs(
+            ["Chat", "File Explorer", "Tools", "Skills", "Simulations"]
+        )
+    else:
+        chat_tab, files_tab, tools_tab, skills_tab = st.tabs(
+            ["Chat", "File Explorer", "Tools", "Skills"]
+        )
+        sim_tab = None
 
     # ── Chat tab ─────────────────────────────────────────────────────
     with chat_tab:
@@ -780,7 +796,7 @@ else:
         new MutationObserver(fix).observe(doc.body,
             {childList:true, subtree:true, attributes:true, attributeFilter:['aria-checked','checked']});
     })();
-    </script>""", height=0)
+    </script>""", height=1)
                     if show:
                         import html as _html
     
@@ -990,5 +1006,7 @@ else:
         render_skills_tab()
     
     # ── Simulations tab ──────────────────────────────────────────────
-    with sim_tab:
-        render_simulations_tab()
+    if sim_tab is not None:
+        from scilink.ui.components.simulations import render_simulations_tab
+        with sim_tab:
+            render_simulations_tab()

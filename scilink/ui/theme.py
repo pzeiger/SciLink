@@ -1331,7 +1331,7 @@ def inject_theme() -> None:
         .observe(doc.body, {childList:true, subtree:true, attributes:true});
 })();
 </script>"""
-        components.html(_LIGHT_WIDGET_JS, height=0)
+        components.html(_LIGHT_WIDGET_JS, height=1)
     else:
         # Keep DOM slot count stable; also undo any inline styles
         # left by the light-mode observer on the stop button.
@@ -1351,7 +1351,7 @@ def inject_theme() -> None:
     new MutationObserver(cleanup)
         .observe(doc.body, {childList:true, subtree:true});
 })();
-</script>""", height=0)
+</script>""", height=1)
 
     vibe = st.session_state.get("vibe_theme", "Professional")
 
@@ -1380,5 +1380,5 @@ def inject_theme() -> None:
     # Slot 2: collision JS (always present, no-op script when inactive)
     components.html(
         _COLLISION_JS if use_collision_js else "<script>/* noop */</script>",
-        height=0,
+        height=1,
     )
