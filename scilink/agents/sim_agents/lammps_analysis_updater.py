@@ -7,7 +7,9 @@ import json
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-from ...auth import get_internal_proxy_key
+from ...auth import (
+    APIKeyNotFoundError, get_api_key, get_internal_proxy_key, infer_provider,
+)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from ._deprecation import normalize_params
@@ -70,6 +72,13 @@ class LAMMPSAnalysisUpdater:
                 base_url=base_url
             )
         else:
+            if api_key is None:
+                provider = infer_provider(model_name) or "google"
+                api_key = get_api_key(provider) or get_internal_proxy_key()
+            if not api_key:
+                raise APIKeyNotFoundError(
+                    infer_provider(model_name) or "google"
+                )
             self.logger.info(f"Using LiteLLM: {model_name}")
             self.model = LiteLLMGenerativeModel(
                 model=model_name,

@@ -9,6 +9,9 @@ import json
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 
+from ...auth import (
+    APIKeyNotFoundError, get_api_key, get_internal_proxy_key, infer_provider,
+)
 from .lammps_agent import LAMMPSSimulationAgent
 from .lammps_updater import LAMMPSUpdater
 from .lammps_analysis import LAMMPSAnalysisAgent
@@ -44,9 +47,15 @@ class LAMMPSOrchestrator:
         self.working_dir = Path(working_dir).resolve()
         self.working_dir.mkdir(exist_ok=True, parents=True)
         
-        self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
-        if not self.api_key:
-            raise ValueError("API key required for orchestrator")
+        # Provider-inferred key with SCILINK_API_KEY as final fallback
+        if api_key is None:
+            provider = infer_provider(model_name) or "google"
+            api_key = get_api_key(provider) or get_internal_proxy_key()
+        if not api_key:
+            raise APIKeyNotFoundError(
+                infer_provider(model_name) or "google"
+            )
+        self.api_key = api_key
         
         self.model_name = model_name
         self.base_url = base_url
@@ -1388,9 +1397,16 @@ class LAMMPSOrchestrator:
         logging.info("LAMMPS ORCHESTRATOR - QUICK RUN")
         logging.info("=" * 80)
     
-        api_key = kwargs.get('api_key') or os.getenv("GOOGLE_API_KEY")
         model_name = kwargs.get('model_name', "gemini-3-pro-preview")
         base_url = kwargs.get('base_url')
+        api_key = kwargs.get('api_key')
+        if api_key is None:
+            provider = infer_provider(model_name) or "google"
+            api_key = get_api_key(provider) or get_internal_proxy_key()
+        if not api_key:
+            raise APIKeyNotFoundError(
+                infer_provider(model_name) or "google"
+            )
     
         # Step 1: Prepare data file
         logging.info("\n📋 Step 1: Preparing data file...")

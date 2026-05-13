@@ -10,7 +10,9 @@ import numpy as np
 # MDAnalysis is imported lazily inside _analyze_system_composition so that
 # loading scilink.agents.sim_agents (e.g., via DFTOrchestrator) doesn't
 # require the LAMMPS-side optional dep.
-from ...auth import get_internal_proxy_key
+from ...auth import (
+    APIKeyNotFoundError, get_api_key, get_internal_proxy_key, infer_provider,
+)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from ._deprecation import normalize_params
@@ -104,6 +106,13 @@ class ForceFieldAgent:
             )
         else:
             # Public / LiteLLM
+            if api_key is None:
+                provider = infer_provider(model_name) or "google"
+                api_key = get_api_key(provider) or get_internal_proxy_key()
+            if not api_key:
+                raise APIKeyNotFoundError(
+                    infer_provider(model_name) or "google"
+                )
             self.logger.info(f"ForceFieldAgent using LiteLLM: {model_name}")
             self.model = LiteLLMGenerativeModel(
                 model=model_name,

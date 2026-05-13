@@ -23,7 +23,9 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from enum import Enum
 
-from ...auth import get_internal_proxy_key
+from ...auth import (
+    APIKeyNotFoundError, get_api_key, get_internal_proxy_key, infer_provider,
+)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .simulation_orchestrator_tools import SimulationOrchestratorTools
@@ -358,6 +360,13 @@ class SimulationOrchestratorAgent:
             self.use_openai = True
             self.tools_for_model = self.tools.openai_schemas
         else:
+            if api_key is None:
+                provider = infer_provider(model_name) or "google"
+                api_key = get_api_key(provider) or get_internal_proxy_key()
+            if not api_key:
+                raise APIKeyNotFoundError(
+                    infer_provider(model_name) or "google"
+                )
             logging.info(f"🌐 Simulation orchestrator using LiteLLM: {model_name}")
             self.model = LiteLLMGenerativeModel(
                 model=model_name,

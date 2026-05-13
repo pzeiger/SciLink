@@ -49,7 +49,9 @@ def _filter_confirmations(issues: List[str]) -> List[str]:
     return out
 
 # Replaced google.generativeai imports with wrappers
-from ...auth import get_internal_proxy_key
+from ...auth import (
+    APIKeyNotFoundError, get_api_key, get_internal_proxy_key, infer_provider,
+)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 
@@ -90,7 +92,14 @@ class StructureValidatorAgent:
                 base_url=base_url
             )
         else:
-            # Public / LiteLLM
+            # Public / LiteLLM — provider-inferred key, SCILINK_API_KEY fallback
+            if api_key is None:
+                provider = infer_provider(model_name) or "google"
+                api_key = get_api_key(provider) or get_internal_proxy_key()
+            if not api_key:
+                raise APIKeyNotFoundError(
+                    infer_provider(model_name) or "google"
+                )
             self.logger.info(f"StructureValidatorAgent using LiteLLM: {model_name}")
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
@@ -477,13 +486,21 @@ class IncarValidatorAgent:
                 base_url=base_url
             )
         else:
+            # Public / LiteLLM — provider-inferred key, SCILINK_API_KEY fallback
+            if api_key is None:
+                provider = infer_provider(model_name) or "google"
+                api_key = get_api_key(provider) or get_internal_proxy_key()
+            if not api_key:
+                raise APIKeyNotFoundError(
+                    infer_provider(model_name) or "google"
+                )
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key
             )
-            
+
         self.generation_config = None
-        
+
         # Initialize literature agent
         self.literature_agent = IncarLiteratureAgent(
             api_key=futurehouse_api_key, 
