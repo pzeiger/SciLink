@@ -262,7 +262,7 @@ class VaspQualityAgent:
         self,
         output_dir: str,
         research_goal: str,
-        skill: Optional[str] = "vasp_input_generation",
+        skill: Optional[str] = "vasp",
     ) -> Dict[str, Any]:
         """Assess the post-run quality of a VASP calculation.
 
@@ -272,7 +272,10 @@ class VaspQualityAgent:
             research_goal: the original natural-language objective for
                 the calculation. Provides the LLM with intent context.
             skill: VASP skill name to load convention guidance from
-                (defaults to "vasp_input_generation"). Pass None to skip.
+                (defaults to "vasp", which loads
+                ``skills/periodic_dft/vasp/vasp.md``; the legacy name
+                "vasp_input_generation" is also accepted via the alias
+                map). Pass None to skip skill loading.
         """
         self.logger.info(f"Running VASP quality check on: {output_dir}")
 
@@ -325,13 +328,20 @@ class VaspQualityAgent:
 
     # ── Internals ──────────────────────────────────────────────
 
+    # Backward-compat: previous skill location was vasp/vasp_input_generation/,
+    # now at periodic_dft/vasp/ after the scale-aware refactor. Keep the same
+    # alias mapping PeriodicDFTAgent uses so direct-to-loader callers (this
+    # method) resolve the legacy name too.
+    _LEGACY_SKILL_ALIASES = {"vasp_input_generation": "vasp"}
+
     def _load_skill_text(self, skill: Optional[str]) -> str:
         if not skill:
             return ""
+        resolved = self._LEGACY_SKILL_ALIASES.get(skill, skill)
         try:
-            parsed = load_skill(skill, domain="vasp")
+            parsed = load_skill(resolved, domain="periodic_dft")
         except Exception as exc:
-            self.logger.warning(f"Could not load skill '{skill}': {exc}")
+            self.logger.warning(f"Could not load skill '{resolved}': {exc}")
             return ""
         # Validation section is the most relevant for post-run judgment;
         # fall back to planning if validation is empty.
