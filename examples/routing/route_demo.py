@@ -91,9 +91,45 @@ def build_fake_available_software() -> AvailableSoftware:
     return avail
 
 
-def build_model(api_key: str, model_name: str):
-    """Construct an LLM model client the router can call."""
+def build_model(api_key: Optional[str], model_name: str,
+                base_url: Optional[str] = None):
+    """Construct an LLM model client using the same auth resolution as
+    the SciLink agents (see vasp_agent.py).
+
+      - If ``base_url`` is set: PNNL-style internal proxy, use the
+        OpenAI-compatible wrapper with SCILINK_API_KEY for auth.
+      - Otherwise: public LiteLLM path. Resolve the key as
+        ``api_key`` (if explicit) → provider-specific env var
+        (GOOGLE_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY based on
+        the model name) → SCILINK_API_KEY fallback. The last fallback
+        is what makes ``SCILINK_API_KEY=<your-anthropic-key>`` work
+        with a Claude model (or any other model whose provider
+        matches the underlying key).
+    """
+    from scilink.auth import (
+        get_api_key, get_internal_proxy_key,
+        infer_provider, APIKeyNotFoundError,
+    )
+
+    if base_url:
+        from scilink.wrappers.openai_wrapper import OpenAIAsGenerativeModel
+        if api_key is None:
+            api_key = get_internal_proxy_key()
+        if not api_key:
+            raise APIKeyNotFoundError("internal proxy (SCILINK_API_KEY)")
+        return OpenAIAsGenerativeModel(
+            model=model_name, api_key=api_key, base_url=base_url,
+        )
+
     from scilink.wrappers.litellm_wrapper import LiteLLMGenerativeModel
+    if api_key is None:
+        provider = infer_provider(model_name) or "google"
+        api_key = get_api_key(provider) or get_internal_proxy_key()
+    if not api_key:
+        raise APIKeyNotFoundError(
+            infer_provider(model_name)
+            or f"<unknown provider for model {model_name!r}>"
+        )
     return LiteLLMGenerativeModel(model=model_name, api_key=api_key)
 
 
@@ -185,18 +221,33 @@ def main():
         help="Which scenario to run. Default: all three.",
     )
     parser.add_argument(
-        "--api-key",
-        default=(
-            os.environ.get("SCILINK_API_KEY")
-            or os.environ.get("ANTHROPIC_API_KEY")
-            or os.environ.get("GOOGLE_API_KEY")
-            or os.environ.get("OPENAI_API_KEY")
+        "--api-key", default=None,
+        help=(
+            "Explicit LLM API key. If omitted, the script resolves "
+            "based on `--base-url`: with a base URL set, falls back to "
+            "SCILINK_API_KEY (internal proxy); without, infers the "
+            "provider from --model-name and uses the matching env var "
+            "(GOOGLE_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY)."
         ),
-        help="LLM API key. Defaults to SCILINK_API_KEY / GOOGLE_API_KEY / etc.",
     )
     parser.add_argument(
-        "--model-name", default="gemini-2.5-pro",
-        help="LiteLLM model identifier (default: gemini-2.5-pro).",
+        "--base-url", default=os.environ.get("SCILINK_BASE_URL"),
+        help=(
+            "Internal proxy base URL (e.g. PNNL's). Triggers the "
+            "OpenAI-compatible wrapper that uses SCILINK_API_KEY for "
+            "auth. Defaults to $SCILINK_BASE_URL."
+        ),
+    )
+    parser.add_argument(
+        "--model-name", default="claude-sonnet-4-5",
+        help=(
+            "LiteLLM model identifier (default: claude-sonnet-4-5). "
+            "Anthropic Claude works out of the box with "
+            "SCILINK_API_KEY=<your anthropic key> via the auth-fallback "
+            "chain. Override with `--model-name gemini-2.5-pro` if you "
+            "have GOOGLE_API_KEY set, or `gpt-4o` if you have "
+            "OPENAI_API_KEY set."
+        ),
     )
     parser.add_argument(
         "--show-candidates-only", action="store_true",
@@ -216,17 +267,28 @@ def main():
         print_candidate_grid(router)
         return 0
 
-    if not args.api_key:
+    try:
+        model = build_model(
+            api_key=args.api_key,
+            model_name=args.model_name,
+            base_url=args.base_url,
+        )
+    except Exception as exc:
         print(
-            "ERROR: no LLM API key. Set SCILINK_API_KEY (or "
-            "GOOGLE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY), or "
-            "pass --api-key, or use --show-candidates-only to skip the "
-            "LLM call.",
+            f"ERROR: could not construct LLM model: {exc}\n\n"
+            "Quick fixes:\n"
+            "  - If you use PNNL's internal proxy, pass --base-url "
+            "(or set $SCILINK_BASE_URL) so SCILINK_API_KEY is used "
+            "via the OpenAI-compatible wrapper.\n"
+            "  - For direct Gemini, set GOOGLE_API_KEY in your env.\n"
+            "  - For direct Claude, pick a claude-* model and set "
+            "ANTHROPIC_API_KEY.\n"
+            "  - To skip the LLM entirely and just see the candidate "
+            "grid, run with --show-candidates-only.",
             file=sys.stderr,
         )
         return 2
 
-    model = build_model(args.api_key, args.model_name)
     router = SimulationRouter(model=model, available_software=avail)
 
     print_candidate_grid(router)
