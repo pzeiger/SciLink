@@ -350,41 +350,18 @@ class SeriesScoutController:
     def _create_overlay_plot(
         scout_curves: list,
         system_info: dict,
-    ) -> bytes:
+    ) -> str:
         """Create a single overlay figure with all scout spectra.
 
-        Args:
-            scout_curves: list of {"label": str, "curve_data": np.ndarray}
-            system_info: metadata dict for axis labels
-        Returns:
-            PNG image bytes.
+        Returns base64-encoded PNG (preserved shape for the existing prompt
+        consumer at `state["scout_overlay_plot"]`). Rendering is delegated
+        to `scilink.utils.curve_preview.render_curve_overlay` so the lit-
+        search optimizer can reuse the same plotting logic.
         """
-        import matplotlib.pyplot as plt
-        import io
+        from ....utils.curve_preview import render_curve_overlay
 
-        fig, ax = plt.subplots(figsize=(10, 6))
-
-        cmap = plt.cm.viridis
-        n = len(scout_curves)
-        for i, entry in enumerate(scout_curves):
-            x, y = SeriesScoutController._extract_xy(entry["curve_data"])
-            color = cmap(i / max(n - 1, 1))
-            ax.plot(x, y, color=color, linewidth=1.2, label=entry["label"])
-
-        ax.set_xlabel(system_info.get("xlabel", "X"))
-        ax.set_ylabel(system_info.get("ylabel", "Y"))
-        ax.set_title(
-            system_info.get("title", "Data")
-            + " — Scout Overlay"
-        )
-        ax.legend(fontsize=8, loc="best")
-        fig.tight_layout()
-
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=120)
-        plt.close(fig)
-        buf.seek(0)
-        return base64.b64encode(buf.read()).decode("utf-8")
+        png_bytes = render_curve_overlay(scout_curves, system_info)
+        return base64.b64encode(png_bytes).decode("utf-8")
 
     def _load_spectrum(self, idx: int, state: dict) -> np.ndarray:
         spectrum_stack = state.get("spectrum_stack")
@@ -468,7 +445,13 @@ class SeriesScoutController:
 
 
 class LiteratureSearchController:
-    """Search literature if enabled and query provided."""
+    """Search literature if enabled and query provided.
+
+    DEPRECATED: prefer the orchestrator-level `search_literature` tool, which
+    fetches lit context BEFORE planning so the planner can produce a
+    literature-informed plan. This in-pipeline controller is retained as a
+    fallback for direct-Python-API callers using `use_literature=True`.
+    """
 
     def __init__(
         self,
@@ -501,6 +484,10 @@ class LiteratureSearchController:
 
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"):
+            return state
+
+        if state.get("literature_context"):
+            self.logger.info("\n📚 --- Skipping Literature (pre-fetched via search_literature tool) ---\n")
             return state
 
         if self.literature_agent is None:
@@ -977,6 +964,13 @@ class HumanFeedbackRefinementController:
         _append_skill_context(prompt, state, "planning")
         _append_prior_knowledge_context(prompt, state)
 
+        # Withhold lit context from the planner in identification mode — it
+        # would re-anchor the planner to specific known materials/phases and
+        # defeat the unbiased-fit purpose. Lit context still reaches Stage-2
+        # candidate enumeration via the synthesis prompt.
+        if state.get("literature_context") and state.get("task_mode") != "identification":
+            prompt.append("\n## Literature\n" + state["literature_context"])
+
         # Identification mode: require a generic, material-agnostic fit plan.
         if state.get("task_mode") == "identification":
             from ..instruct import ID_MODE_PLANNING_ADDENDUM
@@ -1207,6 +1201,9 @@ class HumanFeedbackRefinementController:
         _append_auxiliary_context(prompt, state)
         _append_skill_context(prompt, state, "planning")
         _append_prior_knowledge_context(prompt, state)
+
+        if state.get("literature_context") and state.get("task_mode") != "identification":
+            prompt.append("\n## Literature\n" + state["literature_context"])
 
         # Include current series plan and scout data in refinement context
         if state.get("series_analysis_plan"):

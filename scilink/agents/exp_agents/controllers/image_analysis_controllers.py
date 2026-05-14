@@ -1119,6 +1119,9 @@ class ImagePlanningController:
         _append_prior_analysis_state(prompt, state)
         _append_subagent_context(prompt, state)
 
+        if state.get("literature_context"):
+            prompt.append("\n## Literature\n" + state["literature_context"])
+
         # Series context: use scout data if available, otherwise basic notice
         num_images = state.get("num_images", 1)
         scout_data = state.get("scout_data", [])
@@ -1423,6 +1426,9 @@ class ImagePlanningController:
         _append_prior_analysis_state(prompt, state)
         _append_subagent_context(prompt, state)
 
+        if state.get("literature_context"):
+            prompt.append("\n## Literature\n" + state["literature_context"])
+
         # Include current series plan and scout data in refinement context
         if state.get("series_analysis_plan"):
             prompt.append(
@@ -1668,7 +1674,13 @@ class ImagePlanningController:
 
 
 class LiteratureSearchController:
-    """Search literature if enabled and query provided."""
+    """Search literature if enabled and query provided.
+
+    DEPRECATED: prefer the orchestrator-level `search_literature` tool, which
+    fetches lit context BEFORE planning so the planner can produce a
+    literature-informed plan. This in-pipeline controller is retained as a
+    fallback for direct-Python-API callers using `use_literature=True`.
+    """
 
     def __init__(
         self,
@@ -1701,6 +1713,10 @@ class LiteratureSearchController:
 
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"):
+            return state
+
+        if state.get("literature_context"):
+            self.logger.info("\n--- Skipping Literature (pre-fetched via search_literature tool) ---\n")
             return state
 
         if self.literature_agent is None:

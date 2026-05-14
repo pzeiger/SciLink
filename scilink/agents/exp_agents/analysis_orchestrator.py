@@ -157,6 +157,14 @@ You are the **Analysis Agent**. Your goal is to coordinate experimental data ana
 _SYSTEM_PROMPT_BODY_POST = """
 5. `preview_image`: Load image for visual inspection (for agent 0 vs 1 decision, or ambiguous 2D data).
 
+**LITERATURE CONTEXT (optional, before analysis):**
+5b. `search_literature`: Fetch external literature to inform an upcoming analysis.
+   - Input: `query` (a focused research question).
+   - Action: queries the FutureHouse Edison API; saves results to a markdown file.
+   - Output: `file_path`. Pass it as `literature_file` to the next `run_analysis` so the planner produces a literature-informed plan the user reviews.
+   - When to use: the user asks for literature support, or the analysis objective is one where domain context would meaningfully shape method/parameter choice. Skip for routine measurement-quality analyses.
+   - Note: in curve-fitting `task_mode="identification"` the planner withholds lit context (to keep the fit unbiased); the literature still informs Stage-2 candidate enumeration.
+
 **ANALYSIS EXECUTION:**
 6. `run_analysis`: Execute analysis. Handles single files AND series automatically.
    - Each analysis run creates a unique output directory for traceability.

@@ -15,6 +15,7 @@ LLM reasoning.  If extraction fails, the user is prompted and shown the
 sidecar contents to help them specify the variable manually.
 """
 
+import hashlib
 import json
 import logging
 import re
@@ -31,7 +32,8 @@ from .metadata_converter import (
     normalize_metadata_dict,
     normalize_metadata_dict_with_llm,
 )
-from ..lit_agents import OwlLiteratureAgent, NoveltyScorer
+from ..lit_agents import OwlLiteratureAgent, NoveltyScorer, FittingModelLiteratureAgent
+from ..lit_agents.optimize_query_for_analysis import optimize_query_for_analysis
 from .recommendation_agent import RecommendationAgent
 from ...skills.loader import list_skills, list_all_skills, load_skill
 # Note: DFTOrchestrator is imported lazily inside `run_dft_workflow` to avoid
@@ -1930,6 +1932,7 @@ class AnalysisOrchestratorTools:
             series_metadata: str = None,
             task_mode: str = None,
             prior_analysis_paths: List[str] = None,
+            literature_file: str = None,
         ) -> str:
             """
             Execute analysis with the selected or specified agent.
@@ -2405,6 +2408,8 @@ class AnalysisOrchestratorTools:
                     analyze_kwargs["prior_knowledge"] = self.orch.active_knowledge
                 if prior_analysis_paths:
                     analyze_kwargs["prior_analysis_paths"] = prior_analysis_paths
+                if literature_file:
+                    analyze_kwargs["literature_file"] = literature_file
                 result = agent.analyze(**analyze_kwargs)
                 
                 # === Store result ===
@@ -2598,11 +2603,23 @@ class AnalysisOrchestratorTools:
                         "extracted features, scientific claims, saved-arrays "
                         "catalog). Image-analysis agent only."
                     )
+                },
+                "literature_file": {
+                    "type": "string",
+                    "description": (
+                        "Path to a literature search markdown file produced by "
+                        "`search_literature`. When provided, its contents are "
+                        "injected into the planner so the proposed analysis plan "
+                        "is grounded in external literature. Skipped for the curve-"
+                        "fitting agent's `task_mode='identification'` to preserve "
+                        "the unbiased fit; in that case the literature still "
+                        "informs Stage-2 candidate enumeration."
+                    )
                 }
             },
             required=[]
         )
-        
+
         # =====================================================================
         # 6. LIST RESULTS
         # =====================================================================
@@ -2932,6 +2949,101 @@ class AnalysisOrchestratorTools:
                 }
             },
             required=[]
+        )
+
+        # =====================================================================
+        # 10b. SEARCH LITERATURE (preparatory — call BEFORE run_analysis)
+        # =====================================================================
+        def search_literature(query: str) -> str:
+            """
+            Search scientific literature for context to inform an upcoming
+            analysis. Returns a file path that should be passed as
+            `literature_file` to the next `run_analysis` call so the planner
+            can produce a literature-informed plan.
+            """
+            print(f"  ⚡ Tool: Searching literature for '{query[:80]}...'")
+
+            if not self.orch.futurehouse_api_key:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No FutureHouse/Edison API Key provided in Orchestrator initialization."
+                })
+
+            try:
+                # 50-min ceiling matches plan mode's `LiteratureSearchAgent`
+                # default; Edison CROW jobs can take 20-30 min for harder queries.
+                lit_agent = FittingModelLiteratureAgent(
+                    api_key=self.orch.futurehouse_api_key, max_wait_time=3000
+                )
+            except Exception as e:
+                return json.dumps({"status": "error", "message": f"Failed to init Literature Agent: {e}"})
+
+            # Refine the orchestrator-LLM's draft query using the loaded data
+            # preview + metadata (visual + experimental specifics). Best-effort:
+            # falls back to the raw query on any failure.
+            refined_query = optimize_query_for_analysis(
+                raw_query=query,
+                data_type=getattr(self.orch, "current_data_type", None),
+                data_path=getattr(self.orch, "current_data_path", None),
+                metadata=getattr(self.orch, "current_metadata", None),
+                model=self.orch.model,
+            )
+            if refined_query != query:
+                print(f"  🔍 Refined query: {refined_query}")
+                logging.info(f"search_literature: refined query → {refined_query}")
+            else:
+                print(f"  🔍 Using raw query (no refinement applied)")
+
+            try:
+                result = lit_agent.query_for_models(refined_query)
+            except Exception as e:
+                logging.error(f"Literature search error: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+
+            if result.get("status") != "success":
+                return json.dumps({
+                    "status": result.get("status", "error"),
+                    "message": result.get("message", "Literature search did not succeed")
+                })
+
+            content = result.get("formatted_answer", "") or ""
+
+            # Hash the raw query for an idempotent, collision-free filename:
+            # same raw query → same file (re-runnable), different queries → different files.
+            query_hash = hashlib.md5(query.encode("utf-8")).hexdigest()[:8]
+            lit_path = self.orch.base_dir / f"literature_search_{query_hash}.md"
+            with open(lit_path, "w") as f:
+                f.write(f"# Literature Search Results\n\n**Draft query:** {query}\n")
+                if refined_query != query:
+                    f.write(f"**Refined query:** {refined_query}\n")
+                f.write(f"\n{content}")
+
+            print(f"  ✅ Literature search completed. Saved to {lit_path.name}")
+
+            preview = content[:500] + "..." if len(content) > 500 else content
+            return json.dumps({
+                "status": "success",
+                "file_path": str(lit_path),
+                "content_preview": preview,
+                "hint": "Pass file_path as literature_file to the next run_analysis() call."
+            })
+
+        self._register_tool(
+            func=search_literature,
+            name="search_literature",
+            description=(
+                "Search scientific literature via the FutureHouse Edison API to gather "
+                "context that will inform an upcoming analysis. Call BEFORE run_analysis(); "
+                "pass the returned file_path as `literature_file` to run_analysis() so the "
+                "planner produces a literature-informed plan."
+            ),
+            parameters={
+                "query": {
+                    "type": "string",
+                    "description": "A focused research question (e.g., 'methods for detecting grain boundaries in HRTEM images of 2D materials')."
+                }
+            },
+            required=["query"]
         )
 
         # =====================================================================
