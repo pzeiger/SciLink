@@ -25,7 +25,7 @@ import numpy as np
 # DeployedPotential is the cross-agent contract (see
 # agents/sim_agents/_potential.py). It's a pure-dataclass leaf module
 # with no agent imports, so importing it here creates no cycle —
-# mlip_tools.deploy_pretrained produces a DeployedPotential that
+# mlip_tools.deploy() produces a DeployedPotential that
 # MDSimulationAgent later consumes.
 from ...agents.sim_agents._potential import (
     ASECalculatorSpec, DeployedPotential,
@@ -139,26 +139,32 @@ def check_backends() -> Dict[str, Dict[str, Any]]:
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  PRETRAINED MODEL DEPLOYMENT  (the default path)
+#  MODEL DEPLOYMENT  (the default path)
 # ═══════════════════════════════════════════════════════════════════
 
-def deploy_pretrained(
+def deploy(
     backend: str,
-    model_name: str,
+    model: str,
     elements: List[str],
     working_dir: str,
     device: str = "cpu",
 ) -> DeployedPotential:
     """
-    Deploy a pretrained foundation model for immediate use.
-    No training data or GPU training time required.
+    Deploy an MLIP model as an engine-neutral DeployedPotential.
+
+    ``model`` is a model *identifier* — each backend's deploy function
+    decides whether it's a foundation-model keyword (``"mace-mp-0"``,
+    ``"chgnet"``) or an on-disk path to a trained/fine-tuned model
+    (the output of ``train()`` / ``fine_tune()``). This single entry
+    point covers both cases so adding a backend touches exactly one
+    deploy function — no separate pretrained/trained code paths.
 
     Args:
-        backend:    "mace" | "chgnet" | "nequip" | "deepmd"
-        model_name: Pretrained model identifier (e.g. "mace-mp-0", "chgnet")
-        elements:   Chemical elements in the system
+        backend:     "mace" | "chgnet" | "nequip" | "deepmd"
+        model:       Foundation-model keyword or path to a trained model
+        elements:    Chemical elements in the system
         working_dir: Output directory
-        device:     "cpu" or "cuda"
+        device:      "cpu" or "cuda"
 
     Returns:
         A DeployedPotential descriptor — the engine-neutral contract
@@ -168,106 +174,151 @@ def deploy_pretrained(
     os.makedirs(working_dir, exist_ok=True)
 
     if backend == "mace":
-        return _mace_deploy_pretrained(model_name, elements, working_dir, device)
+        return _mace_deploy(model, elements, working_dir, device)
     elif backend == "chgnet":
-        return _chgnet_deploy_pretrained(model_name, elements, working_dir, device)
-    elif backend == "nequip":
+        return _chgnet_deploy(model, elements, working_dir, device)
+    elif backend in ("nequip", "deepmd"):
+        # These have no foundation models. A trained model file is the
+        # only way to deploy them — but the deploy function (with its
+        # ASECalculatorSpec) isn't written yet.
+        if os.path.exists(model):
+            raise NotImplementedError(
+                f"_{backend}_deploy not yet implemented — add it here "
+                f"with an ASECalculatorSpec, mirroring _mace_deploy."
+            )
         raise NotImplementedError(
-            "NequIP has no foundation models. Use backend='mace' for "
-            "pretrained deployment, or call train() with NequIP."
-        )
-    elif backend == "deepmd":
-        raise NotImplementedError(
-            "DeePMD pretrained deployment not yet implemented. "
-            "DPA-2 foundation model support is planned."
+            f"{backend} has no foundation models; pass a trained model "
+            f"file. Use backend='mace' for pretrained deployment."
         )
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
 
-def _chgnet_deploy_pretrained(
-    model_name: str,
+def _chgnet_deploy(
+    model: str,
     elements: List[str],
     working_dir: str,
     device: str,
 ) -> DeployedPotential:
-    """Deploy the pretrained CHGNet universal model.
+    """Deploy a CHGNet model — bundled universal model or a trained file.
 
-    CHGNet has a single pretrained model bundled with the chgnet
-    package; no model file is downloaded or saved to disk
-    (``model_file=""``). The calculator is constructed once here to
-    validate the install, then discarded — the run script
-    reconstructs it from the ASECalculatorSpec.
+    CHGNet ships a single universal model with the package; the common
+    case (``model`` is the ``"chgnet"`` keyword) deploys that with no
+    file on disk (``model_file=""``). If ``model`` is a path to a
+    trained CHGNet checkpoint, that file is loaded instead. Either way
+    the calculator is constructed once here to validate the install,
+    then discarded — the run script reconstructs it from the
+    ASECalculatorSpec.
     """
     from chgnet.model.dynamics import CHGNetCalculator
 
     use_device = device if device in ("cuda", "cpu", "mps") else "cpu"
-    # Construct-and-discard: validates that chgnet is importable and
-    # the bundled weights load. The generated script rebuilds it.
-    CHGNetCalculator(use_device=use_device)
+    is_file = bool(model) and os.path.exists(model)
 
-    logger.info(f"Deployed CHGNet (ASE-only, device={use_device})")
+    if is_file:
+        from chgnet.model import CHGNet
+        CHGNetCalculator(model=CHGNet.from_file(model), use_device=use_device)
+        construct_expr = (
+            f"CHGNetCalculator(model=__import__('chgnet.model', "
+            f"fromlist=['CHGNet']).CHGNet.from_file({model!r}), "
+            f"use_device=DEVICE)"
+        )
+        model_file, model_name = model, os.path.basename(model)
+        notes = f"Trained CHGNet model ({model_name}). ASE-only — no LAMMPS pair_style."
+    else:
+        # Construct-and-discard: validates chgnet is importable and the
+        # bundled weights load. The generated script rebuilds it.
+        CHGNetCalculator(use_device=use_device)
+        construct_expr = "CHGNetCalculator(use_device=DEVICE)"
+        model_file, model_name = "", model or "chgnet"
+        notes = (
+            "CHGNet universal MPtrj-pretrained model. ASE-only — no "
+            "LAMMPS pair_style; the MD agent must use the ASE runner."
+        )
+
+    logger.info(f"Deployed CHGNet {model_name} (ASE-only, device={use_device})")
     return DeployedPotential(
         kind="mlip",
         backend="chgnet",
-        model_name=model_name or "chgnet",
-        model_file="",     # CHGNet bundles its weights — no external file
+        model_name=model_name,
+        model_file=model_file,
         elements=list(elements),
         ase_calculator=ASECalculatorSpec(
             import_line="from chgnet.model.dynamics import CHGNetCalculator",
-            construct_expr="CHGNetCalculator(use_device=DEVICE)",
+            construct_expr=construct_expr,
             device_env_var="CHGNET_DEVICE",
         ),
-        notes=(
-            "CHGNet universal MPtrj-pretrained model. ASE-only — no "
-            "LAMMPS pair_style; the MD agent must use the ASE runner."
-        ),
+        notes=notes,
     )
 
 
-def _mace_deploy_pretrained(
-    model_name: str,
+# MACE foundation-model keywords -> (loader, API size keyword, domain).
+_MACE_FOUNDATION_MODELS = {
+    "mace-mp-0":        ("mace_mp", "medium", "inorganic"),
+    "mace-mp-0b":       ("mace_mp", "small",  "inorganic"),
+    "mace-mp-0-large":  ("mace_mp", "large",  "inorganic"),
+    "small":            ("mace_mp", "small",  "inorganic"),
+    "medium":           ("mace_mp", "medium", "inorganic"),
+    "large":            ("mace_mp", "large",  "inorganic"),
+    "mace-off23":       ("mace_off", "medium", "organic"),
+    "mace-off23-small": ("mace_off", "small",  "organic"),
+    "mace-off23-large": ("mace_off", "large",  "organic"),
+}
+
+
+def _mace_deploy(
+    model: str,
     elements: List[str],
     working_dir: str,
     device: str,
 ) -> DeployedPotential:
-    """Deploy a pretrained MACE model.
+    """Deploy a MACE model — foundation keyword or trained file.
 
-    Resolves the human-readable model name to the MACE API's
-    size keyword and loader (mace_mp vs mace_off), constructs the
-    calculator once to validate the install and locate the cached
-    model file (needed for the LAMMPS pair_coeff), then returns a
-    DeployedPotential whose ASECalculatorSpec lets the run script
-    reconstruct the same calculator.
+    If ``model`` is a path to a trained/fine-tuned model on disk it is
+    loaded via ``MACECalculator(model_paths=...)``. Otherwise it's
+    treated as a foundation-model keyword resolved through the
+    ``mace_mp`` / ``mace_off`` loaders. In both cases the calculator is
+    constructed once to validate the install and locate the on-disk
+    model file (needed for the LAMMPS pair_coeff), and a
+    DeployedPotential is returned whose ASECalculatorSpec lets the run
+    script reconstruct the same calculator.
     """
+    if model and os.path.exists(model):
+        # Trained / fine-tuned model file.
+        from mace.calculators import MACECalculator
+        MACECalculator(model_paths=[model], device=device,
+                       default_dtype="float64")
+        logger.info(f"Deployed trained MACE model → {model}")
+        return DeployedPotential(
+            kind="mlip",
+            backend="mace",
+            model_name=os.path.basename(model),
+            model_file=model,
+            elements=list(elements),
+            ase_calculator=ASECalculatorSpec(
+                import_line="from mace.calculators import MACECalculator",
+                construct_expr=(
+                    f"MACECalculator(model_paths=[{model!r}], "
+                    f"device=DEVICE, default_dtype='float64')"
+                ),
+                device_env_var="MACE_DEVICE",
+            ),
+            notes=(
+                f"Trained MACE model ({os.path.basename(model)}). "
+                f"LAMMPS-capable via pair_style mliap unified."
+            ),
+        )
+
+    # Foundation-model keyword.
     from mace.calculators import mace_mp, mace_off
 
-    # Map human-readable names to MACE API size keywords.
-    MP_MODEL_MAP = {
-        "mace-mp-0":   "medium",
-        "mace-mp-0b":  "small",
-        "mace-mp-0-large": "large",
-        "small":       "small",
-        "medium":      "medium",
-        "large":       "large",
-    }
-    OFF_MODEL_MAP = {
-        "mace-off23":       "medium",
-        "mace-off23-small": "small",
-        "mace-off23-large": "large",
-    }
-
-    is_off = "off" in model_name.lower()
-    if is_off:
-        mace_size = OFF_MODEL_MAP.get(model_name, model_name)
-        loader = "mace_off"
-        calc = mace_off(model=mace_size, device=device, default_dtype="float64")
-        domain = "organic"
-    else:
-        mace_size = MP_MODEL_MAP.get(model_name, model_name)
-        loader = "mace_mp"
-        calc = mace_mp(model=mace_size, device=device, default_dtype="float64")
-        domain = "inorganic"
+    loader, mace_size, domain = _MACE_FOUNDATION_MODELS.get(
+        model, ("mace_off" if "off" in model.lower() else "mace_mp", model,
+                "organic" if "off" in model.lower() else "inorganic")
+    )
+    loaders = {"mace_mp": mace_mp, "mace_off": mace_off}
+    calc = loaders[loader](model=mace_size, device=device,
+                           default_dtype="float64")
 
     # Locate the cached model file (needed for the LAMMPS pair_coeff).
     model_file = None
@@ -278,23 +329,22 @@ def _mace_deploy_pretrained(
             break
 
     if model_file is None or not os.path.exists(model_file):
-        model_file = os.path.join(working_dir, f"{model_name}.model")
+        model_file = os.path.join(working_dir, f"{model}.model")
         try:
             import torch
             torch.save(calc.models[0], model_file)
         except Exception as e:
             logger.warning(f"Could not save model file: {e}")
-            model_file = model_name
+            model_file = model
 
     logger.info(
-        f"Deployed pretrained {model_name} → {mace_size} ({domain}) "
-        f"→ {model_file}"
+        f"Deployed pretrained {model} → {mace_size} ({domain}) → {model_file}"
     )
 
     return DeployedPotential(
         kind="mlip",
         backend="mace",
-        model_name=model_name,
+        model_name=model,
         model_file=model_file,
         elements=list(elements),
         ase_calculator=ASECalculatorSpec(
@@ -306,7 +356,7 @@ def _mace_deploy_pretrained(
             device_env_var="MACE_DEVICE",
         ),
         notes=(
-            f"MACE {model_name} ({mace_size}, {domain}). LAMMPS-capable "
+            f"MACE {model} ({mace_size}, {domain}). LAMMPS-capable "
             f"via pair_style mliap unified."
         ),
     )
