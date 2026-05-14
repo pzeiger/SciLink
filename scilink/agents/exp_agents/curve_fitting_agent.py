@@ -177,6 +177,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         max_model_retries: int = 1,
         outlier_sigma: float = 2.0,
         max_verification_iterations: int = 7,
+        parallel_workers: int | None = None,
         **kwargs,
     ):
         # ====================================================================
@@ -216,6 +217,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.max_model_retries = max_model_retries
         self.outlier_sigma = outlier_sigma
         self.max_verification_iterations = max_verification_iterations
+        # Non-anchor parallel fan-out for series fitting. None → falls back to
+        # SCILINK_CURVE_FIT_WORKERS env var or 1 (serial, backward-compatible).
+        self.parallel_workers = parallel_workers
 
         self.executor = ScriptExecutor(timeout=executor_timeout)
 
@@ -605,6 +609,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             max_model_retries=effective_max_retries,
             outlier_sigma=effective_outlier_sigma,
             max_verification_iterations=self.max_verification_iterations,
+            parallel_workers=self.parallel_workers,
         )
         
         # Execute pipeline

@@ -286,17 +286,23 @@ class ScriptExecutor:
         logging.info(f"ScriptExecutor initialized (timeout: {self.timeout}s)")
 
     def execute_script(self, script_content: str, working_dir: str = None) -> dict:
-        """Execute a Python script."""
+        """Execute a Python script.
+
+        Thread-safe: the subprocess's CWD is set via ``Popen(cwd=...)`` and the
+        caller's process CWD is never mutated, so concurrent calls from
+        different threads do not race on a shared global.
+        """
         logging.info("   Executing Python script...")
-        
-        original_cwd = os.getcwd()
+
         if working_dir:
             os.makedirs(working_dir, exist_ok=True)
-            os.chdir(working_dir)
+            script_dir = os.path.abspath(working_dir)
+        else:
+            script_dir = os.getcwd()
 
         temp_script_file = None
         try:
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, dir=os.getcwd(), encoding='utf-8') as tf:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, dir=script_dir, encoding='utf-8') as tf:
                 tf.write(script_content)
                 temp_script_file = tf.name
 
@@ -307,7 +313,7 @@ class ScriptExecutor:
             proc = subprocess.Popen(
                 [sys.executable, os.path.basename(temp_script_file)],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, env=env,
+                text=True, env=env, cwd=script_dir,
             )
             # Register so OutputCapture.kill_subprocesses() can terminate it.
             _register_subprocess(proc)
@@ -334,9 +340,11 @@ class ScriptExecutor:
         except Exception as e:
             return {"status": "error", "message": f"An unexpected error occurred: {e}"}
         finally:
-            os.chdir(original_cwd)
             if temp_script_file and os.path.exists(temp_script_file):
-                os.remove(temp_script_file)
+                try:
+                    os.remove(temp_script_file)
+                except OSError:
+                    pass
 
 
 class ExecutionTimeout:
