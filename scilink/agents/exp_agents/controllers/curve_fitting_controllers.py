@@ -25,10 +25,29 @@ import logging
 import os
 import base64
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
 from typing import Callable, Optional, Any, Dict, List
 import numpy as np
+
+
+def _resolve_parallel_workers(value: Optional[int]) -> int:
+    """Resolve the effective non-anchor worker count.
+
+    Precedence: explicit constructor value (when not None) > env var
+    ``SCILINK_CURVE_FIT_WORKERS`` > 1. Values <1 are clamped to 1.
+    """
+    if value is None:
+        env = os.environ.get("SCILINK_CURVE_FIT_WORKERS")
+        if env:
+            try:
+                value = int(env)
+            except ValueError:
+                value = 1
+        else:
+            value = 1
+    return max(int(value), 1)
 
 
 def build_verification_prompt_with_history(
@@ -1416,6 +1435,7 @@ Your guidance: '''
         max_verification_iterations: int = None,
         preprocessor: Any = None,
         conformance_instructions: str = "",
+        parallel_workers: Optional[int] = None,
     ):
         self.model = model
         self.logger = logger
@@ -1438,6 +1458,9 @@ Your guidance: '''
         self.outlier_sigma = outlier_sigma if outlier_sigma is not None else self.DEFAULT_OUTLIER_SIGMA
         self.max_verification_iterations = max_verification_iterations if max_verification_iterations is not None else self.DEFAULT_MAX_VERIFICATION_ITERATIONS
         self.preprocessor = preprocessor
+        # Non-anchor parallel fan-out. Defaults to 1 (serial, byte-identical
+        # to pre-feature behavior). Anchor processing always runs serially.
+        self.parallel_workers = _resolve_parallel_workers(parallel_workers)
         self.conformance_instructions = conformance_instructions
 
     def _generate_fitting_script(
@@ -3186,12 +3209,19 @@ Return JSON with:
         else:
             first_in_regime = {0}  # Only spectrum 0 needs full QC
 
-        series_results = []
+        results_by_idx: Dict[int, dict] = {}
+        deferred_non_anchors: List[dict] = []
         base_scripts: Dict[str, str] = {}  # keyed by regime name
         locked_preprocessing_strategy = None
         original_locked_config = state.get("locked_fitting_config", {})
         if original_locked_config:
             original_locked_config = original_locked_config.copy()
+
+        run_parallel = self.parallel_workers > 1 and num_spectra > 1
+        if run_parallel:
+            self.logger.info(
+                f"   Parallel non-anchor fan-out: up to {self.parallel_workers} workers"
+            )
 
         for idx in range(num_spectra):
             if spectrum_stack is not None:
@@ -3311,6 +3341,24 @@ Return JSON with:
                                 break
             else:
                 base_script = base_scripts.get(regime_name)
+                if run_parallel:
+                    deferred_non_anchors.append({
+                        "idx": idx,
+                        "regime_name": regime_name,
+                        "spectrum_name": spectrum_name,
+                        "curve_data": curve_data,
+                        "data_path": data_path,
+                        "base_script": base_script,
+                        # Capture the per-spectrum locked config so retries via
+                        # _correct_script see the correct regime's config, not
+                        # whichever value happens to be left in shared `state`
+                        # at drain time.
+                        "spectrum_config": spectrum_config,
+                    })
+                    self.logger.info(
+                        f"   ⏳ Queued spectrum {idx} ({spectrum_name}) for parallel fan-out"
+                    )
+                    continue  # tagging + logging happen in the drain phase
                 result = self._fit_single_spectrum(
                     state=state, curve_data=curve_data, data_path=data_path,
                     spectrum_name=spectrum_name, spectrum_idx=idx,
@@ -3321,7 +3369,7 @@ Return JSON with:
             if regime_configs:
                 result["regime"] = regime_name
 
-            series_results.append(result)
+            results_by_idx[idx] = result
 
             if result["success"]:
                 r2 = result.get("fit_quality", {}).get("r_squared")
@@ -3329,6 +3377,72 @@ Return JSON with:
                 self.logger.info(f"✅ {result.get('model_type', 'Fit')} - {r2_str}")
             else:
                 self.logger.error(f"❌ Failed: {result.get('error', 'Unknown')[:50]}")
+
+        # Phase 2: drain deferred non-anchor fits in parallel. Anchors and any
+        # state mutations they perform have already completed by this point,
+        # so non-anchor workers see a stable snapshot of `state`.
+        if deferred_non_anchors:
+            workers = min(self.parallel_workers, len(deferred_non_anchors))
+            self.logger.info(
+                f"⚙️ Parallel non-anchor phase: {len(deferred_non_anchors)} spectra, "
+                f"{workers} workers"
+            )
+
+            def _run_deferred(job: dict) -> dict:
+                # Shallow-copy state per job and pin its regime's
+                # locked_fitting_config. Other state fields are shared
+                # read-only references; this is cheap and keeps the
+                # retry path (which reads locked_fitting_config) per-spectrum
+                # correct without mutating shared state.
+                job_state = dict(state)
+                job_state["locked_fitting_config"] = job["spectrum_config"]
+                return self._fit_single_spectrum(
+                    state=job_state,
+                    curve_data=job["curve_data"],
+                    data_path=job["data_path"],
+                    spectrum_name=job["spectrum_name"],
+                    spectrum_idx=job["idx"],
+                    base_script=job["base_script"],
+                )
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                future_to_job = {pool.submit(_run_deferred, job): job for job in deferred_non_anchors}
+                for future in as_completed(future_to_job):
+                    job = future_to_job[future]
+                    idx = job["idx"]
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        self.logger.error(
+                            f"❌ Spectrum {idx} ({job['spectrum_name']}) raised: {exc}"
+                        )
+                        result = {
+                            "index": idx,
+                            "name": job["spectrum_name"],
+                            "data_path": job["data_path"],
+                            "success": False,
+                            "error": str(exc),
+                            "parameters": {},
+                            "fit_quality": {},
+                            "script": job["base_script"],
+                            "script_errors": [],
+                        }
+                    if regime_configs:
+                        result["regime"] = job["regime_name"]
+                    results_by_idx[idx] = result
+                    if result.get("success"):
+                        r2 = result.get("fit_quality", {}).get("r_squared")
+                        r2_str = f"R²: {r2:.4f}" if r2 else "R²: N/A"
+                        self.logger.info(
+                            f"✅ [{idx + 1}/{num_spectra}] {result.get('model_type', 'Fit')} - {r2_str}"
+                        )
+                    else:
+                        self.logger.error(
+                            f"❌ [{idx + 1}/{num_spectra}] Failed: "
+                            f"{(result.get('error') or 'Unknown')[:50]}"
+                        )
+
+        series_results = [results_by_idx[i] for i in range(num_spectra)]
 
         # Restore original locked config
         if original_locked_config:

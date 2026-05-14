@@ -62,6 +62,7 @@ def create_unified_curve_fitting_pipeline(
     max_model_retries: int = 1,
     outlier_sigma: float = 2.0,
     max_verification_iterations: int = 7,
+    parallel_workers: int | None = None,
 ) -> List:
     """
     Factory function to create the unified curve fitting pipeline.
@@ -190,6 +191,7 @@ def create_unified_curve_fitting_pipeline(
             max_verification_iterations=max_verification_iterations,
             preprocessor=preprocessor,
             conformance_instructions=PLAN_CONFORMANCE_CHECK_INSTRUCTIONS,
+            parallel_workers=parallel_workers,
         )
     )
 
