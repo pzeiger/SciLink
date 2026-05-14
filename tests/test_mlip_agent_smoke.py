@@ -1,26 +1,66 @@
 """
-Local smoke tests for MLIPAgent assembly + LAMMPS input generation.
+Local smoke tests for MLIPAgent assembly + the potential/runner split.
 
 These cover the relocation/wiring contract without making any LLM
-calls and without invoking real MACE / NequIP / DeePMD backends.
+calls and without invoking real MACE / CHGNet / NequIP / DeePMD
+backends — every test that needs a potential builds a fake
+``DeployedPotential`` by hand.
 
 What they exercise:
   - MLIPAgent constructs and auto-loads the `general` skill from the
-    machine_learning_potentials bundle directory.
-  - _load_backend_skill('mace') merges the backend bundle into
-    skill_sections (each section now contains a `--- MACE SPECIFIC ---`
-    block).
-  - mlip_tools.generate_lammps_input emits a syntactically plausible
-    LAMMPS input file for the MACE pair_style, in `metal` units.
+    machine_learning_potentials bundle directory, and merges backend
+    bundles via _load_backend_skill.
+  - The engine-neutral `DeployedPotential` contract flows through both
+    runners: `_ase_runner.generate_ase_script` (universal) and
+    `lammps.run_with_potential` (engine-side, raises for backends with
+    no pair_style).
+  - MLIPAgent.deploy_pretrained delegates run generation rather than
+    generating inputs itself — so its only pre-LLM validation is the
+    structure_file requirement.
 """
 
-import os
 import tempfile
 from pathlib import Path
 
 
 def _agent_kwargs():
     return dict(api_key="sk-smoke-not-real", model_name="gpt-4o-mini")
+
+
+def _fake_potential(backend="mace", model_file="/path/to/mace-mp-0.model",
+                    elements=("Cu",)):
+    """Build a DeployedPotential by hand — no real backend needed.
+
+    The ASECalculatorSpec strings are intentionally identifiable so
+    tests can assert they flow through the runner verbatim.
+    """
+    from scilink.agents.sim_agents._potential import (
+        DeployedPotential, ASECalculatorSpec,
+    )
+    specs = {
+        "mace": ASECalculatorSpec(
+            import_line="from mace.calculators import mace_mp",
+            construct_expr=(
+                "mace_mp(model='medium', device=DEVICE, "
+                "default_dtype='float64')"
+            ),
+            device_env_var="MACE_DEVICE",
+        ),
+        "chgnet": ASECalculatorSpec(
+            import_line="from chgnet.model.dynamics import CHGNetCalculator",
+            construct_expr="CHGNetCalculator(use_device=DEVICE)",
+            device_env_var="CHGNET_DEVICE",
+        ),
+    }
+    return DeployedPotential(
+        kind="mlip",
+        backend=backend,
+        model_name=backend,
+        model_file=model_file,
+        elements=list(elements),
+        ase_calculator=specs[backend],
+        notes=f"fake {backend} potential for smoke test",
+    )
 
 
 def test_mlip_agent_assembly():
@@ -68,21 +108,22 @@ def test_mlip_backend_skill_merge():
         )
 
 
-def test_mlip_lammps_input_generation():
-    from scilink.skills._shared import mlip_tools
+def test_lammps_run_with_potential():
+    """LAMMPS engine consumes a DeployedPotential and emits in.lammps."""
+    from scilink.skills.molecular_dynamics.lammps import lammps
 
+    pot = _fake_potential("mace")
     with tempfile.TemporaryDirectory() as td:
-        path = mlip_tools.generate_lammps_input(
-            backend="mace",
-            model_file="/path/to/mace-mp-0.model",
-            elements=["Cu"],
+        path = lammps.run_with_potential(
+            pot,
+            structure_file="cu_bulk.data",
             working_dir=td,
+            task="md",
             timestep=0.5,
             temperature=300.0,
             pressure=None,
         )
-
-        assert Path(path).exists()
+        assert Path(path).name == "in.lammps"
         content = Path(path).read_text()
 
         for required in (
@@ -90,79 +131,90 @@ def test_mlip_lammps_input_generation():
             "atom_style     atomic",
             "pair_style     mace no_domain_decomposition",
             "pair_coeff     * * /path/to/mace-mp-0.model Cu",
-            "fix 1 all nvt",
-            "thermo_style",
-            "dump",
+            "fix            1 all nvt",
+            "read_data      cu_bulk.data",
         ):
             assert required in content, (
                 f"Generated LAMMPS input missing required line: {required!r}\n"
                 f"--- content ---\n{content}"
             )
-
         assert "npt" not in content, (
             "NVT ensemble requested (pressure=None) but NPT slipped in"
         )
 
-        path_npt = mlip_tools.generate_lammps_input(
-            backend="mace",
-            model_file="/path/to/mace-mp-0.model",
-            elements=["Cu"],
-            working_dir=td,
-            timestep=0.5,
-            temperature=300.0,
-            pressure=1.0,
+        npt_path = lammps.run_with_potential(
+            pot, structure_file="cu_bulk.data", working_dir=td,
+            task="md", temperature=300.0, pressure=1.0,
         )
-        npt_content = Path(path_npt).read_text()
-        assert "fix 1 all npt" in npt_content, (
+        npt_content = Path(npt_path).read_text()
+        assert "fix            1 all npt" in npt_content, (
             "pressure=1.0 should produce an NPT fix line"
         )
 
 
-def test_mlip_unknown_backend_raises():
-    from scilink.skills._shared import mlip_tools
+def test_lammps_relax_with_potential():
+    """task='relax' produces a box/relax + minimize input, no dynamics."""
+    from scilink.skills.molecular_dynamics.lammps import lammps
 
+    pot = _fake_potential("mace")
+    with tempfile.TemporaryDirectory() as td:
+        path = lammps.run_with_potential(
+            pot, structure_file="cu.data", working_dir=td, task="relax",
+        )
+        content = Path(path).read_text()
+        assert "box/relax" in content and "minimize" in content
+        assert "nvt" not in content and "npt" not in content, (
+            "relax task should not emit a dynamics ensemble fix"
+        )
+
+
+def test_lammps_unsupported_backend_raises():
+    """CHGNet has no LAMMPS pair_style — run_with_potential must raise."""
+    from scilink.skills.molecular_dynamics.lammps import lammps
+
+    pot = _fake_potential("chgnet", model_file="")
     with tempfile.TemporaryDirectory() as td:
         try:
-            mlip_tools.generate_lammps_input(
-                backend="not_a_real_backend",
-                model_file="/tmp/x.model",
-                elements=["Cu"],
-                working_dir=td,
+            lammps.run_with_potential(
+                pot, structure_file="x.data", working_dir=td,
             )
-        except ValueError as exc:
-            assert "Unknown backend" in str(exc)
+        except NotImplementedError as exc:
+            assert "ASE" in str(exc) or "ase" in str(exc), (
+                "error should point users at the ASE runner"
+            )
         else:
-            raise AssertionError("Unknown backend should raise ValueError")
+            raise AssertionError(
+                "CHGNet via LAMMPS should raise NotImplementedError"
+            )
 
 
-def test_ase_script_generation_nvt():
-    from scilink.skills._shared import mlip_tools
+def test_ase_runner_nvt():
+    """ASE runner is universal — drives any DeployedPotential."""
+    from scilink.agents.sim_agents._ase_runner import generate_ase_script
 
+    pot = _fake_potential("mace")
     with tempfile.TemporaryDirectory() as td:
-        path = mlip_tools.generate_ase_script(
-            backend="mace",
-            model_name="mace-mp-0",
-            elements=["Cu"],
+        path = generate_ase_script(
+            pot,
             working_dir=td,
             structure_file="cu_bulk.data",
+            task="md",
             timestep=1.0,
             temperature=300.0,
             pressure=None,
             n_steps=100,
             output_interval=10,
-            device="cuda",
         )
-
-        content = Path(path).read_text()
         assert Path(path).name == "run_md.py"
+        content = Path(path).read_text()
 
         for required in (
-            "from mace.calculators import mace_mp",
-            "mace_mp(",
+            "from mace.calculators import mace_mp",        # spec.import_line
+            "mace_mp(model='medium', device=DEVICE",       # spec.construct_expr
+            "MACE_DEVICE",                                 # spec.device_env_var
             "from ase.md.langevin import Langevin",
-            "Langevin(",
             "MaxwellBoltzmannDistribution",
-            "Trajectory(\"traj.traj\"",
+            'Trajectory("traj.traj"',
             "thermo.log",
             "dyn.run(100)",
             "read_lammps_data('cu_bulk.data'",
@@ -171,84 +223,88 @@ def test_ase_script_generation_nvt():
             assert required in content, (
                 f"ASE script missing expected token: {required!r}"
             )
-
         assert "from ase.md.npt import NPT" not in content, (
             "NVT requested (pressure=None) but NPT import slipped in"
         )
 
 
-def test_ase_script_generation_npt():
-    from scilink.skills._shared import mlip_tools
+def test_ase_runner_npt():
+    from scilink.agents.sim_agents._ase_runner import generate_ase_script
 
+    pot = _fake_potential("mace")
     with tempfile.TemporaryDirectory() as td:
-        path = mlip_tools.generate_ase_script(
-            backend="mace",
-            model_name="mace-mp-0",
-            elements=["Cu"],
-            working_dir=td,
-            timestep=1.0,
-            temperature=300.0,
-            pressure=1.0,
+        path = generate_ase_script(
+            pot, working_dir=td, task="md", pressure=1.0,
         )
         content = Path(path).read_text()
         assert "from ase.md.npt import NPT" in content
         assert "externalstress=1.0 * units.bar" in content
 
 
-def test_ase_script_mace_off_model():
-    """mace-off23 should pick the mace_off loader, not mace_mp."""
-    from scilink.skills._shared import mlip_tools
+def test_ase_runner_relax():
+    """task='relax' emits run_relax.py with BFGS + cell filter."""
+    from scilink.agents.sim_agents._ase_runner import generate_ase_script
 
+    pot = _fake_potential("mace")
     with tempfile.TemporaryDirectory() as td:
-        path = mlip_tools.generate_ase_script(
-            backend="mace",
-            model_name="mace-off23",
-            elements=["C", "H", "O"],
-            working_dir=td,
+        path = generate_ase_script(
+            pot, working_dir=td, task="relax", fmax=0.01,
         )
+        assert Path(path).name == "run_relax.py"
         content = Path(path).read_text()
-        assert "from mace.calculators import mace_off" in content
-        assert "mace_off(" in content
-        assert "mace_mp(" not in content, (
-            "off23 model should not use mace_mp loader"
-        )
+        for required in (
+            "from ase.optimize import BFGS",
+            "from ase.filters import FrechetCellFilter",
+            "relax_result.json",
+            "relaxed.xyz",
+            "fmax=0.01",
+        ):
+            assert required in content, (
+                f"relax script missing expected token: {required!r}"
+            )
 
 
-def test_ase_runner_unknown_backend():
-    from scilink.skills._shared import mlip_tools
+def test_ase_runner_rejects_bad_task():
+    """The ASE runner is backend-agnostic; what it validates is `task`."""
+    from scilink.agents.sim_agents._ase_runner import generate_ase_script
 
+    pot = _fake_potential("mace")
     with tempfile.TemporaryDirectory() as td:
         try:
-            mlip_tools.generate_ase_script(
-                backend="nequip",
-                model_name="whatever",
-                elements=["Cu"],
-                working_dir=td,
-            )
+            generate_ase_script(pot, working_dir=td, task="banana")
         except ValueError as exc:
-            assert "mace" in str(exc).lower()
+            assert "task" in str(exc)
         else:
-            raise AssertionError("Non-mace backend should raise ValueError")
+            raise AssertionError("Invalid task should raise ValueError")
 
 
-def test_agent_runner_validation():
-    """Early kwargs validation in deploy_pretrained -- no LLM/MACE needed."""
+def test_ase_runner_spec_passthrough():
+    """Backend-specific bits are *data* on the spec, not code in the
+    runner — whatever the spec says shows up verbatim in the script.
+    This is the contract that lets a new backend ship without touching
+    the runner.
+    """
+    from scilink.agents.sim_agents._ase_runner import generate_ase_script
+
+    pot = _fake_potential("chgnet")
+    with tempfile.TemporaryDirectory() as td:
+        path = generate_ase_script(pot, working_dir=td, task="md")
+        content = Path(path).read_text()
+        assert "from chgnet.model.dynamics import CHGNetCalculator" in content
+        assert "CHGNetCalculator(use_device=DEVICE)" in content
+        assert "CHGNET_DEVICE" in content
+        # the mace spec strings must not leak in
+        assert "mace_mp" not in content
+        assert "from mace.calculators" not in content
+
+
+def test_agent_requires_structure_file():
+    """deploy_pretrained delegates run generation, so its only pre-LLM
+    validation is that a structure_file was supplied."""
     from scilink.agents.sim_agents.mlip_agent import MLIPAgent
 
     with tempfile.TemporaryDirectory() as td:
         agent = MLIPAgent(working_dir=td, **_agent_kwargs())
-
-        try:
-            agent.deploy_pretrained(
-                system_info={"elements": {"Cu": 4}, "n_atoms": 4},
-                research_goal="test",
-                runner="not_a_runner",
-            )
-        except ValueError as exc:
-            assert "runner" in str(exc)
-        else:
-            raise AssertionError("Invalid runner should raise ValueError")
-
         try:
             agent.deploy_pretrained(
                 system_info={"elements": {"Cu": 4}, "n_atoms": 4},
@@ -259,7 +315,7 @@ def test_agent_runner_validation():
             assert "structure_file" in str(exc)
         else:
             raise AssertionError(
-                "runner='ase' without structure_file should raise"
+                "deploy_pretrained without structure_file should raise"
             )
 
 
@@ -287,81 +343,10 @@ def test_chgnet_skill_discoverable():
     )
 
 
-def test_chgnet_ase_script_generation():
-    """ASE-script generation should support backend='chgnet'."""
-    from scilink.skills._shared import mlip_tools
-
-    with tempfile.TemporaryDirectory() as td:
-        path = mlip_tools.generate_ase_script(
-            backend="chgnet",
-            model_name="chgnet",
-            elements=["Cu", "O"],
-            working_dir=td,
-            structure_file="cu_o.data",
-            timestep=1.0,
-            temperature=400.0,
-            pressure=None,
-            n_steps=200,
-            output_interval=20,
-            device="cuda",
-        )
-        content = Path(path).read_text()
-
-        for required in (
-            "from chgnet.model.dynamics import CHGNetCalculator",
-            "CHGNetCalculator(use_device=DEVICE)",
-            "from ase.md.langevin import Langevin",
-            "MaxwellBoltzmannDistribution",
-            "ELEMENTS = ['Cu', 'O']",
-            "dyn.run(200)",
-            "CHGNET_DEVICE",
-        ):
-            assert required in content, (
-                f"CHGNet ASE script missing expected line: {required!r}"
-            )
-
-        # CHGNet's script must NOT import MACE
-        assert "mace_mp" not in content
-        assert "from mace.calculators" not in content
-
-
-def test_chgnet_lammps_input_raises():
-    """CHGNet has no LAMMPS pair_style — generation must raise cleanly."""
-    from scilink.skills._shared import mlip_tools
-
-    with tempfile.TemporaryDirectory() as td:
-        try:
-            mlip_tools.generate_lammps_input(
-                backend="chgnet",
-                model_file="/fake.pt",
-                elements=["Cu"],
-                working_dir=td,
-            )
-        except NotImplementedError as exc:
-            assert "ASE" in str(exc) or "ase" in str(exc), (
-                "error should point users at the ASE runner"
-            )
-        else:
-            raise AssertionError(
-                "CHGNet via LAMMPS input gen should raise NotImplementedError"
-            )
-
-
 if __name__ == "__main__":
-    print("=== smoke 1: MLIPAgent assembly + skill load ===")
-    test_mlip_agent_assembly()
-    print("  OK")
-    print()
-    print("=== smoke 2: MACE backend skill merge ===")
-    test_mlip_backend_skill_merge()
-    print("  OK")
-    print()
-    print("=== smoke 3: MACE LAMMPS input generation ===")
-    test_mlip_lammps_input_generation()
-    print("  OK")
-    print()
-    print("=== smoke 4: unknown backend raises ===")
-    test_mlip_unknown_backend_raises()
-    print("  OK")
-    print()
-    print("All smokes passed.")
+    for name, fn in list(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            print(f"=== {name} ===")
+            fn()
+            print("  OK")
+    print("\nAll smokes passed.")

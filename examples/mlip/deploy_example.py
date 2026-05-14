@@ -279,7 +279,6 @@ def run_with_mace(
             "temperature": temperature,
             "pressure": pressure,
         }
-        kwargs = dict(runner="lammps")
     else:  # ase
         sim_params = {
             "timestep": 1.0,            # fs (ASE convention)
@@ -288,7 +287,9 @@ def run_with_mace(
             "n_steps": n_steps,
             "device": device,
         }
-        kwargs = dict(runner="ase", structure_file=str(structure_file))
+    # structure_file is required for every runner now — MLIPAgent
+    # delegates run generation to the MD agent, which reads it.
+    kwargs = dict(runner=runner, structure_file=str(structure_file))
     if backend:
         kwargs["backend"] = backend
 
@@ -305,12 +306,14 @@ def run_without_mace(
     runner, structure_file, n_steps, device,
 ):
     """
-    Demonstrate the orchestration without MACE installed: drive
-    skill context lookup + direct script/input generation with a
-    placeholder model path. Documents what the cluster run would do.
+    Demonstrate the orchestration without MACE installed: drive skill
+    context lookup, then exercise the engine-neutral runner path with a
+    placeholder DeployedPotential. No real calculator is constructed,
+    so no MACE needed — but the run-generation path is identical to the
+    cluster's (the runners only read the DeployedPotential descriptor).
     """
     print(f"  MACE not installed locally — exercising deterministic")
-    print(f"  pieces only (skill context + {runner} script generation).")
+    print(f"  pieces only (skill context + {runner} run generation).")
 
     agent._load_backend_skill("mace")
     planning = agent._get_skill_context(section="planning")
@@ -334,42 +337,60 @@ def run_without_mace(
     print(f"  pretrained pick: {chosen}")
     print(f"  rationale:       {rationale}")
 
-    from scilink.skills._shared import mlip_tools
+    # Placeholder potential — same shape mlip_tools.deploy() returns on
+    # the cluster, but with a placeholder model path and no calculator
+    # constructed. The runners only read this descriptor, so the
+    # generated input/script is exactly what the cluster would produce
+    # (modulo the model path).
+    from scilink.agents.sim_agents._potential import (
+        DeployedPotential, ASECalculatorSpec,
+    )
+    loader = "mace_off" if "off" in chosen else "mace_mp"
+    potential = DeployedPotential(
+        kind="mlip", backend="mace", model_name=chosen,
+        model_file=f"/CLUSTER_PATH/to/{chosen}.model",
+        elements=list(system["elements"]),
+        ase_calculator=ASECalculatorSpec(
+            import_line=f"from mace.calculators import {loader}",
+            construct_expr=(
+                f"{loader}(model='medium', device=DEVICE, "
+                f"default_dtype='float64')"
+            ),
+            device_env_var="MACE_DEVICE",
+        ),
+        notes="PLACEHOLDER MODEL PATH — update on the cluster",
+    )
+
     if runner == "lammps":
-        out_path = mlip_tools.generate_lammps_input(
-            backend="mace",
-            model_file="/CLUSTER_PATH/to/mace-mp-0.model",
-            elements=system["elements"],
+        from scilink.skills.molecular_dynamics.lammps import lammps
+        run_path = lammps.run_with_potential(
+            potential,
+            structure_file=Path(structure_file).name,
             working_dir=str(out_dir),
+            task="md",
             timestep=0.5,
             temperature=temperature,
             pressure=pressure,
         )
-        return {
-            "backend": "mace", "model_name": chosen,
-            "elements": system["elements"], "runner": "lammps",
-            "lammps_input": out_path,
-            "note": "PLACEHOLDER MODEL PATH — update on the cluster",
-        }
     else:  # ase
-        out_path = mlip_tools.generate_ase_script(
-            backend="mace",
-            model_name=chosen,
-            elements=system["elements"],
+        from scilink.agents.sim_agents._ase_runner import generate_ase_script
+        run_path = generate_ase_script(
+            potential,
             working_dir=str(out_dir),
             structure_file=Path(structure_file).name,
+            task="md",
             timestep=1.0,
             temperature=temperature,
             pressure=pressure,
             n_steps=n_steps,
             device=device,
         )
-        return {
-            "backend": "mace", "model_name": chosen,
-            "elements": system["elements"], "runner": "ase",
-            "ase_script": out_path,
-            "note": "MACE not installed locally — script needs MACE+torch to run",
-        }
+    return {
+        "backend": "mace", "model_name": chosen,
+        "elements": system["elements"], "runner": runner,
+        "run_path": run_path,
+        "note": "PLACEHOLDER MODEL PATH — update on the cluster",
+    }
 
 
 def main():
@@ -511,7 +532,7 @@ def main():
                 args.n_steps, args.device,
             )
 
-        output_file = result.get("lammps_input") or result.get("ase_script")
+        output_file = result.get("run_path")
         label = "LAMMPS input" if args.runner == "lammps" else "ASE MD script"
         print()
         print(f"  --- generated {label} (head) ---")

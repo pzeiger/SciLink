@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 
 from .base_agent import SimulationAgent
+from ._potential import DeployedPotential
 
 _TOOL_REGISTRY: Dict[str, Any] = {}
 try:
@@ -195,10 +196,29 @@ class MDSimulationAgent(SimulationAgent):
         research_goal: str,
         system_description: Optional[str] = None,
         temperature: float = 300.0,
-        pressure: float = 1.0,
+        pressure: Optional[float] = 1.0,
         force_field_files: Optional[Dict[str, str]] = None,
+        potential: Optional[DeployedPotential] = None,
+        runner: str = "lammps",
+        task: str = "md",
         **kwargs,
     ) -> Dict[str, Any]:
+        # Multi-agent collaboration path: a potential-producing agent
+        # (today: MLIPAgent) hands us a DeployedPotential and we own the
+        # run generation. The MD agent is the place that knows how to
+        # *run* a simulation with any potential — classical FF or MLIP.
+        if potential is not None:
+            return self._run_with_potential(
+                structure_file=structure_file,
+                research_goal=research_goal,
+                potential=potential,
+                runner=runner,
+                task=task,
+                temperature=temperature,
+                pressure=pressure,
+                **kwargs,
+            )
+
         self._auto_select_skill(structure_file)
 
         system_info = self.analyze_system(structure_file)
@@ -256,6 +276,112 @@ class MDSimulationAgent(SimulationAgent):
             "simulation_parameters": plan,
             "validation": validation,
             "skill_used": self.skill_name,
+        }
+
+    # ================================================================
+    # POTENTIAL-DRIVEN RUNS  (multi-agent collaboration entry point)
+    # ================================================================
+
+    def _run_with_potential(
+        self,
+        structure_file: str,
+        research_goal: str,
+        potential: DeployedPotential,
+        runner: str,
+        task: str,
+        temperature: float,
+        pressure: Optional[float],
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """
+        Generate a run for a pre-deployed interatomic potential.
+
+        A potential-producing agent (today: MLIPAgent) deploys the
+        potential and hands the DeployedPotential descriptor here; the
+        MD agent owns the run generation. This keeps both agents
+        general — the MLIP agent doesn't reimplement MD orchestration,
+        and the MD agent doesn't care whether the potential is an MLIP
+        or (eventually) a classical force field.
+
+        Runner dispatch is extensible by construction:
+          - ``"ase"`` is the **universal** runner, built into the MD
+            agent — every DeployedPotential has an ASE calculator, so
+            this always works. Supports ``task="md"`` and
+            ``task="relax"``.
+          - any other runner dispatches to that engine's tools module
+            via ``TOOL_REGISTRY[runner].run_with_potential(...)``.
+            There is no per-engine branching here: adding GROMACS is
+            dropping a ``gromacs`` tools module with a
+            ``run_with_potential`` function — this method never
+            changes. The engine raises ``NotImplementedError`` if it
+            has no integration for the potential's backend (e.g. LAMMPS
+            for CHGNet), and the caller is expected to use ``"ase"``.
+
+        kwargs carries the remaining simulation params unpacked by the
+        caller (timestep, n_steps, output_interval, device, fmax, ...).
+        """
+        sim = kwargs
+        # pressure: None -> NVT, a value -> NPT. An explicit
+        # pressure in sim overrides the positional arg.
+        pressure = sim.get("pressure", pressure)
+
+        if runner == "ase":
+            from ._ase_runner import generate_ase_script
+            run_path = generate_ase_script(
+                potential=potential,
+                working_dir=str(self.working_dir),
+                structure_file=structure_file,
+                task=task,
+                timestep=sim.get("timestep", 1.0),
+                temperature=temperature,
+                pressure=pressure,
+                n_steps=sim.get("n_steps", 1000),
+                output_interval=sim.get("output_interval", 50),
+                device=sim.get("device", "cuda"),
+                fmax=sim.get("fmax", 0.02),
+            )
+            self.logger.info(
+                f"Generated ASE {task} script for {potential.backend}: "
+                f"{run_path}"
+            )
+        else:
+            engine = self.TOOL_REGISTRY.get(runner)
+            if engine is None:
+                raise ValueError(
+                    f"no tools module for runner {runner!r}; loaded "
+                    f"engines: {sorted(self.TOOL_REGISTRY)}. The "
+                    f"universal 'ase' runner is always available."
+                )
+            if not hasattr(engine, "run_with_potential"):
+                raise NotImplementedError(
+                    f"the {runner!r} engine's tools module has no "
+                    f"run_with_potential() — it cannot run a deployed "
+                    f"potential. Use runner='ase'."
+                )
+            run_path = engine.run_with_potential(
+                potential,
+                structure_file=structure_file,
+                working_dir=str(self.working_dir),
+                task=task,
+                timestep=sim.get("timestep", 0.5),
+                temperature=temperature,
+                pressure=pressure,
+                n_steps=sim.get("n_steps", 100000),
+            )
+            self.logger.info(
+                f"Generated {runner} input for {potential.backend}: "
+                f"{run_path}"
+            )
+
+        return {
+            "run_path": run_path,
+            "runner": runner,
+            "task": task,
+            "potential_backend": potential.backend,
+            "potential_model": potential.model_name,
+            "structure_file": structure_file,
+            "research_goal": research_goal,
+            "notes": potential.notes,
         }
 
     def _generate_md_input(

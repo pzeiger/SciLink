@@ -22,6 +22,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+# DeployedPotential is the cross-agent contract (see
+# agents/sim_agents/_potential.py). It's a pure-dataclass leaf module
+# with no agent imports, so importing it here creates no cycle —
+# mlip_tools.deploy() produces a DeployedPotential that
+# MDSimulationAgent later consumes.
+from ...agents.sim_agents._potential import (
+    ASECalculatorSpec, DeployedPotential,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -130,126 +139,194 @@ def check_backends() -> Dict[str, Dict[str, Any]]:
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  PRETRAINED MODEL DEPLOYMENT  (the default path)
+#  MODEL DEPLOYMENT  (the default path)
 # ═══════════════════════════════════════════════════════════════════
 
-def deploy_pretrained(
+def deploy(
     backend: str,
-    model_name: str,
+    model: str,
     elements: List[str],
     working_dir: str,
     device: str = "cpu",
-) -> Dict[str, Any]:
+) -> DeployedPotential:
     """
-    Deploy a pretrained foundation model for immediate use.
-    No training data or GPU training time required.
+    Deploy an MLIP model as an engine-neutral DeployedPotential.
+
+    ``model`` is a model *identifier* — each backend's deploy function
+    decides whether it's a foundation-model keyword (``"mace-mp-0"``,
+    ``"chgnet"``) or an on-disk path to a trained/fine-tuned model
+    (the output of ``train()`` / ``fine_tune()``). This single entry
+    point covers both cases so adding a backend touches exactly one
+    deploy function — no separate pretrained/trained code paths.
 
     Args:
-        backend:    "mace" | "chgnet" | "nequip" | "deepmd"
-        model_name: Pretrained model identifier (e.g. "mace-mp-0", "chgnet")
-        elements:   Chemical elements in the system
+        backend:     "mace" | "chgnet" | "nequip" | "deepmd"
+        model:       Foundation-model keyword or path to a trained model
+        elements:    Chemical elements in the system
         working_dir: Output directory
-        device:     "cpu" or "cuda"
+        device:      "cpu" or "cuda"
 
     Returns:
-        {
-            "model_file": str,      # path to model artifact (or "" for
-                                    # backends with no persistable file)
-            "calculator": object,   # ASE calculator (for validation)
-            "metadata": dict,       # model metadata
-        }
+        A DeployedPotential descriptor — the engine-neutral contract
+        MDSimulationAgent consumes to generate the actual run. See
+        agents/sim_agents/_potential.py.
     """
     os.makedirs(working_dir, exist_ok=True)
 
     if backend == "mace":
-        return _mace_deploy_pretrained(model_name, elements, working_dir, device)
+        return _mace_deploy(model, elements, working_dir, device)
     elif backend == "chgnet":
-        return _chgnet_deploy_pretrained(model_name, elements, working_dir, device)
-    elif backend == "nequip":
+        return _chgnet_deploy(model, elements, working_dir, device)
+    elif backend in ("nequip", "deepmd"):
+        # These have no foundation models. A trained model file is the
+        # only way to deploy them — but the deploy function (with its
+        # ASECalculatorSpec) isn't written yet.
+        if os.path.exists(model):
+            raise NotImplementedError(
+                f"_{backend}_deploy not yet implemented — add it here "
+                f"with an ASECalculatorSpec, mirroring _mace_deploy."
+            )
         raise NotImplementedError(
-            "NequIP has no foundation models. Use backend='mace' for "
-            "pretrained deployment, or call train() with NequIP."
-        )
-    elif backend == "deepmd":
-        raise NotImplementedError(
-            "DeePMD pretrained deployment not yet implemented. "
-            "DPA-2 foundation model support is planned."
+            f"{backend} has no foundation models; pass a trained model "
+            f"file. Use backend='mace' for pretrained deployment."
         )
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
 
-def _chgnet_deploy_pretrained(
-    model_name: str,
+def _chgnet_deploy(
+    model: str,
     elements: List[str],
     working_dir: str,
     device: str,
-) -> Dict[str, Any]:
-    """Deploy the pretrained CHGNet universal model.
+) -> DeployedPotential:
+    """Deploy a CHGNet model — bundled universal model or a trained file.
 
-    CHGNet has a single pretrained model bundled with the chgnet
-    package; no model file needs to be downloaded or saved to disk.
-    The ``model_file`` key in the return dict is an empty string —
-    the agent / runner constructs ``CHGNetCalculator()`` directly
-    instead of loading from a path.
+    CHGNet ships a single universal model with the package; the common
+    case (``model`` is the ``"chgnet"`` keyword) deploys that with no
+    file on disk (``model_file=""``). If ``model`` is a path to a
+    trained CHGNet checkpoint, that file is loaded instead. Either way
+    the calculator is constructed once here to validate the install,
+    then discarded — the run script reconstructs it from the
+    ASECalculatorSpec.
     """
     from chgnet.model.dynamics import CHGNetCalculator
 
     use_device = device if device in ("cuda", "cpu", "mps") else "cpu"
-    calc = CHGNetCalculator(use_device=use_device)
+    is_file = bool(model) and os.path.exists(model)
 
-    logger.info(f"Deployed CHGNet (ASE-only, device={use_device})")
-    return {
-        "model_file": "",     # CHGNet has no externalizable model file
-        "calculator": calc,
-        "metadata": {
-            "backend": "chgnet",
-            "model_name": model_name or "chgnet",
-            "domain": "universal-inorganic",
-            "device": use_device,
-            "elements_requested": elements,
-        },
-    }
+    if is_file:
+        from chgnet.model import CHGNet
+        CHGNetCalculator(model=CHGNet.from_file(model), use_device=use_device)
+        construct_expr = (
+            f"CHGNetCalculator(model=__import__('chgnet.model', "
+            f"fromlist=['CHGNet']).CHGNet.from_file({model!r}), "
+            f"use_device=DEVICE)"
+        )
+        model_file, model_name = model, os.path.basename(model)
+        notes = f"Trained CHGNet model ({model_name}). ASE-only — no LAMMPS pair_style."
+    else:
+        # Construct-and-discard: validates chgnet is importable and the
+        # bundled weights load. The generated script rebuilds it.
+        CHGNetCalculator(use_device=use_device)
+        construct_expr = "CHGNetCalculator(use_device=DEVICE)"
+        model_file, model_name = "", model or "chgnet"
+        notes = (
+            "CHGNet universal MPtrj-pretrained model. ASE-only — no "
+            "LAMMPS pair_style; the MD agent must use the ASE runner."
+        )
+
+    logger.info(f"Deployed CHGNet {model_name} (ASE-only, device={use_device})")
+    return DeployedPotential(
+        kind="mlip",
+        backend="chgnet",
+        model_name=model_name,
+        model_file=model_file,
+        elements=list(elements),
+        ase_calculator=ASECalculatorSpec(
+            import_line="from chgnet.model.dynamics import CHGNetCalculator",
+            construct_expr=construct_expr,
+            device_env_var="CHGNET_DEVICE",
+        ),
+        notes=notes,
+    )
 
 
-def _mace_deploy_pretrained(
-    model_name: str,
+# MACE foundation-model keywords -> (loader, API size keyword, domain).
+_MACE_FOUNDATION_MODELS = {
+    # Bare backend name -> the default MACE foundation model. Lets
+    # deploy("mace", model="mace", ...) work, symmetric with CHGNet
+    # (whose only model is also named after the backend) — this is the
+    # path taken when a caller forces backend="mace" without naming a
+    # specific model.
+    "mace":             ("mace_mp", "medium", "inorganic"),
+    "mace-mp-0":        ("mace_mp", "medium", "inorganic"),
+    "mace-mp-0b":       ("mace_mp", "small",  "inorganic"),
+    "mace-mp-0-large":  ("mace_mp", "large",  "inorganic"),
+    "small":            ("mace_mp", "small",  "inorganic"),
+    "medium":           ("mace_mp", "medium", "inorganic"),
+    "large":            ("mace_mp", "large",  "inorganic"),
+    "mace-off23":       ("mace_off", "medium", "organic"),
+    "mace-off23-small": ("mace_off", "small",  "organic"),
+    "mace-off23-large": ("mace_off", "large",  "organic"),
+}
+
+
+def _mace_deploy(
+    model: str,
     elements: List[str],
     working_dir: str,
     device: str,
-) -> Dict[str, Any]:
-    """Deploy a pretrained MACE model."""
+) -> DeployedPotential:
+    """Deploy a MACE model — foundation keyword or trained file.
+
+    If ``model`` is a path to a trained/fine-tuned model on disk it is
+    loaded via ``MACECalculator(model_paths=...)``. Otherwise it's
+    treated as a foundation-model keyword resolved through the
+    ``mace_mp`` / ``mace_off`` loaders. In both cases the calculator is
+    constructed once to validate the install and locate the on-disk
+    model file (needed for the LAMMPS pair_coeff), and a
+    DeployedPotential is returned whose ASECalculatorSpec lets the run
+    script reconstruct the same calculator.
+    """
+    if model and os.path.exists(model):
+        # Trained / fine-tuned model file.
+        from mace.calculators import MACECalculator
+        MACECalculator(model_paths=[model], device=device,
+                       default_dtype="float64")
+        logger.info(f"Deployed trained MACE model → {model}")
+        return DeployedPotential(
+            kind="mlip",
+            backend="mace",
+            model_name=os.path.basename(model),
+            model_file=model,
+            elements=list(elements),
+            ase_calculator=ASECalculatorSpec(
+                import_line="from mace.calculators import MACECalculator",
+                construct_expr=(
+                    f"MACECalculator(model_paths=[{model!r}], "
+                    f"device=DEVICE, default_dtype='float64')"
+                ),
+                device_env_var="MACE_DEVICE",
+            ),
+            notes=(
+                f"Trained MACE model ({os.path.basename(model)}). "
+                f"LAMMPS-capable via pair_style mliap unified."
+            ),
+        )
+
+    # Foundation-model keyword.
     from mace.calculators import mace_mp, mace_off
 
-    # ── Map human-readable names to MACE API arguments ────────────
-    # mace_mp() expects: "small", "medium", "large", or a file path/URL
-    # mace_off() expects: "small", "medium", "large", or a file path/URL
-    MP_MODEL_MAP = {
-        "mace-mp-0":   "medium",
-        "mace-mp-0b":  "small",
-        "mace-mp-0-large": "large",
-        "small":       "small",
-        "medium":      "medium",
-        "large":       "large",
-    }
-    OFF_MODEL_MAP = {
-        "mace-off23":       "medium",
-        "mace-off23-small": "small",
-        "mace-off23-large": "large",
-    }
+    loader, mace_size, domain = _MACE_FOUNDATION_MODELS.get(
+        model, ("mace_off" if "off" in model.lower() else "mace_mp", model,
+                "organic" if "off" in model.lower() else "inorganic")
+    )
+    loaders = {"mace_mp": mace_mp, "mace_off": mace_off}
+    calc = loaders[loader](model=mace_size, device=device,
+                           default_dtype="float64")
 
-    is_off = "off" in model_name.lower()
-
-    if is_off:
-        mace_size = OFF_MODEL_MAP.get(model_name, model_name)
-        calc = mace_off(model=mace_size, device=device, default_dtype="float64")
-        domain = "organic"
-    else:
-        mace_size = MP_MODEL_MAP.get(model_name, model_name)
-        calc = mace_mp(model=mace_size, device=device, default_dtype="float64")
-        domain = "inorganic"
-
-    # Locate the cached model file for LAMMPS deployment
+    # Locate the cached model file (needed for the LAMMPS pair_coeff).
     model_file = None
     for attr in ("model_path", "model_paths"):
         val = getattr(calc, attr, None)
@@ -258,28 +335,37 @@ def _mace_deploy_pretrained(
             break
 
     if model_file is None or not os.path.exists(model_file):
-        model_file = os.path.join(working_dir, f"{model_name}.model")
+        model_file = os.path.join(working_dir, f"{model}.model")
         try:
             import torch
             torch.save(calc.models[0], model_file)
         except Exception as e:
             logger.warning(f"Could not save model file: {e}")
-            model_file = model_name
+            model_file = model
 
-    logger.info(f"Deployed pretrained {model_name} → {mace_size} ({domain}) → {model_file}")
+    logger.info(
+        f"Deployed pretrained {model} → {mace_size} ({domain}) → {model_file}"
+    )
 
-    return {
-        "model_file": model_file,
-        "calculator": calc,
-        "metadata": {
-            "backend": "mace",
-            "model_name": model_name,
-            "mace_size": mace_size,
-            "domain": domain,
-            "device": device,
-            "elements_requested": elements,
-        },
-    }
+    return DeployedPotential(
+        kind="mlip",
+        backend="mace",
+        model_name=model,
+        model_file=model_file,
+        elements=list(elements),
+        ase_calculator=ASECalculatorSpec(
+            import_line=f"from mace.calculators import {loader}",
+            construct_expr=(
+                f"{loader}(model={mace_size!r}, device=DEVICE, "
+                f"default_dtype='float64')"
+            ),
+            device_env_var="MACE_DEVICE",
+        ),
+        notes=(
+            f"MACE {model} ({mace_size}, {domain}). LAMMPS-capable "
+            f"via pair_style mliap unified."
+        ),
+    )
 
 # ═══════════════════════════════════════════════════════════════════
 #  UNCERTAINTY ESTIMATION
@@ -837,502 +923,3 @@ def _write_cp2k_inputs(atoms, calc_dir, settings):
         f.write("# CP2K input template — customize for your system\n")
         f.write("# Structure: structure.xyz\n")
 
-
-# ═══════════════════════════════════════════════════════════════════
-#  LAMMPS INPUT GENERATION  (backend dispatch)
-# ═══════════════════════════════════════════════════════════════════
-
-def generate_lammps_input(
-    backend: str,
-    model_file: str,
-    elements: List[str],
-    working_dir: str,
-    timestep: float = 0.5,
-    temperature: float = 300.0,
-    pressure: Optional[float] = None,
-) -> str:
-    """
-    Generate LAMMPS input file for the given backend.
-    Returns path to the written input file.
-    """
-    os.makedirs(working_dir, exist_ok=True)
-
-    if backend == "mace":
-        return _mace_lammps_input(model_file, elements, working_dir,
-                                   timestep, temperature, pressure)
-    elif backend == "chgnet":
-        raise NotImplementedError(
-            "CHGNet has no LAMMPS pair_style. Use the ASE runner "
-            "instead: MLIPAgent.deploy_pretrained(runner='ase', ...) "
-            "with backend='chgnet'."
-        )
-    elif backend == "nequip":
-        return _nequip_lammps_input(model_file, elements, working_dir,
-                                     timestep, temperature, pressure)
-    elif backend == "deepmd":
-        return _deepmd_lammps_input(model_file, elements, working_dir,
-                                     timestep, temperature, pressure)
-    else:
-        raise ValueError(f"Unknown backend: {backend}")
-
-
-def _mace_lammps_input(model_file, elements, working_dir,
-                        timestep, temperature, pressure):
-    el_str = " ".join(elements)
-    ensemble_fix = (
-        f"fix 1 all npt temp {temperature} {temperature} 0.1 "
-        f"iso {pressure} {pressure} 1.0"
-        if pressure is not None
-        else f"fix 1 all nvt temp {temperature} {temperature} 0.1"
-    )
-    content = f"""# LAMMPS input — MACE potential
-# Model: {os.path.basename(model_file)}
-# Elements: {el_str}
-
-units          metal
-atom_style     atomic
-boundary       p p p
-
-read_data      system.data
-
-pair_style     mace no_domain_decomposition
-pair_coeff     * * {model_file} {el_str}
-
-neighbor       2.0 bin
-neigh_modify   every 1 delay 0 check yes
-
-thermo         100
-thermo_style   custom step temp press pe ke etotal vol density
-
-dump           traj all custom 1000 traj.lammpstrj id type x y z fx fy fz
-
-min_style      cg
-minimize       1.0e-6 1.0e-8 1000 10000
-
-velocity       all create {temperature} 12345 mom yes rot yes
-timestep       {timestep}e-3
-
-{ensemble_fix}
-run            100000
-"""
-    path = os.path.join(working_dir, "in.lammps")
-    with open(path, "w") as f:
-        f.write(content)
-    return path
-
-
-def _nequip_lammps_input(model_file, elements, working_dir,
-                          timestep, temperature, pressure):
-    el_str = " ".join(elements)
-    ensemble_fix = (
-        f"fix 1 all npt temp {temperature} {temperature} 0.1 "
-        f"iso {pressure} {pressure} 1.0"
-        if pressure is not None
-        else f"fix 1 all nvt temp {temperature} {temperature} 0.1"
-    )
-    content = f"""# LAMMPS input — NequIP potential
-units          metal
-atom_style     atomic
-boundary       p p p
-
-read_data      system.data
-
-pair_style     nequip
-pair_coeff     * * {model_file} {el_str}
-
-neighbor       2.0 bin
-neigh_modify   every 1 delay 0 check yes
-
-thermo         100
-thermo_style   custom step temp press pe ke etotal vol density
-dump           traj all custom 1000 traj.lammpstrj id type x y z fx fy fz
-
-velocity       all create {temperature} 12345 mom yes rot yes
-timestep       {timestep}e-3
-
-{ensemble_fix}
-run            100000
-"""
-    path = os.path.join(working_dir, "in.lammps")
-    with open(path, "w") as f:
-        f.write(content)
-    return path
-
-
-def _deepmd_lammps_input(model_file, elements, working_dir,
-                          timestep, temperature, pressure):
-    el_str = " ".join(elements)
-    ensemble_fix = (
-        f"fix 1 all npt temp {temperature} {temperature} 0.1 "
-        f"iso {pressure} {pressure} 1.0"
-        if pressure is not None
-        else f"fix 1 all nvt temp {temperature} {temperature} 0.1"
-    )
-    content = f"""# LAMMPS input — DeePMD potential
-units          metal
-atom_style     atomic
-boundary       p p p
-
-read_data      system.data
-
-pair_style     deepmd {model_file}
-pair_coeff     * * {el_str}
-
-neighbor       2.0 bin
-neigh_modify   every 1 delay 0 check yes
-
-thermo         100
-thermo_style   custom step temp press pe ke etotal vol density
-dump           traj all custom 1000 traj.lammpstrj id type x y z fx fy fz
-
-velocity       all create {temperature} 12345 mom yes rot yes
-timestep       {timestep}e-3
-
-{ensemble_fix}
-run            100000
-"""
-    path = os.path.join(working_dir, "in.lammps")
-    with open(path, "w") as f:
-        f.write(content)
-    return path
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  ASE MD SCRIPT GENERATION  (alternative to LAMMPS for pure-Python runs)
-# ═══════════════════════════════════════════════════════════════════
-
-def generate_ase_script(
-    backend: str,
-    model_name: str,
-    elements: List[str],
-    working_dir: str,
-    structure_file: str = "system.data",
-    timestep: float = 1.0,
-    temperature: float = 300.0,
-    pressure: Optional[float] = None,
-    n_steps: int = 1000,
-    output_interval: int = 50,
-    device: str = "cuda",
-) -> str:
-    """
-    Generate a runnable Python MD script using the ASE+MACE calculator.
-
-    Use this when LAMMPS+MACE is unavailable or for quick prototyping.
-    The script runs MD in-process via ASE's Langevin (NVT) or NPT
-    integrators with the MACE foundation model attached as the
-    calculator. Trajectory and thermo log are written next to the
-    script.
-
-    Args:
-        backend:         "mace" (only supported value for now)
-        model_name:      pretrained model identifier (e.g. "mace-mp-0")
-        elements:        chemical symbols, in atom-type order matching
-                         the LAMMPS data file
-        working_dir:     output directory
-        structure_file:  input structure (LAMMPS data format)
-        timestep:        in fs (ASE convention; LAMMPS metal uses ps)
-        temperature:     Kelvin
-        pressure:        bar -- NPT if given, NVT (Langevin) if None
-        n_steps:         number of MD steps
-        output_interval: how often to log thermo + trajectory
-        device:          "cuda" or "cpu"; can be overridden at run time
-                         via the MACE_DEVICE env var
-
-    Returns the absolute path to the generated script.
-    """
-    os.makedirs(working_dir, exist_ok=True)
-    if backend == "mace":
-        return _mace_ase_script(
-            model_name, elements, working_dir, structure_file,
-            timestep, temperature, pressure,
-            n_steps, output_interval, device,
-        )
-    if backend == "chgnet":
-        return _chgnet_ase_script(
-            model_name, elements, working_dir, structure_file,
-            timestep, temperature, pressure,
-            n_steps, output_interval, device,
-        )
-    raise ValueError(
-        f"ASE runner does not support backend={backend!r}. "
-        "Supported: 'mace', 'chgnet'."
-    )
-
-
-def _mace_ase_script(
-    model_name, elements, working_dir, structure_file,
-    timestep, temperature, pressure,
-    n_steps, output_interval, device,
-):
-    is_off = "off" in model_name.lower()
-    mace_loader = "mace_off" if is_off else "mace_mp"
-
-    if is_off:
-        size_map = {
-            "mace-off23":       "medium",
-            "mace-off23-small": "small",
-            "mace-off23-large": "large",
-        }
-    else:
-        size_map = {
-            "mace-mp-0":       "medium",
-            "mace-mp-0b":      "small",
-            "mace-mp-0-large": "large",
-        }
-    mace_size = size_map.get(model_name, "medium")
-
-    el_repr = ", ".join(repr(e) for e in elements)
-    ensemble = "NPT" if pressure is not None else "NVT (Langevin)"
-
-    if pressure is not None:
-        dynamics_block = (
-            "from ase.md.npt import NPT\n"
-            f"    dyn = NPT(\n"
-            f"        atoms,\n"
-            f"        timestep={timestep} * units.fs,\n"
-            f"        temperature_K={temperature},\n"
-            f"        externalstress={pressure} * units.bar,\n"
-            f"        ttime=20.0 * units.fs,\n"
-            f"        pfactor=(2e6 * units.GPa) * (20.0 * units.fs)**2,\n"
-            f"    )"
-        )
-    else:
-        dynamics_block = (
-            "from ase.md.langevin import Langevin\n"
-            f"    dyn = Langevin(\n"
-            f"        atoms,\n"
-            f"        timestep={timestep} * units.fs,\n"
-            f"        temperature_K={temperature},\n"
-            f"        friction=0.01,\n"
-            f"    )"
-        )
-
-    content = f'''"""
-ASE+MACE MD script -- generated by SciLink MLIPAgent.
-
-Model:     {model_name} ({mace_size})
-Backend:   mace (ASE calculator)
-Elements:  {elements}
-Ensemble:  {ensemble}
-Temp:      {temperature} K
-Steps:     {n_steps}
-
-Run:
-    python run_md.py                     # uses default device
-    MACE_DEVICE=cpu python run_md.py     # force CPU
-
-Outputs (alongside this script):
-    thermo.log   step / time / PE / KE / T
-    traj.traj    ASE binary trajectory (use ase.io.read to inspect)
-"""
-import os
-import time
-
-from ase import units
-from ase.io.lammpsdata import read_lammps_data
-from ase.io.trajectory import Trajectory
-from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
-from mace.calculators import {mace_loader}
-
-ELEMENTS = [{el_repr}]
-DEVICE = os.environ.get("MACE_DEVICE", {device!r})
-
-
-def main():
-    atoms = read_lammps_data({structure_file!r}, atom_style="atomic", sort_by_id=True)
-    if ELEMENTS:
-        # write_lammps_data(masses=True) lets ASE infer real elements from
-        # masses on read, so atoms.numbers will be true Zs (29 for Cu, etc.)
-        # in the typical case. Only fall back to type-index remap if ASE's
-        # mass-based inference didn't recover the expected element set.
-        actual_syms = sorted(set(atoms.get_chemical_symbols()))
-        expected_syms = sorted(set(ELEMENTS))
-        if actual_syms != expected_syms:
-            type_to_sym = {{i + 1: ELEMENTS[i] for i in range(len(ELEMENTS))}}
-            nums = atoms.get_atomic_numbers()
-            atoms.set_chemical_symbols([type_to_sym[int(n)] for n in nums])
-
-    print(f"system:  {{len(atoms)}} atoms "
-          f"({{sorted(set(atoms.get_chemical_symbols()))}})")
-    print(f"device:  {{DEVICE}}")
-    print(f"loading: {mace_loader}(model={mace_size!r})")
-    calc = {mace_loader}(
-        model={mace_size!r}, device=DEVICE, default_dtype="float64",
-    )
-    atoms.calc = calc
-
-    MaxwellBoltzmannDistribution(atoms, temperature_K={temperature})
-
-    {dynamics_block}
-
-    traj = Trajectory("traj.traj", "w", atoms)
-    dyn.attach(traj.write, interval={output_interval})
-
-    log_file = open("thermo.log", "w")
-    log_file.write("# step time(ps) PE(eV) KE(eV) T(K)\\n")
-    log_file.flush()
-
-    def log_step():
-        epot = atoms.get_potential_energy()
-        ekin = atoms.get_kinetic_energy()
-        temp = atoms.get_temperature()
-        step = dyn.nsteps
-        time_ps = step * {timestep} / 1000.0
-        line = (f"{{step}} {{time_ps:.4f}} {{epot:.6f}} "
-                f"{{ekin:.6f}} {{temp:.2f}}")
-        print(line)
-        log_file.write(line + "\\n")
-        log_file.flush()
-
-    dyn.attach(log_step, interval={output_interval})
-
-    t0 = time.time()
-    print(f"running {n_steps} steps...")
-    dyn.run({n_steps})
-    log_file.close()
-    elapsed = time.time() - t0
-    ms_per_step = 1000 * elapsed / max({n_steps}, 1)
-    print(f"done -- {{elapsed:.1f}}s "
-          f"({{ms_per_step:.2f}} ms/step)")
-
-
-if __name__ == "__main__":
-    main()
-'''
-    path = os.path.join(working_dir, "run_md.py")
-    with open(path, "w") as f:
-        f.write(content)
-    return path
-
-
-def _chgnet_ase_script(
-    model_name, elements, working_dir, structure_file,
-    timestep, temperature, pressure,
-    n_steps, output_interval, device,
-):
-    """Generate a runnable Python MD script using CHGNetCalculator.
-
-    CHGNet has a single universal pretrained model (no size variants);
-    ``model_name`` is accepted only for API symmetry with MACE and is
-    ignored.
-    """
-    el_repr = ", ".join(repr(e) for e in elements)
-    ensemble = "NPT" if pressure is not None else "NVT (Langevin)"
-
-    if pressure is not None:
-        dynamics_block = (
-            "from ase.md.npt import NPT\n"
-            f"    dyn = NPT(\n"
-            f"        atoms,\n"
-            f"        timestep={timestep} * units.fs,\n"
-            f"        temperature_K={temperature},\n"
-            f"        externalstress={pressure} * units.bar,\n"
-            f"        ttime=20.0 * units.fs,\n"
-            f"        pfactor=(2e6 * units.GPa) * (20.0 * units.fs)**2,\n"
-            f"    )"
-        )
-    else:
-        dynamics_block = (
-            "from ase.md.langevin import Langevin\n"
-            f"    dyn = Langevin(\n"
-            f"        atoms,\n"
-            f"        timestep={timestep} * units.fs,\n"
-            f"        temperature_K={temperature},\n"
-            f"        friction=0.01,\n"
-            f"    )"
-        )
-
-    content = f'''"""
-ASE+CHGNet MD script -- generated by SciLink MLIPAgent.
-
-Model:     chgnet (universal MPtrj-pretrained, no size variants)
-Backend:   chgnet (ASE calculator; no LAMMPS pair_style)
-Elements:  {elements}
-Ensemble:  {ensemble}
-Temp:      {temperature} K
-Steps:     {n_steps}
-
-Run:
-    python run_md.py                       # uses default device
-    CHGNET_DEVICE=cpu python run_md.py     # force CPU
-
-Outputs (alongside this script):
-    thermo.log   step / time / PE / KE / T
-    traj.traj    ASE binary trajectory (use ase.io.read to inspect)
-"""
-import os
-import time
-
-from ase import units
-from ase.io.lammpsdata import read_lammps_data
-from ase.io.trajectory import Trajectory
-from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
-from chgnet.model.dynamics import CHGNetCalculator
-
-ELEMENTS = [{el_repr}]
-DEVICE = os.environ.get("CHGNET_DEVICE", {device!r})
-
-
-def main():
-    atoms = read_lammps_data({structure_file!r}, atom_style="atomic", sort_by_id=True)
-    if ELEMENTS:
-        # write_lammps_data(masses=True) lets ASE infer real elements from
-        # masses on read, so atoms.numbers will be true Zs in the typical
-        # case. Only fall back to type-index remap if ASE's mass-based
-        # inference didn't recover the expected element set.
-        actual_syms = sorted(set(atoms.get_chemical_symbols()))
-        expected_syms = sorted(set(ELEMENTS))
-        if actual_syms != expected_syms:
-            type_to_sym = {{i + 1: ELEMENTS[i] for i in range(len(ELEMENTS))}}
-            nums = atoms.get_atomic_numbers()
-            atoms.set_chemical_symbols([type_to_sym[int(n)] for n in nums])
-
-    print(f"system:  {{len(atoms)}} atoms "
-          f"({{sorted(set(atoms.get_chemical_symbols()))}})")
-    print(f"device:  {{DEVICE}}")
-    print(f"loading: CHGNetCalculator()  -- universal MPtrj pretrained")
-    calc = CHGNetCalculator(use_device=DEVICE)
-    atoms.calc = calc
-
-    MaxwellBoltzmannDistribution(atoms, temperature_K={temperature})
-
-    {dynamics_block}
-
-    traj = Trajectory("traj.traj", "w", atoms)
-    dyn.attach(traj.write, interval={output_interval})
-
-    log_file = open("thermo.log", "w")
-    log_file.write("# step time(ps) PE(eV) KE(eV) T(K)\\n")
-    log_file.flush()
-
-    def log_step():
-        epot = atoms.get_potential_energy()
-        ekin = atoms.get_kinetic_energy()
-        temp = atoms.get_temperature()
-        step = dyn.nsteps
-        time_ps = step * {timestep} / 1000.0
-        line = (f"{{step}} {{time_ps:.4f}} {{epot:.6f}} "
-                f"{{ekin:.6f}} {{temp:.2f}}")
-        print(line)
-        log_file.write(line + "\\n")
-        log_file.flush()
-
-    dyn.attach(log_step, interval={output_interval})
-
-    t0 = time.time()
-    print(f"running {n_steps} steps...")
-    dyn.run({n_steps})
-    log_file.close()
-    elapsed = time.time() - t0
-    ms_per_step = 1000 * elapsed / max({n_steps}, 1)
-    print(f"done -- {{elapsed:.1f}}s "
-          f"({{ms_per_step:.2f}} ms/step)")
-
-
-if __name__ == "__main__":
-    main()
-'''
-    path = os.path.join(working_dir, "run_md.py")
-    with open(path, "w") as f:
-        f.write(content)
-    return path

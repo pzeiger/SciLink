@@ -122,6 +122,15 @@ class MLIPAgent:
 
         self.generation_config = None
 
+        # Auth params retained so deploy_pretrained can construct the
+        # MDSimulationAgent it delegates run-generation to (see
+        # _get_md_agent). MLIPAgent's job ends at "here is a deployed
+        # potential" — the MD agent owns the actual run.
+        self._api_key = api_key
+        self._model_name = model_name
+        self._base_url = base_url
+        self._md_agent = None   # lazily constructed in _get_md_agent
+
         # Skill state
         self.skill_name: Optional[str] = None
         self.skill_sections: Optional[Dict[str, str]] = None
@@ -296,36 +305,35 @@ Return JSON:
             system_info: From ForceFieldAgent._analyze_system_composition()
                          or any dict with "elements" and "n_atoms" keys
             research_goal: What the simulation should achieve
-            simulation_params: Optional MD settings (keys depend on runner):
-                LAMMPS: {"temperature": 300, "pressure": 1.0, "timestep": 0.5}
-                ASE:    {"temperature": 300, "pressure": 1.0, "timestep": 1.0,
-                         "n_steps": 1000, "output_interval": 50,
-                         "device": "cuda"}
-            runner: "lammps" (default) emits a LAMMPS input file; "ase"
-                emits a runnable Python MD script using the MACE ASE
-                calculator. ASE is useful when LAMMPS+MACE isn't built
-                yet or for quick prototyping.
-            structure_file: Path to a LAMMPS data file. Required for
-                runner="ase" (the script reads from this path at run
-                time). Ignored for runner="lammps".
+            simulation_params: Optional run settings, forwarded to the MD
+                agent: {"task": "md"|"relax", "temperature": 300,
+                "pressure": 1.0, "timestep": ..., "n_steps": ...,
+                "output_interval": ..., "device": "cuda", "fmax": ...}.
+                Omitted keys fall back to the MD agent / runner defaults.
+            runner: Which engine the MD agent drives the potential
+                through — "lammps" (default), "ase", or any other engine
+                registered in MDSimulationAgent.TOOL_REGISTRY that
+                implements run_with_potential. "ase" is the universal
+                fallback (works for every backend).
+            structure_file: Path to a LAMMPS data file describing the
+                system. Required — the MD agent's run reads from it.
 
-        Returns dict with keys depending on runner:
-            common: model_file, backend, model_name, elements, selection,
-                    runner, notes
-            lammps: lammps_input, pair_style, pair_coeff
-            ase:    ase_script
+        This method deploys the model, then delegates run generation to
+        MDSimulationAgent. MLIPAgent's job ends at "here is a deployed
+        potential"; the MD agent owns the actual run.
+
+        Returns dict: backend, model_name, model_file, elements,
+        selection, plus the MD agent's run result (run_path, runner,
+        task, notes, ...).
         """
         if not _MLIP_TOOLS_AVAILABLE:
             raise ImportError(
                 "mlip_tools required. Install mace-torch: pip install mace-torch"
             )
-        if runner not in ("lammps", "ase"):
+        if not structure_file:
             raise ValueError(
-                f"runner must be 'lammps' or 'ase', got {runner!r}"
-            )
-        if runner == "ase" and not structure_file:
-            raise ValueError(
-                "runner='ase' requires a structure_file (LAMMPS data file path)"
+                "deploy_pretrained requires a structure_file "
+                "(LAMMPS data file path) — the MD agent's run reads from it"
             )
 
         self.logger.info("=" * 60)
@@ -354,73 +362,54 @@ Return JSON:
         # Load backend-specific skill
         self._load_backend_skill(backend)
 
-        # Deploy -- caches model weights, validates the install
-        deployment = mlip_tools.deploy_pretrained(
+        sim = simulation_params or {}
+
+        # Deploy -- constructs the calculator once (validates the
+        # install, locates the model file), returns an engine-neutral
+        # DeployedPotential descriptor.
+        potential = mlip_tools.deploy(
             backend=backend,
-            model_name=model_name,
+            model=model_name,
             elements=elements,
             working_dir=self.working_dir,
+            device=sim.get("device", "cpu"),
         )
 
-        sim = simulation_params or {}
-        result: Dict[str, Any] = {
-            "model_file": deployment["model_file"],
-            "backend":    backend,
-            "model_name": model_name,
-            "elements":   elements,
-            "selection":  selection,
-            "runner":     runner,
+        # Delegate run generation to MDSimulationAgent. MLIPAgent's job
+        # ends here -- "here is a deployed potential". The MD agent
+        # owns the actual run (relax / MD / whatever the goal asks for)
+        # and is the place that knows how to drive any potential
+        # through any runner. See project_mlip_md_delegation memory.
+        #
+        # Forward only the run params the caller actually set -- the MD
+        # agent / runner supply defaults for the rest, and passing an
+        # explicit None would clobber those defaults.
+        run_params = {
+            k: sim[k]
+            for k in ("timestep", "n_steps", "output_interval",
+                      "device", "fmax")
+            if sim.get(k) is not None
         }
+        md_agent = self._get_md_agent()
+        run = md_agent.generate_simulation(
+            structure_file=structure_file,
+            research_goal=research_goal,
+            potential=potential,
+            runner=runner,
+            task=sim.get("task", "md"),
+            temperature=sim.get("temperature", 300.0),
+            pressure=sim.get("pressure"),   # None -> NVT
+            **run_params,
+        )
 
-        if runner == "lammps":
-            lammps_input = mlip_tools.generate_lammps_input(
-                backend=backend,
-                model_file=deployment["model_file"],
-                elements=elements,
-                working_dir=self.working_dir,
-                timestep=sim.get("timestep", 0.5),
-                temperature=sim.get("temperature", 300.0),
-                pressure=sim.get("pressure"),
-            )
-            result.update(
-                lammps_input=lammps_input,
-                pair_style=f"{backend} no_domain_decomposition",
-                pair_coeff=(
-                    f"* * {deployment['model_file']} {' '.join(elements)}"
-                ),
-                notes=(
-                    f"Pretrained {model_name} deployed. Units: metal "
-                    f"(eV, Å, ps). Run simulation, then call "
-                    f"evaluate_simulation_quality() to check if "
-                    f"refinement is needed."
-                ),
-            )
-            self.logger.info(f"LAMMPS input: {lammps_input}")
-        else:  # runner == "ase"
-            ase_script = mlip_tools.generate_ase_script(
-                backend=backend,
-                model_name=model_name,
-                elements=elements,
-                working_dir=self.working_dir,
-                structure_file=structure_file,
-                timestep=sim.get("timestep", 1.0),
-                temperature=sim.get("temperature", 300.0),
-                pressure=sim.get("pressure"),
-                n_steps=sim.get("n_steps", 1000),
-                output_interval=sim.get("output_interval", 50),
-                device=sim.get("device", "cuda"),
-            )
-            result.update(
-                ase_script=ase_script,
-                notes=(
-                    f"Pretrained {model_name} deployed via ASE+MACE. "
-                    f"Run `python run_md.py` in the working dir; outputs "
-                    f"thermo.log + traj.traj. Then call "
-                    f"evaluate_simulation_quality() to check if "
-                    f"refinement is needed."
-                ),
-            )
-            self.logger.info(f"ASE script: {ase_script}")
+        result: Dict[str, Any] = {
+            "backend":    potential.backend,
+            "model_name": potential.model_name,
+            "model_file": potential.model_file,
+            "elements":   potential.elements,
+            "selection":  selection,
+            **run,        # run_path, runner, task, notes, ...
+        }
 
         with open(os.path.join(self.working_dir, "deployment.json"), "w") as f:
             json.dump(
@@ -429,9 +418,29 @@ Return JSON:
                 f, indent=2,
             )
 
-        self.logger.info(f"Model: {deployment['model_file']}")
+        self.logger.info(f"Model: {potential.model_file or '(bundled)'}")
+        self.logger.info(f"Run:   {run.get('run_path')}")
         self.logger.info("=" * 60)
         return result
+
+    def _get_md_agent(self):
+        """Lazily construct (and cache) the MDSimulationAgent this
+        agent delegates run generation to.
+
+        Constructed once per MLIPAgent and reused. The potential-driven
+        path through the MD agent does not call the LLM, but the MD
+        agent's __init__ builds one anyway, so we pass MLIPAgent's own
+        auth params through for consistency.
+        """
+        if self._md_agent is None:
+            from .md_simulation_agent import MDSimulationAgent
+            self._md_agent = MDSimulationAgent(
+                working_dir=str(self.working_dir),
+                api_key=self._api_key,
+                model_name=self._model_name,
+                base_url=self._base_url,
+            )
+        return self._md_agent
 
     # ================================================================
     # PUBLIC API — FEEDBACK AND EVALUATION
@@ -613,7 +622,7 @@ Return JSON:
                 "dft_inputs": {...} | None,
                 "instructions": str,
                 "fine_tuned_model": str | None,
-                "new_deployment": {...} | None,
+                "new_deployment": DeployedPotential | None,
             }
         """
         self.logger.info(f"Refining potential (mode={mode})...")
@@ -720,22 +729,19 @@ Return JSON:
         result["training_result"] = train_result
         result["instructions"] = (
             f"Fine-tuned model saved to: {train_result['model_file']}\n"
-            f"Re-deploy with deploy_pretrained() using this model, "
-            f"or call generate_lammps_input() directly."
+            f"Hand result['new_deployment'] (a DeployedPotential) to the "
+            f"MD agent, or pass the model file to deploy_pretrained()."
         )
 
-        # Generate updated LAMMPS input
+        # Wrap the refined model as a DeployedPotential — refine_potential
+        # produces a potential; the MD agent owns running it.
         elements = deployment.get("elements", [])
-        new_lammps = mlip_tools.generate_lammps_input(
+        result["new_deployment"] = mlip_tools.deploy(
             backend=backend,
-            model_file=train_result["model_file"],
+            model=train_result["model_file"],
             elements=elements,
             working_dir=os.path.join(self.working_dir, "refined"),
         )
-        result["new_deployment"] = {
-            "model_file": train_result["model_file"],
-            "lammps_input": new_lammps,
-        }
 
         # Track
         self._refinement_history.append({
@@ -756,22 +762,26 @@ Return JSON:
         self,
         system_info: Dict[str, Any],
         research_goal: str,
+        structure_file: str,
         simulation_params: Optional[Dict[str, Any]] = None,
+        runner: str = "lammps",
     ) -> Dict[str, Any]:
         """
-        Deploy pretrained model and generate LAMMPS files.
+        Deploy a pretrained model and generate a runnable simulation.
 
         This is the simplest entry point.  After the user runs the
         simulation, they call evaluate_simulation_quality() and
         refine_potential() as needed.
 
         Returns:
-            Same as deploy_pretrained(), ready for LAMMPS execution.
+            Same as deploy_pretrained().
         """
         return self.deploy_pretrained(
             system_info=system_info,
             research_goal=research_goal,
+            structure_file=structure_file,
             simulation_params=simulation_params,
+            runner=runner,
         )
 
     # ================================================================
@@ -1013,7 +1023,8 @@ Return JSON:
                 If None, auto-selected.  Pass "none" or "scratch" to
                 train from scratch.
             hyperparameters: Training config overrides.
-            simulation_params: LAMMPS settings for the deployed model.
+            simulation_params: Optional {"device": ...} for wrapping the
+                trained model as a DeployedPotential.
             timeout_hours: Training wall-clock limit.
 
         Returns:
@@ -1021,7 +1032,7 @@ Return JSON:
                 "model_file": str,
                 "backend": str,
                 "validation": dict,
-                "lammps_input": str,
+                "potential": DeployedPotential,   # hand to the MD agent
                 "dataset_info": dict,
             }
         """
@@ -1126,28 +1137,28 @@ Return JSON:
                     f"Validation below thresholds: {diagnosis.get('likely_cause')}"
                 )
 
-        # ── Generate LAMMPS deployment ────────────────────────────
+        # ── Wrap the trained model as a DeployedPotential ─────────
+        # fine_tune's job ends at producing a potential. Running it is
+        # the MD agent's job — hand the returned `potential` (or its
+        # model_file) to deploy_pretrained / MDSimulationAgent when a
+        # structure is in hand.
         sim = simulation_params or {}
-        lammps_input = mlip_tools.generate_lammps_input(
+        potential = mlip_tools.deploy(
             backend=backend,
-            model_file=train_result["model_file"],
+            model=train_result["model_file"],
             elements=elements,
             working_dir=self.working_dir,
-            timestep=sim.get("timestep", 0.5),
-            temperature=sim.get("temperature", 300.0),
-            pressure=sim.get("pressure"),
+            device=sim.get("device", "cpu"),
         )
 
         result = {
-            "model_file":   train_result["model_file"],
+            "model_file":   potential.model_file,
             "backend":      backend,
             "foundation":   foundation_model,
             "from_scratch":  from_scratch,
             "validation":   validation,
             "dataset_info": dataset_info,
-            "lammps_input": lammps_input,
-            "pair_style":   f"{backend} no_domain_decomposition",
-            "pair_coeff":   f"* * {train_result['model_file']} {' '.join(elements)}",
+            "potential":    potential,
             "hyperparameters": hparams,
         }
 
@@ -1160,8 +1171,7 @@ Return JSON:
             )
 
         self.logger.info("=" * 60)
-        self.logger.info(f"Model: {train_result['model_file']}")
-        self.logger.info(f"LAMMPS input: {lammps_input}")
+        self.logger.info(f"Model: {potential.model_file}")
         self.logger.info("=" * 60)
         return result
 
@@ -1294,14 +1304,14 @@ Return JSON:
             return None
 
         try:
-            result = mlip_tools.deploy_pretrained(
+            result = mlip_tools.deploy(
                 backend="mace",
-                model_name=foundation_model,
+                model=foundation_model,
                 elements=[],          # not needed for path resolution
                 working_dir=self.working_dir,
                 device="cpu",
             )
-            model_path = result.get("model_file")
+            model_path = result.model_file
             if model_path and os.path.exists(str(model_path)):
                 self.logger.info(f"Foundation model resolved: {model_path}")
                 return str(model_path)

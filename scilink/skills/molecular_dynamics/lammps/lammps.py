@@ -6,6 +6,11 @@ Provides:
   - Script validation (structural checks)
   - Script cleaning and fixing
   - Force field file integration
+  - run_with_potential: engine-side integration of a deployed MLIP
+    potential — the LAMMPS skill's own knowledge of which MLIP
+    backends have a LAMMPS pair_style and how to write the input.
+    The MD agent calls this generically via TOOL_REGISTRY; it never
+    branches on the engine itself.
 
 Called by MDSimulationAgent when the LAMMPS skill is active.
 Decoupled from the skill so they can be tested independently.
@@ -831,3 +836,165 @@ def integrate_force_field_files(
             new_lines.append("")
 
     return "\n".join(new_lines)
+
+
+# ─── MLIP potential integration (engine-side) ──────────────────────
+# How LAMMPS consumes a deployed MLIP. The MD agent calls
+# run_with_potential() generically via TOOL_REGISTRY — this is where
+# the *LAMMPS-specific* knowledge of MLIP pair_styles lives, so adding
+# an MLIP backend that has a LAMMPS pair_style means one entry here,
+# and an MLIP backend that doesn't (CHGNet) means nothing here at all.
+
+def _mace_pair(model_file: str, el_str: str):
+    return (
+        "pair_style     mace no_domain_decomposition",
+        f"pair_coeff     * * {model_file} {el_str}",
+    )
+
+
+def _nequip_pair(model_file: str, el_str: str):
+    return (
+        "pair_style     nequip",
+        f"pair_coeff     * * {model_file} {el_str}",
+    )
+
+
+def _deepmd_pair(model_file: str, el_str: str):
+    return (
+        f"pair_style     deepmd {model_file}",
+        f"pair_coeff     * * {el_str}",
+    )
+
+
+# backend keyword -> (pair_style, pair_coeff) builder. A backend absent
+# from this map has no LAMMPS pair_style (e.g. CHGNet is ASE-only);
+# run_with_potential raises NotImplementedError so the MD agent can
+# fall back to its universal ASE runner.
+_MLIP_PAIR_BUILDERS = {
+    "mace":   _mace_pair,
+    "nequip": _nequip_pair,
+    "deepmd": _deepmd_pair,
+}
+
+
+def supported_mlip_backends() -> list:
+    """MLIP backend keywords LAMMPS can run via a pair_style."""
+    return sorted(_MLIP_PAIR_BUILDERS)
+
+
+def run_with_potential(
+    potential,
+    structure_file: str,
+    working_dir: str,
+    task: str = "md",
+    timestep: float = 0.5,
+    temperature: float = 300.0,
+    pressure=None,
+    n_steps: int = 100000,
+) -> str:
+    """
+    Generate a LAMMPS input file that runs a deployed MLIP potential.
+
+    This is the LAMMPS engine's side of the potential/runner split:
+    MDSimulationAgent hands over a ``DeployedPotential`` (duck-typed
+    here — only ``.backend``, ``.model_file``, ``.elements`` are read)
+    and this function emits the LAMMPS input. The MD agent calls it
+    generically through ``TOOL_REGISTRY["lammps"].run_with_potential``;
+    it does not know anything LAMMPS-specific.
+
+    Parameters
+    ----------
+    potential:
+        A DeployedPotential. Its ``.backend`` selects the pair_style.
+    structure_file:
+        Structure the generated input reads (``read_data``); the file
+        basename is used in the input.
+    task:
+        ``"md"`` — minimize then NVT/NPT dynamics for ``n_steps``.
+        ``"relax"`` — ``fix box/relax`` + ``minimize`` only (cell +
+        geometry optimization, no dynamics).
+    pressure:
+        ``None`` → NVT for MD; a value → NPT. Ignored for ``relax``.
+
+    Returns
+    -------
+    Absolute path to the written ``in.lammps``.
+
+    Raises
+    ------
+    NotImplementedError
+        If ``potential.backend`` has no LAMMPS pair_style (the caller
+        should fall back to the universal ASE runner).
+    ValueError
+        For an unknown ``task`` or a potential with no model file.
+    """
+    if task not in ("md", "relax"):
+        raise ValueError(f"task must be 'md' or 'relax', got {task!r}")
+
+    backend = getattr(potential, "backend", None)
+    builder = _MLIP_PAIR_BUILDERS.get(backend)
+    if builder is None:
+        raise NotImplementedError(
+            f"LAMMPS has no pair_style for MLIP backend {backend!r}. "
+            f"Supported: {supported_mlip_backends()}. Use the ASE runner."
+        )
+
+    model_file = getattr(potential, "model_file", "") or ""
+    if not model_file:
+        raise ValueError(
+            f"backend {backend!r} has no on-disk model file — it cannot "
+            f"run via LAMMPS. Use the ASE runner."
+        )
+
+    elements = list(getattr(potential, "elements", []) or [])
+    el_str = " ".join(elements)
+    pair_style, pair_coeff = builder(model_file, el_str)
+    data_name = os.path.basename(structure_file)
+
+    head = (
+        f"# LAMMPS input -- {backend} MLIP potential ({task})\n"
+        f"# Model: {os.path.basename(model_file)}\n"
+        f"# Elements: {el_str}\n\n"
+        "units          metal\n"
+        "atom_style     atomic\n"
+        "boundary       p p p\n\n"
+        f"read_data      {data_name}\n\n"
+        f"{pair_style}\n"
+        f"{pair_coeff}\n\n"
+        "neighbor       2.0 bin\n"
+        "neigh_modify   every 1 delay 0 check yes\n\n"
+        "thermo         100\n"
+        "thermo_style   custom step temp press pe ke etotal vol density\n"
+    )
+
+    if task == "relax":
+        body = (
+            "\n# cell + geometry relaxation\n"
+            "fix            1 all box/relax iso 0.0 vmax 0.001\n"
+            "min_style      cg\n"
+            "minimize       1.0e-8 1.0e-10 10000 100000\n"
+            "write_data     relaxed.data\n"
+        )
+    else:  # md
+        ensemble_fix = (
+            f"fix            1 all npt temp {temperature} {temperature} 0.1 "
+            f"iso {pressure} {pressure} 1.0"
+            if pressure is not None
+            else f"fix            1 all nvt temp {temperature} {temperature} 0.1"
+        )
+        body = (
+            "\ndump           traj all custom 1000 traj.lammpstrj "
+            "id type x y z fx fy fz\n\n"
+            "min_style      cg\n"
+            "minimize       1.0e-6 1.0e-8 1000 10000\n\n"
+            f"velocity       all create {temperature} 12345 mom yes rot yes\n"
+            f"timestep       {timestep}e-3\n\n"
+            f"{ensemble_fix}\n"
+            f"run            {n_steps}\n"
+        )
+
+    os.makedirs(working_dir, exist_ok=True)
+    path = os.path.join(working_dir, "in.lammps")
+    with open(path, "w") as f:
+        f.write(head + body)
+    return path
