@@ -269,6 +269,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         skill: Optional[str] = None,
         # Prior knowledge from reference analyses
         prior_knowledge: Optional[List[Dict[str, Any]]] = None,
+        literature_file: Optional[str] = None,
         # Quality control overrides (optional)
         r2_threshold: Optional[float] = None,
         max_model_retries: Optional[int] = None,
@@ -586,7 +587,20 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "result_json": {},
             "error_dict": None,
         }
-        
+
+        # Pre-populate literature context if a search file was supplied via
+        # the orchestrator's `search_literature` tool. Skips the in-pipeline
+        # `LiteratureSearchController`. In identification mode the planner
+        # ignores it (see _build_planning_prompt) to preserve the unbiased
+        # fit, but Stage-2 candidate enumeration still consumes it.
+        if literature_file:
+            lit_p = Path(literature_file)
+            if lit_p.is_file():
+                state["literature_context"] = lit_p.read_text()
+                self.logger.info(f"📚 Loaded literature context from {lit_p.name}")
+            else:
+                self.logger.warning(f"literature_file not found: {literature_file}")
+
         # Create unified pipeline with quality settings
         pipeline = create_unified_curve_fitting_pipeline(
             model=self.model,

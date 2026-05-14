@@ -229,6 +229,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         skill: Optional[str] = None,
         prior_knowledge: Optional[List[Dict[str, Any]]] = None,
         prior_analysis_paths: Optional[List[str]] = None,
+        literature_file: Optional[str] = None,
         # Quality control overrides
         outlier_sigma: Optional[float] = None,
         **kwargs,
@@ -436,6 +437,17 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "result_json": {},
             "error_dict": None,
         }
+
+        # Pre-populate literature context if a search file was supplied via
+        # the orchestrator's `search_literature` tool. Skips the in-pipeline
+        # `LiteratureSearchController` and lets the planner see lit context.
+        if literature_file:
+            lit_p = Path(literature_file)
+            if lit_p.is_file():
+                state["literature_context"] = lit_p.read_text()
+                self.logger.info(f"📚 Loaded literature context from {lit_p.name}")
+            else:
+                self.logger.warning(f"literature_file not found: {literature_file}")
 
         # Create unified pipeline
         pipeline = create_unified_image_analysis_pipeline(
