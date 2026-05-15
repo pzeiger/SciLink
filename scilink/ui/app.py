@@ -360,27 +360,18 @@ if not st.session_state.agent_initialized:
         if st.session_state.app_mode == "simulate" and not simulate_enabled():
             st.session_state.app_mode = "analyze"
         _mode_map = {m["key"]: m for m in APP_MODES}
+        # One button per mode; simulate is dropped when [sim] isn't installed.
+        _modes = [m for m in APP_MODES
+                  if m["key"] != "simulate" or simulate_enabled()]
         st.markdown('<div class="mode-selector-anchor"></div>', unsafe_allow_html=True)
-        if simulate_enabled():
-            _, _mc1, _mc2, _mc3, _ = st.columns([1.5, 1, 1, 1, 1.5])
-        else:
-            _, _mc1, _mc2, _ = st.columns([1.5, 1.5, 1.5, 1.5])
-            _mc3 = None
-        with _mc1:
-            _atype = "primary" if st.session_state.app_mode == "analyze" else "secondary"
-            if st.button("Analyze", type=_atype, use_container_width=True, key="mode_analyze"):
-                st.session_state.app_mode = "analyze"
-                st.rerun()
-        with _mc2:
-            _ptype = "primary" if st.session_state.app_mode == "plan" else "secondary"
-            if st.button("Plan", type=_ptype, use_container_width=True, key="mode_plan"):
-                st.session_state.app_mode = "plan"
-                st.rerun()
-        if _mc3 is not None:
-            with _mc3:
-                _stype = "primary" if st.session_state.app_mode == "simulate" else "secondary"
-                if st.button("Simulate", type=_stype, use_container_width=True, key="mode_simulate"):
-                    st.session_state.app_mode = "simulate"
+        _cols = st.columns([1.5] + [1.0] * len(_modes) + [1.5])
+        for _m, _col in zip(_modes, _cols[1:-1]):
+            with _col:
+                _btype = ("primary" if st.session_state.app_mode == _m["key"]
+                          else "secondary")
+                if st.button(_m["label"], type=_btype, use_container_width=True,
+                             key=f"mode_{_m['key']}"):
+                    st.session_state.app_mode = _m["key"]
                     st.rerun()
         _cur_desc = _mode_map[st.session_state.app_mode]["description"]
         st.markdown(
@@ -837,7 +828,11 @@ else:
             )
 
     _has_conversation = bool(st.session_state.chat_messages)
-    if st.session_state.app_mode == "plan":
+    # plan and meta accept a free-text goal with no prior upload.
+    _free_start_modes = ("plan", "meta")
+    if st.session_state.app_mode == "meta":
+        _chat_placeholder = "Describe your research goal..."
+    elif st.session_state.app_mode == "plan":
         _chat_placeholder = "Message the planning agent..."
     elif _has_conversation:
         _chat_placeholder = "Message the analysis agent..."
@@ -845,7 +840,7 @@ else:
         _chat_placeholder = "Upload data and click Analyze to start"
 
     _chat_disabled = task.is_running or (
-        not _has_conversation and st.session_state.app_mode != "plan"
+        not _has_conversation and st.session_state.app_mode not in _free_start_modes
     )
     user_text = st.chat_input(_chat_placeholder, disabled=_chat_disabled)
     _upload_preamble = st.session_state.pop("_upload_preamble", None)

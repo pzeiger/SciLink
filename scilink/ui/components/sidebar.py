@@ -246,9 +246,17 @@ def render_sidebar() -> None:
             )
             st.caption("\u2139\ufe0f Leave blank to use the main API key")
 
+        # The meta-agent has only two autonomy levels (a delegation is a
+        # one-shot run_task, so the modes' step-by-step co-pilot does not
+        # apply). Other modes keep the full three-level paradigm.
+        _is_meta = st.session_state.app_mode == "meta"
+        _mode_opts = (["supervised", "autonomous"] if _is_meta
+                      else ["co-pilot", "supervised", "autonomous"])
+        if st.session_state.get("cfg_mode") not in _mode_opts:
+            st.session_state.cfg_mode = _mode_opts[0]
         mode = st.selectbox(
             "Autonomy mode",
-            ["co-pilot", "supervised", "autonomous"],
+            _mode_opts,
             key="cfg_mode",
             disabled=_locked,
         )
@@ -373,6 +381,8 @@ def render_sidebar() -> None:
                 _render_analyze_status()
             elif app_mode == "plan":
                 _render_planning_status()
+            elif app_mode == "meta":
+                _render_meta_status()
 
         # ── Vibes ──────────────────────────────────────────
         st.divider()
@@ -525,6 +535,21 @@ def _render_planning_status() -> None:
     st.metric("Autonomy", mode.replace("-", " ").title())
 
 
+def _render_meta_status() -> None:
+    """Show meta-agent status metrics."""
+    agent = st.session_state.agent
+    children = getattr(agent, "_children", {}) or {}
+    ledger = getattr(agent, "_delegation_ledger", []) or []
+    mode = st.session_state.agent_config.get("mode", "co-pilot")
+
+    row_c1, row_c2 = st.columns(2)
+    with row_c1:
+        st.metric("Delegations", len(ledger))
+    with row_c2:
+        st.metric("Autonomy", mode.replace("-", " ").title())
+    st.metric("Specialists Active", ", ".join(sorted(children)) or "None")
+
+
 # ── helpers ──────────────────────────────────────────────────────
 
 def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key: str = "", mp_api_key: str = "", embedding_model: str = None, embedding_api_key: str = None) -> None:
@@ -562,7 +587,13 @@ def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key
     executors._GLOBAL_SANDBOX_APPROVED = True
 
     try:
-        if app_mode == "plan":
+        if app_mode == "meta":
+            agent = _init_meta_agent(
+                session_dir, resolved_key, model, base_url, mode, fh_api_key,
+                embedding_model=embedding_model,
+                embedding_api_key=embedding_api_key,
+            )
+        elif app_mode == "plan":
             agent = _init_planning_agent(
                 session_dir, resolved_key, model, base_url, mode, fh_api_key,
                 embedding_model=embedding_model,
@@ -651,6 +682,39 @@ def _init_planning_agent(session_dir, api_key, model, base_url, mode, fh_api_key
         knowledge_dir=str(knowledge_dir),
         code_dir=str(code_dir),
         data_dir=str(data_dir),
+        **kwargs,
+    )
+
+
+def _init_meta_agent(session_dir, api_key, model, base_url, mode, fh_api_key,
+                     embedding_model=None, embedding_api_key=None):
+    """Create a MetaOrchestratorAgent.
+
+    Child orchestrators are created lazily by the meta-agent on first
+    delegation, in fixed sub-directories of the meta session.
+    """
+    from scilink.agents.meta_agent.meta_orchestrator import (
+        MetaMode,
+        MetaOrchestratorAgent,
+    )
+
+    mode_map = {
+        "supervised": MetaMode.SUPERVISED,
+        "autonomous": MetaMode.AUTONOMOUS,
+    }
+    kwargs = {}
+    if embedding_model:
+        kwargs["embedding_model"] = embedding_model
+    if embedding_api_key:
+        kwargs["embedding_api_key"] = embedding_api_key
+
+    return MetaOrchestratorAgent(
+        base_dir=str(session_dir),
+        api_key=api_key,
+        model_name=model,
+        base_url=base_url or None,
+        meta_mode=mode_map[mode],
+        futurehouse_api_key=fh_api_key or None,
         **kwargs,
     )
 
@@ -760,7 +824,30 @@ def resume_session(
     app_mode = st.session_state.app_mode or "analyze"
 
     try:
-        if app_mode == "plan":
+        if app_mode == "meta":
+            from scilink.agents.meta_agent.meta_orchestrator import (
+                MetaMode,
+                MetaOrchestratorAgent,
+            )
+            meta_mode_map = {
+                "supervised": MetaMode.SUPERVISED,
+                "autonomous": MetaMode.AUTONOMOUS,
+            }
+            kwargs = {}
+            if embedding_model:
+                kwargs["embedding_model"] = embedding_model
+            if embedding_api_key:
+                kwargs["embedding_api_key"] = embedding_api_key
+            agent = MetaOrchestratorAgent.restore_from_checkpoint(
+                base_dir=str(session_path),
+                api_key=resolved_key,
+                model_name=model,
+                base_url=base_url or None,
+                meta_mode=meta_mode_map[mode],
+                futurehouse_api_key=fh_api_key or None,
+                **kwargs,
+            )
+        elif app_mode == "plan":
             from scilink.agents.planning_agents.planning_orchestrator import (
                 AutonomyLevel,
                 PlanningOrchestratorAgent,

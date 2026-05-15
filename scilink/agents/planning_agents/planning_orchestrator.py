@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import pandas as pd
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -639,6 +640,16 @@ class PlanningOrchestratorAgent:
         self.expected_input_levels = None  # {col: [level0, level1, ...]} for categorical inputs
         self.latest_tea_results = None
 
+        # Per-delegation output isolation. Used only by run_task: the meta
+        # agent reuses one planning child across delegations, and the plan
+        # tools write fixed filenames (plan.json, tea_analysis.json, ...).
+        # Without a per-delegation sub-directory, each delegation would
+        # overwrite the previous one's artifacts. Direct `scilink plan` use
+        # never calls run_task, so _active_output_subdir stays None and
+        # writes land in base_dir exactly as before.
+        self._delegation_counter = 0
+        self._active_output_subdir = None
+
         # Custom tools / MCP state
         self._tool_data_cache: Dict[tuple, Any] = {}
         self._external_tools: List[Dict[str, str]] = []
@@ -1102,7 +1113,8 @@ class PlanningOrchestratorAgent:
             self.expected_input_types = state.get("expected_input_types")
             self.expected_input_levels = state.get("expected_input_levels")
             self.latest_tea_results = state.get("latest_tea_results")
-            
+            self._delegation_counter = state.get("delegation_counter", 0)
+
             # Restore autonomy level if saved
             if "autonomy_level" in state:
                 try:
@@ -1189,12 +1201,12 @@ class PlanningOrchestratorAgent:
             
             return f"❌ Error: {e}\n\n(Emergency checkpoint saved to {self.checkpoint_path})"
 
-    def run_task(self, task: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def run_task(self, task: str, context: Optional[Dict[str, Any]] = None,
+                 autonomy: Optional[AutonomyLevel] = None) -> Dict[str, Any]:
         """Non-interactive entry point — used by the meta agent.
 
-        Runs the task in autonomous mode (regardless of the agent's current
-        configured autonomy level) and returns a structured summary that's
-        easy to consume programmatically:
+        Runs the task and returns a structured summary that's easy to
+        consume programmatically:
 
             {
                 "status": "success" | "error",
@@ -1208,10 +1220,15 @@ class PlanningOrchestratorAgent:
             }
 
         Mirrors SimulationOrchestratorAgent.run_task — see CLAUDE.md
-        "Two surfaces, one agent". The agent is pinned into AUTONOMOUS mode
-        for the duration of the call so it doesn't pause for a (nonexistent)
-        user; the original autonomy level is restored on exit, even if
-        chat() raises.
+        "Two surfaces, one agent".
+
+        ``autonomy`` selects the AutonomyLevel for this call. Defaults to
+        AUTONOMOUS — the safe choice for a headless/programmatic caller, so
+        the agent never pauses for a nonexistent user. A caller attached to a
+        human (the meta agent, driven via CLI/UI) passes SUPERVISED so the
+        sub-agents' human-feedback prompts reach that human.
+        The original autonomy level is restored on exit, even if chat()
+        raises.
 
         Planning has no analysis-style record list, so files_produced is a
         before/after diff of the campaign directory (session-churn files
@@ -1249,11 +1266,25 @@ class PlanningOrchestratorAgent:
         # call" rather than "everything in the session."
         files_before = _snapshot_files()
 
-        # Pin autonomy to AUTONOMOUS for the duration of this call so the
-        # agent doesn't pause to ask the (nonexistent) user for confirmation.
+        # Isolate this delegation's plan artifacts in their own sub-directory
+        # so a persistent planning child (reused by the meta agent) does not
+        # overwrite an earlier delegation's plan.json / tea_analysis /
+        # output_scripts. The plan tools read self._active_output_subdir.
+        self._delegation_counter += 1
+        slug = re.sub(r"[^a-z0-9]+", "_", task.lower()).strip("_")[:40] or "task"
+        self._active_output_subdir = (
+            self.base_dir / "delegations" / f"{self._delegation_counter:02d}_{slug}"
+        )
+        self._active_output_subdir.mkdir(parents=True, exist_ok=True)
+
+        # Run under the requested autonomy level — AUTONOMOUS by default (the
+        # safe headless choice). The meta agent passes its own mode through,
+        # so a co-pilot / supervised delegation still raises the sub-agents'
+        # human-feedback prompts to the user driving the session.
+        run_level = autonomy if autonomy is not None else AutonomyLevel.AUTONOMOUS
         original_level = self.autonomy_level
         try:
-            self.set_autonomy_level(AutonomyLevel.AUTONOMOUS)
+            self.set_autonomy_level(run_level)
             try:
                 summary_text = self.chat(prompt)
                 status = "success"
@@ -1266,6 +1297,9 @@ class PlanningOrchestratorAgent:
         finally:
             # Always restore the original level, even if chat() raised.
             self.set_autonomy_level(original_level)
+            # _active_output_subdir is scoped to this call; clear it so a
+            # later direct chat() on the same instance writes to base_dir.
+            self._active_output_subdir = None
 
         files_produced = sorted(_snapshot_files() - files_before)
 
@@ -1362,6 +1396,7 @@ class PlanningOrchestratorAgent:
                 "planner_state": self.planner.state,
                 "message_count": self.message_count,
                 "latest_tea_results": self.latest_tea_results,
+                "delegation_counter": self._delegation_counter,
                 "autonomy_level": self.autonomy_level.value,
                 "data_dir": str(self.data_dir) if self.data_dir else None,
                 "knowledge_dir": str(self.knowledge_dir) if self.knowledge_dir else None,

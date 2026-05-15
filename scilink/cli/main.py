@@ -123,10 +123,13 @@ def main():
     print_gradient_logo()
 
     if len(sys.argv) < 2:
-        print()  # Spacing after logo
-        print_usage()
-        return 1
-    
+        # Bare `scilink` launches the meta-agent — the default entry point,
+        # which auto-routes work between the analyze and plan specialists.
+        # Explicit per-mode commands and `scilink help` still work below.
+        from scilink.cli.meta import main as meta_main
+        sys.argv = [sys.argv[0] + ' meta']
+        return meta_main()
+
     command = sys.argv[1]
     
     # Route to appropriate handler
@@ -149,6 +152,11 @@ def main():
         from scilink.cli.analyze import main as analyze_main
         sys.argv = [sys.argv[0] + ' analyze'] + sys.argv[2:]
         return analyze_main()
+
+    elif command == 'meta':
+        from scilink.cli.meta import main as meta_main
+        sys.argv = [sys.argv[0] + ' meta'] + sys.argv[2:]
+        return meta_main()
 
     elif command == 'ui':
         from scilink.cli.ui import main as ui_main
@@ -180,21 +188,27 @@ def print_usage():
 ║              AI-Powered Scientific Research Automation                   ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 
-Usage: scilink <command> [options]
+Usage: scilink [command] [options]
+
+Run `scilink` with no command to launch the meta-agent — a single
+conversational agent that auto-routes your request to the right specialist.
 
 Available Commands:
-  plan          Interactive planning orchestrator for experimental design
-                and Bayesian optimization workflows
-                
-  simulate      Simulation agents for MD, DFT, LAMMPS, VASP workflows
-                (Coming soon)
+  (none)        Launch the meta-agent orchestrator — coordinates the
+                analyze and plan specialists from one chat surface
 
-  prepare-ff    Force field agent for generating LAMMPS force field and 
-                data files with AMBER
+  meta          The meta-agent, explicit form (same as bare `scilink`)
 
   analyze       Analysis agents for microscopy, spectroscopy, and
                 experimental data processing
-                (Coming soon)
+
+  plan          Interactive planning orchestrator for experimental design
+                and Bayesian optimization workflows
+
+  simulate      Simulation agents for MD, DFT, LAMMPS, VASP workflows
+
+  prepare-ff    Force field agent for generating LAMMPS force field and
+                data files with AMBER
 
   ui            Launch the Streamlit web interface for interactive
                 analysis (requires: pip install scilink[ui])
@@ -203,11 +217,11 @@ Available Commands:
                 (Claude Desktop, Cursor) can use SciLink's tools
 
 Examples:
-  scilink plan                              # Start planning orchestrator
-  scilink plan --model gemini-2.0-flash-exp # Use different model
-  scilink simulate --help                   # See simulation options
+  scilink                                   # Launch the meta-agent
+  scilink meta --mode supervised            # Meta-agent, supervised autonomy
   scilink analyze --help                    # See analysis options
-  scilink prepare-ff --help                 # See force field options
+  scilink plan --model gemini-2.0-flash-exp # Use a different model
+  scilink simulate --help                   # See simulation options
 
 Get Help:
   scilink <command> --help                  # Command-specific help

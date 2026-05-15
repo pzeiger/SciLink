@@ -412,6 +412,16 @@ class OrchestratorTools:
             "hint": "Check filename spelling or use /files command to see available files"
         })
     
+    def _output_dir(self):
+        """Directory for plan artifacts (plan.json, tea_analysis, output_scripts,
+        literature_search*, molecule_design, ...).
+
+        During a meta-agent delegation this is a per-delegation sub-directory
+        so a reused planning child does not overwrite an earlier delegation's
+        artifacts; for direct `scilink plan` use it is the campaign root
+        (``_active_output_subdir`` is None, so behaviour is unchanged)."""
+        return self.orch._active_output_subdir or self.orch.base_dir
+
     def _register_all_tools(self):
         """Register all tools with both OpenAI and Gemini formats."""
         
@@ -492,7 +502,7 @@ class OrchestratorTools:
                     })
 
                 # Save to file (distinct per search_type to avoid overwrites)
-                lit_path = self.orch.base_dir / f"literature_search_{search_type}.md"
+                lit_path = self._output_dir() / f"literature_search_{search_type}.md"
                 with open(lit_path, 'w') as f:
                     f.write(f"# Literature Search Results ({search_type})\n\n")
                     f.write(lit_res['content'])
@@ -562,7 +572,7 @@ class OrchestratorTools:
                     })
 
                 # Save to file
-                mol_path = self.orch.base_dir / "molecule_design.md"
+                mol_path = self._output_dir() / "molecule_design.md"
                 with open(mol_path, 'w') as f:
                     f.write("# Molecular Design & Synthesis Planning Results\n\n")
                     f.write(mol_res['content'])
@@ -742,13 +752,13 @@ class OrchestratorTools:
                     })
 
                 # Save
-                output_path = self.orch.base_dir / "plan.json"
+                output_path = self._output_dir() / "plan.json"
                 with open(output_path, 'w') as f:
                     json.dump(plan, f, indent=2)
 
                 # If literature came from the deprecated internal path, save it
                 if not literature_context and plan.get("literature_search"):
-                    lit_path = self.orch.base_dir / "literature_search.md"
+                    lit_path = self._output_dir() / "literature_search.md"
                     with open(lit_path, 'w') as f:
                         f.write("# Literature Search Results\n\n")
                         f.write(plan["literature_search"])
@@ -756,7 +766,7 @@ class OrchestratorTools:
 
                 # Generate HTML
                 from .html_generator import HTMLReportGenerator
-                html_path = self.orch.base_dir / "plan.html"
+                html_path = self._output_dir() / "plan.html"
                 generator = HTMLReportGenerator(self.orch.planner.state)
                 generator.generate(str(html_path))
 
@@ -905,13 +915,13 @@ class OrchestratorTools:
                     })
                 
                 # Save
-                output_path = self.orch.base_dir / "plan.json"
+                output_path = self._output_dir() / "plan.json"
                 with open(output_path, 'w') as f:
                     json.dump(updated_plan, f, indent=2)
                 
                 # Regenerate HTML
                 from .html_generator import HTMLReportGenerator
-                html_path = self.orch.base_dir / "plan.html"
+                html_path = self._output_dir() / "plan.html"
                 generator = HTMLReportGenerator(self.orch.planner.state)
                 generator.generate(str(html_path))
                 
@@ -932,7 +942,7 @@ class OrchestratorTools:
                     })
 
                 # Save scripts to output folder
-                final_out = str(self.orch.base_dir / "output_scripts")
+                final_out = str(self._output_dir() / "output_scripts")
                 print(f"\n--- Saving Scripts to: {final_out} ---")
                 write_experiments_to_disk(updated_plan, final_out)
 
@@ -1052,7 +1062,7 @@ class OrchestratorTools:
                     objective=obj,
                     knowledge_paths=knowledge_list,
                     primary_data_set=primary_dataset,
-                    output_json_path=str(self.orch.base_dir / "tea_analysis.json"),
+                    output_json_path=str(self._output_dir() / "tea_analysis.json"),
                     external_context=ext_ctx
                 )
                 
@@ -1075,8 +1085,8 @@ class OrchestratorTools:
                 return json.dumps({
                     "status": "success",
                     "summary": summary,
-                    "output_path": str(self.orch.base_dir / "tea_analysis.json"),
-                    "html_report": str(self.orch.base_dir / "tea_analysis.html"),
+                    "output_path": str(self._output_dir() / "tea_analysis.json"),
+                    "html_report": str(self._output_dir() / "tea_analysis.html"),
                     "hint": "These results will automatically inform future generate_initial_plan calls"
                 })
                 
@@ -1162,7 +1172,7 @@ class OrchestratorTools:
                 print(f"    📚 Literature context provided")
             else:
                 # Auto-load hypothesis context from session if available
-                lit_path = self.orch.base_dir / "literature_search_hypothesis_context.md"
+                lit_path = self._output_dir() / "literature_search_hypothesis_context.md"
                 if lit_path.is_file():
                     ext_parts.append(lit_path.read_text())
                     print(f"    📚 Auto-loaded literature hypothesis context from session")
@@ -1191,13 +1201,13 @@ class OrchestratorTools:
                     })
                 
                 # Save
-                output_path = self.orch.base_dir / "plan.json"
+                output_path = self._output_dir() / "plan.json"
                 with open(output_path, 'w') as f:
                     json.dump(plan, f, indent=2)
 
                 # Generate HTML
                 from .html_generator import HTMLReportGenerator
-                html_path = self.orch.base_dir / "plan.html"
+                html_path = self._output_dir() / "plan.html"
                 generator = HTMLReportGenerator(self.orch.planner.state)
                 generator.generate(str(html_path))
 
@@ -1273,13 +1283,13 @@ class OrchestratorTools:
                     })
 
                 # Save
-                output_path = self.orch.base_dir / "plan.json"
+                output_path = self._output_dir() / "plan.json"
                 with open(output_path, 'w') as f:
                     json.dump(plan, f, indent=2)
 
                 # Generate HTML
                 from .html_generator import HTMLReportGenerator
-                html_path = self.orch.base_dir / "plan.html"
+                html_path = self._output_dir() / "plan.html"
                 generator = HTMLReportGenerator(self.orch.planner.state)
                 generator.generate(str(html_path))
 
@@ -1354,18 +1364,18 @@ class OrchestratorTools:
                     })
                 
                 # Save
-                output_path = self.orch.base_dir / "plan_refined.json"
+                output_path = self._output_dir() / "plan_refined.json"
                 with open(output_path, 'w') as f:
                     json.dump(updated_plan, f, indent=2)
                 
                 # Regenerate HTML
                 from .html_generator import HTMLReportGenerator
-                html_path = self.orch.base_dir / "plan_refined.html"
+                html_path = self._output_dir() / "plan_refined.html"
                 generator = HTMLReportGenerator(self.orch.planner.state)
                 generator.generate(str(html_path))
                 
                 # Save scripts
-                final_out = str(self.orch.base_dir / "output_scripts")
+                final_out = str(self._output_dir() / "output_scripts")
                 print(f"\n--- Saving Scripts to: {final_out} ---")
                 write_experiments_to_disk(updated_plan, final_out)
                 

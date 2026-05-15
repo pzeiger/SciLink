@@ -1233,11 +1233,11 @@ class AnalysisOrchestratorAgent:
             
             return f"❌ Error: {e}\n\n(Emergency checkpoint saved to {self.checkpoint_path})"
 
-    def run_task(self, task: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def run_task(self, task: str, context: Optional[Dict[str, Any]] = None,
+                 autonomy: Optional[AnalysisMode] = None) -> Dict[str, Any]:
         """Non-interactive entry point — used by the meta agent.
 
-        Runs the task in autonomous mode (regardless of the agent's current
-        configured mode) and returns a structured summary that's easy to
+        Runs the task and returns a structured summary that's easy to
         consume programmatically:
 
             {
@@ -1252,9 +1252,14 @@ class AnalysisOrchestratorAgent:
             }
 
         Mirrors SimulationOrchestratorAgent.run_task — see CLAUDE.md
-        "Two surfaces, one agent". The agent is pinned into AUTONOMOUS mode
-        for the duration of the call so it doesn't pause for a (nonexistent)
-        user; the original mode is restored on exit, even if chat() raises.
+        "Two surfaces, one agent".
+
+        ``autonomy`` selects the AnalysisMode for this call. Defaults to
+        AUTONOMOUS — the safe choice for a headless/programmatic caller, so
+        the agent never pauses for a nonexistent user. A caller attached to a
+        human (the meta agent, driven via CLI/UI) passes SUPERVISED so the
+        sub-agents' human-feedback prompts reach that human.
+        The original mode is restored on exit, even if chat() raises.
         """
         # Build a self-contained prompt that includes the optional context.
         prompt = task
@@ -1274,11 +1279,14 @@ class AnalysisOrchestratorAgent:
         # call" rather than "everything in the session."
         n_before = len(self.analysis_results)
 
-        # Pin autonomy to AUTONOMOUS for the duration of this call so the
-        # agent doesn't pause to ask the (nonexistent) user for confirmation.
+        # Run under the requested autonomy mode — AUTONOMOUS by default (the
+        # safe headless choice). The meta agent passes its own mode through,
+        # so a co-pilot / supervised delegation still raises the sub-agents'
+        # human-feedback prompts to the user driving the session.
+        run_mode = autonomy if autonomy is not None else AnalysisMode.AUTONOMOUS
         original_mode = self.analysis_mode
         try:
-            self.set_analysis_mode(AnalysisMode.AUTONOMOUS)
+            self.set_analysis_mode(run_mode)
             try:
                 summary_text = self.chat(prompt)
                 status = "success"

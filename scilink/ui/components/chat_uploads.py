@@ -26,6 +26,8 @@ def render_pre_chat_uploads(start_task_fn) -> None:
         _render_analyze_uploads(start_task_fn)
     elif mode == "plan":
         _render_planning_uploads(start_task_fn)
+    elif mode == "meta":
+        _render_meta_uploads(start_task_fn)
 
 
 # ── Analyze mode uploads ─────────────────────────────────────────
@@ -280,6 +282,48 @@ def _render_planning_uploads(start_task_fn) -> None:
 
     if not can_start:
         st.caption("Enter a research objective or upload files to begin.")
+
+
+# ── Meta mode (free-text goal; no file uploaders in v1) ──────────
+
+def _render_meta_uploads(start_task_fn) -> None:
+    st.markdown(
+        '<div class="upload-hero-box">'
+        '<p class="upload-hero-title">What would you like to do?</p>'
+        '<p class="upload-hero-subtitle">'
+        "Describe your research goal — the meta-agent routes it to the "
+        "analysis and planning specialists</p>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    goal = st.text_area(
+        "Research goal",
+        key="meta_objective",
+        placeholder=(
+            "e.g., Analyze the STEM image at /data/grains.tif, then plan a "
+            "follow-up experiment campaign based on what you find"
+        ),
+        height=110,
+        label_visibility="collapsed",
+    )
+
+    can_start = bool((goal or "").strip())
+    if st.button(
+        "Start",
+        type="primary",
+        use_container_width=True,
+        disabled=not can_start,
+    ):
+        prompt = goal.strip()
+        st.session_state.chat_messages.append({"role": "user", "content": prompt})
+        start_task_fn(prompt)
+
+    if not can_start:
+        st.caption(
+            "Describe a research goal to begin. Include absolute file paths "
+            "for any data you want analyzed."
+        )
 
 
 def save_planning_uploads(files, category: str) -> None:

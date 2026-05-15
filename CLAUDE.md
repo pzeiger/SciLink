@@ -13,7 +13,7 @@ this is a settled architectural commitment, not a refactoring waypoint:
 |---|---|---|
 | `analyze` | `AnalysisOrchestratorAgent` | Experimental data analysis (microscopy, spectroscopy, …) |
 | `plan` | `PlanningOrchestratorAgent` | Experimental campaign design |
-| `simulate` | `SimulationOrchestratorAgent` *(not yet built — stub at `cli/simulate.py`)* | Computational simulations (DFT today, LAMMPS later) |
+| `simulate` | `SimulationOrchestratorAgent` | Computational simulations (DFT today, LAMMPS later) |
 
 Anything in scientific workflow falls under one of these three. There will
 **not** be a fourth mode. Future capability growth happens *inside* one of
@@ -128,46 +128,92 @@ simulate_session_YYYYMMDD_HHMMSS/
 Each orchestrator exposes both an interactive and a non-interactive entry
 point sharing the same state and tool registry:
 
-```python
-class SimulationOrchestratorAgent:
-    def run_chat(self, user_input: str) -> str:
-        """Interactive — CLI / UI."""
-    def run_task(self, task: str, context: dict) -> dict:
-        """Non-interactive — autonomous mode under the hood. Returns:
-            {summary, files_produced, key_findings, suggested_followups}
-        Used by the future meta agent to delegate sub-tasks.
-        """
-```
+- `chat(user_input: str) -> str` — interactive (CLI / UI).
+- `run_task(task, context=None, autonomy=None) -> dict` — programmatic
+  entry point. Runs one `chat` turn under the requested autonomy mode, then
+  derives a structured summary from the session-state delta. `autonomy=None`
+  defaults to AUTONOMOUS — the safe choice for a headless caller (never
+  pauses for a nonexistent user). A caller attached to a human passes a
+  co-pilot / supervised mode so the sub-agents' human-feedback prompts reach
+  that human.
 
-Plan and analyze will eventually need `run_task` too. Not a refactor —
-just a contract to honor when *adding* surfaces.
+`run_task` is implemented on **all three** orchestrators with that uniform
+signature. The return dict shares `status, task, summary, files_produced,
+key_findings, suggested_followups, warnings` (plus `error` on failure); the
+domain-specific field differs per mode — `analyses` (analyze),
+`campaign_state` (plan), `structures` (simulate). This is the contract the
+meta agent delegates through.
 
-## The meta agent (future)
+## The meta agent
 
-A meta agent will sit on top of the three modes so users don't switch
-manually. It is **not a fourth mode**; it's an orchestrator-of-orchestrators
-with a different role (router + context bridge).
+The meta agent sits on top of the mode orchestrators so users don't switch
+manually — bare `scilink` (or `scilink meta`) launches it. It is **not a
+fourth mode**; it's an orchestrator-of-orchestrators with a different role
+(router + context bridge). It lives in `scilink/agents/meta_agent/`
+(`MetaOrchestratorAgent` + `MetaOrchestratorTools`), copying the
+`AnalysisOrchestratorAgent` chat-loop shape.
+
+**v1 scope: analysis + planning.** Simulation delegation is deferred —
+`scilink.agents.sim_agents` hard-imports `ase` (an optional dependency), so
+the meta module must stay importable without it. `delegate_to_simulation`
+is a documented lazy seam: when added, its body does a guarded import
+*inside the function*, never at module scope.
 
 ### Pattern: agent-as-tool
 
 ```
 Meta tool registry
-  delegate_to_analysis(task, context)     → AnalysisOrchestratorAgent.run_task
-  delegate_to_planning(task, context)     → PlanningOrchestratorAgent.run_task
-  delegate_to_simulation(task, context)   → SimulationOrchestratorAgent.run_task
-  bridge_context(from_session, to_topic)  → extract findings/files between modes
-  summarize_session_state()               → cross-child status
+  delegate_to_analysis(task, context)   → AnalysisOrchestratorAgent.run_task
+  delegate_to_planning(task, context)   → PlanningOrchestratorAgent.run_task
+  summarize_session_state()             → cross-specialist status
+  get_delegation_history(limit)         → the delegation ledger
+  delegate_to_simulation(...)           → deferred lazy seam (not built)
 ```
 
-The meta agent presents a single conversational surface to the user;
-under the hood each delegation spins up a child sub-session with its
-own chat history, files, checkpoint — all nested under the meta-session
-directory.
+There is **no `bridge_context` tool**. `run_task` already accepts a
+`context` dict; the meta LLM bridges modes by reading a prior result via
+`get_delegation_history` and threading its `key_findings` / `files_produced`
+into the next delegation's `context`. The delegation ledger is the
+supporting structure.
 
-Because the meta consumes children through their `run_task` contract
-(not through inherited internals), no base class is required. The
-contract is duck-typed; what the children share is *interface shape*,
-not *implementation*.
+### Two autonomy levels, not three
+
+The individual modes have a three-level autonomy paradigm (co-pilot /
+supervised / autonomous); `MetaMode` has only **SUPERVISED** (default) and
+**AUTONOMOUS**. A delegation runs the child through its one-shot `run_task`
+— a single turn. Co-pilot's model is "pause after every step, wait for the
+user's next message," which needs many turns, so it cannot complete a
+delegated task. SUPERVISED and AUTONOMOUS each finish a task in one turn:
+SUPERVISED still pauses at the child's decision points (approve / edit plans
+and outputs) via `input()`-based human-feedback prompts — which compose with
+`run_task` because they block-and-resume *within* the turn — while AUTONOMOUS
+runs end to end. The three-level paradigm is untouched for the standalone
+`analyze` / `plan` / `simulate` modes.
+
+### Persistent children, nested sessions
+
+The meta keeps **one persistent child per mode** — lazily created on first
+delegation, reused across all delegations so context accumulates — in fixed
+sub-directories `<meta_session>/analysis/` and `<meta_session>/planning/`.
+After a meta restore a child is re-created with `restore_checkpoint=True`
+simply by probing for its `checkpoint.json`. **Each delegation runs the
+child under the meta's own autonomy mode** — passed as `run_task`'s
+`autonomy` arg (mapped by enum name); the child's resting mode is
+irrelevant. So a supervised delegation keeps the specialist's human-feedback
+prompts, which surface to the user driving the meta exactly as in a direct
+single-mode session. The planning child is built in CO_PILOT with
+`data_dir=None` — the one construction mode that does not require
+`data_dir`; `set_autonomy_level` does not re-validate it on the per-call
+switch. Per-delegation
+isolation: each `run_task` writes into its own sub-directory so a reused
+child does not overwrite earlier outputs (analysis already stamps result
+dirs; the planning orchestrator writes to a per-delegation
+`delegations/<NN>_<slug>/`).
+
+Because the meta consumes children through their `run_task` contract (not
+through inherited internals), no base class is required. The contract is
+duck-typed; what the children share is *interface shape*, not
+*implementation*.
 
 ## Sequencing — hard features first, UI later
 
@@ -190,7 +236,9 @@ Concretely, when the simulate orchestrator work starts, the order is:
 5. UI — sidebar mode, chat panel, possibly a wizard surface coexisting
    with the chat surface
 
-The meta agent comes after all three child orchestrators are stable.
+The meta agent (`scilink/agents/meta_agent/`) was built following this same
+backend → CLI → UI order, over the analysis and planning orchestrators;
+simulation delegation is wired into its lazy seam once that path is stable.
 
 ## Connection between modes today
 

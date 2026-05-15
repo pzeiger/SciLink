@@ -16,12 +16,14 @@ EMBEDDING_MODEL_OPTIONS = [
 
 # ── Mode registry ────────────────────────────────────────────────
 APP_MODES = [
+    {"key": "meta",    "label": "Auto",    "description": "Meta-agent — auto-routes to analyze & plan"},
     {"key": "analyze", "label": "Analyze", "description": "Multi-modal data analysis"},
     {"key": "plan",    "label": "Plan",    "description": "Experimental design & optimization"},
     {"key": "simulate", "label": "Simulate", "description": "Submit and monitor DFT/MD simulations"},
 ]
 
 SESSION_DIR_PREFIXES = {
+    "meta": "meta_session",
     "analyze": "analysis_session",
     "plan": "planning_session",
     "simulate": "simulation_session",

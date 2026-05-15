@@ -51,6 +51,8 @@ def init_session_state() -> None:
         "app_mode": None,
         # Planning mode state
         "planning_objective": "",
+        # Meta mode state
+        "meta_objective": "",
         "uploaded_knowledge_paths": [],
         "uploaded_code_paths": [],
         "uploaded_planning_data_paths": [],
