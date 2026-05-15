@@ -1189,6 +1189,137 @@ class PlanningOrchestratorAgent:
             
             return f"❌ Error: {e}\n\n(Emergency checkpoint saved to {self.checkpoint_path})"
 
+    def run_task(self, task: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Non-interactive entry point — used by the meta agent.
+
+        Runs the task in autonomous mode (regardless of the agent's current
+        configured autonomy level) and returns a structured summary that's
+        easy to consume programmatically:
+
+            {
+                "status": "success" | "error",
+                "task": str,                       # echoed input
+                "summary": str,                    # the agent's final reply
+                "files_produced": List[str],       # absolute paths
+                "key_findings": List[str],         # campaign configuration
+                "suggested_followups": List[str],
+                "campaign_state": dict,            # objective / targets / data
+                "warnings": List[str],
+            }
+
+        Mirrors SimulationOrchestratorAgent.run_task — see CLAUDE.md
+        "Two surfaces, one agent". The agent is pinned into AUTONOMOUS mode
+        for the duration of the call so it doesn't pause for a (nonexistent)
+        user; the original autonomy level is restored on exit, even if
+        chat() raises.
+
+        Planning has no analysis-style record list, so files_produced is a
+        before/after diff of the campaign directory (session-churn files
+        like chat_history.json are excluded).
+        """
+        # Build a self-contained prompt that includes the optional context.
+        prompt = task
+        if context:
+            try:
+                ctx_str = json.dumps(context, indent=2, default=str)
+            except (TypeError, ValueError):
+                ctx_str = repr(context)
+            prompt = (
+                f"{task}\n\n"
+                f"Context provided by the caller (e.g., upstream agent's findings):\n"
+                f"```\n{ctx_str}\n```\n\n"
+                "Use this context together with your tools to complete the task."
+            )
+
+        def _snapshot_files() -> set:
+            """Resolved paths of campaign artifacts, minus session churn."""
+            skip_names = {
+                "chat_history.json", "checkpoint.json",
+                "analyzed_files.json", "session_log.txt",
+            }
+            snap = set()
+            if self.base_dir.is_dir():
+                for p in self.base_dir.rglob("*"):
+                    if (p.is_file() and p.name not in skip_names
+                            and p.suffix not in (".log", ".pyc")):
+                        snap.add(str(p.resolve()))
+            return snap
+
+        # Snapshot prior state so we report "what was produced *during* this
+        # call" rather than "everything in the session."
+        files_before = _snapshot_files()
+
+        # Pin autonomy to AUTONOMOUS for the duration of this call so the
+        # agent doesn't pause to ask the (nonexistent) user for confirmation.
+        original_level = self.autonomy_level
+        try:
+            self.set_autonomy_level(AutonomyLevel.AUTONOMOUS)
+            try:
+                summary_text = self.chat(prompt)
+                status = "success"
+                error_msg: Optional[str] = None
+            except Exception as e:
+                logging.exception(f"run_task failed: {e}")
+                summary_text = ""
+                status = "error"
+                error_msg = str(e)
+        finally:
+            # Always restore the original level, even if chat() raised.
+            self.set_autonomy_level(original_level)
+
+        files_produced = sorted(_snapshot_files() - files_before)
+
+        # data_points_collected: rows in the BO optimization table, if any.
+        data_points = 0
+        try:
+            if self.bo_data_path.exists():
+                data_points = len(pd.read_csv(self.bo_data_path))
+        except Exception:
+            data_points = 0
+
+        # key_findings: the campaign configuration the orchestrator settled
+        # on. Planning's substantive output is the plan text itself, which
+        # the caller reads from `summary`.
+        key_findings: List[str] = []
+        for col in self.expected_target_columns or []:
+            direction = self.target_directions.get(col, "optimize")
+            key_findings.append(f"Optimization target: {col} ({direction}).")
+        if self.latest_tea_results:
+            key_findings.append("Techno-economic analysis results are available.")
+
+        # Heuristic: collected BO data with no further direction is a natural
+        # cue to propose the next experiment batch.
+        suggested_followups: List[str] = []
+        if data_points > 0:
+            suggested_followups.append(
+                f"Run the next BO iteration ({data_points} data point(s) "
+                f"collected so far)."
+            )
+
+        warnings: List[str] = []
+        if status == "success" and not files_produced:
+            warnings.append("Task completed but produced no campaign artifacts.")
+
+        result = {
+            "status": status,
+            "task": task,
+            "summary": summary_text,
+            "files_produced": files_produced,
+            "key_findings": key_findings,
+            "suggested_followups": suggested_followups,
+            "campaign_state": {
+                "objective": self.objective,
+                "expected_input_columns": self.expected_input_columns,
+                "expected_target_columns": self.expected_target_columns,
+                "target_directions": self.target_directions,
+                "data_points_collected": data_points,
+            },
+            "warnings": warnings,
+        }
+        if error_msg:
+            result["error"] = error_msg
+        return result
+
     def _compress_large_tool_results(self):
         """Compress large tool results in chat history to prevent context overflow.
 

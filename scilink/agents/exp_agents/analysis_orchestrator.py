@@ -1166,6 +1166,127 @@ class AnalysisOrchestratorAgent:
             
             return f"❌ Error: {e}\n\n(Emergency checkpoint saved to {self.checkpoint_path})"
 
+    def run_task(self, task: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Non-interactive entry point — used by the meta agent.
+
+        Runs the task in autonomous mode (regardless of the agent's current
+        configured mode) and returns a structured summary that's easy to
+        consume programmatically:
+
+            {
+                "status": "success" | "error",
+                "task": str,                       # echoed input
+                "summary": str,                    # the agent's final reply
+                "files_produced": List[str],       # absolute paths
+                "key_findings": List[str],         # extracted scientific claims
+                "suggested_followups": List[str],
+                "analyses": List[dict],            # session record snapshot
+                "warnings": List[str],
+            }
+
+        Mirrors SimulationOrchestratorAgent.run_task — see CLAUDE.md
+        "Two surfaces, one agent". The agent is pinned into AUTONOMOUS mode
+        for the duration of the call so it doesn't pause for a (nonexistent)
+        user; the original mode is restored on exit, even if chat() raises.
+        """
+        # Build a self-contained prompt that includes the optional context.
+        prompt = task
+        if context:
+            try:
+                ctx_str = json.dumps(context, indent=2, default=str)
+            except (TypeError, ValueError):
+                ctx_str = repr(context)
+            prompt = (
+                f"{task}\n\n"
+                f"Context provided by the caller (e.g., upstream agent's findings):\n"
+                f"```\n{ctx_str}\n```\n\n"
+                "Use this context together with your tools to complete the task."
+            )
+
+        # Snapshot prior state so we report "what was produced *during* this
+        # call" rather than "everything in the session."
+        n_before = len(self.analysis_results)
+
+        # Pin autonomy to AUTONOMOUS for the duration of this call so the
+        # agent doesn't pause to ask the (nonexistent) user for confirmation.
+        original_mode = self.analysis_mode
+        try:
+            self.set_analysis_mode(AnalysisMode.AUTONOMOUS)
+            try:
+                summary_text = self.chat(prompt)
+                status = "success"
+                error_msg: Optional[str] = None
+            except Exception as e:
+                self.logger.exception(f"run_task failed: {e}")
+                summary_text = ""
+                status = "error"
+                error_msg = str(e)
+        finally:
+            # Always restore the original mode, even if chat() raised.
+            self.set_analysis_mode(original_mode)
+
+        # Derive the structured summary from the session-state delta.
+        new_analyses = self.analysis_results[n_before:]
+
+        # files_produced: every file written under each new analysis's
+        # output directory (visualizations, reports, results JSON, ...).
+        files_produced: List[str] = []
+        for rec in new_analyses:
+            out_dir = rec.get("output_directory")
+            if out_dir and Path(out_dir).is_dir():
+                for p in sorted(Path(out_dir).rglob("*")):
+                    if p.is_file():
+                        files_produced.append(str(p.resolve()))
+
+        # key_findings: the scientific claims extracted by the sub-agents.
+        key_findings: List[str] = []
+        for rec in new_analyses:
+            full = rec.get("full_result") or {}
+            for claim in full.get("scientific_claims", []) or []:
+                text = claim.get("claim") if isinstance(claim, dict) else claim
+                if text:
+                    key_findings.append(f"[{rec.get('analysis_id')}] {text}")
+
+        # Heuristic: a successful analysis with no novelty assessment yet is
+        # a natural next step — claims can be checked against the literature.
+        suggested_followups: List[str] = []
+        for rec in new_analyses:
+            if rec.get("status") == "success" and not rec.get("novelty_assessment"):
+                suggested_followups.append(
+                    f"Assess novelty / get recommendations for analysis "
+                    f"{rec.get('analysis_id')}."
+                )
+
+        warnings: List[str] = []
+        for rec in new_analyses:
+            if rec.get("status") != "success":
+                warnings.append(
+                    f"Analysis {rec.get('analysis_id')} did not complete "
+                    f"successfully (status={rec.get('status')})."
+                )
+
+        result = {
+            "status": status,
+            "task": task,
+            "summary": summary_text,
+            "files_produced": files_produced,
+            "key_findings": key_findings,
+            "suggested_followups": suggested_followups,
+            "analyses": [
+                {
+                    "analysis_id": rec.get("analysis_id"),
+                    "agent_name": rec.get("agent_name"),
+                    "status": rec.get("status"),
+                    "data_path": rec.get("data_path"),
+                    "output_directory": rec.get("output_directory"),
+                } for rec in new_analyses
+            ],
+            "warnings": warnings,
+        }
+        if error_msg:
+            result["error"] = error_msg
+        return result
+
     def _auto_checkpoint(self):
         """Internal auto-checkpoint without LLM interaction."""
         try:
