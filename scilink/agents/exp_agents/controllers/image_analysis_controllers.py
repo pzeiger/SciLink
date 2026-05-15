@@ -1041,9 +1041,6 @@ class ImagePlanningController:
         if state.get("expected_outputs"):
             print(f"\n📄 Expected Outputs:\n   {', '.join(state.get('expected_outputs', []))}")
 
-        if state.get("literature_query"):
-            print(f"\n📚 Literature Query:\n   {state['literature_query']}")
-
         # Display regime plan if present
         series_plan = state.get("series_analysis_plan")
         if series_plan and series_plan.get("regimes") and not is_single:

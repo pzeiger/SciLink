@@ -156,15 +156,7 @@ You are the **Analysis Agent**. Your goal is to coordinate experimental data ana
 
 _SYSTEM_PROMPT_BODY_POST = """
 5. `preview_image`: Load image for visual inspection (for agent 0 vs 1 decision, or ambiguous 2D data).
-
-**LITERATURE CONTEXT (optional, before analysis):**
-5b. `search_literature`: Fetch external literature to inform an upcoming analysis.
-   - Input: `query` (a focused research question).
-   - Action: queries the FutureHouse Edison API; saves results to a markdown file.
-   - Output: `file_path`. Pass it as `literature_file` to the next `run_analysis` so the planner produces a literature-informed plan the user reviews.
-   - When to use: the user asks for literature support, or the analysis objective is one where domain context would meaningfully shape method/parameter choice. Skip for routine measurement-quality analyses.
-   - Note: in curve-fitting `task_mode="identification"` the planner withholds lit context (to keep the fit unbiased); the literature still informs Stage-2 candidate enumeration.
-
+___LITERATURE_SECTION___
 **ANALYSIS EXECUTION:**
 6. `run_analysis`: Execute analysis. Handles single files AND series automatically.
    - Each analysis run creates a unique output directory for traceability.
@@ -295,11 +287,40 @@ def _build_agent_list_section(agent_registry: dict) -> str:
     return "\n".join(lines)
 
 
+# Literature section — injected into the prompt body only when a FutureHouse
+# API key is configured this session. Without a key the `search_literature`
+# tool errors at call time, so the orchestrator is not told to offer it.
+#
+# This is a workflow GATE, not a tool description: the LLM otherwise chains
+# straight to run_analysis and never offers literature search.
+_LITERATURE_SECTION_AVAILABLE = """
+**LITERATURE SEARCH — REQUIRED OFFER BEFORE ANALYSIS:**
+A FutureHouse API key is configured this session. Before the FIRST
+`run_analysis` on a dataset you MUST first ask the user whether the analysis
+should be informed by a literature search of prior work, then wait for their
+answer — do NOT call `run_analysis` in the same turn as the question.
+- On yes: call `search_literature(query=...)`, then pass the returned
+  `file_path` to `run_analysis` as `literature_file`.
+- On no: call `run_analysis` normally.
+- Ask once per dataset; do not re-offer on follow-up `run_analysis` calls
+  for the same data.
+
+`search_literature` queries the FutureHouse Edison API and returns a
+`file_path`. Supplied via `literature_file`, the literature informs the
+analysis plan, the generated code, and the interpretation. (In curve-fitting
+`task_mode="identification"` the planner withholds lit context to keep the fit
+unbiased; it still informs Stage-2 candidate enumeration.)
+"""
+
+_LITERATURE_SECTION_UNAVAILABLE = ""
+
+
 def get_system_prompt(
     analysis_mode: AnalysisMode,
     agent_registry: dict = None,
     external_tools: list = None,
     custom_skills: dict = None,
+    literature_available: bool = False,
 ) -> str:
     """Returns the appropriate system prompt for the given analysis mode.
 
@@ -315,6 +336,9 @@ def get_system_prompt(
         custom_skills: ``{name: path}`` dict of custom skills registered via
             register_skill(). When provided, a "Custom skills" section is
             appended so the LLM knows to pass them to ``run_analysis``.
+        literature_available: True iff a FutureHouse API key is configured.
+            When True, the prompt instructs the orchestrator to offer a
+            literature search before the first analysis of a dataset.
     """
     directives = {
         AnalysisMode.CO_PILOT: _CO_PILOT_DIRECTIVE,
@@ -329,7 +353,14 @@ def get_system_prompt(
             "     * 1: ImageAnalysisAgent - Images: general-purpose analysis (microscopy, SEM, TEM, AFM, optical). Atomic resolution, grains, particles, textures, defects, morphology",
             "     * 2: HyperspectralAnalysisAgent - 3D datacubes: EELS-SI, EDS, Raman imaging",
         ])
-    body = _SYSTEM_PROMPT_BODY_PRE + agent_list + _SYSTEM_PROMPT_BODY_POST
+    lit_section = (
+        _LITERATURE_SECTION_AVAILABLE if literature_available
+        else _LITERATURE_SECTION_UNAVAILABLE
+    )
+    body = (
+        _SYSTEM_PROMPT_BODY_PRE + agent_list
+        + _SYSTEM_PROMPT_BODY_POST.replace("___LITERATURE_SECTION___", lit_section)
+    )
     if external_tools:
         lines = ["\n**CUSTOM TOOLS (registered externally, call directly by name):**"]
         for t in external_tools:
@@ -464,6 +495,9 @@ class AnalysisOrchestratorAgent:
         else:
              logging.warning("⚠️ Literature Analysis disabled (No FutureHouse API key)")
 
+        # Gates the literature-search offer in the system prompt.
+        self._literature_available = bool(self.futurehouse_api_key)
+
         logging.info(f"🎛️  Analysis Mode: {analysis_mode.value.upper()}")
         
         # Setup directories
@@ -521,6 +555,7 @@ class AnalysisOrchestratorAgent:
         system_prompt = get_system_prompt(
             self.analysis_mode, self._agent_registry,
             custom_skills=self._custom_skills or None,
+            literature_available=self._literature_available,
         )
         
         # Initialize LLM
@@ -575,6 +610,7 @@ class AnalysisOrchestratorAgent:
         new_system_prompt = get_system_prompt(
             mode, self._agent_registry, self._external_tools or None,
             self._custom_skills or None,
+            literature_available=self._literature_available,
         )
         self._system_prompt = new_system_prompt
 
@@ -669,6 +705,7 @@ class AnalysisOrchestratorAgent:
         self._system_prompt = get_system_prompt(
             self.analysis_mode, self._agent_registry,
             self._external_tools or None, self._custom_skills or None,
+            literature_available=self._literature_available,
         )
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = self._system_prompt
@@ -778,6 +815,7 @@ class AnalysisOrchestratorAgent:
         self._system_prompt = get_system_prompt(
             self.analysis_mode, self._agent_registry,
             self._external_tools, self._custom_skills or None,
+            literature_available=self._literature_available,
         )
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = self._system_prompt
@@ -817,6 +855,7 @@ class AnalysisOrchestratorAgent:
         self._system_prompt = get_system_prompt(
             self.analysis_mode, self._agent_registry,
             self._external_tools, self._custom_skills,
+            literature_available=self._literature_available,
         )
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = self._system_prompt
@@ -903,6 +942,7 @@ class AnalysisOrchestratorAgent:
         self._system_prompt = get_system_prompt(
             self.analysis_mode, self._agent_registry,
             self._external_tools, self._custom_skills or None,
+            literature_available=self._literature_available,
         )
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = self._system_prompt
@@ -944,6 +984,7 @@ class AnalysisOrchestratorAgent:
         self._system_prompt = get_system_prompt(
             self.analysis_mode, self._agent_registry,
             self._external_tools, self._custom_skills or None,
+            literature_available=self._literature_available,
         )
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = self._system_prompt

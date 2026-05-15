@@ -892,10 +892,7 @@ class HumanFeedbackRefinementController:
         # avoid mangling numbers in text (e.g. "cm-1.", "8.7").
         _strategy = _re.sub(r"\. (\d+)\. ", r".\n   \1. ", _strategy)
         print(f"\n⚙️  Fitting Strategy:\n   {_strategy}")
-        
-        if state.get("literature_query"):
-            print(f"\n📚 Literature Query:\n   {state['literature_query']}")
-        
+
         # Display regime plan if present
         series_plan = state.get("series_analysis_plan")
         if series_plan and series_plan.get("regimes") and not is_single:
