@@ -71,5 +71,14 @@ SUPPORTED_KNOWLEDGE_EXTENSIONS = (".pdf", ".txt", ".md", ".docx", ".png", ".jpg"
 SUPPORTED_CODE_EXTENSIONS = (".py", ".txt", ".md", ".json", ".yaml", ".yml")
 SUPPORTED_PLANNING_DATA_EXTENSIONS = (".csv", ".xlsx", ".tsv", ".txt", ".npy", ".json")
 
+# Auto (meta) mode accepts everything the specialist modes accept — one
+# combined uploader; the meta-agent routes each file to the right child.
+SUPPORTED_META_EXTENSIONS = tuple(sorted(set(
+    SUPPORTED_DATA_EXTENSIONS
+    + SUPPORTED_METADATA_EXTENSIONS
+    + SUPPORTED_KNOWLEDGE_EXTENSIONS
+    + SUPPORTED_CODE_EXTENSIONS
+)))
+
 AVATAR_USER = str(Path(__file__).resolve().parent / "assets" / "avatar_user.svg")
 AVATAR_AGENT = str(Path(__file__).resolve().parent / "assets" / "avatar_agent.svg")

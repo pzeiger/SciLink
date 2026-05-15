@@ -13,7 +13,105 @@ refactor".
 
 import json
 import logging
+from pathlib import Path
 from typing import Any, Callable, Dict
+
+
+# ── Upload inspection ────────────────────────────────────────────────
+# Lightweight, content-based file probes so the meta-agent routes each
+# uploaded file from evidence (array shape, table columns, document text)
+# rather than guessing from the filename. Every heavy / optional import is
+# done lazily inside the relevant branch, so this module stays importable
+# without those packages and a missing reader degrades one file's probe
+# instead of breaking the whole tool.
+
+_PROBE_MAX_FILES = 60
+_PROBE_TEXT_HEAD = 400
+
+
+def _probe_file(path: Path) -> Dict[str, Any]:
+    """Content-probe a single file for routing. Never raises — any failure
+    is reported in the returned dict's ``note`` field."""
+    ext = path.suffix.lower()
+    info: Dict[str, Any] = {"file": str(path), "ext": ext}
+    try:
+        info["size_kb"] = round(path.stat().st_size / 1024, 1)
+    except OSError:
+        pass
+    try:
+        if ext == ".npy":
+            import numpy as np
+            arr = np.load(path, mmap_mode="r", allow_pickle=False)
+            info.update(kind="array", shape=list(arr.shape), dtype=str(arr.dtype))
+        elif ext in (".tif", ".tiff", ".png", ".jpg", ".jpeg"):
+            from PIL import Image
+            with Image.open(path) as im:
+                info.update(kind="image", height=im.height, width=im.width,
+                            mode=im.mode, n_frames=getattr(im, "n_frames", 1))
+        elif ext in (".csv", ".tsv"):
+            import pandas as pd
+            df = pd.read_csv(path, sep="\t" if ext == ".tsv" else ",", nrows=200)
+            info.update(kind="table", n_columns=int(df.shape[1]),
+                        sampled_rows=int(df.shape[0]),
+                        columns=[str(c) for c in df.columns[:40]],
+                        dtypes={str(c): str(t)
+                                for c, t in list(df.dtypes.items())[:40]})
+        elif ext == ".xlsx":
+            import pandas as pd
+            df = pd.read_excel(path, nrows=200)
+            info.update(kind="table", n_columns=int(df.shape[1]),
+                        sampled_rows=int(df.shape[0]),
+                        columns=[str(c) for c in df.columns[:40]])
+        elif ext == ".json":
+            with open(path, "r", errors="replace") as fh:
+                obj = json.load(fh)
+            if isinstance(obj, dict):
+                info.update(kind="json", json_type="object",
+                            top_level_keys=[str(k) for k in list(obj)[:40]])
+            elif isinstance(obj, list):
+                info.update(kind="json", json_type="array", length=len(obj))
+            else:
+                info.update(kind="json", json_type=type(obj).__name__)
+        elif ext == ".pdf":
+            info.update(kind="document", doc_type="pdf")
+            try:
+                import fitz
+                doc = fitz.open(path)
+                try:
+                    info["n_pages"] = doc.page_count
+                    info["text_head"] = (
+                        doc[0].get_text() or "")[:_PROBE_TEXT_HEAD].strip()
+                finally:
+                    doc.close()
+            except Exception as e:  # noqa: BLE001 - optional reader / bad PDF
+                info["note"] = f"page/text probe unavailable: {e}"
+        elif ext == ".docx":
+            info.update(kind="document", doc_type="docx")
+            try:
+                import docx
+                d = docx.Document(str(path))
+                info["n_paragraphs"] = len(d.paragraphs)
+                text = "\n".join(p.text for p in d.paragraphs if p.text.strip())
+                info["text_head"] = text[:_PROBE_TEXT_HEAD].strip()
+            except Exception as e:  # noqa: BLE001 - optional reader / bad docx
+                info["note"] = f"text probe unavailable: {e}"
+        elif ext in (".md", ".txt"):
+            text = path.read_text(errors="replace")
+            info.update(kind="text", n_chars=len(text),
+                        text_head=text[:_PROBE_TEXT_HEAD].strip())
+        elif ext == ".py":
+            text = path.read_text(errors="replace")
+            info.update(kind="code", n_lines=text.count("\n") + 1,
+                        text_head=text[:_PROBE_TEXT_HEAD].strip())
+        elif ext in (".yaml", ".yml"):
+            text = path.read_text(errors="replace")
+            info.update(kind="config", text_head=text[:_PROBE_TEXT_HEAD].strip())
+        else:
+            info["kind"] = "unknown"
+    except Exception as e:  # noqa: BLE001 - probe must never break the tool
+        info.setdefault("kind", "unreadable")
+        info["note"] = f"probe failed: {e}"
+    return info
 
 
 class MetaOrchestratorTools:
@@ -202,6 +300,59 @@ class MetaOrchestratorTools:
                 "limit": {
                     "type": "integer",
                     "description": "Return only the most recent N delegations.",
+                },
+            },
+            required=[],
+        )
+
+        # -- inspect_uploads ------------------------------------------------
+        def inspect_uploads(path: str = None) -> str:
+            base = Path(path) if path else (self.orch.base_dir / "uploads")
+            print(f"  🔍 Inspecting uploads at {base} ...")
+            if not base.exists():
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Path not found: {base}",
+                })
+            if base.is_file():
+                files = [base]
+                directory = str(base.parent)
+            else:
+                files = sorted(
+                    f for f in base.iterdir()
+                    if f.is_file() and not f.name.startswith(".")
+                )
+                directory = str(base)
+            probes = [_probe_file(f) for f in files[:_PROBE_MAX_FILES]]
+            return json.dumps({
+                "status": "success",
+                "directory": directory,
+                "n_files": len(files),
+                "truncated": len(files) > _PROBE_MAX_FILES,
+                "files": probes,
+            }, default=str)
+
+        self._register_tool(
+            func=inspect_uploads,
+            name="inspect_uploads",
+            description=(
+                "Inspect uploaded files to decide how to route them. Returns a "
+                "lightweight CONTENT probe of each file — array shape/dtype, "
+                "table column names, document text snippets, JSON keys — so you "
+                "classify from evidence, not from filenames. Call this FIRST "
+                "whenever the user refers to uploaded files or points you at a "
+                "folder. With no argument it inspects the meta session's "
+                "uploads/ directory; pass `path` for a specific file or folder. "
+                "Read-only — use the result only to choose a specialist, never "
+                "to interpret the data yourself."
+            ),
+            parameters={
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Optional file or directory to inspect. Defaults to "
+                        "the meta session's uploads/ directory."
+                    ),
                 },
             },
             required=[],
