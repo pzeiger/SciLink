@@ -38,8 +38,8 @@ Examples:
   # Seed the first turn with your research goal
   scilink meta --message "Analyze grains.tif then plan a follow-up campaign"
 
-  # Supervised mode (meta delegates on its own judgement; reports as it goes)
-  scilink meta --mode supervised
+  # Autopilot mode (meta delegates on its own judgement; reports as it goes)
+  scilink meta --mode autopilot
 
   # Use a different model / an internal proxy
   scilink meta --model gemini-2.0-flash
@@ -48,7 +48,7 @@ Examples:
 Modes — the meta has two levels (a delegation runs a specialist through its
 one-shot run_task, so the specialists' step-by-step co-pilot mode does not
 apply here):
-  supervised (default)  Specialists pause at decision points for you to
+  autopilot (default)  Specialists pause at decision points for you to
                         approve / edit plans and outputs.
   autonomous            Specialists run end to end without pausing.
 
@@ -82,9 +82,9 @@ Environment Variables:
 
     # Mode
     parser.add_argument('--mode', type=str, dest='mode',
-                        choices=['supervised', 'autonomous'],
-                        default='supervised',
-                        help='Autonomy mode (default: supervised). The meta '
+                        choices=['autopilot', 'autonomous'],
+                        default='autopilot',
+                        help='Autonomy mode (default: autopilot). The meta '
                              'has two levels, not the modes’ three.')
 
     # Initial message — seeds the first chat turn
@@ -169,17 +169,17 @@ class MetaPlayground:
         embedding_model = self.config.get('embedding_model', 'gemini-embedding-001')
         embedding_api_key = self.config.get('embedding_api_key')
         futurehouse_api_key = self.config.get('futurehouse_api_key')
-        mode_str = self.config.get('meta_mode', 'supervised')
+        mode_str = self.config.get('meta_mode', 'autopilot')
         session_dir = self.config.get('session_dir')
         restore = self.config.get('restore', False)
 
         self._initial_message = self.config.get('initial_message')
 
         mode_map = {
-            'supervised': MetaMode.SUPERVISED,
+            'autopilot': MetaMode.AUTOPILOT,
             'autonomous': MetaMode.AUTONOMOUS,
         }
-        meta_mode = mode_map.get(mode_str, MetaMode.SUPERVISED)
+        meta_mode = mode_map.get(mode_str, MetaMode.AUTOPILOT)
 
         print("\n" + "=" * 60)
         print("🧭  SCILINK META-AGENT")
@@ -334,10 +334,10 @@ a nested child sub-session under this meta session.
             parts = cmd.split()
             if len(parts) == 1:
                 print(f"\n🎛️  Current Meta Mode: {self.agent.meta_mode.value}")
-                print("\n   To change: /mode <supervised|autonomous>")
+                print("\n   To change: /mode <autopilot|autonomous>")
             else:
                 mode_map = {
-                    'supervised': MetaMode.SUPERVISED,
+                    'autopilot': MetaMode.AUTOPILOT,
                     'autonomous': MetaMode.AUTONOMOUS,
                 }
                 new_mode = mode_map.get(parts[1].lower())
@@ -346,7 +346,7 @@ a nested child sub-session under this meta session.
                     print(f"\n   ✅ Meta mode changed to: {new_mode.value}")
                 else:
                     print(f"\n   ❌ Unknown mode: {parts[1]}")
-                    print("   Valid options: supervised, autonomous")
+                    print("   Valid options: autopilot, autonomous")
             return True
 
         if cmd == "/clear":

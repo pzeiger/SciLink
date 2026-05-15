@@ -2172,12 +2172,12 @@ class AnalysisOrchestratorTools:
                                 f"    Auto-extracted series variable "
                                 f"'{extracted_series['variable']}' from sidecar JSONs"
                             )
-                            # In co-pilot / supervised modes, let the user
+                            # In co-pilot / autopilot modes, let the user
                             # know which control variable was extracted and
                             # give them a chance to confirm or correct it
                             # before proceeding with the analysis.
                             mode = self.orch.analysis_mode.value
-                            if mode in ("co-pilot", "supervised"):
+                            if mode in ("co-pilot", "autopilot"):
                                 values = extracted_series.get("values", {})
                                 unit = extracted_series.get("unit", "")
                                 # Build a readable summary of the mapping

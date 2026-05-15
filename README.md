@@ -21,7 +21,7 @@ SciLink provides three complementary agent systems that cover the full scientifi
 All systems support three autonomy levels:
 
 - **Co-Pilot** (default) — Human leads, AI assists. Reviews every step.
-- **Supervised** — AI leads, human reviews major decisions.
+- **Autopilot** — AI leads, human reviews major decisions.
 - **Autonomous** — Full autonomy, no human review.
 
 ---
@@ -75,7 +75,7 @@ SciLink can be used via the **CLI**, **web UI**, **MCP server**, or **Python API
 ```bash
 # Planning session
 scilink plan
-scilink plan --autonomy supervised --data-dir ./results --knowledge-dir ./papers
+scilink plan --autonomy autopilot --data-dir ./results --knowledge-dir ./papers
 
 # Analysis session
 scilink analyze
@@ -113,7 +113,7 @@ plan = planner.propose_experiments(
 )
 
 # Analyze image data
-analyzer = AnalysisOrchestratorAgent(analysis_mode=AnalysisMode.SUPERVISED)
+analyzer = AnalysisOrchestratorAgent(analysis_mode=AnalysisMode.AUTOPILOT)
 result = analyzer.chat("Analyze ./stem_image.tif and generate scientific claims")
 ```
 
@@ -232,7 +232,7 @@ PlanningOrchestratorAgent (main coordinator)
 
 ```bash
 scilink plan
-scilink plan --autonomy supervised --data-dir ./results --knowledge-dir ./papers
+scilink plan --autonomy autopilot --data-dir ./results --knowledge-dir ./papers
 scilink plan --model claude-opus-4-5
 ```
 
@@ -281,7 +281,7 @@ from scilink.agents.planning_agents import PlanningAgent, ScalarizerAgent, BOAge
 # Using the orchestrator
 orchestrator = PlanningOrchestratorAgent(
     objective="Optimize reaction yield",
-    autonomy_level=AutonomyLevel.SUPERVISED,
+    autonomy_level=AutonomyLevel.AUTOPILOT,
     data_dir="./experimental_results",
     knowledge_dir="./papers"
 )
@@ -382,7 +382,7 @@ from scilink.agents.exp_agents import (
 # Using the orchestrator
 orchestrator = AnalysisOrchestratorAgent(
     base_dir="./my_analysis",
-    analysis_mode=AnalysisMode.SUPERVISED
+    analysis_mode=AnalysisMode.AUTOPILOT
 )
 response = orchestrator.chat("Examine ./data/sample.tif")
 

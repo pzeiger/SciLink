@@ -97,7 +97,7 @@ def _find_new_images(summary_only: bool = False) -> list[str]:
             st.session_state.known_images.add(s)
 
         # In co-pilot mode, show sample fits inline (first, middle, last)
-        # In supervised/autonomous, skip — user can find them in File Explorer
+        # In autopilot/autonomous, skip — user can find them in File Explorer
         agent = st.session_state.get("agent")
         is_copilot = (
             agent is not None

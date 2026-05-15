@@ -250,8 +250,8 @@ def render_sidebar() -> None:
         # one-shot run_task, so the modes' step-by-step co-pilot does not
         # apply). Other modes keep the full three-level paradigm.
         _is_meta = st.session_state.app_mode == "meta"
-        _mode_opts = (["supervised", "autonomous"] if _is_meta
-                      else ["co-pilot", "supervised", "autonomous"])
+        _mode_opts = (["autopilot", "autonomous"] if _is_meta
+                      else ["co-pilot", "autopilot", "autonomous"])
         if st.session_state.get("cfg_mode") not in _mode_opts:
             st.session_state.cfg_mode = _mode_opts[0]
         mode = st.selectbox(
@@ -527,7 +527,7 @@ def _render_planning_status() -> None:
     """Show planning-specific agent status metrics."""
     objective = st.session_state.get("planning_objective", "")
     n_messages = len(st.session_state.chat_messages)
-    mode = st.session_state.agent_config.get("mode", "supervised")
+    mode = st.session_state.agent_config.get("mode", "autopilot")
 
     if objective:
         st.metric("Objective", objective[:40] + ("..." if len(objective) > 40 else ""))
@@ -628,7 +628,7 @@ def _init_analysis_agent(session_dir, api_key, model, base_url, mode, fh_api_key
 
     mode_map = {
         "co-pilot": AnalysisMode.CO_PILOT,
-        "supervised": AnalysisMode.SUPERVISED,
+        "autopilot": AnalysisMode.AUTOPILOT,
         "autonomous": AnalysisMode.AUTONOMOUS,
     }
     return AnalysisOrchestratorAgent(
@@ -651,7 +651,7 @@ def _init_planning_agent(session_dir, api_key, model, base_url, mode, fh_api_key
 
     mode_map = {
         "co-pilot": AutonomyLevel.CO_PILOT,
-        "supervised": AutonomyLevel.SUPERVISED,
+        "autopilot": AutonomyLevel.AUTOPILOT,
         "autonomous": AutonomyLevel.AUTONOMOUS,
     }
     objective = st.session_state.get("planning_objective", "").strip() or "Undefined Research Goal"
@@ -699,7 +699,7 @@ def _init_meta_agent(session_dir, api_key, model, base_url, mode, fh_api_key,
     )
 
     mode_map = {
-        "supervised": MetaMode.SUPERVISED,
+        "autopilot": MetaMode.AUTOPILOT,
         "autonomous": MetaMode.AUTONOMOUS,
     }
     kwargs = {}
@@ -830,7 +830,7 @@ def resume_session(
                 MetaOrchestratorAgent,
             )
             meta_mode_map = {
-                "supervised": MetaMode.SUPERVISED,
+                "autopilot": MetaMode.AUTOPILOT,
                 "autonomous": MetaMode.AUTONOMOUS,
             }
             kwargs = {}
@@ -854,7 +854,7 @@ def resume_session(
             )
             plan_mode_map = {
                 "co-pilot": AutonomyLevel.CO_PILOT,
-                "supervised": AutonomyLevel.SUPERVISED,
+                "autopilot": AutonomyLevel.AUTOPILOT,
                 "autonomous": AutonomyLevel.AUTONOMOUS,
             }
             kwargs = {}
@@ -878,7 +878,7 @@ def resume_session(
             )
             analysis_mode_map = {
                 "co-pilot": AnalysisMode.CO_PILOT,
-                "supervised": AnalysisMode.SUPERVISED,
+                "autopilot": AnalysisMode.AUTOPILOT,
                 "autonomous": AnalysisMode.AUTONOMOUS,
             }
             agent = AnalysisOrchestratorAgent.restore_from_checkpoint(

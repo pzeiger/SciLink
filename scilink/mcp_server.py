@@ -7,7 +7,7 @@ tool provider.  Start with::
 
 Supports three autonomy modes:
 - **autonomous** (default) — tools execute without human approval.
-- **supervised** — tools run but return key decisions for review.
+- **autopilot** — tools run but return key decisions for review.
 - **co-pilot** — tools that need approval return a ``needs_input``
   response; the MCP client must call ``scilink_respond`` to continue.
 
@@ -41,8 +41,8 @@ def _require_mcp():
         )
 
 
-# Tools that require user approval in co-pilot / supervised modes.
-# In co-pilot mode ALL of these pause; in supervised mode only the
+# Tools that require user approval in co-pilot / autopilot modes.
+# In co-pilot mode ALL of these pause; in autopilot mode only the
 # high-impact subset (run_analysis, run_optimization) pauses.
 _COPILOT_APPROVAL_TOOLS = {
     "run_analysis", "select_agent", "assess_novelty",
@@ -50,7 +50,7 @@ _COPILOT_APPROVAL_TOOLS = {
     "generate_implementation_code", "run_economic_analysis",
     "discard_plan",
 }
-_SUPERVISED_APPROVAL_TOOLS = {
+_AUTOPILOT_APPROVAL_TOOLS = {
     "run_analysis", "run_optimization", "discard_plan",
 }
 
@@ -120,7 +120,7 @@ def _execute_tool_captured(tools, tool_name: str, kwargs: dict) -> str:
     return result
 
 
-# ── Pending action support (co-pilot / supervised) ──────────────────────
+# ── Pending action support (co-pilot / autopilot) ──────────────────────
 
 class PendingAction:
     """Holds a pending tool call that needs user approval before execution."""
@@ -138,8 +138,8 @@ def _needs_approval(tool_name: str, mode: str) -> bool:
         return False
     if mode in ("co-pilot", "co_pilot", "copilot"):
         return tool_name in _COPILOT_APPROVAL_TOOLS
-    if mode == "supervised":
-        return tool_name in _SUPERVISED_APPROVAL_TOOLS
+    if mode == "autopilot":
+        return tool_name in _AUTOPILOT_APPROVAL_TOOLS
     return False
 
 
@@ -176,7 +176,7 @@ def create_server(
         base_url: Optional OpenAI-compatible endpoint.
         mode: ``"analyze"``, ``"plan"``, or ``"both"``.
         session_dir: Directory for session outputs.
-        analysis_mode: ``"autonomous"``, ``"supervised"``, or ``"co-pilot"``.
+        analysis_mode: ``"autonomous"``, ``"autopilot"``, or ``"co-pilot"``.
         futurehouse_api_key: Optional FutureHouse/Edison API key.
 
     Returns:
@@ -272,13 +272,13 @@ def create_server(
                 tools.append(_openai_to_mcp_tool(schema, prefix=prefix))
 
         # Always include scilink_respond so it's available if the user
-        # switches to co-pilot/supervised mode mid-session via
+        # switches to co-pilot/autopilot mode mid-session via
         # scilink_set_autonomy (MCP clients only call tools/list once).
         tools.append(types.Tool(
             name="scilink_respond",
             description=(
                 "Send a response to a pending SciLink action that requires "
-                "human approval. Only needed in co-pilot or supervised mode. "
+                "human approval. Only needed in co-pilot or autopilot mode. "
                 "Call this after receiving a 'needs_input' status from another tool."
             ),
             inputSchema={
@@ -337,7 +337,7 @@ def create_server(
             name="scilink_set_autonomy",
             description=(
                 "Change the autonomy mode at runtime. In 'autonomous' mode "
-                "all tools execute immediately. In 'supervised' mode high-impact "
+                "all tools execute immediately. In 'autopilot' mode high-impact "
                 "tools (run_analysis, run_optimization) pause for approval. "
                 "In 'co-pilot' mode most action tools pause for approval. "
                 "Returns the new mode and whether scilink_respond is now needed."
@@ -347,7 +347,7 @@ def create_server(
                 "properties": {
                     "mode": {
                         "type": "string",
-                        "enum": ["autonomous", "supervised", "co-pilot"],
+                        "enum": ["autonomous", "autopilot", "co-pilot"],
                         "description": "The autonomy mode to switch to.",
                     },
                 },
@@ -480,7 +480,7 @@ def create_server(
         orch = state[orch_key]
         autonomy = state["config"]["analysis_mode"]
 
-        # Co-pilot / supervised: intercept tools that need approval
+        # Co-pilot / autopilot: intercept tools that need approval
         if _needs_approval(original_name, autonomy):
             prompt = _build_approval_prompt(original_name, arguments)
             state["pending_action"] = PendingAction(
@@ -678,7 +678,7 @@ def _init_orchestrators(state: dict, config: dict) -> None:
             "co-pilot": AnalysisMode.CO_PILOT,
             "co_pilot": AnalysisMode.CO_PILOT,
             "copilot": AnalysisMode.CO_PILOT,
-            "supervised": AnalysisMode.SUPERVISED,
+            "autopilot": AnalysisMode.AUTOPILOT,
             "autonomous": AnalysisMode.AUTONOMOUS,
         }
         analysis_mode = mode_map.get(
@@ -702,7 +702,7 @@ def _init_orchestrators(state: dict, config: dict) -> None:
                 "co-pilot": AutonomyLevel.CO_PILOT,
                 "co_pilot": AutonomyLevel.CO_PILOT,
                 "copilot": AutonomyLevel.CO_PILOT,
-                "supervised": AutonomyLevel.SUPERVISED,
+                "autopilot": AutonomyLevel.AUTOPILOT,
                 "autonomous": AutonomyLevel.AUTONOMOUS,
             }
             autonomy_level = autonomy_map.get(
@@ -900,7 +900,7 @@ def _handle_set_autonomy(
 ) -> List["types.TextContent"]:
     """Switch autonomy mode at runtime."""
     new_mode = arguments.get("mode", "").strip().lower()
-    valid = {"autonomous", "supervised", "co-pilot"}
+    valid = {"autonomous", "autopilot", "co-pilot"}
     if new_mode not in valid:
         return [types.TextContent(
             type="text",
@@ -924,7 +924,7 @@ def _handle_set_autonomy(
             "current_mode": new_mode,
             "approval_required_for": sorted(
                 _COPILOT_APPROVAL_TOOLS if new_mode == "co-pilot"
-                else _SUPERVISED_APPROVAL_TOOLS if new_mode == "supervised"
+                else _AUTOPILOT_APPROVAL_TOOLS if new_mode == "autopilot"
                 else set()
             ),
             "scilink_respond_needed": new_mode != "autonomous",
@@ -932,7 +932,7 @@ def _handle_set_autonomy(
     )]
 
 
-# ── Respond handler (co-pilot / supervised) ──────────────────────────────
+# ── Respond handler (co-pilot / autopilot) ──────────────────────────────
 
 async def _handle_respond(
     state: dict, arguments: dict

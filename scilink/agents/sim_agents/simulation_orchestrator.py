@@ -36,8 +36,15 @@ class SimulationMode(Enum):
     """Autonomy level for the simulation orchestrator. Mirrors AnalysisMode
     for consistent UX across modes."""
     CO_PILOT = "co-pilot"        # Human leads, AI assists (default)
-    SUPERVISED = "supervised"    # AI leads, human supervises
+    AUTOPILOT = "autopilot"      # AI leads, human monitors
     AUTONOMOUS = "autonomous"    # Full autonomy
+
+    @classmethod
+    def _missing_(cls, value):
+        # Back-compat: the AUTOPILOT level was named "supervised" before.
+        if isinstance(value, str) and value.strip().lower() == "supervised":
+            return cls.AUTOPILOT
+        return None
 
 
 _CO_PILOT_DIRECTIVE = """**AUTONOMY: CO-PILOT (default)** — The human is leading the work; you are
@@ -49,7 +56,7 @@ user a chance to redirect after each significant step.
 
 """
 
-_SUPERVISED_DIRECTIVE = """**AUTONOMY: SUPERVISED** — You are leading the work with reasonable defaults.
+_AUTOPILOT_DIRECTIVE = """**AUTONOMY: AUTOPILOT** — You are leading the work with reasonable defaults.
 Proceed with sensible choices for routine decisions, but surface significant
 decisions (polymorph selection when not specified, supercell size choices
 that drive cost, expensive operations) for a one-line confirmation before
@@ -172,7 +179,7 @@ def get_system_prompt(
     """
     directives = {
         SimulationMode.CO_PILOT: _CO_PILOT_DIRECTIVE,
-        SimulationMode.SUPERVISED: _SUPERVISED_DIRECTIVE,
+        SimulationMode.AUTOPILOT: _AUTOPILOT_DIRECTIVE,
         SimulationMode.AUTONOMOUS: _AUTONOMOUS_DIRECTIVE,
     }
     # Tools section is filled dynamically by the orchestrator after tool
@@ -424,7 +431,7 @@ class SimulationOrchestratorAgent:
         ``autonomy`` selects the SimulationMode for this call. Defaults to
         AUTONOMOUS — the safe choice for a headless/programmatic caller, so
         the agent never pauses for a nonexistent user. A caller attached to a
-        human (the meta agent, driven via CLI/UI) passes SUPERVISED so the
+        human (the meta agent, driven via CLI/UI) passes AUTOPILOT so the
         sub-agents' human-feedback prompts reach that human.
         The structured summary is derived from the post-call session-state
         delta; the original mode is restored on exit, even if chat() raises.
@@ -450,7 +457,7 @@ class SimulationOrchestratorAgent:
 
         # Run under the requested autonomy mode — AUTONOMOUS by default (the
         # safe headless choice). The meta agent passes its own mode through,
-        # so a co-pilot / supervised delegation still raises the sub-agents'
+        # so a co-pilot / autopilot delegation still raises the sub-agents'
         # human-feedback prompts to the user driving the session.
         run_mode = autonomy if autonomy is not None else SimulationMode.AUTONOMOUS
         original_mode = self.simulation_mode

@@ -27,7 +27,7 @@ scilink ui
 **CLI**:
 
 ```bash
-scilink plan --autonomy supervised \
+scilink plan --autonomy autopilot \
              --data-dir examples/planning_agent_demo/experimental_data \
              --knowledge-dir examples/planning_agent_demo/knowledge_folder
 ```

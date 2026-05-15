@@ -26,8 +26,8 @@ Examples:
   # Start with data file
   scilink analyze --data ./sample.tif --metadata ./metadata.json
   
-  # Use supervised mode (AI leads, human approves)
-  scilink analyze --mode supervised --data ./data/
+  # Use autopilot mode (AI leads, human approves)
+  scilink analyze --mode autopilot --data ./data/
   
   # Full autonomous mode (runs entire pipeline automatically)
   scilink analyze --mode autonomous --data ./sample.npy --metadata ./description.txt
@@ -43,7 +43,7 @@ Examples:
 
 Analysis Modes (matching 'scilink plan' for consistent UX):
   co-pilot (default)   Human leads, AI assists. Reviews all agent selections.
-  supervised           AI leads, human approves. AI proceeds with reasonable defaults.
+  autopilot           AI leads, human approves. AI proceeds with reasonable defaults.
   autonomous           Full autonomy. AI selects agents and runs without confirmation.
 
 Environment Variables:
@@ -101,7 +101,7 @@ Metadata Options:
     parser.add_argument(
         '--mode',
         type=str,
-        choices=['co-pilot', 'supervised', 'autonomous'],
+        choices=['co-pilot', 'autopilot', 'autonomous'],
         default='co-pilot',
         help='Analysis mode (default: co-pilot)'
     )
@@ -383,7 +383,7 @@ class AnalysisPlayground:
         # Convert mode string to enum
         mode_map = {
             'co-pilot': AnalysisMode.CO_PILOT,
-            'supervised': AnalysisMode.SUPERVISED,
+            'autopilot': AnalysisMode.AUTOPILOT,
             'autonomous': AnalysisMode.AUTONOMOUS,
         }
         analysis_mode = mode_map.get(analysis_mode_str, AnalysisMode.CO_PILOT)
@@ -764,11 +764,11 @@ Supported data types:
             if len(parts) == 1:
                 print(f"\n🎛️  Current Analysis Mode: {self.agent.analysis_mode.value}")
                 print(f"   Human Feedback: {'Enabled' if self.agent._enable_human_feedback else 'Disabled'}")
-                print("\n   To change: /mode <co-pilot|supervised|autonomous>")
+                print("\n   To change: /mode <co-pilot|autopilot|autonomous>")
             else:
                 mode_map = {
                     'co-pilot': AnalysisMode.CO_PILOT,
-                    'supervised': AnalysisMode.SUPERVISED,
+                    'autopilot': AnalysisMode.AUTOPILOT,
                     'autonomous': AnalysisMode.AUTONOMOUS,
                 }
                 new_mode = mode_map.get(parts[1].lower())
@@ -779,7 +779,7 @@ Supported data types:
                     print(f"   Human Feedback: {'Enabled' if self.agent._enable_human_feedback else 'Disabled'}")
                 else:
                     print(f"\n   ❌ Unknown mode: {parts[1]}")
-                    print("   Valid options: co-pilot, supervised, autonomous")
+                    print("   Valid options: co-pilot, autopilot, autonomous")
             return True
         
         elif cmd == "/checkpoint":
@@ -810,7 +810,7 @@ Supported data types:
         Process initial --data and --metadata inputs.
         Handles different modes appropriately:
         - co-pilot: Examine data, load metadata, then wait for user
-        - supervised: Examine, load metadata, suggest agent, wait for approval
+        - autopilot: Examine, load metadata, suggest agent, wait for approval
         - autonomous: Run the entire pipeline automatically
         """
         has_data = self._initial_data_path is not None
@@ -866,7 +866,7 @@ Supported data types:
                 print("   Falling back to loading metadata only...\n")
                 # Fall through to load metadata
         
-        # === CO-PILOT / SUPERVISED / Fallback: Step-by-step ===
+        # === CO-PILOT / AUTOPILOT / Fallback: Step-by-step ===
         
         # Step 1: Examine data (if provided)
         if has_data:
@@ -888,9 +888,9 @@ Supported data types:
                 self.agent.chat(f"Convert the text description to metadata from {meta_path}")
             print()
         
-        # Step 3: In supervised mode with both inputs, suggest next step
-        if mode == 'supervised' and has_data and has_metadata:
-            print("🔄 SUPERVISED MODE: Suggesting agent selection...")
+        # Step 3: In autopilot mode with both inputs, suggest next step
+        if mode == 'autopilot' and has_data and has_metadata:
+            print("🔄 AUTOPILOT MODE: Suggesting agent selection...")
             self.agent.chat(
                 "Based on the data type and metadata, recommend the appropriate "
                 "analysis agent and explain your reasoning."

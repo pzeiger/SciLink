@@ -131,8 +131,8 @@ Available with `--mode plan` or `--mode both`:
 
 | Tool | Description |
 |------|-------------|
-| `scilink_set_autonomy` | Switch between autonomous/supervised/co-pilot modes at runtime |
-| `scilink_respond` | Approve or reject a pending action (co-pilot/supervised modes) |
+| `scilink_set_autonomy` | Switch between autonomous/autopilot/co-pilot modes at runtime |
+| `scilink_respond` | Approve or reject a pending action (co-pilot/autopilot modes) |
 | `scilink_job_status` | Check status of a background job |
 | `scilink_job_result` | Retrieve result of a completed background job |
 
@@ -199,7 +199,7 @@ scilink serve --help
 |------|---------|-------------|
 | `--model` | `gemini-3.1-pro-preview` | LLM model for analysis agents |
 | `--mode` | `both` | `analyze`, `plan`, or `both` |
-| `--autonomy` | `autonomous` | `autonomous`, `supervised`, or `co-pilot` |
+| `--autonomy` | `autonomous` | `autonomous`, `autopilot`, or `co-pilot` |
 | `--transport` | `stdio` | `stdio` or `sse` |
 | `--host` | `127.0.0.1` | Bind address (SSE only) |
 | `--port` | `8000` | Bind port (SSE only) |
@@ -214,17 +214,17 @@ Control how much approval SciLink requires:
 
 ```bash
 scilink serve --autonomy autonomous   # default — all tools run immediately
-scilink serve --autonomy supervised   # high-impact tools pause for approval
+scilink serve --autonomy autopilot   # high-impact tools pause for approval
 scilink serve --autonomy co-pilot     # most tools pause for approval
 ```
 
 You can also switch at runtime by asking the LLM to call `scilink_set_autonomy`.
 
-In **supervised** and **co-pilot** modes, high-impact tools return a `needs_input` response instead of executing. The MCP client calls `scilink_respond` with `"yes"` to approve or `"no"` to cancel.
+In **autopilot** and **co-pilot** modes, high-impact tools return a `needs_input` response instead of executing. The MCP client calls `scilink_respond` with `"yes"` to approve or `"no"` to cancel.
 
 Tools that require approval:
 - **Co-pilot**: `run_analysis`, `select_agent`, `assess_novelty`, `get_recommendations`, `run_optimization`, `generate_initial_plan`, `generate_implementation_code`, `run_economic_analysis`, `discard_plan`
-- **Supervised**: `run_analysis`, `run_optimization`, `discard_plan`
+- **Autopilot**: `run_analysis`, `run_optimization`, `discard_plan`
 
 ## Background execution
 

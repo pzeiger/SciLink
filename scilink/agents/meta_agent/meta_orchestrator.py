@@ -31,28 +31,36 @@ from .meta_orchestrator_tools import MetaOrchestratorTools
 class MetaMode(Enum):
     """Autonomy level for the meta orchestrator — **two levels, not three**.
 
-    The individual modes use a three-level paradigm (co-pilot / supervised /
+    The individual modes use a three-level paradigm (co-pilot / autopilot /
     autonomous). The meta agent cannot: a delegation runs the child through
     its one-shot ``run_task``, which gives the child a single turn. Co-pilot's
     model — pause after *every* step and wait for the user's next message —
-    needs many turns, so it cannot complete a delegated task. SUPERVISED and
+    needs many turns, so it cannot complete a delegated task. AUTOPILOT and
     AUTONOMOUS each finish a task within one turn.
 
     Each delegated child runs under this same mode (mapped by enum name):
-    SUPERVISED keeps the child's human-feedback prompts — it pauses at
+    AUTOPILOT keeps the child's human-feedback prompts — it pauses at
     decision points for the user to approve / edit plans and outputs;
     AUTONOMOUS runs end to end without pausing.
     """
-    SUPERVISED = "supervised"    # Children pause for feedback at decision points
+    AUTOPILOT = "autopilot"      # Children pause for feedback at decision points
     AUTONOMOUS = "autonomous"    # Children run end to end without pausing
 
+    @classmethod
+    def _missing_(cls, value):
+        # Back-compat: the AUTOPILOT level was named "supervised" before.
+        if isinstance(value, str) and value.strip().lower() == "supervised":
+            return cls.AUTOPILOT
+        return None
 
-_SUPERVISED_DIRECTIVE = """**OPERATING MODE: SUPERVISED (default)**
+
+_AUTOPILOT_DIRECTIVE = """**OPERATING MODE: AUTOPILOT (default)**
 - Delegate on your own judgement; briefly announce each delegation before
   making it, and ask a clarifying question when the goal or the right
   specialist is genuinely ambiguous.
-- Each delegated specialist runs supervised — it pauses at its own decision
-  points for the user to approve or edit plans and outputs. Let that happen.
+- Each delegated specialist runs in autopilot mode — it pauses at its own
+  decision points for the user to approve or edit plans and outputs. Let
+  that happen.
 - Chain delegations when the path is clear; pause to report if a child
   returns an error or an ambiguous result.
 
@@ -88,7 +96,7 @@ attempt to delegate simulation work.
   context)` run the specialist and return a structured JSON result: status,
   summary, key_findings, files_produced, suggested_followups, warnings,
   delegation_index.
-- The specialist runs in the SAME autonomy mode as you. In supervised mode it
+- The specialist runs in the SAME autonomy mode as you. In autopilot mode it
   pauses at its decision points for the user to approve or edit plans and
   outputs (via its own human-feedback prompts) — that is expected and good;
   let it happen. In autonomous mode it runs the task end to end.
@@ -116,7 +124,7 @@ attempt to delegate simulation work.
 def get_system_prompt(meta_mode: MetaMode) -> str:
     """Return the system prompt for the given meta autonomy mode."""
     directives = {
-        MetaMode.SUPERVISED: _SUPERVISED_DIRECTIVE,
+        MetaMode.AUTOPILOT: _AUTOPILOT_DIRECTIVE,
         MetaMode.AUTONOMOUS: _AUTONOMOUS_DIRECTIVE,
     }
     return directives[meta_mode] + _SYSTEM_PROMPT_BODY
@@ -139,7 +147,7 @@ class MetaOrchestratorAgent:
         embedding_api_key: API key for the embedding provider (forwarded).
         futurehouse_api_key: Optional FutureHouse API key (forwarded).
         restore_checkpoint: Whether to restore from a previous checkpoint.
-        meta_mode: Autonomy level (SUPERVISED or AUTONOMOUS). The meta has
+        meta_mode: Autonomy level (AUTOPILOT or AUTONOMOUS). The meta has
             only these two — see MetaMode.
     """
 
@@ -158,7 +166,7 @@ class MetaOrchestratorAgent:
         embedding_api_key: Optional[str] = None,
         futurehouse_api_key: Optional[str] = None,
         restore_checkpoint: bool = False,
-        meta_mode: MetaMode = MetaMode.SUPERVISED,
+        meta_mode: MetaMode = MetaMode.AUTOPILOT,
     ):
         self.logger = logging.getLogger(self.__class__.__name__)
 
@@ -318,10 +326,10 @@ class MetaOrchestratorAgent:
         """Lazily create (or restore) the persistent planning child.
 
         Built in CO_PILOT with data_dir=None: PlanningOrchestratorAgent only
-        requires data_dir under SUPERVISED/AUTONOMOUS at *construction* time.
+        requires data_dir under AUTOPILOT/AUTONOMOUS at *construction* time.
         Each delegation's run_task sets the autonomy level via
         set_autonomy_level, which does not re-validate data_dir — so a
-        supervised/autonomous delegation is still safe. Per-task data files
+        autopilot/autonomous delegation is still safe. Per-task data files
         arrive as absolute paths in the delegation `task`.
         """
         if "planning" not in self._children:
@@ -356,7 +364,7 @@ class MetaOrchestratorAgent:
         """Run a task on a child orchestrator, record it, return a JSON summary.
 
         The child runs under the meta's own autonomy mode (mapped by enum
-        name), so a supervised delegation keeps the specialist's
+        name), so an autopilot delegation keeps the specialist's
         human-feedback prompts — they reach the user driving the meta exactly
         as in a direct single-mode session. Called by the delegate_to_* tools.
         Never raises — child/setup failures are captured into an error result.

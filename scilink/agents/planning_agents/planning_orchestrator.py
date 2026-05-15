@@ -23,12 +23,19 @@ class AutonomyLevel(Enum):
     Defines the level of autonomy for the orchestrator.
     
     CO_PILOT: AI assists human (default). Human reviews all plans/code.
-    SUPERVISED: Human assists AI. AI proceeds unless human intervenes.
+    AUTOPILOT: Human assists AI. AI proceeds unless human intervenes.
     AUTONOMOUS: Full autonomy. No human feedback requested.
     """
     CO_PILOT = "co_pilot"       # Human leads, AI assists (current default)
-    SUPERVISED = "supervised"   # AI leads, human can intervene
+    AUTOPILOT = "autopilot"     # AI leads, human can intervene
     AUTONOMOUS = "autonomous"   # Full autonomy, no human feedback
+
+    @classmethod
+    def _missing_(cls, value):
+        # Back-compat: the AUTOPILOT level was named "supervised" before.
+        if isinstance(value, str) and value.strip().lower() == "supervised":
+            return cls.AUTOPILOT
+        return None
 
 
 # Mode-specific directives (inserted at the top)
@@ -85,9 +92,9 @@ Only call `generate_implementation_code` when BOTH conditions are true:
 - Instead say "Ready for results." or "Let me know how to proceed."
 """
 
-_SUPERVISED_DIRECTIVE = """
-**CRITICAL OPERATING MODE: SUPERVISED (AI Leads, Human Supervises)**
-- You lead the research workflow. Human supervises and can intervene.
+_AUTOPILOT_DIRECTIVE = """
+**CRITICAL OPERATING MODE: AUTOPILOT (AI Leads, Human Monitors)**
+- You lead the research workflow. Human monitors and can intervene.
 - Proceed with reasonable next steps without asking for permission.
 - Human will still review generated plans and code through the standard review interface.
 - Do NOT ask clarifying questions unless truly ambiguous - make reasonable assumptions.
@@ -286,7 +293,7 @@ Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions
 7. `adjust_plan_for_constraints`: Adjusts the plan for implementation constraints.
    - In CO_PILOT mode: ONLY call when the user explicitly provides constraints.
      Do NOT call proactively after plan approval.
-   - In SUPERVISED/AUTONOMOUS mode: May be called proactively when you identify
+   - In AUTOPILOT/AUTONOMOUS mode: May be called proactively when you identify
      clear implementation incompatibilities.
 
 **DATA TOOLS:**
@@ -500,7 +507,7 @@ def get_system_prompt(
     """
     directives = {
         AutonomyLevel.CO_PILOT: _CO_PILOT_DIRECTIVE,
-        AutonomyLevel.SUPERVISED: _SUPERVISED_DIRECTIVE,
+        AutonomyLevel.AUTOPILOT: _AUTOPILOT_DIRECTIVE,
         AutonomyLevel.AUTONOMOUS: _AUTONOMOUS_DIRECTIVE,
     }
     prompt = directives[autonomy_level] + _SYSTEM_PROMPT_BODY
@@ -536,7 +543,7 @@ class PlanningOrchestratorAgent:
         embedding_api_key: API key for the embedding LLM provider.
         futurehouse_api_key: Optional FutureHouse API key for literature search.
         restore_checkpoint: Whether to restore from previous checkpoint.
-        autonomy_level: Level of autonomy (CO_PILOT, SUPERVISED, or AUTONOMOUS).
+        autonomy_level: Level of autonomy (CO_PILOT, AUTOPILOT, or AUTONOMOUS).
         
         google_api_key: DEPRECATED. Use 'api_key' instead.
         local_model: DEPRECATED. Use 'base_url' instead.
@@ -597,7 +604,7 @@ class PlanningOrchestratorAgent:
         logging.info(f"🎛️  Autonomy Level: {autonomy_level.value.upper()}")
 
         # Validate and store workspace directories
-        if autonomy_level in (AutonomyLevel.SUPERVISED, AutonomyLevel.AUTONOMOUS):
+        if autonomy_level in (AutonomyLevel.AUTOPILOT, AutonomyLevel.AUTONOMOUS):
             if data_dir is None:
                 raise ValueError(
                     f"data_dir is required for {autonomy_level.value} mode.\n"
@@ -791,7 +798,7 @@ class PlanningOrchestratorAgent:
     def _should_enable_human_feedback(self) -> bool:
         """Determines if human feedback should be enabled based on autonomy level."""
         # Only CO_PILOT pauses for human review
-        # SUPERVISED and AUTONOMOUS proceed without asking
+        # AUTOPILOT and AUTONOMOUS proceed without asking
         return self.autonomy_level == AutonomyLevel.CO_PILOT
 
     def set_autonomy_level(self, level: AutonomyLevel) -> None:
@@ -1225,7 +1232,7 @@ class PlanningOrchestratorAgent:
         ``autonomy`` selects the AutonomyLevel for this call. Defaults to
         AUTONOMOUS — the safe choice for a headless/programmatic caller, so
         the agent never pauses for a nonexistent user. A caller attached to a
-        human (the meta agent, driven via CLI/UI) passes SUPERVISED so the
+        human (the meta agent, driven via CLI/UI) passes AUTOPILOT so the
         sub-agents' human-feedback prompts reach that human.
         The original autonomy level is restored on exit, even if chat()
         raises.
@@ -1279,7 +1286,7 @@ class PlanningOrchestratorAgent:
 
         # Run under the requested autonomy level — AUTONOMOUS by default (the
         # safe headless choice). The meta agent passes its own mode through,
-        # so a co-pilot / supervised delegation still raises the sub-agents'
+        # so a co-pilot / autopilot delegation still raises the sub-agents'
         # human-feedback prompts to the user driving the session.
         run_level = autonomy if autonomy is not None else AutonomyLevel.AUTONOMOUS
         original_level = self.autonomy_level

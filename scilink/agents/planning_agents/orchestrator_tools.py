@@ -1825,7 +1825,7 @@ class OrchestratorTools:
                                     "available_columns": all_cols
                                 })
                             else:
-                                # SUPERVISED/AUTONOMOUS: accept directly
+                                # AUTOPILOT/AUTONOMOUS: accept directly
                                 self.orch.expected_input_columns = proposed_inputs
                                 self.orch.expected_target_columns = proposed_targets
                                 if opt_dir:

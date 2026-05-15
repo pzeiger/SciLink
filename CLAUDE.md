@@ -134,7 +134,7 @@ point sharing the same state and tool registry:
   derives a structured summary from the session-state delta. `autonomy=None`
   defaults to AUTONOMOUS — the safe choice for a headless caller (never
   pauses for a nonexistent user). A caller attached to a human passes a
-  co-pilot / supervised mode so the sub-agents' human-feedback prompts reach
+  co-pilot / autopilot mode so the sub-agents' human-feedback prompts reach
   that human.
 
 `run_task` is implemented on **all three** orchestrators with that uniform
@@ -179,12 +179,12 @@ supporting structure.
 ### Two autonomy levels, not three
 
 The individual modes have a three-level autonomy paradigm (co-pilot /
-supervised / autonomous); `MetaMode` has only **SUPERVISED** (default) and
+autopilot / autonomous); `MetaMode` has only **AUTOPILOT** (default) and
 **AUTONOMOUS**. A delegation runs the child through its one-shot `run_task`
 — a single turn. Co-pilot's model is "pause after every step, wait for the
 user's next message," which needs many turns, so it cannot complete a
-delegated task. SUPERVISED and AUTONOMOUS each finish a task in one turn:
-SUPERVISED still pauses at the child's decision points (approve / edit plans
+delegated task. AUTOPILOT and AUTONOMOUS each finish a task in one turn:
+AUTOPILOT still pauses at the child's decision points (approve / edit plans
 and outputs) via `input()`-based human-feedback prompts — which compose with
 `run_task` because they block-and-resume *within* the turn — while AUTONOMOUS
 runs end to end. The three-level paradigm is untouched for the standalone
@@ -199,7 +199,7 @@ After a meta restore a child is re-created with `restore_checkpoint=True`
 simply by probing for its `checkpoint.json`. **Each delegation runs the
 child under the meta's own autonomy mode** — passed as `run_task`'s
 `autonomy` arg (mapped by enum name); the child's resting mode is
-irrelevant. So a supervised delegation keeps the specialist's human-feedback
+irrelevant. So an autopilot delegation keeps the specialist's human-feedback
 prompts, which surface to the user driving the meta exactly as in a direct
 single-mode session. The planning child is built in CO_PILOT with
 `data_dir=None` — the one construction mode that does not require

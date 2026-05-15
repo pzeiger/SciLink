@@ -53,12 +53,19 @@ class AnalysisMode(Enum):
     Matches the autonomy levels in PlanningOrchestratorAgent for consistent UX.
     
     CO_PILOT: Human leads, AI assists (default). Human reviews every step.
-    SUPERVISED: AI leads, human supervises. AI proceeds with reasonable defaults.
+    AUTOPILOT: AI leads, human monitors. AI proceeds with reasonable defaults.
     AUTONOMOUS: Full autonomy. AI executes complete workflows without confirmation.
     """
     CO_PILOT = "co-pilot"        # Human leads, AI assists (default)
-    SUPERVISED = "supervised"    # AI leads, human supervises
+    AUTOPILOT = "autopilot"      # AI leads, human monitors
     AUTONOMOUS = "autonomous"    # Full autonomy
+
+    @classmethod
+    def _missing_(cls, value):
+        # Back-compat: the AUTOPILOT level was named "supervised" before.
+        if isinstance(value, str) and value.strip().lower() == "supervised":
+            return cls.AUTOPILOT
+        return None
 
 
 # Mode-specific directives (matching planning orchestrator patterns)
@@ -85,9 +92,9 @@ _CO_PILOT_DIRECTIVE = """
 - Instead say "Ready for your input." or "Let me know how to proceed."
 """
 
-_SUPERVISED_DIRECTIVE = """
-**CRITICAL OPERATING MODE: SUPERVISED (AI Leads, Human Supervises)**
-- You lead the analysis workflow. Human supervises and can intervene.
+_AUTOPILOT_DIRECTIVE = """
+**CRITICAL OPERATING MODE: AUTOPILOT (AI Leads, Human Monitors)**
+- You lead the analysis workflow. Human monitors and can intervene.
 - Suggest the most appropriate agent based on data type and metadata.
 - Proceed with reasonable defaults without asking for every detail.
 - Human will still review agent selection before execution.
@@ -293,7 +300,7 @@ def _build_agent_list_section(agent_registry: dict) -> str:
 #
 # This is a workflow GATE, not a tool description: the LLM otherwise chains
 # straight to run_analysis and never reaches literature search. The gate is
-# mode-aware — CO-PILOT pauses to ask the user; SUPERVISED/AUTONOMOUS decide
+# mode-aware — CO-PILOT pauses to ask the user; AUTOPILOT/AUTONOMOUS decide
 # on their own, since those modes have no interactive user to wait on (and
 # `run_task` pins the orchestrator into AUTONOMOUS).
 _LIT_TOOL_BLURB = (
@@ -320,7 +327,7 @@ answer — do NOT call `run_analysis` in the same turn as the question.
 {_LIT_TOOL_BLURB}
 """
 
-# SUPERVISED / AUTONOMOUS: no interactive user — decide without asking.
+# AUTOPILOT / AUTONOMOUS: no interactive user — decide without asking.
 _LITERATURE_SECTION_AUTONOMOUS = f"""
 **LITERATURE SEARCH — CONSIDER BEFORE ANALYSIS:**
 A FutureHouse API key is configured this session. Before the FIRST
@@ -364,7 +371,7 @@ def get_system_prompt(
     """
     directives = {
         AnalysisMode.CO_PILOT: _CO_PILOT_DIRECTIVE,
-        AnalysisMode.SUPERVISED: _SUPERVISED_DIRECTIVE,
+        AnalysisMode.AUTOPILOT: _AUTOPILOT_DIRECTIVE,
         AnalysisMode.AUTONOMOUS: _AUTONOMOUS_DIRECTIVE,
     }
     if agent_registry:
@@ -381,7 +388,7 @@ def get_system_prompt(
         # Interactive — pause and ask the user.
         lit_section = _LITERATURE_SECTION_COPILOT
     else:
-        # SUPERVISED / AUTONOMOUS — no user to wait on; decide autonomously.
+        # AUTOPILOT / AUTONOMOUS — no user to wait on; decide autonomously.
         lit_section = _LITERATURE_SECTION_AUTONOMOUS
     body = (
         _SYSTEM_PROMPT_BODY_PRE + agent_list
@@ -428,7 +435,7 @@ class AnalysisOrchestratorAgent:
         embedding_model: Embedding model name.
         embedding_api_key: API key for the embedding LLM provider.
         restore_checkpoint: Whether to restore from previous checkpoint.
-        analysis_mode: Level of autonomy (CO_PILOT, SUPERVISED, or AUTONOMOUS).
+        analysis_mode: Level of autonomy (CO_PILOT, AUTOPILOT, or AUTONOMOUS).
         image_analysis_depth: Default analysis depth passed to
             ImageAnalysisAgent ("basic", "auto", or "deep"). Defaults to
             "basic" so Tier 2 is handled at the orchestrator level via
@@ -1257,7 +1264,7 @@ class AnalysisOrchestratorAgent:
         ``autonomy`` selects the AnalysisMode for this call. Defaults to
         AUTONOMOUS — the safe choice for a headless/programmatic caller, so
         the agent never pauses for a nonexistent user. A caller attached to a
-        human (the meta agent, driven via CLI/UI) passes SUPERVISED so the
+        human (the meta agent, driven via CLI/UI) passes AUTOPILOT so the
         sub-agents' human-feedback prompts reach that human.
         The original mode is restored on exit, even if chat() raises.
         """
@@ -1281,7 +1288,7 @@ class AnalysisOrchestratorAgent:
 
         # Run under the requested autonomy mode — AUTONOMOUS by default (the
         # safe headless choice). The meta agent passes its own mode through,
-        # so a co-pilot / supervised delegation still raises the sub-agents'
+        # so a co-pilot / autopilot delegation still raises the sub-agents'
         # human-feedback prompts to the user driving the session.
         run_mode = autonomy if autonomy is not None else AnalysisMode.AUTONOMOUS
         original_mode = self.analysis_mode

@@ -218,7 +218,7 @@ Available Commands:
 
 Examples:
   scilink                                   # Launch the meta-agent
-  scilink meta --mode supervised            # Meta-agent, supervised autonomy
+  scilink meta --mode autopilot            # Meta-agent, autopilot autonomy
   scilink analyze --help                    # See analysis options
   scilink plan --model gemini-2.0-flash-exp # Use a different model
   scilink simulate --help                   # See simulation options
