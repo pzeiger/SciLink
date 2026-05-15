@@ -24,6 +24,47 @@ from .instruct import (
     KNOWLEDGE_QUERY_DIRECTORY_CODEGEN_PROMPT,
 )
 from ..lit_agents.optimize_query import optimize_search_query, is_molecule_design_objective
+from ...skills.loader import list_skills, load_skill
+
+
+def _build_planning_skill_description(custom_skills: dict = None) -> str:
+    """Build the ``skill`` parameter description for ``generate_initial_plan``.
+
+    Auto-discovers built-in planning skill bundles (and any custom or
+    graduated skills) so the orchestrator LLM can see which skills are
+    available by name instead of having to be told. Mirrors the analyze-mode
+    ``_build_skill_description`` helper, scoped to ``domain="planning"``.
+    """
+    parts = [
+        "Optional domain skill: a built-in planning skill name or a path to "
+        "a custom .md skill file. When set, the skill's validated domain "
+        "rules are injected as mandatory constraints on the generated plan."
+    ]
+
+    try:
+        names = list_skills(domain="planning")
+    except Exception:
+        names = []
+
+    skill_descs = []
+    for name in names:
+        try:
+            parsed = load_skill(name, domain="planning")
+            desc = (parsed.get("meta") or {}).get("description")
+            if not desc:
+                desc = parsed.get("overview", "").split("\n")[0].strip()
+            # Trim trailing punctuation so the join below stays clean.
+            desc = desc.rstrip(".;,") if desc else desc
+            skill_descs.append(f"'{name}' — {desc}" if desc else f"'{name}'")
+        except Exception:
+            skill_descs.append(f"'{name}'")
+    if skill_descs:
+        parts.append(f"Built-in planning skills: {'; '.join(skill_descs)}.")
+
+    if custom_skills:
+        parts.append(f"Custom skills: {sorted(custom_skills.keys())}.")
+
+    return " ".join(parts)
 
 
 class OrchestratorTools:
@@ -757,7 +798,12 @@ class OrchestratorTools:
                 "knowledge_paths": {"type": "string", "description": "Comma-separated paths to papers/reports/docs folders"},
                 "primary_data_set": {"type": "string", "description": "Path to experimental data file or folder"},
                 "additional_context": {"type": "string", "description": "Lab constraints, equipment, reagents, budget, etc."},
-                "skill": {"type": "string", "description": "Domain skill name or path to custom .md skill file"},
+                "skill": {
+                    "type": "string",
+                    "description": _build_planning_skill_description(
+                        getattr(self.orch, "_custom_skills", None)
+                    ),
+                },
                 "literature_context": {"type": "string", "description": "File path or text from search_literature() tool. Provides external scientific literature context."},
                 "molecule_context": {"type": "string", "description": "File path or text from query_molecules() tool. Provides molecular design / synthesis context."}
             },
@@ -4528,7 +4574,25 @@ class OrchestratorTools:
             }
         }
         self.openai_schemas.append(openai_schema)
-    
+
+    def _update_skill_description(self, custom_skills: dict = None) -> None:
+        """Refresh the ``skill`` parameter description in ``generate_initial_plan``.
+
+        Called after a skill is registered at runtime (e.g. ``graduate_to_skill``)
+        so newly available skills become visible to the orchestrator LLM. The
+        schema dict is mutated in place, so the change propagates to
+        ``tools_for_model`` (which is the same ``openai_schemas`` list object).
+        """
+        new_desc = _build_planning_skill_description(custom_skills)
+        for schema in self.openai_schemas:
+            fn = schema.get("function", {})
+            if fn.get("name") != "generate_initial_plan":
+                continue
+            skill_prop = fn.get("parameters", {}).get("properties", {}).get("skill")
+            if skill_prop is not None:
+                skill_prop["description"] = new_desc
+            break
+
     def execute_tool(self, tool_name: str, **kwargs) -> str:
         """
         Execute a tool by name with given arguments.

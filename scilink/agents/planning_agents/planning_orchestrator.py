@@ -832,6 +832,9 @@ class PlanningOrchestratorAgent:
         # Make it the active skill for subsequent generate_initial_plan calls
         self._active_skill = str(path)
 
+        # Surface the new skill to the orchestrator LLM's generate_initial_plan tool
+        self.tools._update_skill_description(self._custom_skills)
+
         logging.info(f"📖 Registered planning skill: {name} → {path}")
         return name
 

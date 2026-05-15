@@ -31,6 +31,32 @@ across all three modes. For example, adding an XRD or Raman skill for
 existing CurveFittingAgent is strongly preferred over creating two new agents
 for Ramand and XRD.
 
+## Plan-mode capability boundaries
+
+Two settled conventions on where capability lives in plan mode:
+
+**Plan-mode skills are knowledge-only.** Skill bundles under
+`scilink/skills/planning/<name>/` are markdown — no per-skill
+`.py` / `TOOL_SPEC` tools. Plan mode reasons and synthesizes; it does
+not execute domain numerics. `PlanningAgent` produces plan text, heavy
+compute is `BOAgent`'s, and executable artifacts flow through
+`generate_implementation_code` — codegen *guided by* the skill's
+`implementation` section, so the skill shapes the code rather than
+shipping it. Planning subagents deliberately do not consume the
+`_shared/_registry` tool inventory. A planning skill that seems to need
+a vetted tool is mis-scoped.
+
+**The scalarizer is the lightweight analysis tier.** `ScalarizerAgent`
+does simple LLM-generated extraction (pandas / numpy / scipy) over
+tabular or otherwise simple data, reduced to scalars plus the BO
+input/target schema. It gets no vetted `.py` tools — needing one is the
+tripwire that the task is not lightweight and belongs in analyze mode.
+Heavy "data → number" extraction is reused, not rebuilt: `run_analysis`
+does the hard work with its skill tools, then the scalarizer reduces the
+result (`run_analysis → scalarize`). That cross-mode chain is gated on
+the future `run_task` contract; until it exists, run the analysis
+standalone and feed the resulting scalar in as a data file.
+
 ## Why no `BaseChatOrchestrator` refactor
 
 The three orchestrators share a near-identical chat-loop / message-history /
