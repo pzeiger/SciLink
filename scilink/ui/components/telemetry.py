@@ -3,9 +3,8 @@
 Explore (meta) mode only. A compact, status-colored dependency graph of the
 delegation ledger (meta -> delegations, annotated with the sub-agent each mode
 selected, plus the `context_from` provenance edges) sits on top; the delegation
-ledger, a per-agent tool-call sequence, and a detailed per-action breakdown
-(inputs, outputs, reasoning) back it underneath. Refreshes on the sidebar
-delegation tree's cadence (2s while a chat task runs).
+ledger and a per-agent tool-call sequence back it underneath. Refreshes on the
+sidebar delegation tree's cadence (2s while a chat task runs).
 """
 
 import streamlit as st
@@ -39,11 +38,10 @@ def render_telemetry_tab() -> None:
         agents = tel.get("agents", [])
         delegations = meta.get("delegations", [])
 
-        total_actions = sum(a.get("action_count", 0) for a in agents)
         st.markdown(
             f"**{str(meta.get('meta_mode', '—')).title()}**  ·  "
             f"{meta.get('delegations_total', 0)} delegations  ·  "
-            f"{len(agents)} worker agents  ·  {total_actions} actions logged"
+            f"{len(agents)} worker agents"
         )
         st.caption(f"Session: {meta.get('session_dir', '—')}")
 
@@ -68,21 +66,6 @@ def render_telemetry_tab() -> None:
         st.subheader("Tool sequence")
         st.caption("Every tool call each agent's LLM made, in order.")
         _tool_sequence_section(tel.get("tool_sequence", {}))
-
-        # ── Sub-agent activity ───────────────────────────────────────
-        st.subheader("Sub-agent activity")
-        st.caption("Each worker sub-agent's logged operations — inputs, "
-                   "outputs, reasoning — with a link to its full state file.")
-        if not agents:
-            st.caption("No sub-agent operations recorded yet.")
-        for ag in agents:
-            _worker_breakdown(ag)
-
-        reports = tel.get("analysis_reports", [])
-        if reports:
-            st.markdown("**Analysis reasoning**")
-            for rep in reports:
-                _analysis_report(rep)
 
     _panel()
 
@@ -239,60 +222,3 @@ def _tool_sequence_section(sequence: dict) -> None:
         st.caption("No tool calls recorded yet.")
 
 
-# ── detailed breakdown ───────────────────────────────────────────────
-
-def _worker_breakdown(ag: dict) -> None:
-    """One expander per worker agent: every action with input/output/reason."""
-    oc = ag.get("outcomes", {})
-    title = (f"{ag.get('name', '?')}  ·  {ag.get('specialist', '—')}  ·  "
-             f"{ag.get('action_count', 0)} action(s)  "
-             f"({oc.get('success', 0)}✓ / {oc.get('error', 0)}✗)")
-    with st.expander(title):
-        src = ag.get("source_file")
-        if src:
-            st.caption("State file")
-            st.code(src, language=None, wrap_lines=True)
-        actions = ag.get("actions", [])
-        for i, ac in enumerate(actions, 1):
-            st.markdown(
-                f"**{i}. `{ac.get('action', '?')}`**  ·  "
-                f"`{ac.get('status', '—')}`  ·  "
-                f"{_short_time(ac.get('timestamp'))}"
-            )
-            rationale = ac.get("rationale")
-            if rationale:
-                st.caption("Reasoning")
-                st.write(rationale)
-            st.caption("Input types")
-            st.code(_type_summary(ac.get("input"), limit=600),
-                    language=None, wrap_lines=True)
-            st.caption("Output types")
-            st.code(_type_summary(ac.get("result"), limit=600),
-                    language=None, wrap_lines=True)
-            feedback = ac.get("feedback")
-            if feedback:
-                st.caption("Feedback")
-                st.write(feedback)
-            if i < len(actions):
-                st.divider()
-
-
-def _analysis_report(rep: dict) -> None:
-    """One expander per analysis run: its detailed reasoning + claims."""
-    claims = rep.get("claims", [])
-    title = (f"{rep.get('analysis_id', 'analysis')}  ·  "
-             f"{len(claims)} claim(s)  ·  {rep.get('status', '—')}")
-    with st.expander(title):
-        src = rep.get("report_file")
-        if src:
-            st.caption("Results file")
-            st.code(src, language=None, wrap_lines=True)
-        detailed = rep.get("detailed_analysis")
-        if detailed:
-            st.markdown(detailed)
-        if claims:
-            st.caption("Scientific claims")
-            for c in claims:
-                st.markdown(f"- **{c.get('claim', '')}**")
-                if c.get("impact"):
-                    st.caption(c["impact"])
