@@ -35,6 +35,7 @@ from .metadata_converter import (
 from ..lit_agents import OwlLiteratureAgent, NoveltyScorer, FittingModelLiteratureAgent
 from ..lit_agents.optimize_query_for_analysis import optimize_query_for_analysis
 from .recommendation_agent import RecommendationAgent
+from .feature_table import write_feature_table
 from ...skills.loader import list_skills, list_all_skills, load_skill
 # Note: DFTOrchestrator is imported lazily inside `run_dft_workflow` to avoid
 # pulling in the optional [sim] extras (ase, atomate2, pymatgen) on every
@@ -2506,6 +2507,12 @@ class AnalysisOrchestratorTools:
                         response["tier2_focus"] = t2.get(
                             "analysis_approach", "deeper analysis"
                         )
+                    # Emit a flat feature table (per-unit conditions + extracted
+                    # scalar features) so downstream planning / BO can ingest the
+                    # results as a file rather than re-typed prose.
+                    feature_table = write_feature_table(analysis_output_dir)
+                    if feature_table:
+                        response["feature_table"] = feature_table
                     return json.dumps(response)
                 else:
                     return json.dumps({

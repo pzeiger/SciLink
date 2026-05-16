@@ -175,6 +175,17 @@ attempt to delegate simulation work.
   this records the provenance of the threaded findings.
 - `summarize_session_state` reports what each specialist has done so far.
 
+**ANALYSIS RESULTS -> PLANNING / BO:**
+- An analysis delegation result may include `feature_tables` — CSV files of the
+  extracted per-unit features (one row per spectrum / image, columns =
+  experimental conditions + extracted scalar features). When a follow-up
+  planning or Bayesian-optimization task needs those quantitative results, pass
+  the feature-table file PATH to `delegate_to_planning` (in `context`, and name
+  it in `task`).
+- Do NOT re-summarize the numbers as prose for the planning specialist to
+  retype — that loses precision and risks transcription errors. The planning
+  specialist ingests the file directly with its `analyze_file` tool.
+
 **RESPONSE STYLE:**
 - Do not dump raw tool JSON back to the user — synthesize it into plain
   language.
@@ -497,6 +508,7 @@ class MetaOrchestratorAgent:
             "summary": "",
             "key_findings": [],
             "files_produced": [],
+            "feature_tables": [],
             "suggested_followups": [],
             "warnings": [],
             "error": None,
@@ -511,6 +523,7 @@ class MetaOrchestratorAgent:
             "summary": result.get("summary", ""),
             "key_findings": result.get("key_findings", []),
             "files_produced": result.get("files_produced", []),
+            "feature_tables": result.get("feature_tables", []),
             "suggested_followups": result.get("suggested_followups", []),
             "warnings": result.get("warnings", []),
             "error": result.get("error"),
@@ -526,6 +539,7 @@ class MetaOrchestratorAgent:
             "summary": result.get("summary", ""),
             "key_findings": result.get("key_findings", []),
             "files_produced": result.get("files_produced", []),
+            "feature_tables": result.get("feature_tables", []),
             "suggested_followups": result.get("suggested_followups", []),
             "warnings": result.get("warnings", []),
         }

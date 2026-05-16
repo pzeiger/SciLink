@@ -1252,6 +1252,7 @@ class AnalysisOrchestratorAgent:
                 "task": str,                       # echoed input
                 "summary": str,                    # the agent's final reply
                 "files_produced": List[str],       # absolute paths
+                "feature_tables": List[str],       # per-analysis feature CSVs
                 "key_findings": List[str],         # extracted scientific claims
                 "suggested_followups": List[str],
                 "analyses": List[dict],            # session record snapshot
@@ -1347,11 +1348,22 @@ class AnalysisOrchestratorAgent:
                     f"successfully (status={rec.get('status')})."
                 )
 
+        # feature_tables: per-analysis flat CSVs (conditions + extracted scalar
+        # features) for downstream planning / BO — see feature_table.py.
+        feature_tables: List[str] = []
+        for rec in new_analyses:
+            out_dir = rec.get("output_directory")
+            if out_dir:
+                ft = Path(out_dir) / "features.csv"
+                if ft.is_file():
+                    feature_tables.append(str(ft.resolve()))
+
         result = {
             "status": status,
             "task": task,
             "summary": summary_text,
             "files_produced": files_produced,
+            "feature_tables": feature_tables,
             "key_findings": key_findings,
             "suggested_followups": suggested_followups,
             "analyses": [
