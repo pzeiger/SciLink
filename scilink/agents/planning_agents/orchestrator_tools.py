@@ -745,10 +745,14 @@ class OrchestratorTools:
                 if effective_skill:
                     self.orch._active_skill = effective_skill
 
-                if plan.get("error"):
+                # generate_plan signals failure as either `error` (RAG / parse
+                # failure) or `status="failed"` + `last_error` (a returned state
+                # dict) — check both so a failed plan never reports as success.
+                if plan.get("error") or plan.get("status") == "failed":
                     return json.dumps({
                         "status": "error",
-                        "message": plan.get("error")
+                        "message": (plan.get("error") or plan.get("last_error")
+                                    or "Plan generation failed")
                     })
 
                 # Save

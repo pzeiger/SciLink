@@ -488,17 +488,17 @@ class PlanningAgent(BaseAgent):
         self.state["iteration_index"] = existing_iter + 1
         current_iter = self.state["iteration_index"]
 
-        # Build KB (docs only)
+        # Build KB (docs only). A missing / unbuilt knowledge base is NOT fatal:
+        # perform_science_rag below falls back to the LLM's general scientific
+        # knowledge when no documents are retrievable (its "Insufficient context"
+        # path swaps in HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK). Aborting
+        # here instead would break every planning task delegated without
+        # literature documents (e.g. from the meta-agent).
         if not self._ensure_kb_is_ready(knowledge_paths, code_paths=None):
-            self.state["status"] = "failed"
-            self.state["last_error"] = "KB Init Failed"
-            self._log_action(
-                action="generate_plan",
-                input_ctx={"objective": objective},
-                result={"status": "failed", "error": "KB Init Failed"},
-                rationale=None
+            logging.warning(
+                "Knowledge base unavailable — generating the plan from general "
+                "scientific knowledge without document retrieval."
             )
-            return self.state
         
         # Build context string
         ctx_string = ""
