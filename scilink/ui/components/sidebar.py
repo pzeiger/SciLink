@@ -574,7 +574,7 @@ def _meta_delegation_tree(ledger: list) -> str:
         by_mode.setdefault(e.get("mode", "?"), []).append(e)
     glyphs = {"success": "✓", "error": "✗"}
     icons = {"analysis": "🧪", "planning": "📋"}
-    lines = ["🛰️ Mission control"]
+    lines = ["🎛️ Mission control"]
     modes = sorted(by_mode)
     for mi, mode in enumerate(modes):
         rows = by_mode[mode]
