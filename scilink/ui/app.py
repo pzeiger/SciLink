@@ -469,16 +469,22 @@ if st.session_state.app_mode == "simulate" and simulate_enabled():
             "the full agent framework alongside HPC simulations."
         )
 else:
-    # ── Analyze / Plan modes: full agent UI ──────────────────
+    # ── Analyze / Plan / Explore modes: full agent UI ────────
+    # Tabs are built dynamically: Telemetry is appended only in Explore
+    # (meta) mode, Simulations only when the simulate extra is enabled.
+    _is_meta = st.session_state.app_mode == "meta"
+    _tab_labels = ["Chat", "File Explorer", "Tools", "Skills"]
+    if _is_meta:
+        _tab_labels.append("Telemetry")
     if simulate_enabled():
-        chat_tab, files_tab, tools_tab, skills_tab, sim_tab = st.tabs(
-            ["Chat", "File Explorer", "Tools", "Skills", "Simulations"]
-        )
-    else:
-        chat_tab, files_tab, tools_tab, skills_tab = st.tabs(
-            ["Chat", "File Explorer", "Tools", "Skills"]
-        )
-        sim_tab = None
+        _tab_labels.append("Simulations")
+    _tabs = st.tabs(_tab_labels)
+    chat_tab, files_tab, tools_tab, skills_tab = _tabs[:4]
+    _next = 4
+    telemetry_tab = None
+    if _is_meta:
+        telemetry_tab, _next = _tabs[_next], _next + 1
+    sim_tab = _tabs[_next] if simulate_enabled() else None
 
     # ── Chat tab ─────────────────────────────────────────────────────
     with chat_tab:
@@ -1003,6 +1009,12 @@ else:
     with skills_tab:
         render_skills_tab()
     
+    # ── Telemetry tab (Explore mode only) ────────────────────────────
+    if telemetry_tab is not None:
+        from scilink.ui.components.telemetry import render_telemetry_tab
+        with telemetry_tab:
+            render_telemetry_tab()
+
     # ── Simulations tab ──────────────────────────────────────────────
     if sim_tab is not None:
         from scilink.ui.components.simulations import render_simulations_tab
