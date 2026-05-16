@@ -185,25 +185,47 @@ def _extract_tool_calls(messages: list) -> List[Dict[str, Any]]:
     return seq
 
 
-def _tool_sequence(base_dir: Path) -> Dict[str, Dict[str, Any]]:
-    """Per-agent ordered tool-call sequence, read from each ``chat_history.json``
-    (the meta's at the session root, each specialist's in its sub-dir). Each
-    layer's entry carries its ``calls`` and the ``source`` file path."""
+def _tool_sequence(base_dir: Path, meta_agent: Any) -> Dict[str, Dict[str, Any]]:
+    """Per-agent ordered tool-call sequence.
+
+    Prefers each agent's live in-memory ``messages`` — which grows per tool
+    iteration mid-turn, so the sequence updates in real time — and falls back
+    to the persisted ``chat_history.json`` (written only at end of turn) when
+    no live agent object is available (e.g. a child not yet re-created after a
+    resume). Pure read: a snapshot copy guards against the background chat
+    thread mutating ``messages`` concurrently.
+
+    Each layer's entry carries its ``calls`` and the ``source`` file path (the
+    meta's at the session root, each specialist's in its sub-dir).
+    """
+    children = getattr(meta_agent, "_children", {}) or {}
+    live = {"meta": meta_agent, "analysis": children.get("analysis"),
+            "planning": children.get("planning")}
     out: Dict[str, Dict[str, Any]] = {}
     for layer, sub in (("meta", ""), ("analysis", "analysis"),
                         ("planning", "planning")):
         path = (base_dir / sub / "chat_history.json" if sub
                 else base_dir / "chat_history.json")
-        if not path.is_file():
-            continue
-        try:
-            messages = json.loads(path.read_text())
-        except Exception:  # noqa: BLE001
-            continue
-        if isinstance(messages, list):
-            calls = _extract_tool_calls(messages)
-            if calls:
-                out[layer] = {"calls": calls, "source": str(path)}
+        calls: Optional[List[Dict[str, Any]]] = None
+
+        obj = live.get(layer)
+        msgs = getattr(obj, "messages", None) if obj is not None else None
+        if isinstance(msgs, list):
+            try:
+                calls = _extract_tool_calls(list(msgs))  # snapshot, then read
+            except Exception:  # noqa: BLE001 - concurrent mutation; next poll
+                calls = None
+
+        if calls is None and path.is_file():  # fall back to the persisted file
+            try:
+                messages = json.loads(path.read_text())
+                if isinstance(messages, list):
+                    calls = _extract_tool_calls(messages)
+            except Exception:  # noqa: BLE001
+                calls = None
+
+        if calls:
+            out[layer] = {"calls": calls, "source": str(path)}
     return out
 
 
@@ -282,7 +304,7 @@ def collect_session_telemetry(meta_agent: Any) -> Dict[str, Any]:
                 if row:
                     agents.append(row)
             analysis_reports = _analysis_reports(base)
-            tool_sequence = _tool_sequence(base)
+            tool_sequence = _tool_sequence(base, meta_agent)
 
         # Which sub-agents each specialist (mode) ended up using — for the
         # dependency graph's per-mode sub-agent annotation.
