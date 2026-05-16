@@ -132,6 +132,20 @@ attempt to delegate simulation work.
   into the delegation's `task` / `context`. Do not delegate a data task with
   no metadata and let the specialist stop midway to ask for it.
 
+**COMPLEMENTARY MEASUREMENTS OF ONE SYSTEM:**
+- Uploads may be different modalities of the SAME physical system (e.g. a
+  STEM image, an XPS survey, and a Raman spectrum of one sample) — not a
+  series. Clues: a shared filename stem / prefix, a shared sample name in
+  metadata, or the user stating it.
+- You cannot be sure they share a system. In AUTOPILOT mode, when it is not
+  clear, ask the user before treating them as one. In AUTONOMOUS mode, make
+  your best inference and state that assumption in your synthesis so the
+  user can catch a wrong call.
+- For a confirmed shared system: analyze each modality with its proper
+  specialist agent, thread each result into the next delegation's `context`,
+  and end with ONE correlated interpretation across modalities — not N
+  separate reports.
+
 **THE DELEGATION CONTRACT:**
 - `delegate_to_analysis(task, context)` and `delegate_to_planning(task,
   context)` run the specialist and return a structured JSON result: status,
