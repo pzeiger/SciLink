@@ -175,9 +175,10 @@ class MetaOrchestratorTools:
 
         # -- delegate_to_analysis -------------------------------------------
         def delegate_to_analysis(task: str, context: dict = None,
-                                 context_from: list = None) -> str:
+                                 context_from: list = None,
+                                 label: str = None) -> str:
             print(f"  🧪 Delegating to analysis specialist: {task[:80]}...")
-            return self.orch._delegate("analysis", task, context, context_from)
+            return self.orch._delegate("analysis", task, context, context_from, label)
 
         self._register_tool(
             func=delegate_to_analysis,
@@ -213,15 +214,24 @@ class MetaOrchestratorTools:
                         "findings you threaded into `context` — records provenance."
                     ),
                 },
+                "label": {
+                    "type": "string",
+                    "description": (
+                        "Short label shown in the UI delegation tree — the data "
+                        "type being analyzed (e.g. '1-D Raman spectra', "
+                        "'STEM image', 'hyperspectral datacube')."
+                    ),
+                },
             },
             required=["task"],
         )
 
         # -- delegate_to_planning -------------------------------------------
         def delegate_to_planning(task: str, context: dict = None,
-                                 context_from: list = None) -> str:
+                                 context_from: list = None,
+                                 label: str = None) -> str:
             print(f"  📋 Delegating to planning specialist: {task[:80]}...")
-            return self.orch._delegate("planning", task, context, context_from)
+            return self.orch._delegate("planning", task, context, context_from, label)
 
         self._register_tool(
             func=delegate_to_planning,
@@ -254,6 +264,14 @@ class MetaOrchestratorTools:
                     "description": (
                         "delegation_index numbers of earlier delegations whose "
                         "findings you threaded into `context` — records provenance."
+                    ),
+                },
+                "label": {
+                    "type": "string",
+                    "description": (
+                        "Short label shown in the UI delegation tree — the "
+                        "focus of the planning task (e.g. 'follow-up BO "
+                        "campaign', 'experiment design')."
                     ),
                 },
             },

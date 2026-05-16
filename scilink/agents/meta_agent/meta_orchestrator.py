@@ -146,6 +146,9 @@ attempt to delegate simulation work.
   conversation.
 - Pass upstream findings via the `context` dict, not by re-typing them into
   `task`.
+- Give each call a short `label` — the data type for an analysis (e.g.
+  "1-D Raman spectra", "STEM image") or the focus for a planning task (e.g.
+  "follow-up BO campaign"). It is how the delegation is shown in the UI.
 
 **BRIDGING CONTEXT BETWEEN SPECIALISTS:**
 - Every delegation's result is kept in a delegation ledger. Call
@@ -405,7 +408,8 @@ class MetaOrchestratorAgent:
     # =========================================================================
 
     def _delegate(self, mode: str, task: str, context: Optional[dict] = None,
-                  context_from: Optional[list] = None) -> str:
+                  context_from: Optional[list] = None,
+                  label: Optional[str] = None) -> str:
         """Run a task on a child orchestrator, record it, return a JSON summary.
 
         The child runs under the meta's own autonomy mode (mapped by enum
@@ -430,7 +434,7 @@ class MetaOrchestratorAgent:
                 "message": f"Unknown delegation target: {mode}",
             })
 
-        entry = self._open_delegation(mode, task, context, context_from)
+        entry = self._open_delegation(mode, task, context, context_from, label)
         try:
             child = get_child()
             result = child.run_task(
@@ -447,7 +451,8 @@ class MetaOrchestratorAgent:
         self._close_delegation(entry, result)
         return self._summarize_delegation_result(mode, result, entry["index"])
 
-    def _open_delegation(self, mode, task, context, context_from) -> Dict[str, Any]:
+    def _open_delegation(self, mode, task, context, context_from,
+                         label=None) -> Dict[str, Any]:
         """Append a provisional 'running' ledger entry before the child runs.
 
         Finalized later by ``_close_delegation``. Having the entry present up
@@ -470,6 +475,7 @@ class MetaOrchestratorAgent:
             "timestamp": datetime.now().isoformat(),
             "mode": mode,
             "task": task,
+            "label": (label or "").strip(),
             "context_keys": sorted(context.keys()) if isinstance(context, dict) else [],
             "context_from": sources,
             "status": "running",

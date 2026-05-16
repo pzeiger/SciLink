@@ -565,19 +565,22 @@ def _render_planning_status() -> None:
 
 
 def _meta_delegation_tree(ledger: list, specialist: str) -> str:
-    """Monospace meta → specialist → delegations tree for the sidebar."""
+    """Monospace mission-control → specialist → delegations tree."""
     rows = [e for e in ledger if e.get("mode") == specialist]
-    lines = ["🧭 Explore", f"└─ {specialist.title()}  ({len(rows)})"]
+    lines = ["🛰️ Mission control", f"└─ {specialist.title()}  ({len(rows)})"]
     glyphs = {"success": "✓", "error": "✗"}
     for i, e in enumerate(rows):
         branch = "   └─" if i == len(rows) - 1 else "   ├─"
-        task = " ".join(str(e.get("task") or "").split())
-        if len(task) > 30:
-            task = task[:29] + "…"
+        # Prefer the meta-supplied short label (e.g. the data type); fall
+        # back to the task text for older entries.
+        label = (e.get("label") or "").strip() or " ".join(
+            str(e.get("task") or "").split())
+        if len(label) > 32:
+            label = label[:31] + "…"
         glyph = glyphs.get(e.get("status"), "⋯")
         cf = e.get("context_from") or []
         cf_str = "  ←" + ",".join(f"#{n}" for n in cf) if cf else ""
-        lines.append(f"{branch} #{e.get('index', '?')} {task} {glyph}{cf_str}")
+        lines.append(f"{branch} #{e.get('index', '?')} {label} {glyph}{cf_str}")
     return "\n".join(lines)
 
 
@@ -618,7 +621,6 @@ def _render_meta_status() -> None:
             key="meta_status_specialist",
         )
         st.text(_meta_delegation_tree(ledger, selected))
-        st.caption("✓ done · ✗ error · ⋯ running · ←#n context source")
 
     _delegation_tree_panel()
 
