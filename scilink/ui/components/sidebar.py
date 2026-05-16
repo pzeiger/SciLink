@@ -640,7 +640,10 @@ def _render_meta_status() -> None:
         if not ledger:
             st.info("No delegations yet — describe a goal and the meta routes it.")
             return
-        st.markdown(_meta_delegation_tree(ledger), unsafe_allow_html=True)
+        # st.html (not st.markdown) — renders raw HTML with no Markdown
+        # processing, so the <pre> newlines survive and the tree stays
+        # top-down rather than collapsing into a wrapped inline run.
+        st.html(_meta_delegation_tree(ledger))
 
     _delegation_tree_panel()
 
