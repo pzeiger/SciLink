@@ -565,22 +565,39 @@ def _render_planning_status() -> None:
 
 
 def _meta_delegation_tree(ledger: list) -> str:
-    """Monospace mission-control → specialists → delegations tree.
+    """HTML monospace mission-control → specialists → delegations tree.
 
-    Shows every specialist branch at once — no selector.
+    Every specialist branch is shown at once; delegation rows are colored by
+    status. Returned as an HTML ``<pre>`` (so the box-drawing stays aligned)
+    inside a fixed-height scroll box, so a long session does not stretch the
+    sidebar.
     """
+    import html
+
+    GREY = "#8893a5"  # root / specialist headers — no status
+    status_colors = {
+        "success": "#3fb950",   # green
+        "error": "#f85149",     # red
+        "running": "#d29922",   # amber
+    }
+
     by_mode: dict = {}
     for e in ledger:
         by_mode.setdefault(e.get("mode", "?"), []).append(e)
     glyphs = {"success": "✓", "error": "✗"}
     icons = {"analysis": "🧪", "planning": "📋"}
-    lines = ["🎛️ Mission control"]
+
+    def _line(text: str, color: str) -> str:
+        return f'<span style="color:{color}">{html.escape(text)}</span>'
+
+    out = [_line("🎛️ Mission control", GREY)]
     modes = sorted(by_mode)
     for mi, mode in enumerate(modes):
         rows = by_mode[mode]
         last_mode = mi == len(modes) - 1
-        lines.append(f"{'└─' if last_mode else '├─'} {icons.get(mode, '•')} "
-                     f"{mode.title()}  ({len(rows)})")
+        out.append(_line(
+            f"{'└─' if last_mode else '├─'} {icons.get(mode, '•')} "
+            f"{mode.title()}  ({len(rows)})", GREY))
         cont = "   " if last_mode else "│  "
         for ri, e in enumerate(rows):
             rbranch = "└─" if ri == len(rows) - 1 else "├─"
@@ -590,12 +607,17 @@ def _meta_delegation_tree(ledger: list) -> str:
                 str(e.get("task") or "").split())
             if len(label) > 30:
                 label = label[:29] + "…"
-            glyph = glyphs.get(e.get("status"), "⋯")
+            status = e.get("status")
+            glyph = glyphs.get(status, "⋯")
             cf = e.get("context_from") or []
             cf_str = " ←" + ",".join(f"#{n}" for n in cf) if cf else ""
-            lines.append(f"{cont}{rbranch} #{e.get('index', '?')} "
-                         f"{label} {glyph}{cf_str}")
-    return "\n".join(lines)
+            out.append(_line(
+                f"{cont}{rbranch} #{e.get('index', '?')} "
+                f"{label} {glyph}{cf_str}",
+                status_colors.get(status, status_colors["running"])))
+    body = "\n".join(out)
+    return (f'<pre style="margin:0;font-size:0.8rem;line-height:1.45;'
+            f'white-space:pre;max-height:340px;overflow:auto">{body}</pre>')
 
 
 def _render_meta_status() -> None:
@@ -618,7 +640,7 @@ def _render_meta_status() -> None:
         if not ledger:
             st.info("No delegations yet — describe a goal and the meta routes it.")
             return
-        st.text(_meta_delegation_tree(ledger))
+        st.markdown(_meta_delegation_tree(ledger), unsafe_allow_html=True)
 
     _delegation_tree_panel()
 
