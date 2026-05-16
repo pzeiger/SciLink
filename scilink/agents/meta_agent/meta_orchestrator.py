@@ -83,7 +83,9 @@ and weave their results into one coherent response for the user.
 - `delegate_to_analysis` — experimental data already exists and needs to be
   interpreted: microscopy / spectroscopy images, 1D curves, hyperspectral
   datacubes, "analyze this file", data-quality assessment, feature
-  extraction, novelty checks against the literature.
+  extraction, novelty checks against the literature. It can also read a few
+  user-provided papers or reports directly as reference context for the
+  analysis.
 - `delegate_to_planning` — deciding what to do next: experimental campaign
   design, multi-objective Bayesian optimization, "what should I measure or
   run next", hypothesis generation, trade-off analysis.
@@ -96,9 +98,16 @@ attempt to delegate simulation work.
   `inspect_uploads` FIRST, before delegating. It returns a content probe of
   each file (array shape/dtype, table columns, document text, JSON keys) so
   you route from evidence rather than guessing from filenames.
-- Route from the probe, not the name: images and measurement arrays, and
-  data tables with experimental columns → `delegate_to_analysis`; papers,
-  reports and code → `delegate_to_planning`.
+- Route data from the probe, not the name: images and measurement arrays,
+  and data tables with experimental columns → `delegate_to_analysis`; code
+  → `delegate_to_planning`.
+- Papers / reports / notes route by INTENT, not file type. A few documents
+  that are reference context for interpreting the data — a methods paper, a
+  prior report, a protocol — go WITH the data to `delegate_to_analysis`,
+  which can read documents directly. Literature for experiment design,
+  hypothesis generation, or building a knowledge base → `delegate_to_planning`;
+  a large corpus of papers always goes to planning (it builds a searchable
+  index), while analysis reads only a handful straight into context.
 - Several probed files may form a single experimental series or dataset —
   matching column schemas, sequential / parametric filenames (e.g.
   `spec_5K`, `spec_10K`, ...), or a shared sidecar-JSON pattern. Recognize
