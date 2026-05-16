@@ -290,10 +290,13 @@ def _render_planning_uploads(start_task_fn) -> None:
 def _render_meta_uploads(start_task_fn) -> None:
     st.markdown(
         '<div class="upload-hero-box">'
-        '<p class="upload-hero-title">What would you like to do?</p>'
+        '<p class="upload-hero-title">What would you like to do? '
+        '<span style="font-size:0.45em;vertical-align:middle;'
+        'background:#8893a5;color:#fff;padding:2px 8px;border-radius:9px;'
+        'letter-spacing:1px;font-weight:600;">BETA</span></p>'
         '<p class="upload-hero-subtitle">'
-        "Describe your research goal — the meta-agent routes it to the "
-        "analysis and planning specialists</p>"
+        "Describe your research goal — Explore routes it to the analysis "
+        "and planning specialists</p>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -394,7 +397,7 @@ def save_planning_uploads(files, category: str) -> None:
 
 
 def save_meta_uploads(files) -> None:
-    """Save Auto-mode uploads into the meta session's ``uploads/`` directory.
+    """Save Explore-mode uploads into the meta session's ``uploads/`` directory.
 
     Everything lands in one place; the meta-agent decides which child
     specialist each file belongs to when it builds its delegations.

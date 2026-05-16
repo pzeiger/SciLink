@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scilink meta - Interactive Meta-Agent Orchestrator
+scilink explore - Interactive Meta-Agent Orchestrator
 
 The meta-agent is SciLink's default entry point (bare `scilink`): a single
 conversational agent that auto-routes each request to the right specialist —
@@ -23,27 +23,27 @@ from pathlib import Path
 # ==============================================================================
 
 def main():
-    """Main entry point for the 'scilink meta' command (and bare 'scilink')."""
+    """Main entry point for the 'scilink explore' command (and bare 'scilink')."""
 
     parser = argparse.ArgumentParser(
-        prog='scilink meta',
+        prog='scilink explore',
         description='SciLink Meta-Agent - one chat surface that auto-routes '
                     'to the analyze and plan specialists',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Launch the meta-agent (identical to running bare `scilink`)
-  scilink meta
+  scilink explore
 
   # Seed the first turn with your research goal
-  scilink meta --message "Analyze grains.tif then plan a follow-up campaign"
+  scilink explore --message "Analyze grains.tif then plan a follow-up campaign"
 
   # Autopilot mode (meta delegates on its own judgement; reports as it goes)
-  scilink meta --mode autopilot
+  scilink explore --mode autopilot
 
   # Use a different model / an internal proxy
-  scilink meta --model gemini-2.0-flash
-  scilink meta --base-url https://my-proxy.example.com/v1 --model my-model
+  scilink explore --model gemini-2.0-flash
+  scilink explore --base-url https://my-proxy.example.com/v1 --model my-model
 
 Modes — the meta has two levels (a delegation runs a specialist through its
 one-shot run_task, so the specialists' step-by-step co-pilot mode does not

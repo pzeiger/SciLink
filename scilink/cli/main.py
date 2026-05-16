@@ -127,7 +127,7 @@ def main():
         # which auto-routes work between the analyze and plan specialists.
         # Explicit per-mode commands and `scilink help` still work below.
         from scilink.cli.meta import main as meta_main
-        sys.argv = [sys.argv[0] + ' meta']
+        sys.argv = [sys.argv[0] + ' explore']
         return meta_main()
 
     command = sys.argv[1]
@@ -153,9 +153,9 @@ def main():
         sys.argv = [sys.argv[0] + ' analyze'] + sys.argv[2:]
         return analyze_main()
 
-    elif command == 'meta':
+    elif command in ('explore', 'meta'):  # 'meta' kept as a back-compat alias
         from scilink.cli.meta import main as meta_main
-        sys.argv = [sys.argv[0] + ' meta'] + sys.argv[2:]
+        sys.argv = [f"{sys.argv[0]} {command}"] + sys.argv[2:]
         return meta_main()
 
     elif command == 'ui':
@@ -197,7 +197,8 @@ Available Commands:
   (none)        Launch the meta-agent orchestrator — coordinates the
                 analyze and plan specialists from one chat surface
 
-  meta          The meta-agent, explicit form (same as bare `scilink`)
+  explore       The meta-agent, explicit form (same as bare `scilink`).
+                Alias: `meta`
 
   analyze       Analysis agents for microscopy, spectroscopy, and
                 experimental data processing
@@ -218,7 +219,7 @@ Available Commands:
 
 Examples:
   scilink                                   # Launch the meta-agent
-  scilink meta --mode autopilot            # Meta-agent, autopilot autonomy
+  scilink explore --mode autopilot         # Meta-agent, autopilot autonomy
   scilink analyze --help                    # See analysis options
   scilink plan --model gemini-2.0-flash-exp # Use a different model
   scilink simulate --help                   # See simulation options

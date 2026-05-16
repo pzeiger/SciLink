@@ -369,7 +369,8 @@ if not st.session_state.agent_initialized:
             with _col:
                 _btype = ("primary" if st.session_state.app_mode == _m["key"]
                           else "secondary")
-                if st.button(_m["label"], type=_btype, use_container_width=True,
+                _label = _m["label"] + (" (beta)" if _m.get("beta") else "")
+                if st.button(_label, type=_btype, use_container_width=True,
                              key=f"mode_{_m['key']}"):
                     st.session_state.app_mode = _m["key"]
                     st.rerun()

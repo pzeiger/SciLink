@@ -14,6 +14,7 @@ from ..config import (
     SUPPORTED_CODE_EXTENSIONS,
     SUPPORTED_DATA_EXTENSIONS,
     SUPPORTED_KNOWLEDGE_EXTENSIONS,
+    SUPPORTED_META_EXTENSIONS,
     SUPPORTED_METADATA_EXTENSIONS,
     SUPPORTED_PLANNING_DATA_EXTENSIONS,
     extra_data_extensions_for,
@@ -374,6 +375,8 @@ def render_sidebar() -> None:
                 _render_analyze_sidebar_uploads()
             elif app_mode == "plan":
                 _render_planning_sidebar_uploads()
+            elif app_mode == "meta":
+                _render_meta_sidebar_uploads()
 
             # ── Agent status (mode-specific) ─────────────────────
             st.divider()
@@ -497,6 +500,31 @@ def _render_planning_sidebar_uploads() -> None:
     if data_files:
         from .chat_uploads import save_planning_uploads
         save_planning_uploads(data_files, "data")
+
+
+def _render_meta_sidebar_uploads() -> None:
+    """Compact sidebar upload widget for Explore (meta) mode.
+
+    One combined uploader — files land in the session's uploads/ directory;
+    the meta-agent's inspect_uploads tool classifies and routes them.
+    """
+    st.subheader("Upload Files")
+
+    extra_exts = extra_data_extensions_for(st.session_state.get("agent"))
+    meta_exts = tuple(SUPPORTED_META_EXTENSIONS) + tuple(extra_exts)
+    files = st.file_uploader(
+        "Files (papers, code, data, metadata)",
+        type=[e.lstrip(".") for e in meta_exts],
+        key="sidebar_uploader_meta",
+        accept_multiple_files=True,
+    )
+    if files:
+        from .chat_uploads import save_meta_uploads
+        save_meta_uploads(files)
+    st.caption(
+        "Saved to the session's uploads/ folder — ask the meta-agent to "
+        "inspect them and it routes each file to the right specialist."
+    )
 
 
 def _render_analyze_status() -> None:

@@ -147,7 +147,7 @@ meta agent delegates through.
 ## The meta agent
 
 The meta agent sits on top of the mode orchestrators so users don't switch
-manually — bare `scilink` (or `scilink meta`) launches it. It is **not a
+manually — bare `scilink` (or `scilink explore`) launches it. It is **not a
 fourth mode**; it's an orchestrator-of-orchestrators with a different role
 (router + context bridge). It lives in `scilink/agents/meta_agent/`
 (`MetaOrchestratorAgent` + `MetaOrchestratorTools`), copying the
