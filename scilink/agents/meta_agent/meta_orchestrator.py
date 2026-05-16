@@ -413,22 +413,30 @@ class MetaOrchestratorAgent:
         human-feedback prompts — they reach the user driving the meta exactly
         as in a direct single-mode session. Called by the delegate_to_* tools.
         Never raises — child/setup failures are captured into an error result.
+
+        A provisional 'running' ledger entry is opened before the child runs,
+        so the UI delegation tree shows the delegation live; it is finalized
+        with the result on completion.
         """
+        if mode == "analysis":
+            from ..exp_agents.analysis_orchestrator import AnalysisMode
+            get_child, autonomy_enum = self._get_analysis_child, AnalysisMode
+        elif mode == "planning":
+            from ..planning_agents.planning_orchestrator import AutonomyLevel
+            get_child, autonomy_enum = self._get_planning_child, AutonomyLevel
+        else:
+            return json.dumps({
+                "status": "error",
+                "message": f"Unknown delegation target: {mode}",
+            })
+
+        entry = self._open_delegation(mode, task, context, context_from)
         try:
-            if mode == "analysis":
-                from ..exp_agents.analysis_orchestrator import AnalysisMode
-                child = self._get_analysis_child()
-                child_autonomy = AnalysisMode[self.meta_mode.name]
-            elif mode == "planning":
-                from ..planning_agents.planning_orchestrator import AutonomyLevel
-                child = self._get_planning_child()
-                child_autonomy = AutonomyLevel[self.meta_mode.name]
-            else:
-                return json.dumps({
-                    "status": "error",
-                    "message": f"Unknown delegation target: {mode}",
-                })
-            result = child.run_task(task, context=context, autonomy=child_autonomy)
+            child = get_child()
+            result = child.run_task(
+                task, context=context,
+                autonomy=autonomy_enum[self.meta_mode.name],
+            )
         except Exception as e:
             self.logger.exception(f"Delegation to {mode} failed: {e}")
             result = {
@@ -436,13 +444,15 @@ class MetaOrchestratorAgent:
                 "key_findings": [], "files_produced": [],
                 "suggested_followups": [], "warnings": [],
             }
-
-        entry = self._record_delegation(mode, task, context, result, context_from)
+        self._close_delegation(entry, result)
         return self._summarize_delegation_result(mode, result, entry["index"])
 
-    def _record_delegation(self, mode, task, context, result,
-                           context_from=None) -> Dict[str, Any]:
-        """Append a compact entry to the delegation ledger (not the full result)."""
+    def _open_delegation(self, mode, task, context, context_from) -> Dict[str, Any]:
+        """Append a provisional 'running' ledger entry before the child runs.
+
+        Finalized later by ``_close_delegation``. Having the entry present up
+        front lets the UI delegation tree show the delegation while it runs.
+        """
         index = len(self._delegation_ledger) + 1
         # Normalize context_from to valid prior delegation indices (the LLM may
         # pass ints, strings, or "#n" forms; drop anything out of range).
@@ -462,6 +472,20 @@ class MetaOrchestratorAgent:
             "task": task,
             "context_keys": sorted(context.keys()) if isinstance(context, dict) else [],
             "context_from": sources,
+            "status": "running",
+            "summary": "",
+            "key_findings": [],
+            "files_produced": [],
+            "suggested_followups": [],
+            "warnings": [],
+            "error": None,
+        }
+        self._delegation_ledger.append(entry)
+        return entry
+
+    def _close_delegation(self, entry: Dict[str, Any], result: dict) -> None:
+        """Finalize a provisional ledger entry with the child's result."""
+        entry.update({
             "status": result.get("status"),
             "summary": result.get("summary", ""),
             "key_findings": result.get("key_findings", []),
@@ -469,9 +493,8 @@ class MetaOrchestratorAgent:
             "suggested_followups": result.get("suggested_followups", []),
             "warnings": result.get("warnings", []),
             "error": result.get("error"),
-        }
-        self._delegation_ledger.append(entry)
-        return entry
+            "completed_at": datetime.now().isoformat(),
+        })
 
     def _summarize_delegation_result(self, mode, result, index) -> str:
         """Build the JSON string a delegate_to_* tool returns to the meta LLM."""

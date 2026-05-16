@@ -582,33 +582,45 @@ def _meta_delegation_tree(ledger: list, specialist: str) -> str:
 
 
 def _render_meta_status() -> None:
-    """Show the Explore meta-agent's delegation tree, by specialist."""
-    agent = st.session_state.agent
-    ledger = getattr(agent, "_delegation_ledger", []) or []
-    mode = st.session_state.agent_config.get("mode", "autopilot")
+    """Show the Explore meta-agent's delegation tree, by specialist.
 
-    if not ledger:
-        st.caption(f"Autonomy: {mode.replace('-', ' ').title()}")
-        st.info("No delegations yet — describe a goal and the meta routes it.")
-        return
+    The tree is wrapped in an ``st.fragment`` that polls the live delegation
+    ledger every 2s while a chat is running, so delegations appear (and flip
+    from ⋯ running to ✓/✗) without waiting for the whole turn to finish.
+    """
+    task = st.session_state.get("chat_task")
+    _interval = "2s" if (task is not None and getattr(task, "is_running", False)) else None
 
-    by_mode: dict = {}
-    for e in ledger:
-        m = e.get("mode", "?")
-        by_mode[m] = by_mode.get(m, 0) + 1
-    specialists = sorted(by_mode)
+    @st.fragment(run_every=_interval)
+    def _delegation_tree_panel() -> None:
+        agent = st.session_state.get("agent")
+        ledger = getattr(agent, "_delegation_ledger", []) or []
+        mode = st.session_state.agent_config.get("mode", "autopilot")
 
-    st.caption(f"{len(ledger)} delegation(s) · {mode.replace('-', ' ').title()}")
-    if st.session_state.get("meta_status_specialist") not in specialists:
-        st.session_state["meta_status_specialist"] = specialists[0]
-    selected = st.selectbox(
-        "Specialist",
-        specialists,
-        format_func=lambda s: f"{s.title()} ({by_mode[s]})",
-        key="meta_status_specialist",
-    )
-    st.text(_meta_delegation_tree(ledger, selected))
-    st.caption("✓ done · ✗ error · ⋯ running · ←#n context source")
+        if not ledger:
+            st.caption(f"Autonomy: {mode.replace('-', ' ').title()}")
+            st.info("No delegations yet — describe a goal and the meta routes it.")
+            return
+
+        by_mode: dict = {}
+        for e in ledger:
+            m = e.get("mode", "?")
+            by_mode[m] = by_mode.get(m, 0) + 1
+        specialists = sorted(by_mode)
+
+        st.caption(f"{len(ledger)} delegation(s) · {mode.replace('-', ' ').title()}")
+        if st.session_state.get("meta_status_specialist") not in specialists:
+            st.session_state["meta_status_specialist"] = specialists[0]
+        selected = st.selectbox(
+            "Specialist",
+            specialists,
+            format_func=lambda s: f"{s.title()} ({by_mode[s]})",
+            key="meta_status_specialist",
+        )
+        st.text(_meta_delegation_tree(ledger, selected))
+        st.caption("✓ done · ✗ error · ⋯ running · ←#n context source")
+
+    _delegation_tree_panel()
 
 
 # ── helpers ──────────────────────────────────────────────────────
