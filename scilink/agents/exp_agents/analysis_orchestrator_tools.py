@@ -1891,33 +1891,65 @@ class AnalysisOrchestratorTools:
                     "message": f"File not found: {image_path}"
                 })
             
-            # Check if it's an image file
+            # Accept standard image formats, plus the array-container formats
+            # load_image can read (.npy/.h5/.hdf5). The latter are generic
+            # containers — a .npy may hold a spectrum or datacube, not an
+            # image — so the loaded array's shape is validated below.
             image_extensions = ['.tif', '.tiff', '.png', '.jpg', '.jpeg', '.bmp']
-            if path.suffix.lower() not in image_extensions:
+            array_extensions = ['.npy', '.h5', '.hdf5']
+            suffix = path.suffix.lower()
+            if suffix not in image_extensions and suffix not in array_extensions:
                 return json.dumps({
                     "status": "error",
-                    "message": f"Not an image file: {path.suffix}. Use this tool only for microscopy images."
+                    "message": (
+                        f"Unsupported file type: {path.suffix}. preview_image "
+                        "accepts .tif/.tiff/.png/.jpg/.jpeg/.bmp, or "
+                        ".npy/.h5/.hdf5 holding a 2-D or RGB image array."
+                    )
                 })
-            
+
             try:
                 from ...skills._shared.image_processor import load_image
                 import base64
                 from io import BytesIO
                 from PIL import Image
-                
-                # Load image
+
+                # load_image handles .npy/.h5 too, and normalizes them to uint8
                 img_array = load_image(str(path))
-                
+
+                # An array container may hold a non-image. Only a 2-D array,
+                # or 3-D with 3/4 colour channels, is a previewable image.
+                if img_array.ndim == 3 and img_array.shape[-1] == 1:
+                    img_array = img_array[:, :, 0]   # singleton channel -> 2-D
+                is_image = (
+                    img_array.ndim == 2
+                    or (img_array.ndim == 3 and img_array.shape[-1] in (3, 4))
+                )
+                if not is_image:
+                    if img_array.ndim == 1:
+                        guess = "a 1-D signal / spectrum"
+                    elif img_array.ndim == 3:
+                        guess = (f"a {img_array.shape[-1]}-channel datacube "
+                                 "(e.g. hyperspectral)")
+                    else:
+                        guess = f"a {img_array.ndim}-D array"
+                    return json.dumps({
+                        "status": "error",
+                        "message": (
+                            f"{path.name} holds an array of shape "
+                            f"{list(img_array.shape)} — not a previewable "
+                            f"image; it looks like {guess}. preview_image "
+                            "renders 2-D or RGB images only."
+                        )
+                    })
+
                 # Get basic stats
                 shape = img_array.shape
                 dtype = str(img_array.dtype)
-                
+
                 # Convert to PIL for resizing and encoding
-                if len(shape) == 2:
-                    pil_img = Image.fromarray(img_array)
-                else:
-                    pil_img = Image.fromarray(img_array)
-                
+                pil_img = Image.fromarray(img_array)
+
                 # Resize for preview (max 512px)
                 max_dim = 512
                 if max(pil_img.size) > max_dim:
@@ -1955,7 +1987,10 @@ class AnalysisOrchestratorTools:
             name="preview_image",
             description=(
                 "Load a microscopy image preview for visual inspection. "
-                "Returns the image as base64 for you to examine."
+                "Accepts .png/.tif/.jpg/.bmp and .npy/.h5 array files that "
+                "hold a 2-D or RGB image (a non-image array — spectrum, "
+                "datacube — is rejected with an explanation). Returns the "
+                "image as base64 for you to examine."
             ),
             parameters={
                 "image_path": {
