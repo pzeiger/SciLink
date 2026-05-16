@@ -369,12 +369,14 @@ if not st.session_state.agent_initialized:
             with _col:
                 _btype = ("primary" if st.session_state.app_mode == _m["key"]
                           else "secondary")
-                _label = _m["label"] + (" (beta)" if _m.get("beta") else "")
-                if st.button(_label, type=_btype, use_container_width=True,
+                if st.button(_m["label"], type=_btype, use_container_width=True,
                              key=f"mode_{_m['key']}"):
                     st.session_state.app_mode = _m["key"]
                     st.rerun()
-        _cur_desc = _mode_map[st.session_state.app_mode]["description"]
+        _cur_mode = _mode_map[st.session_state.app_mode]
+        _cur_desc = _cur_mode["description"]
+        if _cur_mode.get("beta"):
+            _cur_desc = f"BETA · {_cur_desc}"
         st.markdown(
             f'<p style="text-align:center;color:#6B7A8C;font-size:0.85em;'
             f'margin-top:-4px;margin-bottom:12px">'
