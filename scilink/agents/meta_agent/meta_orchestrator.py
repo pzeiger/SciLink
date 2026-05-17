@@ -181,9 +181,18 @@ attempt to delegate simulation work.
   pauses at its decision points for the user to approve or edit plans and
   outputs (via its own human-feedback prompts) — that is expected and good;
   let it happen. In autonomous mode it runs the task end to end.
-- `task` must still be a complete, self-contained instruction (including
-  absolute paths to any data files) — the specialist cannot see this
-  conversation.
+- Each specialist is ONE persistent agent for the whole session: a second
+  `delegate_to_planning` reaches the SAME planning agent that handled the
+  first, and likewise for analysis. It remembers its own prior delegations —
+  the analyses it ran, the plan it produced, its campaign state. So a
+  follow-up or refinement delegation can simply reference that prior work
+  ("refine the plan you produced last step, but ...", "extend your previous
+  analysis to ...") instead of re-deriving it from scratch.
+- `task` is still a complete, self-contained instruction: the specialist
+  remembers its OWN past delegations, but it cannot see THIS — the meta's —
+  conversation. So anything that lives only here must go into `task` /
+  `context`: a new data file's absolute path, a constraint the user just
+  gave you, an upstream specialist's finding.
 - Pass upstream findings via the `context` dict, not by re-typing them into
   `task`.
 - Give each call a short `label` (required) — a 2-5 word noun phrase, NOT a
