@@ -1318,6 +1318,20 @@ class ImagePlanningController:
             )
             if values:
                 prompt.append(f"Range: {values[0]} to {values[-1]} {unit}")
+            secondary = series_metadata.get("secondary_variables") or []
+            if secondary:
+                names = "; ".join(
+                    f"{s.get('variable')}"
+                    + (f" ({s.get('unit')})" if s.get("unit") else "")
+                    for s in secondary
+                )
+                prompt.append(
+                    f"Additional control variable(s) co-varying across the "
+                    f"series: {names}. The series is ordered by "
+                    f"{series_metadata['variable']}, but these also change "
+                    f"between images — account for their effect when "
+                    f"interpreting how the data evolves."
+                )
 
         # Montage comparison (all scouts in one figure)
         montage = state.get("scout_montage_bytes")

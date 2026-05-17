@@ -1097,6 +1097,20 @@ class HumanFeedbackRefinementController:
             )
             if values:
                 prompt.append(f"Range: {values[0]} to {values[-1]} {unit}")
+            secondary = series_metadata.get("secondary_variables") or []
+            if secondary:
+                names = "; ".join(
+                    f"{s.get('variable')}"
+                    + (f" ({s.get('unit')})" if s.get("unit") else "")
+                    for s in secondary
+                )
+                prompt.append(
+                    f"Additional control variable(s) co-varying across the "
+                    f"series: {names}. The series is ordered by "
+                    f"{series_metadata['variable']}, but these also change "
+                    f"between spectra — account for their effect when "
+                    f"interpreting how the data evolves."
+                )
 
         # Overlay comparison plot (all scouts on one figure)
         overlay = state.get("scout_overlay_plot")

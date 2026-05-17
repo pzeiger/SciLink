@@ -197,64 +197,54 @@ def _detect_sidecar_jsons(
     return sidecar_map, global_jsons
 
 
-def _parse_single_key_response(raw: str, valid_keys: list[str]) -> str | None:
-    """Extract a candidate key name from a potentially noisy LLM response.
+def _parse_key_list_response(raw: str, valid_keys: list[str]) -> list[str]:
+    """Extract an ordered list of key names from a (possibly noisy) LLM
+    response. The LLM is asked for the control-variable field names
+    comma-separated, most primary first; ``NONE`` means none qualifies.
 
-    Handles common verbosity patterns:
-    - Bare key:         ``temperature``
-    - Quoted:           ``"temperature"`` or ``'temperature'``
-    - Backtick-wrapped: `` `temperature` `` or `` **temperature** ``
-    - Markdown fence:   ````` ```temperature``` `````
-    - Sentence:         ``The control variable is temperature.``
-    - With preamble:    ``Based on the context, temperature``
-
-    Returns the matched key, or ``None`` for NONE / UNCERTAIN / no match.
+    Returns the matched keys in response order (deduped), or ``[]``.
     """
     # Strip markdown fences
     text = raw.strip()
     if text.startswith("```"):
         text = text.split("```")[1].split("```")[0].strip()
 
-    # Quick exact match (ideal case)
-    clean = text.strip().strip("\"'`*. ")
-    if clean.upper() in ("NONE", "UNCERTAIN"):
-        return None
-    if clean in valid_keys:
-        return clean
+    if text.strip().strip("\"'`*. ").upper() == "NONE":
+        return []
 
-    # Try to find a candidate key anywhere in the response (case-sensitive,
-    # matching whole words to avoid partial matches like "temp" in
-    # "temperature").  If exactly one key appears, use it.
-    found = []
+    # Ideal case: comma / newline / semicolon separated tokens.
+    ordered: list[str] = []
+    for token in re.split(r"[,\n;]+", text):
+        tok = token.strip().strip("\"'`*. ")
+        if tok in valid_keys and tok not in ordered:
+            ordered.append(tok)
+    if ordered:
+        return ordered
+
+    # Fallback: scan for any valid key as a whole word, in order of appearance.
+    positions: list[tuple[int, str]] = []
     for key in valid_keys:
-        if re.search(rf"\b{re.escape(key)}\b", text):
-            found.append(key)
-
-    if len(found) == 1:
-        return found[0]
-
-    # Check for NONE / UNCERTAIN buried in the response
-    upper = text.upper()
-    if "NONE" in upper or "UNCERTAIN" in upper:
-        return None
-
-    # Truly ambiguous or unrecognisable
-    return None
+        m = re.search(rf"\b{re.escape(key)}\b", text)
+        if m:
+            positions.append((m.start(), key))
+    positions.sort()
+    return [k for _, k in positions]
 
 
-def _llm_pick_series_variable(
+def _llm_identify_control_variables(
     varying_keys: list[str],
     sidecar_data: dict[str, dict],
     model,
     logger: logging.Logger,
     experimental_context: dict | None = None,
-) -> str | None:
-    """Use the LLM to decide which varying sidecar field, if any, is the
-    true independent control variable.
+) -> list[str]:
+    """Use the LLM to identify which varying sidecar fields are genuine
+    independent control variables, ordered most-primary-first.
 
-    Works for both single- and multi-candidate scenarios. The LLM may
-    return ``NONE`` when no candidate is a genuine control variable
-    (e.g. a single varying field that is clearly an acquisition setting).
+    An experiment may deliberately vary several variables at once (a
+    factorial / grid design — e.g. temperature AND pH). The LLM returns the
+    full set, so the caller can record a primary axis plus secondary
+    variables rather than being forced into a single pick.
 
     Parameters
     ----------
@@ -272,9 +262,9 @@ def _llm_pick_series_variable(
 
     Returns
     -------
-    str | None
-        The chosen key name, or ``None`` if the LLM could not decide or
-        determined that none of the candidates is a control variable.
+    list[str]
+        Control-variable key names, primary first; ``[]`` when none of the
+        candidates is a genuine control variable.
     """
     # Build a summary of each candidate key and its per-file values
     candidates_summary = {}
@@ -308,31 +298,35 @@ def _llm_pick_series_variable(
         "You are a scientific data analysis assistant. A user has a series of "
         "data files, each accompanied by a JSON sidecar containing per-file "
         "metadata. The following numeric fields change across the files.\n\n"
-        "Your task is to decide whether any of these fields is the "
-        "**independent control variable** — the physical or experimental "
-        "quantity the experimenter intentionally varied across measurements "
-        "(e.g. temperature, concentration, voltage, pressure, dose, time). "
+        "Identify which of these fields are genuine **independent control "
+        "variables** — physical or experimental quantities the experimenter "
+        "intentionally varied across measurements (e.g. temperature, "
+        "concentration, voltage, pressure, dose, time).\n\n"
+        "An experiment may deliberately vary MORE THAN ONE at once — a "
+        "factorial / grid design (e.g. temperature AND pH together). Report "
+        "ALL genuine control variables; do NOT force a single choice and do "
+        "NOT answer 'uncertain' just because there are several.\n\n"
         "For in-situ, time-resolved, or kinetic experiments, elapsed time "
-        "or total time IS the control variable — do not dismiss it as mere "
+        "or total time IS a control variable — do not dismiss it as mere "
         "acquisition metadata. "
         "Instrument and acquisition parameters that happen to differ "
         "(e.g. laser_power, integration_time, slit_width, probe_current) "
-        "are NOT control variables. Note: 'integration_time' (detector "
-        "exposure per scan) is an acquisition setting, but 'total time' or "
-        "'elapsed time' (cumulative experiment duration) is typically a "
-        "real control variable.\n\n"
-        "If multiple candidates exist, prefer the one that represents the "
-        "primary experimental axis (e.g. 'Total time (s)' over redundant "
-        "derivatives like 'measurement_duration').\n\n"
+        "are NOT control variables — exclude them. Note: 'integration_time' "
+        "(detector exposure per scan) is an acquisition setting, but 'total "
+        "time' or 'elapsed time' (cumulative experiment duration) is a real "
+        "control variable.\n\n"
         "It is also possible that NONE of the listed fields is a true "
-        "control variable — for example the real control variable was set "
-        "manually and not recorded in the sidecar metadata.\n\n"
+        "control variable — for example the real one was set manually and "
+        "not recorded in the sidecar metadata.\n\n"
         f"Experimental context:\n{context_block}\n\n"
         f"Candidate fields and their per-file values:\n"
         f"{json.dumps(candidates_summary, indent=2)}\n\n"
-        "IMPORTANT: Your response must be a SINGLE word — no explanations, "
-        "no punctuation, no formatting. Respond with exactly one of:\n"
-        f"  {keys_list}, NONE, UNCERTAIN\n"
+        "RESPONSE FORMAT: a single line, comma-separated, listing the control "
+        "variable field names MOST PRIMARY FIRST (the dominant experimental "
+        "axis first, the rest after). No explanations, no other text. If "
+        "none of the fields is a genuine control variable, respond with "
+        "exactly NONE.\n"
+        f"Choose only from: {keys_list}\n"
     )
 
     try:
@@ -343,27 +337,27 @@ def _llm_pick_series_variable(
             else str(response)
         ).strip()
 
-        chosen = _parse_single_key_response(raw, varying_keys)
+        chosen = _parse_key_list_response(raw, varying_keys)
 
-        if chosen is None:
+        if not chosen:
             logger.info(
-                "LLM did not select a series variable "
+                "LLM identified no series control variable "
                 "(response: %r, candidates: %s)",
                 raw,
                 varying_keys,
             )
-            return None
+            return []
 
         logger.info(
-            "LLM selected '%s' as the series variable from candidates %s",
+            "LLM identified control variable(s) %s from candidates %s",
             chosen,
             varying_keys,
         )
         return chosen
 
     except Exception as exc:
-        logger.warning("LLM series-variable selection failed: %s", exc)
-        return None
+        logger.warning("LLM control-variable identification failed: %s", exc)
+        return []
 
 
 # Keys produced by the LLM metadata normalization schema.
@@ -443,8 +437,10 @@ def _extract_series_from_sidecars(
     Returns
     -------
     series_meta : dict | None
-        ``{"variable": ..., "values": {fname: val}, "unit": ...}``
-        or ``None`` when extraction is not possible.
+        ``{"variable": ..., "values": {fname: val}, "unit": ...}`` for the
+        primary control variable, plus an optional ``"secondary_variables"``
+        list of the same shape for any others that co-vary (grid designs).
+        ``None`` when extraction is not possible.
     per_file_meta : dict[str, dict]
         Full sidecar contents keyed by data filename (always returned,
         even when ``series_meta`` is ``None``).
@@ -497,21 +493,22 @@ def _extract_series_from_sidecars(
     if not varying_keys:
         return None, per_file_meta
 
-    # 5. Ask the LLM to evaluate candidates (even a single one could be
-    #    just an acquisition setting rather than a true control variable).
+    # 5. Ask the LLM which varying fields are genuine control variables
+    #    (even a single one could be just an acquisition setting; a grid
+    #    design may have several).
     if model is not None:
         print(
             f"    Varying fields in sidecars: {varying_keys}. "
-            f"Asking LLM to identify the control variable..."
+            f"Asking LLM to identify the control variable(s)..."
         )
-        variable = _llm_pick_series_variable(
+        control_vars = _llm_identify_control_variables(
             varying_keys, sidecar_data, model, logger,
             experimental_context=experimental_context,
         )
     else:
-        variable = None
+        control_vars = []
 
-    if variable is None:
+    if not control_vars:
         logger.info(
             "Could not identify a series control variable from "
             "sidecar candidates: %s",
@@ -519,18 +516,31 @@ def _extract_series_from_sidecars(
         )
         return None, per_file_meta
 
-    # 6. Build series metadata
-    values = {fname: sidecar_data[fname][variable] for fname in sidecar_data}
+    # 6. Build series metadata. The primary control variable becomes
+    #    variable/values/unit (the axis used for file ordering, scouting and
+    #    trend analysis); any others are recorded as secondary_variables so
+    #    the analysis is told the full set of conditions that co-vary.
+    def _meta_for(var: str) -> dict:
+        vals = {fname: sidecar_data[fname][var] for fname in sidecar_data}
+        unit = ""
+        sample_sidecar = next(iter(sidecar_data.values()))
+        for unit_key in (f"{var}_unit", f"{var}_units", "unit", "units"):
+            if unit_key in sample_sidecar:
+                unit = str(sample_sidecar[unit_key])
+                break
+        return {"variable": var, "values": vals, "unit": unit}
 
-    # Try to find a unit: {variable}_unit, {variable}_units, unit, units
-    unit = ""
-    sample_sidecar = next(iter(sidecar_data.values()))
-    for unit_key in [f"{variable}_unit", f"{variable}_units", "unit", "units"]:
-        if unit_key in sample_sidecar:
-            unit = str(sample_sidecar[unit_key])
-            break
+    series_meta = _meta_for(control_vars[0])
+    if len(control_vars) > 1:
+        series_meta["secondary_variables"] = [
+            _meta_for(v) for v in control_vars[1:]
+        ]
+        logger.info(
+            "Series control variables: primary=%s, secondary=%s",
+            control_vars[0], control_vars[1:],
+        )
 
-    return {"variable": variable, "values": values, "unit": unit}, per_file_meta
+    return series_meta, per_file_meta
 
 
 class AnalysisOrchestratorTools:
