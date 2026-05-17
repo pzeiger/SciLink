@@ -243,6 +243,14 @@ Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions
 "characterize this sample", "explore structure-property relationships").
 
 1. `generate_initial_plan`: Use this when starting a NEW campaign or defining a new objective.
+   - Do NOT use for a Bayesian-optimization campaign over an existing dataset —
+     i.e. the objective is "recommend / design the next experiments (batch)" and
+     experimental data is available. That is the Math Loop: go `analyze_file` /
+     `analyze_batch` → `run_optimization`. `run_optimization`'s batch IS the
+     recommendation; a plan would hand-enumerate a different, non-optimal batch
+     that contradicts BO's acquisition output. Skip the planning step entirely
+     and report the BO batch (save it with `save_file` if a shareable file is
+     wanted).
    - Extract knowledge_paths when user mentions papers/PDFs/documents
    - Extract primary_data_set when user mentions experimental data or results folders or files
    - additional_context: Lab constraints, equipment, reagents, budget
@@ -451,6 +459,11 @@ Assume user runs agent from project directory. For example, when user says "file
 - You are optimizing a well-defined property for the current experimental setup.
 - The experiments are running successfully (no failures), and you just need to tune parameters.
 - **At least 3 data files have been successfully analyzed** (check by calling list_workspace_files).
+- **The objective itself is a Bayesian-optimization / "recommend the next
+  experiments" campaign.** Then `run_optimization` IS the deliverable — do NOT
+  also call `generate_initial_plan`. BO is a built-in capability: run it
+  directly. A separately generated plan would hand-design a batch that
+  contradicts (and is inferior to) BO's acquisition-function output.
 
 **Use `iterate_with_results` (The Cognitive Loop) IF:**
 - You need to propose a NEW strategy or experimental setup (e.g., "Change catalyst").
