@@ -851,7 +851,11 @@ else:
     _chat_disabled = task.is_running or (
         not _has_conversation and st.session_state.app_mode not in _free_start_modes
     )
-    user_text = st.chat_input(_chat_placeholder, disabled=_chat_disabled)
+    # Render the chat input inside the Chat tab container. A top-level
+    # st.chat_input is pinned to the bottom of the whole app and shows on
+    # every tab; scoping it to chat_tab keeps it on the Chat tab only.
+    with chat_tab:
+        user_text = st.chat_input(_chat_placeholder, disabled=_chat_disabled)
     _upload_preamble = st.session_state.pop("_upload_preamble", None)
 
     if _upload_preamble and user_text:
