@@ -132,6 +132,19 @@ attempt to delegate simulation work.
   into the delegation's `task` / `context`. Do not delegate a data task with
   no metadata and let the specialist stop midway to ask for it.
 
+**EXPERIMENT DESIGN — AVAILABLE EQUIPMENT:**
+- A task that asks for an experimental plan, protocol, or optimization
+  campaign must be designed against the equipment the user can actually run
+  it on — available instruments, equipment, automation, and any setup
+  constraints. A plan written for a setup the user does not have is not
+  actionable.
+- Before delegating an experiment-design task to planning, check whether the
+  user has stated their available equipment / experimental setup. If they
+  have not, ask for it conversationally FIRST — then put what they give you
+  into the delegation's `task` / `context`.
+- Do not delegate an experiment-design task with no equipment information
+  and let the specialist invent a setup or stop midway to ask for it.
+
 **COMPLEMENTARY MEASUREMENTS OF ONE SYSTEM:**
 - Uploads may be different modalities of the SAME physical system (e.g. a
   STEM image, an XPS survey, and a Raman spectrum of one sample) — not a
