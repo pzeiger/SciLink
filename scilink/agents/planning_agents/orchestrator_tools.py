@@ -3641,13 +3641,28 @@ class OrchestratorTools:
             return sorted(found.values(), key=lambda x: x["name"])
 
         def _resolve_knowledge_data_file(file_name: str):
-            """Resolve a file name to a path in the knowledge directory.
+            """Resolve a file name to a queryable target.
+
+            An absolute / relative path to an existing file or directory is
+            used directly — so a meta-delegated task, whose data lives outside
+            the knowledge directory, works (mirroring read_file / analyze_file).
+            Otherwise the name is matched within the knowledge directory.
 
             Returns (target, error) where target is either:
             - a file path string (for single files)
             - a dict with "type": "directory" (for directory databases)
             """
             from difflib import get_close_matches
+
+            # Direct path: an existing file/directory given by path is used
+            # as-is, without requiring knowledge-directory discovery.
+            p = Path(file_name).expanduser()
+            if p.is_file() and p.suffix.lower() in QUERYABLE_EXTENSIONS:
+                return str(p.resolve()), None
+            if p.is_dir():
+                return {"name": p.name, "path": str(p.resolve()),
+                        "type": "directory"}, None
+
             candidates = _discover_queryable_files()
             if not candidates:
                 return None, json.dumps({
@@ -3898,29 +3913,31 @@ class OrchestratorTools:
 
             print(f"  ⚡ Tool: Querying knowledge data: '{query[:80]}...'")
 
-            # 1. Discover queryable files and directory databases
+            # 1. Discover queryable files / directory databases. Informational
+            #    only — an explicit `file_name` path is resolved directly below,
+            #    so discovery being empty is not an error when a path is given.
             queryable = _discover_queryable_files()
-            if not queryable:
-                return json.dumps({
-                    "status": "error",
-                    "message": "No queryable data files or directories found in knowledge directory."
-                })
 
             # 2. Resolve target
-            if file_name is None:
-                if len(queryable) == 1:
-                    target = queryable[0]
-                    print(f"    - Auto-selected: {target['name']}")
-                else:
-                    return json.dumps({
-                        "status": "file_selection_needed",
-                        "message": "Multiple queryable sources found. Specify file_name.",
-                        "available_files": [f["name"] for f in queryable]
-                    })
-            else:
+            if file_name is not None:
                 target, error = _resolve_knowledge_data_file(file_name)
                 if error:
                     return error
+            elif not queryable:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No queryable data files or directories found by "
+                               "discovery. Pass the file's absolute path as `file_name`."
+                })
+            elif len(queryable) == 1:
+                target = queryable[0]
+                print(f"    - Auto-selected: {target['name']}")
+            else:
+                return json.dumps({
+                    "status": "file_selection_needed",
+                    "message": "Multiple queryable sources found. Specify file_name.",
+                    "available_files": [f["name"] for f in queryable]
+                })
 
             # 2b. Branch: directory database vs single file
             if isinstance(target, dict) and target.get("type") == "directory":
@@ -4039,10 +4056,12 @@ class OrchestratorTools:
             func=query_knowledge_data,
             name="query_knowledge_data",
             description=(
-                "Query knowledge data with natural language. Works with single "
+                "Query tabular data with natural language. Works with single "
                 "data files (CSV, XLSX) and directory databases (folders of "
                 "uniformly-structured files like JSON records). Generates and "
-                "executes a Python script to answer questions about the data."
+                "executes a Python script to answer questions about the data. "
+                "Accepts a file by an absolute path (preferred when the data "
+                "lives outside the knowledge directory) or by name."
             ),
             parameters={
                 "query": {
@@ -4051,7 +4070,12 @@ class OrchestratorTools:
                 },
                 "file_name": {
                     "type": "string",
-                    "description": "Name of knowledge file to query (e.g., 'PWSdatabase.xlsx'). If omitted, lists available files."
+                    "description": (
+                        "The data file to query, given as an absolute path to "
+                        "an existing file or directory, or as a bare file name "
+                        "to look up in the knowledge directory. If omitted, "
+                        "lists available files."
+                    )
                 }
             },
             required=["query"]
