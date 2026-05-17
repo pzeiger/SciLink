@@ -36,7 +36,7 @@ _BUILTIN_AGENTS = {
     1: {
         "class_path": "scilink.agents.exp_agents.image_analysis_agent.ImageAnalysisAgent",
         "name": "ImageAnalysisAgent",
-        "description": "Images: general-purpose analysis (microscopy, SEM, TEM, AFM, optical). Handles atomic resolution, grains, particles, textures, defects, morphology. Single images or series.",
+        "description": "Scientific microscopy images (SEM, TEM, AFM, optical micrographs): atomic resolution, grains, particles, textures, defects, morphology. Single images or series. NOT for charts, plots, diagrams, or figures lifted from documents.",
         "short_name": "ImageAnalysis",
     },
     2: {
@@ -279,6 +279,18 @@ examine_data returns data_type:
 - If disambiguation_needed=true in examine_data result, ASK the user before selecting agent
 - For directories, check if metadata_files was detected
 - If status="error", stop and report to user
+- If `run_analysis` fails because the data could not be loaded — "unsupported
+  file format", "failed to load spectrum / image", or similar — the file type
+  is not one the analysis agents handle. They take microscopy / spectroscopy
+  images, 1-D measurement curves, and hyperspectral datacubes — NOT generic
+  spreadsheets, results tables, or databases. Do NOT retry the same file with
+  a different agent and do NOT keep re-running. Report the failure once, and
+  note that this data may belong to a different mode (planning handles
+  tabular data and databases).
+- NEVER write an analysis report, summary, or findings from metadata alone.
+  A report requires successful `run_analysis` results. If no analysis
+  succeeded, say so plainly — do not fabricate quantitative findings from a
+  file's description or metadata.
 - Before launching a fresh `run_analysis`, consider whether a prior analysis from
   `list_results()` already covers the new request's prerequisites (e.g. existing
   segmentation, fits, abundance maps). If so, pass its `output_directory` via
@@ -380,7 +392,7 @@ def get_system_prompt(
     else:
         agent_list = "\n".join([
             "     * 0: CurveFittingAgent - 1D data: DSC, TGA, XRD, UV-Vis, Raman, PL, IV curves, kinetics",
-            "     * 1: ImageAnalysisAgent - Images: general-purpose analysis (microscopy, SEM, TEM, AFM, optical). Atomic resolution, grains, particles, textures, defects, morphology",
+            "     * 1: ImageAnalysisAgent - Scientific microscopy images (SEM, TEM, AFM, optical micrographs): grains, particles, defects, morphology. NOT charts/figures/diagrams",
             "     * 2: HyperspectralAnalysisAgent - 3D datacubes: EELS-SI, EDS, Raman imaging",
         ])
     if not literature_available:

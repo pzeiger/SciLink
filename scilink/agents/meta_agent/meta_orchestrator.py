@@ -79,16 +79,7 @@ SciLink's specialist mode orchestrators. You do not analyze data or design
 experiments yourself; you route each piece of work to the right specialist
 and weave their results into one coherent response for the user.
 
-**WHEN TO USE EACH SPECIALIST:**
-- `delegate_to_analysis` — experimental data already exists and needs to be
-  interpreted: microscopy / spectroscopy images, 1D curves, hyperspectral
-  datacubes, "analyze this file", data-quality assessment, feature
-  extraction, novelty checks against the literature. It can also read a few
-  user-provided papers or reports directly as reference context for the
-  analysis.
-- `delegate_to_planning` — deciding what to do next: experimental campaign
-  design, multi-objective Bayesian optimization, "what should I measure or
-  run next", hypothesis generation, trade-off analysis.
+__SPECIALIST_CAPABILITIES__
 
 Computational simulation (DFT / MD) is NOT available in this build — do not
 attempt to delegate simulation work.
@@ -98,9 +89,19 @@ attempt to delegate simulation work.
   `inspect_uploads` FIRST, before delegating. It returns a content probe of
   each file (array shape/dtype, table columns, document text, JSON keys) so
   you route from evidence rather than guessing from filenames.
-- Route data from the probe, not the name: images and measurement arrays,
-  and data tables with experimental columns → `delegate_to_analysis`; code
-  → `delegate_to_planning`.
+- Route data from the probe, not the name. Microscopy / spectroscopy
+  MEASUREMENTS — images, 1-D measurement curves (x vs y), hyperspectral
+  datacubes → `delegate_to_analysis`. TABULAR data — results tables,
+  composition tables, spreadsheets, multi-column databases → `delegate_to_
+  planning` (its `analyze_file` / `query_knowledge_data` tools read tables;
+  the analysis agents cannot). Code → `delegate_to_planning`.
+- A 1-D measurement *curve* (a spectrum, a scan) is analysis data; a
+  *results table* (rows = samples / runs, columns = properties) is planning
+  data. Do not conflate them.
+- Charts, plots, diagrams, figures lifted from documents, screenshots are
+  NOT scientific image data — never send them to `delegate_to_analysis`
+  (its image agent is for microscopy data only). Treat a chart/figure as
+  reference context: read it yourself, or route the document to planning.
 - Papers / reports / notes route by INTENT, not file type. A few documents
   that are reference context for interpreting the data — a methods paper, a
   prior analysis report — go WITH the data to `delegate_to_analysis`, which
@@ -195,12 +196,34 @@ attempt to delegate simulation work.
 
 
 def get_system_prompt(meta_mode: MetaMode) -> str:
-    """Return the system prompt for the given meta autonomy mode."""
+    """Return the system prompt for the given meta autonomy mode.
+
+    The prompt still contains the ``__SPECIALIST_CAPABILITIES__`` placeholder;
+    it is filled in on the meta's first chat turn by ``_inject_capabilities``
+    (the live tool inventory can only be read once the child orchestrators
+    exist).
+    """
     directives = {
         MetaMode.AUTOPILOT: _AUTOPILOT_DIRECTIVE,
         MetaMode.AUTONOMOUS: _AUTONOMOUS_DIRECTIVE,
     }
     return directives[meta_mode] + _SYSTEM_PROMPT_BODY
+
+
+def _tool_lines(schemas) -> str:
+    """Bulleted ``name``: first-line-description list from OpenAI tool
+    schemas (``[{"function": {"name", "description", ...}}, ...]``)."""
+    lines = []
+    for s in schemas or []:
+        fn = s.get("function") if isinstance(s, dict) else None
+        if not isinstance(fn, dict) or not fn.get("name"):
+            continue
+        desc = " ".join(str(fn.get("description") or "").split())
+        if len(desc) > 160:
+            desc = desc[:159] + "…"
+        lines.append(f"    - `{fn['name']}`: {desc}" if desc
+                     else f"    - `{fn['name']}`")
+    return "\n".join(lines)
 
 
 class MetaOrchestratorAgent:
@@ -289,6 +312,9 @@ class MetaOrchestratorAgent:
         # Session state — kept shallow; children own their deep state.
         self._children: Dict[str, Any] = {}          # "analysis"/"planning" -> agent
         self._delegation_ledger: List[Dict[str, Any]] = []
+        # Auto-generated specialist capability inventory — built once on the
+        # first chat turn (children must exist to read their tool registries).
+        self._capabilities_block: Optional[str] = None
 
         self.message_count = 0
         self.last_checkpoint_message_count = 0
@@ -428,6 +454,74 @@ class MetaOrchestratorAgent:
                 data_dir=None,
             )
         return self._children["planning"]
+
+    # =========================================================================
+    # Specialist capability inventory
+    # =========================================================================
+
+    def _build_capabilities_block(self) -> str:
+        """Build the routing inventory by reading each specialist's LIVE tool
+        registry — so a new tool / sub-agent in any mode appears here with no
+        meta-agent edit. Constructs the child orchestrators to read them."""
+        sections: List[str] = []
+
+        try:
+            analysis = self._get_analysis_child()
+            agents = getattr(analysis, "_agent_registry", {}) or {}
+            agent_lines = "\n".join(
+                f"    - {s.get('name')}: {s.get('description')}"
+                for s in agents.values() if isinstance(s, dict)
+            )
+            a_tools = _tool_lines(
+                getattr(getattr(analysis, "tools", None), "openai_schemas", []))
+            sections.append(
+                "`delegate_to_analysis` — interpret EXISTING experimental "
+                "measurements. Each `run_analysis` picks ONE of these "
+                "sub-agents by data type:\n"
+                f"{agent_lines}\n  Orchestrator tools:\n{a_tools}"
+            )
+        except Exception as e:  # noqa: BLE001 - probe must not break chat()
+            self.logger.warning(f"analysis capability probe failed: {e}")
+
+        try:
+            planning = self._get_planning_child()
+            p_tools = _tool_lines(
+                getattr(getattr(planning, "tools", None), "openai_schemas", []))
+            sections.append(
+                "`delegate_to_planning` — decide what to do next AND handle "
+                "all tabular / knowledge data. Tools:\n"
+                f"{p_tools}"
+            )
+        except Exception as e:  # noqa: BLE001
+            self.logger.warning(f"planning capability probe failed: {e}")
+
+        if not sections:
+            raise RuntimeError("no specialist capabilities could be read")
+        return (
+            "**SPECIALIST CAPABILITIES** — auto-generated from each "
+            "specialist's live tool registry; route against these:\n\n"
+            + "\n\n".join(sections)
+        )
+
+    def _inject_capabilities(self) -> None:
+        """Splice the capability inventory into the system prompt. Built once
+        and cached; re-applied if the prompt is later rebuilt. Never raises."""
+        if not self.messages or self.messages[0].get("role") != "system":
+            return
+        if "__SPECIALIST_CAPABILITIES__" not in self.messages[0]["content"]:
+            return  # placeholder already consumed
+        if self._capabilities_block is None:
+            try:
+                self._capabilities_block = self._build_capabilities_block()
+            except Exception as e:  # noqa: BLE001 - must never break chat()
+                self.logger.warning(f"capability inventory unavailable: {e}")
+                self._capabilities_block = (
+                    "**SPECIALIST CAPABILITIES**: (inventory unavailable — "
+                    "route by the principles below.)"
+                )
+        self.messages[0]["content"] = self.messages[0]["content"].replace(
+            "__SPECIALIST_CAPABILITIES__", self._capabilities_block
+        )
 
     # =========================================================================
     # Delegation + ledger (used by MetaOrchestratorTools)
@@ -702,6 +796,10 @@ class MetaOrchestratorAgent:
     def chat(self, user_input: str) -> str:
         """Main chat interface with robust function calling support."""
         self.message_count += 1
+
+        # First-turn: fill the system prompt's specialist-capability inventory
+        # from the children's live tool registries (idempotent thereafter).
+        self._inject_capabilities()
 
         # Auto-checkpoint every N messages.
         if self.message_count - self.last_checkpoint_message_count >= self.CHECKPOINT_INTERVAL:
