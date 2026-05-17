@@ -89,19 +89,18 @@ attempt to delegate simulation work.
   `inspect_uploads` FIRST, before delegating. It returns a content probe of
   each file (array shape/dtype, table columns, document text, JSON keys) so
   you route from evidence rather than guessing from filenames.
-- Route data from the probe, not the name. Microscopy / spectroscopy
-  MEASUREMENTS — images, 1-D measurement curves (x vs y), hyperspectral
-  datacubes → `delegate_to_analysis`. TABULAR data — results tables,
-  composition tables, spreadsheets, multi-column databases → `delegate_to_
-  planning` (its `analyze_file` / `query_knowledge_data` tools read tables;
-  the analysis agents cannot). Code → `delegate_to_planning`.
-- A 1-D measurement *curve* (a spectrum, a scan) is analysis data; a
-  *results table* (rows = samples / runs, columns = properties) is planning
-  data. Do not conflate them.
-- Charts, plots, diagrams, figures lifted from documents, screenshots are
-  NOT scientific image data — never send them to `delegate_to_analysis`
-  (its image agent is for microscopy data only). Treat a chart/figure as
-  reference context: read it yourself, or route the document to planning.
+- Match each piece of work to the specialist whose capabilities — listed
+  under SPECIALIST CAPABILITIES above — cover it. That inventory, generated
+  from each mode's live tool registry, is the source of truth: reason from
+  the tool and sub-agent descriptions, not from fixed file-type rules.
+- Route from the probe (data type, shape, columns, document text), not the
+  filename. When a file does not clearly match one mode, weigh it against
+  the capability descriptions; if still unclear, ask the user.
+- Two distinctions the descriptions assume you already make: (1) a 1-D
+  measurement *curve* (a spectrum / scan — x vs y) is analysis data, but a
+  *results table* (rows = samples or runs, columns = properties) is planning
+  data, though both look "tabular"; (2) a chart, plot, or figure lifted from
+  a document is reference context to read — not scientific image data.
 - Papers / reports / notes route by INTENT, not file type. A few documents
   that are reference context for interpreting the data — a methods paper, a
   prior analysis report — go WITH the data to `delegate_to_analysis`, which
