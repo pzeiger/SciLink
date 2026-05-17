@@ -242,9 +242,9 @@ def _llm_identify_control_variables(
     independent control variables, ordered most-primary-first.
 
     An experiment may deliberately vary several variables at once (a
-    factorial / grid design — e.g. temperature AND pH). The LLM returns the
-    full set, so the caller can record a primary axis plus secondary
-    variables rather than being forced into a single pick.
+    factorial / grid design). The LLM returns the full set, so the caller
+    can record a primary axis plus secondary variables rather than being
+    forced into a single pick.
 
     Parameters
     ----------
@@ -303,9 +303,10 @@ def _llm_identify_control_variables(
         "intentionally varied across measurements (e.g. temperature, "
         "concentration, voltage, pressure, dose, time).\n\n"
         "An experiment may deliberately vary MORE THAN ONE at once — a "
-        "factorial / grid design (e.g. temperature AND pH together). Report "
-        "ALL genuine control variables; do NOT force a single choice and do "
-        "NOT answer 'uncertain' just because there are several.\n\n"
+        "factorial / grid design varies several parameters across the "
+        "measurements. Report ALL genuine control variables; do NOT force a "
+        "single choice and do NOT answer 'uncertain' just because there are "
+        "several.\n\n"
         "For in-situ, time-resolved, or kinetic experiments, elapsed time "
         "or total time IS a control variable — do not dismiss it as mere "
         "acquisition metadata. "
