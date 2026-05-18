@@ -23,8 +23,8 @@ Examples:
   # Start with default settings (co-pilot mode)
   scilink plan
   
-  # Use supervised mode (AI leads, human reviews plans/code)
-  scilink plan --autonomy supervised --data-dir ./experimental_results
+  # Use autopilot mode (AI leads, human reviews plans/code)
+  scilink plan --autonomy autopilot --data-dir ./experimental_results
   
   # Full autonomous mode (no human review)
   scilink plan --autonomy autonomous --data-dir ./data --knowledge-dir ./papers --code-dir ./code
@@ -43,10 +43,10 @@ Examples:
 
 Autonomy Levels:
   co-pilot (default)  Human leads, AI assists. Reviews every step.
-  supervised          AI leads, human supervises. Human reviews plans/code only.
+  autopilot           AI leads, human monitors. Human reviews plans/code only.
   autonomous          Full autonomy. No human review, AI chains all tools.
 
-  Note: supervised and autonomous modes require --data-dir to be specified.
+  Note: autopilot and autonomous modes require --data-dir to be specified.
 
 Environment Variables:
   SCILINK_API_KEY          API key for internal proxy
@@ -98,7 +98,7 @@ Supported Models:
     parser.add_argument(
         '--autonomy',
         type=str,
-        choices=['co-pilot', 'supervised', 'autonomous'],
+        choices=['co-pilot', 'autopilot', 'autonomous'],
         default='co-pilot',
         help='Autonomy level (default: co-pilot). Higher levels require --data-dir.'
     )
@@ -107,7 +107,7 @@ Supported Models:
         '--data-dir',
         type=str,
         dest='data_dir',
-        help='Path to experimental data directory (required for supervised/autonomous)'
+        help='Path to experimental data directory (required for autopilot/autonomous)'
     )
     
     parser.add_argument(
@@ -201,7 +201,7 @@ Supported Models:
             api_key = args.google_api_key
 
     # Validate: higher autonomy requires data-dir
-    if args.autonomy in ('supervised', 'autonomous') and not args.data_dir:
+    if args.autonomy in ('autopilot', 'autonomous') and not args.data_dir:
         parser.error(
             f"--data-dir is required for {args.autonomy} mode.\n"
             f"Example: scilink plan --autonomy {args.autonomy} --data-dir ./experimental_results"
@@ -321,7 +321,7 @@ class OrchestratorPlayground:
         # Convert autonomy level string to enum
         autonomy_map = {
             'co-pilot': AutonomyLevel.CO_PILOT,
-            'supervised': AutonomyLevel.SUPERVISED,
+            'autopilot': AutonomyLevel.AUTOPILOT,
             'autonomous': AutonomyLevel.AUTONOMOUS,
         }
         autonomy_level = autonomy_map.get(autonomy_level_str, AutonomyLevel.CO_PILOT)
@@ -445,7 +445,7 @@ class OrchestratorPlayground:
             print("   1. Check that planning_agents package is installed")
             print("   2. Verify all dependencies are installed")
             print("   3. Check your API key is valid")
-            print("   4. For supervised/autonomous: ensure directories exist")
+            print("   4. For autopilot/autonomous: ensure directories exist")
             sys.exit(1)
 
         # === LOAD CUSTOM TOOL FILES ===
@@ -477,7 +477,7 @@ class OrchestratorPlayground:
         print(f"Literature Search: {'Enabled' if futurehouse_key else 'Disabled'}")
         
         # Directory info for higher autonomy
-        if autonomy_level in (AutonomyLevel.SUPERVISED, AutonomyLevel.AUTONOMOUS):
+        if autonomy_level in (AutonomyLevel.AUTOPILOT, AutonomyLevel.AUTONOMOUS):
             print(f"\nWorkspace Directories:")
             print(f"  Data: {self.data_dir}")
             print(f"  Knowledge: {self.knowledge_dir or 'not configured'}")
@@ -694,21 +694,21 @@ class OrchestratorPlayground:
                 # Show current level
                 print(f"\n🎛️  Current Autonomy Level: {self.agent.autonomy_level.value}")
                 print(f"   Human Feedback: {'Enabled' if self.agent._enable_human_feedback else 'Disabled'}")
-                print("\n   To change: /autonomy <co-pilot|supervised|autonomous>")
+                print("\n   To change: /autonomy <co-pilot|autopilot|autonomous>")
                 print("   Note: Higher autonomy works best when started with --data-dir")
             else:
                 # Change level
                 level_map = {
                     'co-pilot': AutonomyLevel.CO_PILOT,
                     'copilot': AutonomyLevel.CO_PILOT,
-                    'supervised': AutonomyLevel.SUPERVISED,
+                    'autopilot': AutonomyLevel.AUTOPILOT,
                     'autonomous': AutonomyLevel.AUTONOMOUS,
                 }
                 new_level = level_map.get(parts[1].lower())
                 
                 if new_level:
                     # Warn if switching to higher autonomy without directories
-                    if new_level in (AutonomyLevel.SUPERVISED, AutonomyLevel.AUTONOMOUS):
+                    if new_level in (AutonomyLevel.AUTOPILOT, AutonomyLevel.AUTONOMOUS):
                         if not self.data_dir:
                             print(f"\n   ⚠️  Warning: No data directory configured.")
                             print(f"   For best results, restart with: scilink plan --autonomy {new_level.value} --data-dir ./your_data")
@@ -719,7 +719,7 @@ class OrchestratorPlayground:
                     print(f"   Human Feedback: {'Enabled' if self.agent._enable_human_feedback else 'Disabled'}")
                 else:
                     print(f"\n   ❌ Unknown level: {parts[1]}")
-                    print("   Valid options: co-pilot, supervised, autonomous")
+                    print("   Valid options: co-pilot, autopilot, autonomous")
             return True
         
         elif cmd == "/checkpoint":
@@ -744,7 +744,7 @@ class OrchestratorPlayground:
         
         Behavior by mode:
         - co-pilot: Do nothing (human leads, full backward compatibility)
-        - supervised: Survey workspace, analyze available data, suggest next steps
+        - autopilot: Survey workspace, analyze available data, suggest next steps
         - autonomous: Execute full pipeline (survey → TEA → plan → checkpoint)
         """
         from scilink.agents.planning_agents.planning_orchestrator import AutonomyLevel
@@ -761,7 +761,7 @@ class OrchestratorPlayground:
         has_code = self.code_dir is not None
         
         # Nothing to process if no directories configured
-        # (This shouldn't happen for supervised/autonomous due to CLI validation,
+        # (This shouldn't happen for autopilot/autonomous due to CLI validation,
         # but we handle it gracefully anyway)
         if not has_data and not has_knowledge:
             return
@@ -837,9 +837,9 @@ class OrchestratorPlayground:
             print("-"*60)
             return
         
-        # === SUPERVISED MODE: Survey and recommend ===
-        if autonomy == AutonomyLevel.SUPERVISED:
-            print("🔄 SUPERVISED MODE: Surveying workspace and preparing recommendations...")
+        # === AUTOPILOT MODE: Survey and recommend ===
+        if autonomy == AutonomyLevel.AUTOPILOT:
+            print("🔄 AUTOPILOT MODE: Surveying workspace and preparing recommendations...")
             print(f"   Objective: {self.agent.objective}")
             print(f"   Data: {self.data_dir}")
             print(f"   Knowledge: {self.knowledge_dir or 'not provided'}")

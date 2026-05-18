@@ -14,6 +14,7 @@ from ..config import (
     SUPPORTED_CODE_EXTENSIONS,
     SUPPORTED_DATA_EXTENSIONS,
     SUPPORTED_KNOWLEDGE_EXTENSIONS,
+    SUPPORTED_META_EXTENSIONS,
     SUPPORTED_METADATA_EXTENSIONS,
     SUPPORTED_PLANNING_DATA_EXTENSIONS,
     extra_data_extensions_for,
@@ -228,8 +229,9 @@ def render_sidebar() -> None:
         if simulate_enabled():
             _render_hpc_connection()
 
-        # Planning mode: embedding model
-        if st.session_state.app_mode == "plan":
+        # Planning + meta modes: embedding model (the meta delegates to a
+        # planning child that uses embeddings for literature / KB retrieval).
+        if st.session_state.app_mode in ("plan", "meta"):
             st.selectbox(
                 "Embedding model",
                 EMBEDDING_MODEL_OPTIONS + ["Custom"],
@@ -246,9 +248,17 @@ def render_sidebar() -> None:
             )
             st.caption("\u2139\ufe0f Leave blank to use the main API key")
 
+        # The meta-agent has only two autonomy levels (a delegation is a
+        # one-shot run_task, so the modes' step-by-step co-pilot does not
+        # apply). Other modes keep the full three-level paradigm.
+        _is_meta = st.session_state.app_mode == "meta"
+        _mode_opts = (["autopilot", "autonomous"] if _is_meta
+                      else ["co-pilot", "autopilot", "autonomous"])
+        if st.session_state.get("cfg_mode") not in _mode_opts:
+            st.session_state.cfg_mode = _mode_opts[0]
         mode = st.selectbox(
             "Autonomy mode",
-            ["co-pilot", "supervised", "autonomous"],
+            _mode_opts,
             key="cfg_mode",
             disabled=_locked,
         )
@@ -365,6 +375,8 @@ def render_sidebar() -> None:
                 _render_analyze_sidebar_uploads()
             elif app_mode == "plan":
                 _render_planning_sidebar_uploads()
+            elif app_mode == "meta":
+                _render_meta_sidebar_uploads()
 
             # ── Agent status (mode-specific) ─────────────────────
             st.divider()
@@ -373,6 +385,8 @@ def render_sidebar() -> None:
                 _render_analyze_status()
             elif app_mode == "plan":
                 _render_planning_status()
+            elif app_mode == "meta":
+                _render_meta_status()
 
         # ── Vibes ──────────────────────────────────────────
         st.divider()
@@ -488,6 +502,31 @@ def _render_planning_sidebar_uploads() -> None:
         save_planning_uploads(data_files, "data")
 
 
+def _render_meta_sidebar_uploads() -> None:
+    """Compact sidebar upload widget for Explore (meta) mode.
+
+    One combined uploader — files land in the session's uploads/ directory;
+    the meta-agent's inspect_uploads tool classifies and routes them.
+    """
+    st.subheader("Upload Files")
+
+    extra_exts = extra_data_extensions_for(st.session_state.get("agent"))
+    meta_exts = tuple(SUPPORTED_META_EXTENSIONS) + tuple(extra_exts)
+    files = st.file_uploader(
+        "Files (papers, code, data, metadata)",
+        type=[e.lstrip(".") for e in meta_exts],
+        key="sidebar_uploader_meta",
+        accept_multiple_files=True,
+    )
+    if files:
+        from .chat_uploads import save_meta_uploads
+        save_meta_uploads(files)
+    st.caption(
+        "Saved to the session's uploads/ folder — ask the meta-agent to "
+        "inspect them and it routes each file to the right specialist."
+    )
+
+
 def _render_analyze_status() -> None:
     """Show analysis-specific agent status metrics."""
     agent = st.session_state.agent
@@ -517,12 +556,96 @@ def _render_planning_status() -> None:
     """Show planning-specific agent status metrics."""
     objective = st.session_state.get("planning_objective", "")
     n_messages = len(st.session_state.chat_messages)
-    mode = st.session_state.agent_config.get("mode", "supervised")
+    mode = st.session_state.agent_config.get("mode", "autopilot")
 
     if objective:
         st.metric("Objective", objective[:40] + ("..." if len(objective) > 40 else ""))
     st.metric("Messages", n_messages)
     st.metric("Autonomy", mode.replace("-", " ").title())
+
+
+def _meta_delegation_tree(ledger: list) -> str:
+    """HTML monospace mission-control → specialists → delegations tree.
+
+    Every specialist branch is shown at once; delegation rows are colored by
+    status. Returned as an HTML ``<pre>`` (so the box-drawing stays aligned)
+    inside a fixed-height scroll box, so a long session does not stretch the
+    sidebar.
+    """
+    import html
+
+    GREY = "#8893a5"  # root / specialist headers — no status
+    status_colors = {
+        "success": "#3fb950",   # green
+        "error": "#f85149",     # red
+        "running": "#d29922",   # amber
+    }
+
+    by_mode: dict = {}
+    for e in ledger:
+        by_mode.setdefault(e.get("mode", "?"), []).append(e)
+    glyphs = {"success": "✓", "error": "✗"}
+    icons = {"analysis": "🧪", "planning": "📋"}
+
+    def _line(text: str, color: str) -> str:
+        return f'<span style="color:{color}">{html.escape(text)}</span>'
+
+    out = [_line("🎛️ Mission control", GREY)]
+    modes = sorted(by_mode)
+    for mi, mode in enumerate(modes):
+        rows = by_mode[mode]
+        last_mode = mi == len(modes) - 1
+        out.append(_line(
+            f"{'└─' if last_mode else '├─'} {icons.get(mode, '•')} "
+            f"{mode.title()}  ({len(rows)})", GREY))
+        cont = "   " if last_mode else "│  "
+        for ri, e in enumerate(rows):
+            rbranch = "└─" if ri == len(rows) - 1 else "├─"
+            # Prefer the meta-supplied short label (the data type); fall back
+            # to the task text for older, unlabelled entries.
+            label = (e.get("label") or "").strip() or " ".join(
+                str(e.get("task") or "").split())
+            if len(label) > 30:
+                label = label[:29] + "…"
+            status = e.get("status")
+            glyph = glyphs.get(status, "⋯")
+            cf = e.get("context_from") or []
+            cf_str = " ←" + ",".join(f"#{n}" for n in cf) if cf else ""
+            out.append(_line(
+                f"{cont}{rbranch} #{e.get('index', '?')} "
+                f"{label} {glyph}{cf_str}",
+                status_colors.get(status, status_colors["running"])))
+    body = "\n".join(out)
+    return (f'<pre style="margin:0;font-size:0.8rem;line-height:1.45;'
+            f'white-space:pre;max-height:340px;overflow:auto">{body}</pre>')
+
+
+def _render_meta_status() -> None:
+    """Show the Explore meta-agent's delegation tree.
+
+    Wrapped in an ``st.fragment`` that polls the live delegation ledger every
+    2s while a chat is running, so delegations appear (and flip from ⋯ running
+    to ✓/✗) without waiting for the whole turn to finish.
+    """
+    task = st.session_state.get("chat_task")
+    _interval = "2s" if (task is not None and getattr(task, "is_running", False)) else None
+
+    @st.fragment(run_every=_interval)
+    def _delegation_tree_panel() -> None:
+        agent = st.session_state.get("agent")
+        ledger = getattr(agent, "_delegation_ledger", []) or []
+        mode = st.session_state.agent_config.get("mode", "autopilot")
+
+        st.caption(f"{len(ledger)} delegation(s) · {mode.replace('-', ' ').title()}")
+        if not ledger:
+            st.info("No delegations yet — describe a goal and the meta routes it.")
+            return
+        # st.html (not st.markdown) — renders raw HTML with no Markdown
+        # processing, so the <pre> newlines survive and the tree stays
+        # top-down rather than collapsing into a wrapped inline run.
+        st.html(_meta_delegation_tree(ledger))
+
+    _delegation_tree_panel()
 
 
 # ── helpers ──────────────────────────────────────────────────────
@@ -562,7 +685,13 @@ def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key
     executors._GLOBAL_SANDBOX_APPROVED = True
 
     try:
-        if app_mode == "plan":
+        if app_mode == "meta":
+            agent = _init_meta_agent(
+                session_dir, resolved_key, model, base_url, mode, fh_api_key,
+                embedding_model=embedding_model,
+                embedding_api_key=embedding_api_key,
+            )
+        elif app_mode == "plan":
             agent = _init_planning_agent(
                 session_dir, resolved_key, model, base_url, mode, fh_api_key,
                 embedding_model=embedding_model,
@@ -597,7 +726,7 @@ def _init_analysis_agent(session_dir, api_key, model, base_url, mode, fh_api_key
 
     mode_map = {
         "co-pilot": AnalysisMode.CO_PILOT,
-        "supervised": AnalysisMode.SUPERVISED,
+        "autopilot": AnalysisMode.AUTOPILOT,
         "autonomous": AnalysisMode.AUTONOMOUS,
     }
     return AnalysisOrchestratorAgent(
@@ -620,7 +749,7 @@ def _init_planning_agent(session_dir, api_key, model, base_url, mode, fh_api_key
 
     mode_map = {
         "co-pilot": AutonomyLevel.CO_PILOT,
-        "supervised": AutonomyLevel.SUPERVISED,
+        "autopilot": AutonomyLevel.AUTOPILOT,
         "autonomous": AutonomyLevel.AUTONOMOUS,
     }
     objective = st.session_state.get("planning_objective", "").strip() or "Undefined Research Goal"
@@ -651,6 +780,39 @@ def _init_planning_agent(session_dir, api_key, model, base_url, mode, fh_api_key
         knowledge_dir=str(knowledge_dir),
         code_dir=str(code_dir),
         data_dir=str(data_dir),
+        **kwargs,
+    )
+
+
+def _init_meta_agent(session_dir, api_key, model, base_url, mode, fh_api_key,
+                     embedding_model=None, embedding_api_key=None):
+    """Create a MetaOrchestratorAgent.
+
+    Child orchestrators are created lazily by the meta-agent on first
+    delegation, in fixed sub-directories of the meta session.
+    """
+    from scilink.agents.meta_agent.meta_orchestrator import (
+        MetaMode,
+        MetaOrchestratorAgent,
+    )
+
+    mode_map = {
+        "autopilot": MetaMode.AUTOPILOT,
+        "autonomous": MetaMode.AUTONOMOUS,
+    }
+    kwargs = {}
+    if embedding_model:
+        kwargs["embedding_model"] = embedding_model
+    if embedding_api_key:
+        kwargs["embedding_api_key"] = embedding_api_key
+
+    return MetaOrchestratorAgent(
+        base_dir=str(session_dir),
+        api_key=api_key,
+        model_name=model,
+        base_url=base_url or None,
+        meta_mode=mode_map[mode],
+        futurehouse_api_key=fh_api_key or None,
         **kwargs,
     )
 
@@ -760,14 +922,37 @@ def resume_session(
     app_mode = st.session_state.app_mode or "analyze"
 
     try:
-        if app_mode == "plan":
+        if app_mode == "meta":
+            from scilink.agents.meta_agent.meta_orchestrator import (
+                MetaMode,
+                MetaOrchestratorAgent,
+            )
+            meta_mode_map = {
+                "autopilot": MetaMode.AUTOPILOT,
+                "autonomous": MetaMode.AUTONOMOUS,
+            }
+            kwargs = {}
+            if embedding_model:
+                kwargs["embedding_model"] = embedding_model
+            if embedding_api_key:
+                kwargs["embedding_api_key"] = embedding_api_key
+            agent = MetaOrchestratorAgent.restore_from_checkpoint(
+                base_dir=str(session_path),
+                api_key=resolved_key,
+                model_name=model,
+                base_url=base_url or None,
+                meta_mode=meta_mode_map[mode],
+                futurehouse_api_key=fh_api_key or None,
+                **kwargs,
+            )
+        elif app_mode == "plan":
             from scilink.agents.planning_agents.planning_orchestrator import (
                 AutonomyLevel,
                 PlanningOrchestratorAgent,
             )
             plan_mode_map = {
                 "co-pilot": AutonomyLevel.CO_PILOT,
-                "supervised": AutonomyLevel.SUPERVISED,
+                "autopilot": AutonomyLevel.AUTOPILOT,
                 "autonomous": AutonomyLevel.AUTONOMOUS,
             }
             kwargs = {}
@@ -791,7 +976,7 @@ def resume_session(
             )
             analysis_mode_map = {
                 "co-pilot": AnalysisMode.CO_PILOT,
-                "supervised": AnalysisMode.SUPERVISED,
+                "autopilot": AnalysisMode.AUTOPILOT,
                 "autonomous": AnalysisMode.AUTONOMOUS,
             }
             agent = AnalysisOrchestratorAgent.restore_from_checkpoint(

@@ -48,7 +48,7 @@ def main():
     parser.add_argument(
         "--autonomy",
         type=str,
-        choices=["autonomous", "supervised", "co-pilot"],
+        choices=["autonomous", "autopilot", "co-pilot"],
         default="autonomous",
         help="Autonomy level (default: autonomous)",
     )

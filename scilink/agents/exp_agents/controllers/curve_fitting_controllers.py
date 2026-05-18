@@ -892,10 +892,7 @@ class HumanFeedbackRefinementController:
         # avoid mangling numbers in text (e.g. "cm-1.", "8.7").
         _strategy = _re.sub(r"\. (\d+)\. ", r".\n   \1. ", _strategy)
         print(f"\n⚙️  Fitting Strategy:\n   {_strategy}")
-        
-        if state.get("literature_query"):
-            print(f"\n📚 Literature Query:\n   {state['literature_query']}")
-        
+
         # Display regime plan if present
         series_plan = state.get("series_analysis_plan")
         if series_plan and series_plan.get("regimes") and not is_single:
@@ -1100,6 +1097,20 @@ class HumanFeedbackRefinementController:
             )
             if values:
                 prompt.append(f"Range: {values[0]} to {values[-1]} {unit}")
+            secondary = series_metadata.get("secondary_variables") or []
+            if secondary:
+                names = "; ".join(
+                    f"{s.get('variable')}"
+                    + (f" ({s.get('unit')})" if s.get("unit") else "")
+                    for s in secondary
+                )
+                prompt.append(
+                    f"Additional control variable(s) co-varying across the "
+                    f"series: {names}. The series is ordered by "
+                    f"{series_metadata['variable']}, but these also change "
+                    f"between spectra — account for their effect when "
+                    f"interpreting how the data evolves."
+                )
 
         # Overlay comparison plot (all scouts on one figure)
         overlay = state.get("scout_overlay_plot")

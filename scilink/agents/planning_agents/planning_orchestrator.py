@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import pandas as pd
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -22,12 +23,19 @@ class AutonomyLevel(Enum):
     Defines the level of autonomy for the orchestrator.
     
     CO_PILOT: AI assists human (default). Human reviews all plans/code.
-    SUPERVISED: Human assists AI. AI proceeds unless human intervenes.
+    AUTOPILOT: Human assists AI. AI proceeds unless human intervenes.
     AUTONOMOUS: Full autonomy. No human feedback requested.
     """
     CO_PILOT = "co_pilot"       # Human leads, AI assists (current default)
-    SUPERVISED = "supervised"   # AI leads, human can intervene
+    AUTOPILOT = "autopilot"     # AI leads, human can intervene
     AUTONOMOUS = "autonomous"   # Full autonomy, no human feedback
+
+    @classmethod
+    def _missing_(cls, value):
+        # Back-compat: the AUTOPILOT level was named "supervised" before.
+        if isinstance(value, str) and value.strip().lower() == "supervised":
+            return cls.AUTOPILOT
+        return None
 
 
 # Mode-specific directives (inserted at the top)
@@ -84,9 +92,9 @@ Only call `generate_implementation_code` when BOTH conditions are true:
 - Instead say "Ready for results." or "Let me know how to proceed."
 """
 
-_SUPERVISED_DIRECTIVE = """
-**CRITICAL OPERATING MODE: SUPERVISED (AI Leads, Human Supervises)**
-- You lead the research workflow. Human supervises and can intervene.
+_AUTOPILOT_DIRECTIVE = """
+**CRITICAL OPERATING MODE: AUTOPILOT (AI Leads, Human Monitors)**
+- You lead the research workflow. Human monitors and can intervene.
 - Proceed with reasonable next steps without asking for permission.
 - Human will still review generated plans and code through the standard review interface.
 - Do NOT ask clarifying questions unless truly ambiguous - make reasonable assumptions.
@@ -235,6 +243,14 @@ Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions
 "characterize this sample", "explore structure-property relationships").
 
 1. `generate_initial_plan`: Use this when starting a NEW campaign or defining a new objective.
+   - Do NOT use for a Bayesian-optimization campaign over an existing dataset —
+     i.e. the objective is "recommend / design the next experiments (batch)" and
+     experimental data is available. That is the Math Loop: go `analyze_file` /
+     `analyze_batch` → `run_optimization`. `run_optimization`'s batch IS the
+     recommendation; a plan would hand-enumerate a different, non-optimal batch
+     that contradicts BO's acquisition output. Skip the planning step entirely
+     and report the BO batch (save it with `save_file` if a shareable file is
+     wanted).
    - Extract knowledge_paths when user mentions papers/PDFs/documents
    - Extract primary_data_set when user mentions experimental data or results folders or files
    - additional_context: Lab constraints, equipment, reagents, budget
@@ -285,7 +301,7 @@ Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions
 7. `adjust_plan_for_constraints`: Adjusts the plan for implementation constraints.
    - In CO_PILOT mode: ONLY call when the user explicitly provides constraints.
      Do NOT call proactively after plan approval.
-   - In SUPERVISED/AUTONOMOUS mode: May be called proactively when you identify
+   - In AUTOPILOT/AUTONOMOUS mode: May be called proactively when you identify
      clear implementation incompatibilities.
 
 **DATA TOOLS:**
@@ -443,6 +459,11 @@ Assume user runs agent from project directory. For example, when user says "file
 - You are optimizing a well-defined property for the current experimental setup.
 - The experiments are running successfully (no failures), and you just need to tune parameters.
 - **At least 3 data files have been successfully analyzed** (check by calling list_workspace_files).
+- **The objective itself is a Bayesian-optimization / "recommend the next
+  experiments" campaign.** Then `run_optimization` IS the deliverable — do NOT
+  also call `generate_initial_plan`. BO is a built-in capability: run it
+  directly. A separately generated plan would hand-design a batch that
+  contradicts (and is inferior to) BO's acquisition-function output.
 
 **Use `iterate_with_results` (The Cognitive Loop) IF:**
 - You need to propose a NEW strategy or experimental setup (e.g., "Change catalyst").
@@ -499,7 +520,7 @@ def get_system_prompt(
     """
     directives = {
         AutonomyLevel.CO_PILOT: _CO_PILOT_DIRECTIVE,
-        AutonomyLevel.SUPERVISED: _SUPERVISED_DIRECTIVE,
+        AutonomyLevel.AUTOPILOT: _AUTOPILOT_DIRECTIVE,
         AutonomyLevel.AUTONOMOUS: _AUTONOMOUS_DIRECTIVE,
     }
     prompt = directives[autonomy_level] + _SYSTEM_PROMPT_BODY
@@ -535,7 +556,7 @@ class PlanningOrchestratorAgent:
         embedding_api_key: API key for the embedding LLM provider.
         futurehouse_api_key: Optional FutureHouse API key for literature search.
         restore_checkpoint: Whether to restore from previous checkpoint.
-        autonomy_level: Level of autonomy (CO_PILOT, SUPERVISED, or AUTONOMOUS).
+        autonomy_level: Level of autonomy (CO_PILOT, AUTOPILOT, or AUTONOMOUS).
         
         google_api_key: DEPRECATED. Use 'api_key' instead.
         local_model: DEPRECATED. Use 'base_url' instead.
@@ -596,7 +617,7 @@ class PlanningOrchestratorAgent:
         logging.info(f"🎛️  Autonomy Level: {autonomy_level.value.upper()}")
 
         # Validate and store workspace directories
-        if autonomy_level in (AutonomyLevel.SUPERVISED, AutonomyLevel.AUTONOMOUS):
+        if autonomy_level in (AutonomyLevel.AUTOPILOT, AutonomyLevel.AUTONOMOUS):
             if data_dir is None:
                 raise ValueError(
                     f"data_dir is required for {autonomy_level.value} mode.\n"
@@ -638,6 +659,16 @@ class PlanningOrchestratorAgent:
         self.expected_input_types = None  # {col: "continuous" | "categorical"} from scalarizer
         self.expected_input_levels = None  # {col: [level0, level1, ...]} for categorical inputs
         self.latest_tea_results = None
+
+        # Per-delegation output isolation. Used only by run_task: the meta
+        # agent reuses one planning child across delegations, and the plan
+        # tools write fixed filenames (plan.json, tea_analysis.json, ...).
+        # Without a per-delegation sub-directory, each delegation would
+        # overwrite the previous one's artifacts. Direct `scilink plan` use
+        # never calls run_task, so _active_output_subdir stays None and
+        # writes land in base_dir exactly as before.
+        self._delegation_counter = 0
+        self._active_output_subdir = None
 
         # Custom tools / MCP state
         self._tool_data_cache: Dict[tuple, Any] = {}
@@ -779,9 +810,10 @@ class PlanningOrchestratorAgent:
     
     def _should_enable_human_feedback(self) -> bool:
         """Determines if human feedback should be enabled based on autonomy level."""
-        # Only CO_PILOT pauses for human review
-        # SUPERVISED and AUTONOMOUS proceed without asking
-        return self.autonomy_level == AutonomyLevel.CO_PILOT
+        # CO_PILOT and AUTOPILOT surface generated plans/code for human
+        # review (accept or request changes) — the AUTOPILOT directive
+        # promises this review interface. Only AUTONOMOUS runs without it.
+        return self.autonomy_level != AutonomyLevel.AUTONOMOUS
 
     def set_autonomy_level(self, level: AutonomyLevel) -> None:
         """
@@ -1102,7 +1134,8 @@ class PlanningOrchestratorAgent:
             self.expected_input_types = state.get("expected_input_types")
             self.expected_input_levels = state.get("expected_input_levels")
             self.latest_tea_results = state.get("latest_tea_results")
-            
+            self._delegation_counter = state.get("delegation_counter", 0)
+
             # Restore autonomy level if saved
             if "autonomy_level" in state:
                 try:
@@ -1189,6 +1222,159 @@ class PlanningOrchestratorAgent:
             
             return f"❌ Error: {e}\n\n(Emergency checkpoint saved to {self.checkpoint_path})"
 
+    def run_task(self, task: str, context: Optional[Dict[str, Any]] = None,
+                 autonomy: Optional[AutonomyLevel] = None) -> Dict[str, Any]:
+        """Non-interactive entry point — used by the meta agent.
+
+        Runs the task and returns a structured summary that's easy to
+        consume programmatically:
+
+            {
+                "status": "success" | "error",
+                "task": str,                       # echoed input
+                "summary": str,                    # the agent's final reply
+                "files_produced": List[str],       # absolute paths
+                "key_findings": List[str],         # campaign configuration
+                "suggested_followups": List[str],
+                "campaign_state": dict,            # objective / targets / data
+                "warnings": List[str],
+            }
+
+        Mirrors SimulationOrchestratorAgent.run_task — see CLAUDE.md
+        "Two surfaces, one agent".
+
+        ``autonomy`` selects the AutonomyLevel for this call. Defaults to
+        AUTONOMOUS — the safe choice for a headless/programmatic caller, so
+        the agent never pauses for a nonexistent user. A caller attached to a
+        human (the meta agent, driven via CLI/UI) passes AUTOPILOT so the
+        sub-agents' human-feedback prompts reach that human.
+        The original autonomy level is restored on exit, even if chat()
+        raises.
+
+        Planning has no analysis-style record list, so files_produced is a
+        before/after diff of the campaign directory (session-churn files
+        like chat_history.json are excluded).
+        """
+        # Build a self-contained prompt that includes the optional context.
+        prompt = task
+        if context:
+            try:
+                ctx_str = json.dumps(context, indent=2, default=str)
+            except (TypeError, ValueError):
+                ctx_str = repr(context)
+            prompt = (
+                f"{task}\n\n"
+                f"Context provided by the caller (e.g., upstream agent's findings):\n"
+                f"```\n{ctx_str}\n```\n\n"
+                "Use this context together with your tools to complete the task."
+            )
+
+        def _snapshot_files() -> set:
+            """Resolved paths of campaign artifacts, minus session churn."""
+            skip_names = {
+                "chat_history.json", "checkpoint.json",
+                "analyzed_files.json", "session_log.txt",
+            }
+            snap = set()
+            if self.base_dir.is_dir():
+                for p in self.base_dir.rglob("*"):
+                    if (p.is_file() and p.name not in skip_names
+                            and p.suffix not in (".log", ".pyc")):
+                        snap.add(str(p.resolve()))
+            return snap
+
+        # Snapshot prior state so we report "what was produced *during* this
+        # call" rather than "everything in the session."
+        files_before = _snapshot_files()
+
+        # Isolate this delegation's plan artifacts in their own sub-directory
+        # so a persistent planning child (reused by the meta agent) does not
+        # overwrite an earlier delegation's plan.json / tea_analysis /
+        # output_scripts. The plan tools read self._active_output_subdir.
+        self._delegation_counter += 1
+        slug = re.sub(r"[^a-z0-9]+", "_", task.lower()).strip("_")[:40] or "task"
+        self._active_output_subdir = (
+            self.base_dir / "delegations" / f"{self._delegation_counter:02d}_{slug}"
+        )
+        self._active_output_subdir.mkdir(parents=True, exist_ok=True)
+
+        # Run under the requested autonomy level — AUTONOMOUS by default (the
+        # safe headless choice). The meta agent passes its own mode through,
+        # so a co-pilot / autopilot delegation still raises the sub-agents'
+        # human-feedback prompts to the user driving the session.
+        run_level = autonomy if autonomy is not None else AutonomyLevel.AUTONOMOUS
+        original_level = self.autonomy_level
+        try:
+            self.set_autonomy_level(run_level)
+            try:
+                summary_text = self.chat(prompt)
+                status = "success"
+                error_msg: Optional[str] = None
+            except Exception as e:
+                logging.exception(f"run_task failed: {e}")
+                summary_text = ""
+                status = "error"
+                error_msg = str(e)
+        finally:
+            # Always restore the original level, even if chat() raised.
+            self.set_autonomy_level(original_level)
+            # _active_output_subdir is scoped to this call; clear it so a
+            # later direct chat() on the same instance writes to base_dir.
+            self._active_output_subdir = None
+
+        files_produced = sorted(_snapshot_files() - files_before)
+
+        # data_points_collected: rows in the BO optimization table, if any.
+        data_points = 0
+        try:
+            if self.bo_data_path.exists():
+                data_points = len(pd.read_csv(self.bo_data_path))
+        except Exception:
+            data_points = 0
+
+        # key_findings: the campaign configuration the orchestrator settled
+        # on. Planning's substantive output is the plan text itself, which
+        # the caller reads from `summary`.
+        key_findings: List[str] = []
+        for col in self.expected_target_columns or []:
+            direction = self.target_directions.get(col, "optimize")
+            key_findings.append(f"Optimization target: {col} ({direction}).")
+        if self.latest_tea_results:
+            key_findings.append("Techno-economic analysis results are available.")
+
+        # Heuristic: collected BO data with no further direction is a natural
+        # cue to propose the next experiment batch.
+        suggested_followups: List[str] = []
+        if data_points > 0:
+            suggested_followups.append(
+                f"Run the next BO iteration ({data_points} data point(s) "
+                f"collected so far)."
+            )
+
+        warnings: List[str] = []
+        if status == "success" and not files_produced:
+            warnings.append("Task completed but produced no campaign artifacts.")
+
+        result = {
+            "status": status,
+            "task": task,
+            "summary": summary_text,
+            "files_produced": files_produced,
+            "key_findings": key_findings,
+            "suggested_followups": suggested_followups,
+            "campaign_state": {
+                "objective": self.objective,
+                "expected_input_columns": self.expected_input_columns,
+                "expected_target_columns": self.expected_target_columns,
+                "target_directions": self.target_directions,
+                "data_points_collected": data_points,
+            },
+            "warnings": warnings,
+        }
+        if error_msg:
+            result["error"] = error_msg
+        return result
+
     def _compress_large_tool_results(self):
         """Compress large tool results in chat history to prevent context overflow.
 
@@ -1231,6 +1417,7 @@ class PlanningOrchestratorAgent:
                 "planner_state": self.planner.state,
                 "message_count": self.message_count,
                 "latest_tea_results": self.latest_tea_results,
+                "delegation_counter": self._delegation_counter,
                 "autonomy_level": self.autonomy_level.value,
                 "data_dir": str(self.data_dir) if self.data_dir else None,
                 "knowledge_dir": str(self.knowledge_dir) if self.knowledge_dir else None,

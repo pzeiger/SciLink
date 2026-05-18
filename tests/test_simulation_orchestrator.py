@@ -70,7 +70,7 @@ def _make_orch(model_name: str, base_dir: str, autonomy: str = "co-pilot"):
     )
     mode_map = {
         "co-pilot": SimulationMode.CO_PILOT,
-        "supervised": SimulationMode.SUPERVISED,
+        "autopilot": SimulationMode.AUTOPILOT,
         "autonomous": SimulationMode.AUTONOMOUS,
     }
     return SimulationOrchestratorAgent(
@@ -231,9 +231,9 @@ def test_4_mode_switching(model_name: str):
         # System prompt was rebuilt with the new directive
         assert "AUTONOMY: AUTONOMOUS" in orch._system_prompt
 
-        orch.set_simulation_mode(SimulationMode.SUPERVISED)
-        assert orch.get_human_feedback_setting() is True  # supervised still wants feedback
-        assert "AUTONOMY: SUPERVISED" in orch._system_prompt
+        orch.set_simulation_mode(SimulationMode.AUTOPILOT)
+        assert orch.get_human_feedback_setting() is True  # autopilot still wants feedback
+        assert "AUTONOMY: AUTOPILOT" in orch._system_prompt
 
     print("   ✅ Mode switching updates feedback flag + system prompt")
 

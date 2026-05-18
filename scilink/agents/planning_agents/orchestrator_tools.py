@@ -412,6 +412,16 @@ class OrchestratorTools:
             "hint": "Check filename spelling or use /files command to see available files"
         })
     
+    def _output_dir(self):
+        """Directory for plan artifacts (plan.json, tea_analysis, output_scripts,
+        literature_search*, molecule_design, ...).
+
+        During a meta-agent delegation this is a per-delegation sub-directory
+        so a reused planning child does not overwrite an earlier delegation's
+        artifacts; for direct `scilink plan` use it is the campaign root
+        (``_active_output_subdir`` is None, so behaviour is unchanged)."""
+        return self.orch._active_output_subdir or self.orch.base_dir
+
     def _register_all_tools(self):
         """Register all tools with both OpenAI and Gemini formats."""
         
@@ -492,7 +502,7 @@ class OrchestratorTools:
                     })
 
                 # Save to file (distinct per search_type to avoid overwrites)
-                lit_path = self.orch.base_dir / f"literature_search_{search_type}.md"
+                lit_path = self._output_dir() / f"literature_search_{search_type}.md"
                 with open(lit_path, 'w') as f:
                     f.write(f"# Literature Search Results ({search_type})\n\n")
                     f.write(lit_res['content'])
@@ -562,7 +572,7 @@ class OrchestratorTools:
                     })
 
                 # Save to file
-                mol_path = self.orch.base_dir / "molecule_design.md"
+                mol_path = self._output_dir() / "molecule_design.md"
                 with open(mol_path, 'w') as f:
                     f.write("# Molecular Design & Synthesis Planning Results\n\n")
                     f.write(mol_res['content'])
@@ -735,20 +745,24 @@ class OrchestratorTools:
                 if effective_skill:
                     self.orch._active_skill = effective_skill
 
-                if plan.get("error"):
+                # generate_plan signals failure as either `error` (RAG / parse
+                # failure) or `status="failed"` + `last_error` (a returned state
+                # dict) — check both so a failed plan never reports as success.
+                if plan.get("error") or plan.get("status") == "failed":
                     return json.dumps({
                         "status": "error",
-                        "message": plan.get("error")
+                        "message": (plan.get("error") or plan.get("last_error")
+                                    or "Plan generation failed")
                     })
 
                 # Save
-                output_path = self.orch.base_dir / "plan.json"
+                output_path = self._output_dir() / "plan.json"
                 with open(output_path, 'w') as f:
                     json.dump(plan, f, indent=2)
 
                 # If literature came from the deprecated internal path, save it
                 if not literature_context and plan.get("literature_search"):
-                    lit_path = self.orch.base_dir / "literature_search.md"
+                    lit_path = self._output_dir() / "literature_search.md"
                     with open(lit_path, 'w') as f:
                         f.write("# Literature Search Results\n\n")
                         f.write(plan["literature_search"])
@@ -756,7 +770,7 @@ class OrchestratorTools:
 
                 # Generate HTML
                 from .html_generator import HTMLReportGenerator
-                html_path = self.orch.base_dir / "plan.html"
+                html_path = self._output_dir() / "plan.html"
                 generator = HTMLReportGenerator(self.orch.planner.state)
                 generator.generate(str(html_path))
 
@@ -905,13 +919,13 @@ class OrchestratorTools:
                     })
                 
                 # Save
-                output_path = self.orch.base_dir / "plan.json"
+                output_path = self._output_dir() / "plan.json"
                 with open(output_path, 'w') as f:
                     json.dump(updated_plan, f, indent=2)
                 
                 # Regenerate HTML
                 from .html_generator import HTMLReportGenerator
-                html_path = self.orch.base_dir / "plan.html"
+                html_path = self._output_dir() / "plan.html"
                 generator = HTMLReportGenerator(self.orch.planner.state)
                 generator.generate(str(html_path))
                 
@@ -932,7 +946,7 @@ class OrchestratorTools:
                     })
 
                 # Save scripts to output folder
-                final_out = str(self.orch.base_dir / "output_scripts")
+                final_out = str(self._output_dir() / "output_scripts")
                 print(f"\n--- Saving Scripts to: {final_out} ---")
                 write_experiments_to_disk(updated_plan, final_out)
 
@@ -1052,7 +1066,7 @@ class OrchestratorTools:
                     objective=obj,
                     knowledge_paths=knowledge_list,
                     primary_data_set=primary_dataset,
-                    output_json_path=str(self.orch.base_dir / "tea_analysis.json"),
+                    output_json_path=str(self._output_dir() / "tea_analysis.json"),
                     external_context=ext_ctx
                 )
                 
@@ -1075,8 +1089,8 @@ class OrchestratorTools:
                 return json.dumps({
                     "status": "success",
                     "summary": summary,
-                    "output_path": str(self.orch.base_dir / "tea_analysis.json"),
-                    "html_report": str(self.orch.base_dir / "tea_analysis.html"),
+                    "output_path": str(self._output_dir() / "tea_analysis.json"),
+                    "html_report": str(self._output_dir() / "tea_analysis.html"),
                     "hint": "These results will automatically inform future generate_initial_plan calls"
                 })
                 
@@ -1162,7 +1176,7 @@ class OrchestratorTools:
                 print(f"    📚 Literature context provided")
             else:
                 # Auto-load hypothesis context from session if available
-                lit_path = self.orch.base_dir / "literature_search_hypothesis_context.md"
+                lit_path = self._output_dir() / "literature_search_hypothesis_context.md"
                 if lit_path.is_file():
                     ext_parts.append(lit_path.read_text())
                     print(f"    📚 Auto-loaded literature hypothesis context from session")
@@ -1191,13 +1205,13 @@ class OrchestratorTools:
                     })
                 
                 # Save
-                output_path = self.orch.base_dir / "plan.json"
+                output_path = self._output_dir() / "plan.json"
                 with open(output_path, 'w') as f:
                     json.dump(plan, f, indent=2)
 
                 # Generate HTML
                 from .html_generator import HTMLReportGenerator
-                html_path = self.orch.base_dir / "plan.html"
+                html_path = self._output_dir() / "plan.html"
                 generator = HTMLReportGenerator(self.orch.planner.state)
                 generator.generate(str(html_path))
 
@@ -1273,13 +1287,13 @@ class OrchestratorTools:
                     })
 
                 # Save
-                output_path = self.orch.base_dir / "plan.json"
+                output_path = self._output_dir() / "plan.json"
                 with open(output_path, 'w') as f:
                     json.dump(plan, f, indent=2)
 
                 # Generate HTML
                 from .html_generator import HTMLReportGenerator
-                html_path = self.orch.base_dir / "plan.html"
+                html_path = self._output_dir() / "plan.html"
                 generator = HTMLReportGenerator(self.orch.planner.state)
                 generator.generate(str(html_path))
 
@@ -1354,18 +1368,18 @@ class OrchestratorTools:
                     })
                 
                 # Save
-                output_path = self.orch.base_dir / "plan_refined.json"
+                output_path = self._output_dir() / "plan_refined.json"
                 with open(output_path, 'w') as f:
                     json.dump(updated_plan, f, indent=2)
                 
                 # Regenerate HTML
                 from .html_generator import HTMLReportGenerator
-                html_path = self.orch.base_dir / "plan_refined.html"
+                html_path = self._output_dir() / "plan_refined.html"
                 generator = HTMLReportGenerator(self.orch.planner.state)
                 generator.generate(str(html_path))
                 
                 # Save scripts
-                final_out = str(self.orch.base_dir / "output_scripts")
+                final_out = str(self._output_dir() / "output_scripts")
                 print(f"\n--- Saving Scripts to: {final_out} ---")
                 write_experiments_to_disk(updated_plan, final_out)
                 
@@ -1815,7 +1829,7 @@ class OrchestratorTools:
                                     "available_columns": all_cols
                                 })
                             else:
-                                # SUPERVISED/AUTONOMOUS: accept directly
+                                # AUTOPILOT/AUTONOMOUS: accept directly
                                 self.orch.expected_input_columns = proposed_inputs
                                 self.orch.expected_target_columns = proposed_targets
                                 if opt_dir:
@@ -3627,13 +3641,28 @@ class OrchestratorTools:
             return sorted(found.values(), key=lambda x: x["name"])
 
         def _resolve_knowledge_data_file(file_name: str):
-            """Resolve a file name to a path in the knowledge directory.
+            """Resolve a file name to a queryable target.
+
+            An absolute / relative path to an existing file or directory is
+            used directly — so a meta-delegated task, whose data lives outside
+            the knowledge directory, works (mirroring read_file / analyze_file).
+            Otherwise the name is matched within the knowledge directory.
 
             Returns (target, error) where target is either:
             - a file path string (for single files)
             - a dict with "type": "directory" (for directory databases)
             """
             from difflib import get_close_matches
+
+            # Direct path: an existing file/directory given by path is used
+            # as-is, without requiring knowledge-directory discovery.
+            p = Path(file_name).expanduser()
+            if p.is_file() and p.suffix.lower() in QUERYABLE_EXTENSIONS:
+                return str(p.resolve()), None
+            if p.is_dir():
+                return {"name": p.name, "path": str(p.resolve()),
+                        "type": "directory"}, None
+
             candidates = _discover_queryable_files()
             if not candidates:
                 return None, json.dumps({
@@ -3884,29 +3913,31 @@ class OrchestratorTools:
 
             print(f"  ⚡ Tool: Querying knowledge data: '{query[:80]}...'")
 
-            # 1. Discover queryable files and directory databases
+            # 1. Discover queryable files / directory databases. Informational
+            #    only — an explicit `file_name` path is resolved directly below,
+            #    so discovery being empty is not an error when a path is given.
             queryable = _discover_queryable_files()
-            if not queryable:
-                return json.dumps({
-                    "status": "error",
-                    "message": "No queryable data files or directories found in knowledge directory."
-                })
 
             # 2. Resolve target
-            if file_name is None:
-                if len(queryable) == 1:
-                    target = queryable[0]
-                    print(f"    - Auto-selected: {target['name']}")
-                else:
-                    return json.dumps({
-                        "status": "file_selection_needed",
-                        "message": "Multiple queryable sources found. Specify file_name.",
-                        "available_files": [f["name"] for f in queryable]
-                    })
-            else:
+            if file_name is not None:
                 target, error = _resolve_knowledge_data_file(file_name)
                 if error:
                     return error
+            elif not queryable:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No queryable data files or directories found by "
+                               "discovery. Pass the file's absolute path as `file_name`."
+                })
+            elif len(queryable) == 1:
+                target = queryable[0]
+                print(f"    - Auto-selected: {target['name']}")
+            else:
+                return json.dumps({
+                    "status": "file_selection_needed",
+                    "message": "Multiple queryable sources found. Specify file_name.",
+                    "available_files": [f["name"] for f in queryable]
+                })
 
             # 2b. Branch: directory database vs single file
             if isinstance(target, dict) and target.get("type") == "directory":
@@ -4025,10 +4056,12 @@ class OrchestratorTools:
             func=query_knowledge_data,
             name="query_knowledge_data",
             description=(
-                "Query knowledge data with natural language. Works with single "
+                "Query tabular data with natural language. Works with single "
                 "data files (CSV, XLSX) and directory databases (folders of "
                 "uniformly-structured files like JSON records). Generates and "
-                "executes a Python script to answer questions about the data."
+                "executes a Python script to answer questions about the data. "
+                "Accepts a file by an absolute path (preferred when the data "
+                "lives outside the knowledge directory) or by name."
             ),
             parameters={
                 "query": {
@@ -4037,7 +4070,12 @@ class OrchestratorTools:
                 },
                 "file_name": {
                     "type": "string",
-                    "description": "Name of knowledge file to query (e.g., 'PWSdatabase.xlsx'). If omitted, lists available files."
+                    "description": (
+                        "The data file to query, given as an absolute path to "
+                        "an existing file or directory, or as a bare file name "
+                        "to look up in the knowledge directory. If omitted, "
+                        "lists available files."
+                    )
                 }
             },
             required=["query"]

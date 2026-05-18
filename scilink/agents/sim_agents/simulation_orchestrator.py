@@ -36,8 +36,15 @@ class SimulationMode(Enum):
     """Autonomy level for the simulation orchestrator. Mirrors AnalysisMode
     for consistent UX across modes."""
     CO_PILOT = "co-pilot"        # Human leads, AI assists (default)
-    SUPERVISED = "supervised"    # AI leads, human supervises
+    AUTOPILOT = "autopilot"      # AI leads, human monitors
     AUTONOMOUS = "autonomous"    # Full autonomy
+
+    @classmethod
+    def _missing_(cls, value):
+        # Back-compat: the AUTOPILOT level was named "supervised" before.
+        if isinstance(value, str) and value.strip().lower() == "supervised":
+            return cls.AUTOPILOT
+        return None
 
 
 _CO_PILOT_DIRECTIVE = """**AUTONOMY: CO-PILOT (default)** — The human is leading the work; you are
@@ -49,7 +56,7 @@ user a chance to redirect after each significant step.
 
 """
 
-_SUPERVISED_DIRECTIVE = """**AUTONOMY: SUPERVISED** — You are leading the work with reasonable defaults.
+_AUTOPILOT_DIRECTIVE = """**AUTONOMY: AUTOPILOT** — You are leading the work with reasonable defaults.
 Proceed with sensible choices for routine decisions, but surface significant
 decisions (polymorph selection when not specified, supercell size choices
 that drive cost, expensive operations) for a one-line confirmation before
@@ -172,7 +179,7 @@ def get_system_prompt(
     """
     directives = {
         SimulationMode.CO_PILOT: _CO_PILOT_DIRECTIVE,
-        SimulationMode.SUPERVISED: _SUPERVISED_DIRECTIVE,
+        SimulationMode.AUTOPILOT: _AUTOPILOT_DIRECTIVE,
         SimulationMode.AUTONOMOUS: _AUTONOMOUS_DIRECTIVE,
     }
     # Tools section is filled dynamically by the orchestrator after tool
@@ -403,11 +410,11 @@ class SimulationOrchestratorAgent:
         self._save_history()
         return response
 
-    def run_task(self, task: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Non-interactive entry point — used by the future meta agent.
+    def run_task(self, task: str, context: Optional[Dict[str, Any]] = None,
+                 autonomy: Optional[SimulationMode] = None) -> Dict[str, Any]:
+        """Non-interactive entry point — used by the meta agent.
 
-        Runs the task in autonomous mode (regardless of the agent's current
-        configured mode) and returns a structured summary that's easy to
+        Runs the task and returns a structured summary that's easy to
         consume programmatically:
 
             {
@@ -421,11 +428,13 @@ class SimulationOrchestratorAgent:
                 "task": str,                       # echoed input
             }
 
-        The implementation pins the agent into AUTONOMOUS mode for the
-        duration of the call, runs the chat loop once with the task as
-        user input, then derives the structured summary from the
-        post-call session state. The original autonomy mode is restored
-        on exit so an interactive session is unaffected.
+        ``autonomy`` selects the SimulationMode for this call. Defaults to
+        AUTONOMOUS — the safe choice for a headless/programmatic caller, so
+        the agent never pauses for a nonexistent user. A caller attached to a
+        human (the meta agent, driven via CLI/UI) passes AUTOPILOT so the
+        sub-agents' human-feedback prompts reach that human.
+        The structured summary is derived from the post-call session-state
+        delta; the original mode is restored on exit, even if chat() raises.
         """
         # Build a self-contained prompt that includes the optional context.
         prompt = task
@@ -446,11 +455,14 @@ class SimulationOrchestratorAgent:
         structures_before = list(self.generated_structures or [])
         n_before = len(structures_before)
 
-        # Pin autonomy to AUTONOMOUS for the duration of this call so the
-        # agent doesn't pause to ask the (nonexistent) user for confirmation.
+        # Run under the requested autonomy mode — AUTONOMOUS by default (the
+        # safe headless choice). The meta agent passes its own mode through,
+        # so a co-pilot / autopilot delegation still raises the sub-agents'
+        # human-feedback prompts to the user driving the session.
+        run_mode = autonomy if autonomy is not None else SimulationMode.AUTONOMOUS
         original_mode = self.simulation_mode
         try:
-            self.set_simulation_mode(SimulationMode.AUTONOMOUS)
+            self.set_simulation_mode(run_mode)
             try:
                 summary_text = self.chat(prompt)
                 status = "success"

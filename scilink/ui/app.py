@@ -97,7 +97,7 @@ def _find_new_images(summary_only: bool = False) -> list[str]:
             st.session_state.known_images.add(s)
 
         # In co-pilot mode, show sample fits inline (first, middle, last)
-        # In supervised/autonomous, skip — user can find them in File Explorer
+        # In autopilot/autonomous, skip — user can find them in File Explorer
         agent = st.session_state.get("agent")
         is_copilot = (
             agent is not None
@@ -360,29 +360,23 @@ if not st.session_state.agent_initialized:
         if st.session_state.app_mode == "simulate" and not simulate_enabled():
             st.session_state.app_mode = "analyze"
         _mode_map = {m["key"]: m for m in APP_MODES}
+        # One button per mode; simulate is dropped when [sim] isn't installed.
+        _modes = [m for m in APP_MODES
+                  if m["key"] != "simulate" or simulate_enabled()]
         st.markdown('<div class="mode-selector-anchor"></div>', unsafe_allow_html=True)
-        if simulate_enabled():
-            _, _mc1, _mc2, _mc3, _ = st.columns([1.5, 1, 1, 1, 1.5])
-        else:
-            _, _mc1, _mc2, _ = st.columns([1.5, 1.5, 1.5, 1.5])
-            _mc3 = None
-        with _mc1:
-            _atype = "primary" if st.session_state.app_mode == "analyze" else "secondary"
-            if st.button("Analyze", type=_atype, use_container_width=True, key="mode_analyze"):
-                st.session_state.app_mode = "analyze"
-                st.rerun()
-        with _mc2:
-            _ptype = "primary" if st.session_state.app_mode == "plan" else "secondary"
-            if st.button("Plan", type=_ptype, use_container_width=True, key="mode_plan"):
-                st.session_state.app_mode = "plan"
-                st.rerun()
-        if _mc3 is not None:
-            with _mc3:
-                _stype = "primary" if st.session_state.app_mode == "simulate" else "secondary"
-                if st.button("Simulate", type=_stype, use_container_width=True, key="mode_simulate"):
-                    st.session_state.app_mode = "simulate"
+        _cols = st.columns([1.5] + [1.0] * len(_modes) + [1.5])
+        for _m, _col in zip(_modes, _cols[1:-1]):
+            with _col:
+                _btype = ("primary" if st.session_state.app_mode == _m["key"]
+                          else "secondary")
+                if st.button(_m["label"], type=_btype, use_container_width=True,
+                             key=f"mode_{_m['key']}"):
+                    st.session_state.app_mode = _m["key"]
                     st.rerun()
-        _cur_desc = _mode_map[st.session_state.app_mode]["description"]
+        _cur_mode = _mode_map[st.session_state.app_mode]
+        _cur_desc = _cur_mode["description"]
+        if _cur_mode.get("beta"):
+            _cur_desc = f"BETA · {_cur_desc}"
         st.markdown(
             f'<p style="text-align:center;color:#6B7A8C;font-size:0.85em;'
             f'margin-top:-4px;margin-bottom:12px">'
@@ -475,16 +469,22 @@ if st.session_state.app_mode == "simulate" and simulate_enabled():
             "the full agent framework alongside HPC simulations."
         )
 else:
-    # ── Analyze / Plan modes: full agent UI ──────────────────
+    # ── Analyze / Plan / Explore modes: full agent UI ────────
+    # Tabs are built dynamically: Telemetry is appended only in Explore
+    # (meta) mode, Simulations only when the simulate extra is enabled.
+    _is_meta = st.session_state.app_mode == "meta"
+    _tab_labels = ["Chat", "File Explorer", "Tools", "Skills"]
+    if _is_meta:
+        _tab_labels.append("Telemetry")
     if simulate_enabled():
-        chat_tab, files_tab, tools_tab, skills_tab, sim_tab = st.tabs(
-            ["Chat", "File Explorer", "Tools", "Skills", "Simulations"]
-        )
-    else:
-        chat_tab, files_tab, tools_tab, skills_tab = st.tabs(
-            ["Chat", "File Explorer", "Tools", "Skills"]
-        )
-        sim_tab = None
+        _tab_labels.append("Simulations")
+    _tabs = st.tabs(_tab_labels)
+    chat_tab, files_tab, tools_tab, skills_tab = _tabs[:4]
+    _next = 4
+    telemetry_tab = None
+    if _is_meta:
+        telemetry_tab, _next = _tabs[_next], _next + 1
+    sim_tab = _tabs[_next] if simulate_enabled() else None
 
     # ── Chat tab ─────────────────────────────────────────────────────
     with chat_tab:
@@ -837,7 +837,11 @@ else:
             )
 
     _has_conversation = bool(st.session_state.chat_messages)
-    if st.session_state.app_mode == "plan":
+    # plan and meta accept a free-text goal with no prior upload.
+    _free_start_modes = ("plan", "meta")
+    if st.session_state.app_mode == "meta":
+        _chat_placeholder = "Describe your research goal..."
+    elif st.session_state.app_mode == "plan":
         _chat_placeholder = "Message the planning agent..."
     elif _has_conversation:
         _chat_placeholder = "Message the analysis agent..."
@@ -845,9 +849,13 @@ else:
         _chat_placeholder = "Upload data and click Analyze to start"
 
     _chat_disabled = task.is_running or (
-        not _has_conversation and st.session_state.app_mode != "plan"
+        not _has_conversation and st.session_state.app_mode not in _free_start_modes
     )
-    user_text = st.chat_input(_chat_placeholder, disabled=_chat_disabled)
+    # Render the chat input inside the Chat tab container. A top-level
+    # st.chat_input is pinned to the bottom of the whole app and shows on
+    # every tab; scoping it to chat_tab keeps it on the Chat tab only.
+    with chat_tab:
+        user_text = st.chat_input(_chat_placeholder, disabled=_chat_disabled)
     _upload_preamble = st.session_state.pop("_upload_preamble", None)
 
     if _upload_preamble and user_text:
@@ -1005,6 +1013,12 @@ else:
     with skills_tab:
         render_skills_tab()
     
+    # ── Telemetry tab (Explore mode only) ────────────────────────────
+    if telemetry_tab is not None:
+        from scilink.ui.components.telemetry import render_telemetry_tab
+        with telemetry_tab:
+            render_telemetry_tab()
+
     # ── Simulations tab ──────────────────────────────────────────────
     if sim_tab is not None:
         from scilink.ui.components.simulations import render_simulations_tab

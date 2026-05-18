@@ -9,6 +9,7 @@ Coordinates multi-modal experimental analysis using specialized sub-agents:
 Follows the same design patterns as PlanningOrchestratorAgent for consistent UX.
 """
 
+import inspect
 import json
 import logging
 import os
@@ -35,7 +36,7 @@ _BUILTIN_AGENTS = {
     1: {
         "class_path": "scilink.agents.exp_agents.image_analysis_agent.ImageAnalysisAgent",
         "name": "ImageAnalysisAgent",
-        "description": "Images: general-purpose analysis (microscopy, SEM, TEM, AFM, optical). Handles atomic resolution, grains, particles, textures, defects, morphology. Single images or series.",
+        "description": "Scientific microscopy images (SEM, TEM, AFM, optical micrographs): atomic resolution, grains, particles, textures, defects, morphology. Single images or series. NOT for charts, plots, diagrams, or figures lifted from documents.",
         "short_name": "ImageAnalysis",
     },
     2: {
@@ -53,12 +54,19 @@ class AnalysisMode(Enum):
     Matches the autonomy levels in PlanningOrchestratorAgent for consistent UX.
     
     CO_PILOT: Human leads, AI assists (default). Human reviews every step.
-    SUPERVISED: AI leads, human supervises. AI proceeds with reasonable defaults.
+    AUTOPILOT: AI leads, human monitors. AI proceeds with reasonable defaults.
     AUTONOMOUS: Full autonomy. AI executes complete workflows without confirmation.
     """
     CO_PILOT = "co-pilot"        # Human leads, AI assists (default)
-    SUPERVISED = "supervised"    # AI leads, human supervises
+    AUTOPILOT = "autopilot"      # AI leads, human monitors
     AUTONOMOUS = "autonomous"    # Full autonomy
+
+    @classmethod
+    def _missing_(cls, value):
+        # Back-compat: the AUTOPILOT level was named "supervised" before.
+        if isinstance(value, str) and value.strip().lower() == "supervised":
+            return cls.AUTOPILOT
+        return None
 
 
 # Mode-specific directives (matching planning orchestrator patterns)
@@ -85,9 +93,9 @@ _CO_PILOT_DIRECTIVE = """
 - Instead say "Ready for your input." or "Let me know how to proceed."
 """
 
-_SUPERVISED_DIRECTIVE = """
-**CRITICAL OPERATING MODE: SUPERVISED (AI Leads, Human Supervises)**
-- You lead the analysis workflow. Human supervises and can intervene.
+_AUTOPILOT_DIRECTIVE = """
+**CRITICAL OPERATING MODE: AUTOPILOT (AI Leads, Human Monitors)**
+- You lead the analysis workflow. Human monitors and can intervene.
 - Suggest the most appropriate agent based on data type and metadata.
 - Proceed with reasonable defaults without asking for every detail.
 - Human will still review agent selection before execution.
@@ -156,15 +164,7 @@ You are the **Analysis Agent**. Your goal is to coordinate experimental data ana
 
 _SYSTEM_PROMPT_BODY_POST = """
 5. `preview_image`: Load image for visual inspection (for agent 0 vs 1 decision, or ambiguous 2D data).
-
-**LITERATURE CONTEXT (optional, before analysis):**
-5b. `search_literature`: Fetch external literature to inform an upcoming analysis.
-   - Input: `query` (a focused research question).
-   - Action: queries the FutureHouse Edison API; saves results to a markdown file.
-   - Output: `file_path`. Pass it as `literature_file` to the next `run_analysis` so the planner produces a literature-informed plan the user reviews.
-   - When to use: the user asks for literature support, or the analysis objective is one where domain context would meaningfully shape method/parameter choice. Skip for routine measurement-quality analyses.
-   - Note: in curve-fitting `task_mode="identification"` the planner withholds lit context (to keep the fit unbiased); the literature still informs Stage-2 candidate enumeration.
-
+___LITERATURE_SECTION___
 **ANALYSIS EXECUTION:**
 6. `run_analysis`: Execute analysis. Handles single files AND series automatically.
    - Each analysis run creates a unique output directory for traceability.
@@ -279,6 +279,18 @@ examine_data returns data_type:
 - If disambiguation_needed=true in examine_data result, ASK the user before selecting agent
 - For directories, check if metadata_files was detected
 - If status="error", stop and report to user
+- If `run_analysis` fails because the data could not be loaded — "unsupported
+  file format", "failed to load spectrum / image", or similar — the file type
+  is not one the analysis agents handle. They take microscopy / spectroscopy
+  images, 1-D measurement curves, and hyperspectral datacubes — NOT generic
+  spreadsheets, results tables, or databases. Do NOT retry the same file with
+  a different agent and do NOT keep re-running. Report the failure once, and
+  note that this data may belong to a different mode (planning handles
+  tabular data and databases).
+- NEVER write an analysis report, summary, or findings from metadata alone.
+  A report requires successful `run_analysis` results. If no analysis
+  succeeded, say so plainly — do not fabricate quantitative findings from a
+  file's description or metadata.
 - Before launching a fresh `run_analysis`, consider whether a prior analysis from
   `list_results()` already covers the new request's prerequisites (e.g. existing
   segmentation, fits, abundance maps). If so, pass its `output_directory` via
@@ -295,11 +307,62 @@ def _build_agent_list_section(agent_registry: dict) -> str:
     return "\n".join(lines)
 
 
+# Literature section — injected into the prompt body only when a FutureHouse
+# API key is configured this session. Without a key the `search_literature`
+# tool errors at call time, so the orchestrator is not told to offer it.
+#
+# This is a workflow GATE, not a tool description: the LLM otherwise chains
+# straight to run_analysis and never reaches literature search. The gate is
+# mode-aware — CO-PILOT pauses to ask the user; AUTOPILOT/AUTONOMOUS decide
+# on their own, since those modes have no interactive user to wait on (and
+# `run_task` pins the orchestrator into AUTONOMOUS).
+_LIT_TOOL_BLURB = (
+    "`search_literature` queries the FutureHouse Edison API and returns a\n"
+    "`file_path`. Supplied via `literature_file`, the literature informs the\n"
+    "analysis plan, the generated code, and the interpretation. (In curve-fitting\n"
+    "`task_mode=\"identification\"` the planner withholds lit context to keep the\n"
+    "fit unbiased; it still informs Stage-2 candidate enumeration.)"
+)
+
+# CO-PILOT: pause and ask the user, wait for their answer.
+_LITERATURE_SECTION_COPILOT = f"""
+**LITERATURE SEARCH — REQUIRED OFFER BEFORE ANALYSIS:**
+A FutureHouse API key is configured this session. Before the FIRST
+`run_analysis` on a dataset you MUST first ask the user whether the analysis
+should be informed by a literature search of prior work, then wait for their
+answer — do NOT call `run_analysis` in the same turn as the question.
+- On yes: call `search_literature(query=...)`, then pass the returned
+  `file_path` to `run_analysis` as `literature_file`.
+- On no: call `run_analysis` normally.
+- Ask once per dataset; do not re-offer on follow-up `run_analysis` calls
+  for the same data.
+
+{_LIT_TOOL_BLURB}
+"""
+
+# AUTOPILOT / AUTONOMOUS: no interactive user — decide without asking.
+_LITERATURE_SECTION_AUTONOMOUS = f"""
+**LITERATURE SEARCH — CONSIDER BEFORE ANALYSIS:**
+A FutureHouse API key is configured this session. Before the FIRST
+`run_analysis` on a dataset, decide for yourself whether a literature search
+would materially shape the analysis (method choice, parameter ranges,
+interpretation). If so, call `search_literature(query=...)` and pass the
+returned `file_path` to `run_analysis` as `literature_file`; otherwise call
+`run_analysis` directly. Do NOT ask the user — decide from the data and
+objective. Decide once per dataset.
+
+{_LIT_TOOL_BLURB}
+"""
+
+_LITERATURE_SECTION_UNAVAILABLE = ""
+
+
 def get_system_prompt(
     analysis_mode: AnalysisMode,
     agent_registry: dict = None,
     external_tools: list = None,
     custom_skills: dict = None,
+    literature_available: bool = False,
 ) -> str:
     """Returns the appropriate system prompt for the given analysis mode.
 
@@ -315,10 +378,13 @@ def get_system_prompt(
         custom_skills: ``{name: path}`` dict of custom skills registered via
             register_skill(). When provided, a "Custom skills" section is
             appended so the LLM knows to pass them to ``run_analysis``.
+        literature_available: True iff a FutureHouse API key is configured.
+            When True, the prompt instructs the orchestrator to offer a
+            literature search before the first analysis of a dataset.
     """
     directives = {
         AnalysisMode.CO_PILOT: _CO_PILOT_DIRECTIVE,
-        AnalysisMode.SUPERVISED: _SUPERVISED_DIRECTIVE,
+        AnalysisMode.AUTOPILOT: _AUTOPILOT_DIRECTIVE,
         AnalysisMode.AUTONOMOUS: _AUTONOMOUS_DIRECTIVE,
     }
     if agent_registry:
@@ -326,10 +392,21 @@ def get_system_prompt(
     else:
         agent_list = "\n".join([
             "     * 0: CurveFittingAgent - 1D data: DSC, TGA, XRD, UV-Vis, Raman, PL, IV curves, kinetics",
-            "     * 1: ImageAnalysisAgent - Images: general-purpose analysis (microscopy, SEM, TEM, AFM, optical). Atomic resolution, grains, particles, textures, defects, morphology",
+            "     * 1: ImageAnalysisAgent - Scientific microscopy images (SEM, TEM, AFM, optical micrographs): grains, particles, defects, morphology. NOT charts/figures/diagrams",
             "     * 2: HyperspectralAnalysisAgent - 3D datacubes: EELS-SI, EDS, Raman imaging",
         ])
-    body = _SYSTEM_PROMPT_BODY_PRE + agent_list + _SYSTEM_PROMPT_BODY_POST
+    if not literature_available:
+        lit_section = _LITERATURE_SECTION_UNAVAILABLE
+    elif analysis_mode == AnalysisMode.CO_PILOT:
+        # Interactive — pause and ask the user.
+        lit_section = _LITERATURE_SECTION_COPILOT
+    else:
+        # AUTOPILOT / AUTONOMOUS — no user to wait on; decide autonomously.
+        lit_section = _LITERATURE_SECTION_AUTONOMOUS
+    body = (
+        _SYSTEM_PROMPT_BODY_PRE + agent_list
+        + _SYSTEM_PROMPT_BODY_POST.replace("___LITERATURE_SECTION___", lit_section)
+    )
     if external_tools:
         lines = ["\n**CUSTOM TOOLS (registered externally, call directly by name):**"]
         for t in external_tools:
@@ -371,7 +448,7 @@ class AnalysisOrchestratorAgent:
         embedding_model: Embedding model name.
         embedding_api_key: API key for the embedding LLM provider.
         restore_checkpoint: Whether to restore from previous checkpoint.
-        analysis_mode: Level of autonomy (CO_PILOT, SUPERVISED, or AUTONOMOUS).
+        analysis_mode: Level of autonomy (CO_PILOT, AUTOPILOT, or AUTONOMOUS).
         image_analysis_depth: Default analysis depth passed to
             ImageAnalysisAgent ("basic", "auto", or "deep"). Defaults to
             "basic" so Tier 2 is handled at the orchestrator level via
@@ -464,6 +541,9 @@ class AnalysisOrchestratorAgent:
         else:
              logging.warning("⚠️ Literature Analysis disabled (No FutureHouse API key)")
 
+        # Gates the literature-search offer in the system prompt.
+        self._literature_available = bool(self.futurehouse_api_key)
+
         logging.info(f"🎛️  Analysis Mode: {analysis_mode.value.upper()}")
         
         # Setup directories
@@ -521,6 +601,7 @@ class AnalysisOrchestratorAgent:
         system_prompt = get_system_prompt(
             self.analysis_mode, self._agent_registry,
             custom_skills=self._custom_skills or None,
+            literature_available=self._literature_available,
         )
         
         # Initialize LLM
@@ -575,6 +656,7 @@ class AnalysisOrchestratorAgent:
         new_system_prompt = get_system_prompt(
             mode, self._agent_registry, self._external_tools or None,
             self._custom_skills or None,
+            literature_available=self._literature_available,
         )
         self._system_prompt = new_system_prompt
 
@@ -669,6 +751,7 @@ class AnalysisOrchestratorAgent:
         self._system_prompt = get_system_prompt(
             self.analysis_mode, self._agent_registry,
             self._external_tools or None, self._custom_skills or None,
+            literature_available=self._literature_available,
         )
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = self._system_prompt
@@ -778,6 +861,7 @@ class AnalysisOrchestratorAgent:
         self._system_prompt = get_system_prompt(
             self.analysis_mode, self._agent_registry,
             self._external_tools, self._custom_skills or None,
+            literature_available=self._literature_available,
         )
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = self._system_prompt
@@ -817,6 +901,7 @@ class AnalysisOrchestratorAgent:
         self._system_prompt = get_system_prompt(
             self.analysis_mode, self._agent_registry,
             self._external_tools, self._custom_skills,
+            literature_available=self._literature_available,
         )
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = self._system_prompt
@@ -903,6 +988,7 @@ class AnalysisOrchestratorAgent:
         self._system_prompt = get_system_prompt(
             self.analysis_mode, self._agent_registry,
             self._external_tools, self._custom_skills or None,
+            literature_available=self._literature_available,
         )
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = self._system_prompt
@@ -944,6 +1030,7 @@ class AnalysisOrchestratorAgent:
         self._system_prompt = get_system_prompt(
             self.analysis_mode, self._agent_registry,
             self._external_tools, self._custom_skills or None,
+            literature_available=self._literature_available,
         )
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = self._system_prompt
@@ -1013,8 +1100,9 @@ class AnalysisOrchestratorAgent:
             "base_url": self.base_url,
             "output_dir": output_dir,
             "enable_human_feedback": self._enable_human_feedback,
-            # Consumed only by ImageAnalysisAgent; other agents accept
-            # **kwargs and silently ignore.
+            # Consumed only by ImageAnalysisAgent. Filtered out below for any
+            # agent whose __init__ neither declares it nor accepts **kwargs
+            # (hyperspectral, FFT, SAM, atomistic) — passing it would raise.
             "analysis_depth": self.image_analysis_depth,
         }
 
@@ -1026,6 +1114,19 @@ class AnalysisOrchestratorAgent:
             module = importlib.import_module(module_path)
             cls = getattr(module, class_name)
             entry["class"] = cls  # cache for subsequent calls
+
+        # Keep only the kwargs this agent's __init__ actually accepts. An agent
+        # that declares **kwargs gets everything; one that does not gets only
+        # its explicitly-named parameters.
+        try:
+            params = inspect.signature(cls.__init__).parameters
+            if not any(p.kind is inspect.Parameter.VAR_KEYWORD
+                       for p in params.values()):
+                common_kwargs = {
+                    k: v for k, v in common_kwargs.items() if k in params
+                }
+        except (ValueError, TypeError):
+            pass  # unintrospectable __init__ — pass kwargs through unchanged
 
         agent = cls(**common_kwargs)
         logging.info(f"   Created agent {agent_id}: {type(agent).__name__}")
@@ -1165,6 +1266,147 @@ class AnalysisOrchestratorAgent:
             self._auto_checkpoint()
             
             return f"❌ Error: {e}\n\n(Emergency checkpoint saved to {self.checkpoint_path})"
+
+    def run_task(self, task: str, context: Optional[Dict[str, Any]] = None,
+                 autonomy: Optional[AnalysisMode] = None) -> Dict[str, Any]:
+        """Non-interactive entry point — used by the meta agent.
+
+        Runs the task and returns a structured summary that's easy to
+        consume programmatically:
+
+            {
+                "status": "success" | "error",
+                "task": str,                       # echoed input
+                "summary": str,                    # the agent's final reply
+                "files_produced": List[str],       # absolute paths
+                "feature_tables": List[str],       # per-analysis feature CSVs
+                "key_findings": List[str],         # extracted scientific claims
+                "suggested_followups": List[str],
+                "analyses": List[dict],            # session record snapshot
+                "warnings": List[str],
+            }
+
+        Mirrors SimulationOrchestratorAgent.run_task — see CLAUDE.md
+        "Two surfaces, one agent".
+
+        ``autonomy`` selects the AnalysisMode for this call. Defaults to
+        AUTONOMOUS — the safe choice for a headless/programmatic caller, so
+        the agent never pauses for a nonexistent user. A caller attached to a
+        human (the meta agent, driven via CLI/UI) passes AUTOPILOT so the
+        sub-agents' human-feedback prompts reach that human.
+        The original mode is restored on exit, even if chat() raises.
+        """
+        # Build a self-contained prompt that includes the optional context.
+        prompt = task
+        if context:
+            try:
+                ctx_str = json.dumps(context, indent=2, default=str)
+            except (TypeError, ValueError):
+                ctx_str = repr(context)
+            prompt = (
+                f"{task}\n\n"
+                f"Context provided by the caller (e.g., upstream agent's findings):\n"
+                f"```\n{ctx_str}\n```\n\n"
+                "Use this context together with your tools to complete the task."
+            )
+
+        # Snapshot prior state so we report "what was produced *during* this
+        # call" rather than "everything in the session."
+        n_before = len(self.analysis_results)
+
+        # Run under the requested autonomy mode — AUTONOMOUS by default (the
+        # safe headless choice). The meta agent passes its own mode through,
+        # so a co-pilot / autopilot delegation still raises the sub-agents'
+        # human-feedback prompts to the user driving the session.
+        run_mode = autonomy if autonomy is not None else AnalysisMode.AUTONOMOUS
+        original_mode = self.analysis_mode
+        try:
+            self.set_analysis_mode(run_mode)
+            try:
+                summary_text = self.chat(prompt)
+                status = "success"
+                error_msg: Optional[str] = None
+            except Exception as e:
+                self.logger.exception(f"run_task failed: {e}")
+                summary_text = ""
+                status = "error"
+                error_msg = str(e)
+        finally:
+            # Always restore the original mode, even if chat() raised.
+            self.set_analysis_mode(original_mode)
+
+        # Derive the structured summary from the session-state delta.
+        new_analyses = self.analysis_results[n_before:]
+
+        # files_produced: every file written under each new analysis's
+        # output directory (visualizations, reports, results JSON, ...).
+        files_produced: List[str] = []
+        for rec in new_analyses:
+            out_dir = rec.get("output_directory")
+            if out_dir and Path(out_dir).is_dir():
+                for p in sorted(Path(out_dir).rglob("*")):
+                    if p.is_file():
+                        files_produced.append(str(p.resolve()))
+
+        # key_findings: the scientific claims extracted by the sub-agents.
+        key_findings: List[str] = []
+        for rec in new_analyses:
+            full = rec.get("full_result") or {}
+            for claim in full.get("scientific_claims", []) or []:
+                text = claim.get("claim") if isinstance(claim, dict) else claim
+                if text:
+                    key_findings.append(f"[{rec.get('analysis_id')}] {text}")
+
+        # Heuristic: a successful analysis with no novelty assessment yet is
+        # a natural next step — claims can be checked against the literature.
+        suggested_followups: List[str] = []
+        for rec in new_analyses:
+            if rec.get("status") == "success" and not rec.get("novelty_assessment"):
+                suggested_followups.append(
+                    f"Assess novelty / get recommendations for analysis "
+                    f"{rec.get('analysis_id')}."
+                )
+
+        warnings: List[str] = []
+        for rec in new_analyses:
+            if rec.get("status") != "success":
+                warnings.append(
+                    f"Analysis {rec.get('analysis_id')} did not complete "
+                    f"successfully (status={rec.get('status')})."
+                )
+
+        # feature_tables: per-analysis flat CSVs (conditions + extracted scalar
+        # features) for downstream planning / BO — see feature_table.py.
+        feature_tables: List[str] = []
+        for rec in new_analyses:
+            out_dir = rec.get("output_directory")
+            if out_dir:
+                ft = Path(out_dir) / "features.csv"
+                if ft.is_file():
+                    feature_tables.append(str(ft.resolve()))
+
+        result = {
+            "status": status,
+            "task": task,
+            "summary": summary_text,
+            "files_produced": files_produced,
+            "feature_tables": feature_tables,
+            "key_findings": key_findings,
+            "suggested_followups": suggested_followups,
+            "analyses": [
+                {
+                    "analysis_id": rec.get("analysis_id"),
+                    "agent_name": rec.get("agent_name"),
+                    "status": rec.get("status"),
+                    "data_path": rec.get("data_path"),
+                    "output_directory": rec.get("output_directory"),
+                } for rec in new_analyses
+            ],
+            "warnings": warnings,
+        }
+        if error_msg:
+            result["error"] = error_msg
+        return result
 
     def _auto_checkpoint(self):
         """Internal auto-checkpoint without LLM interaction."""

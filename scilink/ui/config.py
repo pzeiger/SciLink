@@ -16,12 +16,14 @@ EMBEDDING_MODEL_OPTIONS = [
 
 # ── Mode registry ────────────────────────────────────────────────
 APP_MODES = [
+    {"key": "meta",    "label": "Explore",  "beta": True, "description": "Routes your research goal to the Analyze & Plan specialists"},
     {"key": "analyze", "label": "Analyze", "description": "Multi-modal data analysis"},
     {"key": "plan",    "label": "Plan",    "description": "Experimental design & optimization"},
     {"key": "simulate", "label": "Simulate", "description": "Submit and monitor DFT/MD simulations"},
 ]
 
 SESSION_DIR_PREFIXES = {
+    "meta": "meta_session",
     "analyze": "analysis_session",
     "plan": "planning_session",
     "simulate": "simulation_session",
@@ -68,6 +70,15 @@ SUPPORTED_METADATA_EXTENSIONS = (".json", ".txt")
 SUPPORTED_KNOWLEDGE_EXTENSIONS = (".pdf", ".txt", ".md", ".docx", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".csv", ".xlsx", ".tsv", ".json")
 SUPPORTED_CODE_EXTENSIONS = (".py", ".txt", ".md", ".json", ".yaml", ".yml")
 SUPPORTED_PLANNING_DATA_EXTENSIONS = (".csv", ".xlsx", ".tsv", ".txt", ".npy", ".json")
+
+# Explore (meta) mode accepts everything the specialist modes accept — one
+# combined uploader; the meta-agent routes each file to the right child.
+SUPPORTED_META_EXTENSIONS = tuple(sorted(set(
+    SUPPORTED_DATA_EXTENSIONS
+    + SUPPORTED_METADATA_EXTENSIONS
+    + SUPPORTED_KNOWLEDGE_EXTENSIONS
+    + SUPPORTED_CODE_EXTENSIONS
+)))
 
 AVATAR_USER = str(Path(__file__).resolve().parent / "assets" / "avatar_user.svg")
 AVATAR_AGENT = str(Path(__file__).resolve().parent / "assets" / "avatar_agent.svg")

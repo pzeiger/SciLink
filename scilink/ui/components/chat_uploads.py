@@ -8,6 +8,7 @@ from ..config import (
     SUPPORTED_CODE_EXTENSIONS,
     SUPPORTED_DATA_EXTENSIONS,
     SUPPORTED_KNOWLEDGE_EXTENSIONS,
+    SUPPORTED_META_EXTENSIONS,
     SUPPORTED_METADATA_EXTENSIONS,
     SUPPORTED_PLANNING_DATA_EXTENSIONS,
     extra_data_extensions_for,
@@ -26,6 +27,8 @@ def render_pre_chat_uploads(start_task_fn) -> None:
         _render_analyze_uploads(start_task_fn)
     elif mode == "plan":
         _render_planning_uploads(start_task_fn)
+    elif mode == "meta":
+        _render_meta_uploads(start_task_fn)
 
 
 # ── Analyze mode uploads ─────────────────────────────────────────
@@ -282,6 +285,94 @@ def _render_planning_uploads(start_task_fn) -> None:
         st.caption("Enter a research objective or upload files to begin.")
 
 
+# ── Meta mode (free-text goal + one combined uploader) ───────────
+
+def _render_meta_uploads(start_task_fn) -> None:
+    st.markdown(
+        '<div class="upload-hero-box">'
+        '<p class="upload-hero-title">What would you like to do? '
+        '<span style="font-size:0.45em;vertical-align:middle;'
+        'background:#8893a5;color:#fff;padding:2px 8px;border-radius:9px;'
+        'letter-spacing:1px;font-weight:600;">BETA</span></p>'
+        '<p class="upload-hero-subtitle">'
+        "Describe your research goal — Explore routes it to the analysis "
+        "and planning specialists</p>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    goal = st.text_area(
+        "Research goal",
+        key="meta_objective",
+        placeholder=(
+            "e.g., Analyze the STEM image I uploaded, then plan a "
+            "follow-up experiment campaign based on what you find"
+        ),
+        height=110,
+        label_visibility="collapsed",
+    )
+
+    with st.expander("Add files (optional) — papers, code, data, metadata",
+                     expanded=True):
+        extra_exts = extra_data_extensions_for(st.session_state.get("agent"))
+        meta_exts = tuple(SUPPORTED_META_EXTENSIONS) + tuple(extra_exts)
+        files = st.file_uploader(
+            "Upload files",
+            type=[e.lstrip(".") for e in meta_exts],
+            key="main_uploader_auto",
+            accept_multiple_files=True,
+            label_visibility="collapsed",
+        )
+        if files:
+            save_meta_uploads(files)
+        folder = st.text_input(
+            "or paste a folder path",
+            key="meta_folder_path",
+            placeholder="/path/to/papers/ or /path/to/data/",
+            label_visibility="collapsed",
+        )
+        st.caption(
+            "One drop zone for everything — the meta-agent sorts each file "
+            "to the analysis or planning specialist."
+        )
+
+    folder = (folder or "").strip()
+    folder_ok = bool(folder) and Path(folder).is_dir()
+    if folder and not folder_ok:
+        st.warning(f"Folder not found: {folder}")
+
+    uploads = st.session_state.uploaded_meta_paths
+    goal = (goal or "").strip()
+    can_start = bool(goal) or bool(uploads) or folder_ok
+    if st.button(
+        "Start",
+        type="primary",
+        use_container_width=True,
+        disabled=not can_start,
+    ):
+        parts = []
+        if goal:
+            parts.append(goal)
+        if uploads:
+            listed = "\n".join(f"  - `{p}`" for p in uploads)
+            parts.append(
+                f"I uploaded {len(uploads)} file(s):\n{listed}\n\n"
+                "Inspect them to determine what each file is, then route them "
+                "to the right specialist."
+            )
+        if folder_ok:
+            parts.append(
+                f"Additional resources are in the folder `{folder}` — "
+                "inspect it as well."
+            )
+        prompt = "\n\n".join(parts) if parts else "Please help with my research."
+        st.session_state.chat_messages.append({"role": "user", "content": prompt})
+        start_task_fn(prompt)
+
+    if not can_start:
+        st.caption("Describe a research goal or add files to begin.")
+
+
 def save_planning_uploads(files, category: str) -> None:
     """Save uploaded files to the appropriate planning subdirectory."""
     session_dir = Path(st.session_state.session_dir)
@@ -303,3 +394,24 @@ def save_planning_uploads(files, category: str) -> None:
         st.session_state._processed_uploads.add(upload_key)
         st.session_state[state_key].append(str(dest))
         st.sidebar.success(f"Uploaded {category}: {f.name}")
+
+
+def save_meta_uploads(files) -> None:
+    """Save Explore-mode uploads into the meta session's ``uploads/`` directory.
+
+    Everything lands in one place; the meta-agent decides which child
+    specialist each file belongs to when it builds its delegations.
+    """
+    session_dir = Path(st.session_state.session_dir)
+    target_dir = session_dir / "uploads"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    for f in files:
+        dest = target_dir / f.name
+        upload_key = ("meta", str(dest))
+        if upload_key in st.session_state._processed_uploads:
+            continue
+        dest.write_bytes(f.getvalue())
+        st.session_state._processed_uploads.add(upload_key)
+        st.session_state.uploaded_meta_paths.append(str(dest))
+        st.sidebar.success(f"Uploaded: {f.name}")

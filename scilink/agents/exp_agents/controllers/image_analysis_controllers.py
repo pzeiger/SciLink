@@ -1041,9 +1041,6 @@ class ImagePlanningController:
         if state.get("expected_outputs"):
             print(f"\n📄 Expected Outputs:\n   {', '.join(state.get('expected_outputs', []))}")
 
-        if state.get("literature_query"):
-            print(f"\n📚 Literature Query:\n   {state['literature_query']}")
-
         # Display regime plan if present
         series_plan = state.get("series_analysis_plan")
         if series_plan and series_plan.get("regimes") and not is_single:
@@ -1321,6 +1318,20 @@ class ImagePlanningController:
             )
             if values:
                 prompt.append(f"Range: {values[0]} to {values[-1]} {unit}")
+            secondary = series_metadata.get("secondary_variables") or []
+            if secondary:
+                names = "; ".join(
+                    f"{s.get('variable')}"
+                    + (f" ({s.get('unit')})" if s.get("unit") else "")
+                    for s in secondary
+                )
+                prompt.append(
+                    f"Additional control variable(s) co-varying across the "
+                    f"series: {names}. The series is ordered by "
+                    f"{series_metadata['variable']}, but these also change "
+                    f"between images — account for their effect when "
+                    f"interpreting how the data evolves."
+                )
 
         # Montage comparison (all scouts in one figure)
         montage = state.get("scout_montage_bytes")
