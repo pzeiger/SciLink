@@ -2703,7 +2703,10 @@ class AnalysisOrchestratorTools:
                         "containing `analysis_results.json`, the planner also "
                         "receives a state summary (pipeline, quality score, "
                         "extracted features, scientific claims, saved-arrays "
-                        "catalog). Image-analysis agent only."
+                        "catalog). Consumed by the image-analysis agent and "
+                        "the curve-fitting agent — for a prior curve-fit run "
+                        "the saved fitting script and fit summary are surfaced "
+                        "to its planning and script-generation stages."
                     )
                 },
                 "literature_file": {

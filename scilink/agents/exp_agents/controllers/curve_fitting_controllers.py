@@ -206,6 +206,109 @@ def _append_prior_knowledge_context(prompt: list, state: dict) -> None:
                 prompt.append(f"- {f}")
 
 
+def _load_prior_curve_fit_state(raw_path):
+    """Locate a prior curve-fit run's artifacts for a single path.
+
+    Accepts a directory or a file inside one. Looks for
+    ``series_fit_results.json`` (the structured fit record) and a saved
+    fitting script under ``scripts/``. Returns ``(anchor_dir, summary,
+    script_text, script_label)`` or ``(None, None, None, None)`` on any
+    failure — a missing or malformed prior run silently contributes nothing.
+    """
+    p = Path(raw_path)
+    dir_candidates = (
+        [p.parent, p.parent.parent] if p.is_file() else [p, p.parent]
+    )
+    anchor_dir = None
+    sfr_path = None
+    for cand in dir_candidates:
+        candidate = cand / "series_fit_results.json"
+        if candidate.is_file():
+            anchor_dir = cand
+            sfr_path = candidate
+            break
+    if anchor_dir is None:
+        return None, None, None, None
+    try:
+        data = json.loads(sfr_path.read_text())
+    except Exception:  # noqa: BLE001 - a malformed prior run is skipped
+        return None, None, None, None
+
+    results = data.get("results") or []
+    model_types = sorted({
+        r.get("model_type") for r in results
+        if isinstance(r, dict) and r.get("model_type")
+    })
+    summary = {
+        "series_variable": (data.get("series_metadata") or {}).get("variable"),
+        "total_spectra": data.get("total_spectra"),
+        "successful": data.get("successful"),
+        "model_types": model_types,
+        "locked_config": data.get("locked_config"),
+    }
+
+    # Locate a representative fitting script. A single-spectrum run writes
+    # `scripts/fitting_script.py`; a series writes one `scripts/<spectrum>.py`
+    # per spectrum — all share the locked model, so the first is a
+    # representative template.
+    script_text = None
+    script_label = None
+    scripts_dir = anchor_dir / "scripts"
+    single = scripts_dir / "fitting_script.py"
+    candidate = None
+    if single.is_file():
+        candidate, script_label = single, single.name
+    elif scripts_dir.is_dir():
+        py_files = sorted(scripts_dir.glob("*.py"))
+        if py_files:
+            candidate = py_files[0]
+            script_label = f"{candidate.name} (representative of the series)"
+    if candidate is not None:
+        try:
+            script_text = candidate.read_text()
+        except Exception:  # noqa: BLE001
+            script_text = None
+            script_label = None
+
+    return anchor_dir, summary, script_text, script_label
+
+
+def _prior_curve_fit_block(state: dict) -> str:
+    """A reference-context block for prior curve-fit runs named in
+    ``state['prior_analysis_paths']`` — a compact fit summary plus each
+    run's saved fitting script.
+
+    Returns an empty string when no prior paths are given, so callers can
+    append it unconditionally without affecting a normal (no-prior) run.
+    """
+    paths = state.get("prior_analysis_paths") or []
+    if not paths:
+        return ""
+    blocks = []
+    for raw_path in paths:
+        anchor_dir, summary, script_text, script_label = (
+            _load_prior_curve_fit_state(raw_path)
+        )
+        if anchor_dir is None:
+            continue
+        lines = [f"\n### Prior run: {anchor_dir.name or anchor_dir}"]
+        if summary:
+            lines.append(f"- Fit summary: {json.dumps(summary, default=str)}")
+        if script_text:
+            lines.append(f"- Saved fitting script ({script_label}):")
+            lines.append(f"```python\n{script_text}\n```")
+        blocks.append("\n".join(lines))
+    if not blocks:
+        return ""
+    return (
+        "\n## Prior Curve-Fit Runs\n"
+        "Artifacts from earlier curve-fit analyses, provided as reference. "
+        "When the new data is the same kind of measurement, the saved "
+        "fitting script below can be reused for a consistent fit.\n"
+        + "\n".join(blocks)
+    )
+
+
 def _append_objective_context(prompt: list, state: dict) -> None:
     """Append high-level scientific objective to an LLM prompt.
 
@@ -976,6 +1079,9 @@ class HumanFeedbackRefinementController:
         _append_auxiliary_context(prompt, state)
         _append_skill_context(prompt, state, "planning")
         _append_prior_knowledge_context(prompt, state)
+        _prior_runs = _prior_curve_fit_block(state)
+        if _prior_runs:
+            prompt.append(_prior_runs)
 
         # Withhold lit context from the planner in identification mode — it
         # would re-anchor the planner to specific known materials/phases and
@@ -1507,6 +1613,9 @@ Your guidance: '''
                 min(level, len(self._SKILL_STRICTNESS_SCHEDULE) - 1)
             ].format(name=state.get("skill_name", "skill"))
             context_parts.append(preamble + skill_sections["analysis"])
+        prior_runs = _prior_curve_fit_block(state)
+        if prior_runs:
+            context_parts.append(prior_runs)
 
         prompt = self.script_instructions.format(
             analysis_approach=config.get("analysis_approach", "Fit the data"),

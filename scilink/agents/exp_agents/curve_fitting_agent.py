@@ -273,6 +273,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         skill: Optional[str] = None,
         # Prior knowledge from reference analyses
         prior_knowledge: Optional[List[Dict[str, Any]]] = None,
+        # Prior curve-fit runs whose saved artifacts (fitting script, fit
+        # summary) the new run may consume as reference.
+        prior_analysis_paths: Optional[List[str]] = None,
         literature_file: Optional[str] = None,
         # Quality control overrides (optional)
         r2_threshold: Optional[float] = None,
@@ -352,6 +355,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             r2_threshold: Override default R² threshold for this analysis
             max_model_retries: Override default max retries for this analysis
             outlier_sigma: Override default outlier sigma for this analysis
+            prior_analysis_paths: Optional list of folder/file paths from
+                previous curve-fit runs. Each run's saved fitting script and
+                fit summary are surfaced to the planning and script-generation
+                stages as reference context.
 
         Returns:
             Dict with status, detailed_analysis, scientific_claims,
@@ -577,6 +584,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
             # Prior knowledge from reference analyses
             "prior_knowledge": prior_knowledge or [],
+
+            # Prior curve-fit runs — artifacts surfaced to planner / script-gen
+            "prior_analysis_paths": prior_analysis_paths or [],
 
             # First spectrum (for planning)
             "data_path": spectrum_paths[0] if spectrum_paths else first_spectrum_name,
