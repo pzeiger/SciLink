@@ -4259,11 +4259,23 @@ class ConditionalTrendAnalysisController:
 **VISUALIZATION SCOPE - TRENDS:**
 Create a SINGLE dashboard figure showing how fitted PARAMETERS evolve across the series.
 DO NOT recreate individual spectrum fits - those already exist separately.
-The dashboard should show:
-- Parameter values (y-axis) vs series variable like temperature/time/index (x-axis)
-- Error bars if uncertainties are available
-- Fit quality (R²) evolution
-- Mark flagged spectra with distinct markers
+
+The series may vary ONE control variable or SEVERAL at once (a factorial /
+grid design). Inspect `series_metadata` for a `secondary_variables` entry and
+choose the representation to match:
+- ONE control variable: parameter values (y-axis) vs that variable (x-axis),
+  with error bars where available - the standard trend dashboard.
+- TWO control variables: represent BOTH. If their values define a regular
+  lattice (grid sampling), use a heatmap or filled contour of each key
+  parameter over the 2-D space. If the sampling is scattered, use a scatter
+  plot positioned by the two variables and colored by the parameter value.
+  Detect grid vs scattered from the data itself.
+- THREE OR MORE: there is no single canonical N-D trend plot - produce a
+  best-effort view: plot each parameter against the primary variable and
+  facet or color by the remaining variable(s), or use pairwise panels.
+- In every case also show fit quality (R²) evolution and mark flagged
+  spectra with distinct markers.
+State the representation you chose (and why) in `analysis_approach`.
 
 **FIGURE REQUIREMENTS:**
 - Create ONE summary dashboard figure (parameter_trends.png)
@@ -4278,6 +4290,7 @@ The dashboard should show:
 **DATA EXTRACTION PATTERN:**
 ```python
 import json
+import os
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend - REQUIRED
@@ -4289,7 +4302,15 @@ with open('series_fit_results.json', 'r') as f:
 
 results = data['results']
 series_metadata = data.get('series_metadata', {{}})
-# series_metadata has: variable, values (one per spectrum), unit
+# PRIMARY control variable:
+#   series_metadata['variable'] (name), series_metadata['unit'],
+#   series_metadata['values'] -> a list aligned to results by index:
+#   results[i] primary value = series_metadata['values'][results[i]['index']].
+# ADDITIONAL control variables (present only for a grid / factorial design):
+#   series_metadata.get('secondary_variables', []) -> a list of entries
+#   {{'variable': name, 'unit': unit, 'values': {{filename: value}}}}.
+#   Each secondary 'values' is a dict keyed by file name; align it to a
+#   result via key = os.path.basename(results[i]['data_path']).
 
 # Extract series variable and parameters...
 # Create figure with subplots...
