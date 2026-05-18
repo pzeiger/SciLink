@@ -295,6 +295,29 @@ examine_data returns data_type:
   `list_results()` already covers the new request's prerequisites (e.g. existing
   segmentation, fits, abundance maps). If so, pass its `output_directory` via
   `prior_analysis_paths` so the new run can build on it instead of recomputing.
+
+**INCREMENTAL MEASUREMENT SERIES (locked extraction-script reuse):**
+- When the new data is the NEXT MEASUREMENT of an existing measurement series —
+  the same kind of unit as a prior run, only the control parameters differ
+  (e.g. a new point added to a Bayesian-optimization / closed-loop campaign) —
+  pass that prior run's `output_directory` via `prior_analysis_paths`. The agent
+  reuses the prior run's locked extraction recipe (fitting script / image
+  pipeline) verbatim, so the new feature row has the SAME columns as the rest of
+  the campaign — which a downstream feature-table / BO append strictly requires.
+- Decide deliberately whether the new data IS a continuation. If it is a
+  different kind of measurement, do NOT pass `prior_analysis_paths` — a fresh
+  analysis is correct; forcing the prior recipe would extract the wrong things.
+- After such a run, READ the `reuse_validity` field in the `run_analysis`
+  result and act on its `verdict`:
+  - `good` — the reused recipe fits the new measurement well; proceed normally.
+  - `poor` — the row is still schema-consistent and safe to append, but the
+    reused recipe fits this measurement poorly. Surface the `reuse_warning` to
+    the user: the new measurement may not belong to this series, or conditions
+    shifted. If you judge it is genuinely a different measurement, re-run
+    `run_analysis` WITHOUT `prior_analysis_paths` for a correct fresh analysis.
+  - `script_failed` — the reused recipe could not run and the model/pipeline was
+    re-derived from scratch, so the feature columns may differ from the
+    campaign. Flag this clearly to the user — a campaign append may break.
 """
 
 

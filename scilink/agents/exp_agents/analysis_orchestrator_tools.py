@@ -2560,6 +2560,16 @@ class AnalysisOrchestratorTools:
                     feature_table = write_feature_table(analysis_output_dir)
                     if feature_table:
                         response["feature_table"] = feature_table
+                    # #172: surface the locked-script reuse verdict so the
+                    # orchestrator can act on a non-`good` outcome (a poorly
+                    # fitting reused recipe, or a re-derived schema).
+                    reuse_validity = result.get("reuse_validity")
+                    if reuse_validity:
+                        response["reuse_validity"] = reuse_validity
+                        if reuse_validity.get("verdict") != "good":
+                            response["reuse_warning"] = reuse_validity.get(
+                                "message", ""
+                            )
                     return json.dumps(response)
                 else:
                     return json.dumps({
@@ -2706,7 +2716,24 @@ class AnalysisOrchestratorTools:
                         "catalog). Consumed by the image-analysis agent and "
                         "the curve-fitting agent — for a prior curve-fit run "
                         "the saved fitting script and fit summary are surfaced "
-                        "to its planning and script-generation stages."
+                        "to its planning and script-generation stages.\n"
+                        "LOCKED EXTRACTION-SCRIPT REUSE: when the new data is "
+                        "the NEXT MEASUREMENT of the SAME measurement series as "
+                        "the prior run — the same kind of unit, only the "
+                        "control parameters differ (a new point in a "
+                        "Bayesian-optimization / closed-loop campaign) — the "
+                        "agent reuses the prior run's locked extraction script "
+                        "verbatim instead of re-deriving the model/pipeline. "
+                        "This guarantees the new feature row has the SAME "
+                        "columns as the campaign, which the planning-side "
+                        "feature-table append strictly requires. ONLY pass "
+                        "prior_analysis_paths when the new data genuinely "
+                        "continues that series; if it is a different kind of "
+                        "measurement, do NOT pass it (a fresh analysis is "
+                        "correct — forcing the prior recipe would be wrong). "
+                        "The run reports a `reuse_validity` verdict "
+                        "(`good` / `poor` / `script_failed`) — read it and act "
+                        "on a non-`good` verdict (see the system guidance)."
                     )
                 },
                 "literature_file": {

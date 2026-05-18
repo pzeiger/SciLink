@@ -309,6 +309,25 @@ def _prior_curve_fit_block(state: dict) -> str:
     )
 
 
+def _first_prior_curve_fit_script(state: dict):
+    """Return the first reusable fitting script for locked-script reuse (#172).
+
+    Scans ``state['prior_analysis_paths']`` and returns
+    ``(script_text, source_label)`` for the first prior curve-fit run that
+    carries a saved fitting script, or ``(None, None)`` when no prior paths
+    are given or none have a script. The empty-case gate keeps a normal
+    (no-prior) run byte-identical.
+    """
+    paths = state.get("prior_analysis_paths") or []
+    for raw_path in paths:
+        anchor_dir, _summary, script_text, _label = (
+            _load_prior_curve_fit_state(raw_path)
+        )
+        if anchor_dir is not None and script_text:
+            return script_text, (anchor_dir.name or str(anchor_dir))
+    return None, None
+
+
 def _append_objective_context(prompt: list, state: dict) -> None:
     """Append high-level scientific objective to an LLM prompt.
 
@@ -2499,9 +2518,18 @@ Return JSON with:
             self.logger.error(f"Failed to refine model from feedback: {e}")
             return config
 
-    def _fit_with_quality_control(self, state: dict, curve_data: np.ndarray, data_path: str, spectrum_name: str, spectrum_idx: int, is_regime_anchor: bool = False) -> dict:
+    def _fit_with_quality_control(self, state: dict, curve_data: np.ndarray, data_path: str, spectrum_name: str, spectrum_idx: int, is_regime_anchor: bool = False, reuse_script: Optional[str] = None, reuse_source: Optional[str] = None) -> dict:
         """
         Fit a single spectrum with quality control, verification, and optional judge selection.
+
+        #172 locked-script reuse: when ``reuse_script`` is supplied (an anchor
+        fed a prior run's saved fitting script via ``prior_analysis_paths``),
+        the prior script is run verbatim on the new data first. If it executes,
+        its result is kept — regardless of R² — so the extracted-parameter
+        schema stays consistent across an incremental measurement campaign by
+        construction; R² is attached as a ``reuse_validity`` verdict the
+        orchestrator can act on, not a gate that re-derives the model. Full QC
+        re-derivation runs only when the prior script cannot execute at all.
 
         Flow:
         1. Initial fit attempt.
@@ -2528,6 +2556,77 @@ Return JSON with:
 
         # Anchor = first spectrum overall OR first in a regime; gets full QC
         _is_anchor = spectrum_idx == 0 or is_regime_anchor
+
+        # --- #172: locked-script reuse fast path ---
+        # A prior curve-fit run supplied via prior_analysis_paths means the new
+        # data is point N+1 of that series: reuse the prior run's locked fitting
+        # script verbatim instead of re-deriving the model. This keeps the
+        # extracted-parameter schema consistent across an incremental campaign
+        # by construction. R² is a validity *signal* (attached as reuse_validity
+        # for the orchestrator), never a gate that re-derives the model — a
+        # re-derived model could change the feature columns. The only fallback
+        # to full QC is a prior script that cannot execute at all.
+        if reuse_script and _is_anchor:
+            self.logger.info(
+                f"   ♻️  Reusing locked fitting script from prior run "
+                f"'{reuse_source or 'prior'}'..."
+            )
+            reuse_result = self._fit_single_spectrum(
+                state=state, curve_data=curve_data, data_path=data_path,
+                spectrum_name=spectrum_name, spectrum_idx=spectrum_idx,
+                base_script=reuse_script,
+            )
+            if reuse_result.get("success"):
+                reuse_r2 = (
+                    reuse_result.get("fit_quality", {}).get("r_squared", 0)
+                    or 0.0
+                )
+                verdict = "good" if reuse_r2 >= self.r2_threshold else "poor"
+                if verdict == "good":
+                    self.logger.info(
+                        f"   ✅ Reused script fits well (R² = {reuse_r2:.4f} ≥ "
+                        f"{self.r2_threshold:.3f}) — model re-derivation skipped"
+                    )
+                    message = (
+                        f"Reused the locked fitting script from prior run "
+                        f"'{reuse_source or 'prior'}'; R² = {reuse_r2:.4f} "
+                        f"meets the acceptance threshold "
+                        f"{self.r2_threshold:.3f}."
+                    )
+                else:
+                    self.logger.warning(
+                        f"   ⚠️  Reused script fits poorly (R² = "
+                        f"{reuse_r2:.4f} < {self.r2_threshold:.3f}). Keeping "
+                        f"the result to preserve feature-schema consistency; "
+                        f"flagging it as low-confidence."
+                    )
+                    message = (
+                        f"Reused the locked fitting script from prior run "
+                        f"'{reuse_source or 'prior'}', but R² = "
+                        f"{reuse_r2:.4f} is below the acceptance threshold "
+                        f"{self.r2_threshold:.3f}. The new measurement may "
+                        f"not belong to this series, or measurement "
+                        f"conditions shifted. Extracted parameters are "
+                        f"schema-consistent but should be treated as "
+                        f"low-confidence."
+                    )
+                reuse_result["reuse_validity"] = {
+                    "reused": True,
+                    "source": reuse_source,
+                    "r_squared": reuse_r2,
+                    "threshold": self.r2_threshold,
+                    "verdict": verdict,
+                    "message": message,
+                }
+                if verdict == "poor":
+                    reuse_result["quality_warning"] = message
+                return reuse_result
+            self.logger.warning(
+                f"   ⚠️  Prior fitting script could not execute on this data "
+                f"(even after correction). Falling back to full model "
+                f"re-derivation — the extracted-feature schema may differ "
+                f"from the prior run."
+            )
 
         # --- Initial fit (skills mandatory at T=0) ---
         state["_annealing_level"] = 0
@@ -3342,6 +3441,23 @@ Return JSON with:
         else:
             first_in_regime = {0}  # Only spectrum 0 needs full QC
 
+        # #172: locked-script reuse. When prior_analysis_paths supplies an
+        # earlier curve-fit run, the spectrum-0 anchor reuses that run's saved
+        # fitting script instead of re-deriving the model. Skipped for
+        # multi-regime runs (a single prior script has no regime mapping).
+        reuse_script, reuse_source = _first_prior_curve_fit_script(state)
+        if reuse_script and regime_configs:
+            self.logger.info(
+                "   ♻️  Prior curve-fit run supplied, but this run is "
+                "multi-regime — locked-script reuse skipped."
+            )
+            reuse_script, reuse_source = None, None
+        elif reuse_script:
+            self.logger.info(
+                f"   ♻️  Prior curve-fit run '{reuse_source}' supplied — the "
+                f"anchor will reuse its locked fitting script (#172)."
+            )
+
         results_by_idx: Dict[int, dict] = {}
         deferred_non_anchors: List[dict] = []
         base_scripts: Dict[str, str] = {}  # keyed by regime name
@@ -3448,6 +3564,8 @@ Return JSON with:
                     state=state, curve_data=curve_data, data_path=data_path,
                     spectrum_name=spectrum_name, spectrum_idx=idx,
                     is_regime_anchor=(idx != 0 and idx in first_in_regime),
+                    reuse_script=(reuse_script if idx == 0 else None),
+                    reuse_source=(reuse_source if idx == 0 else None),
                 )
 
                 # Restore original state
@@ -3455,6 +3573,25 @@ Return JSON with:
                     state["original_plot_bytes"] = _saved_original_plot
                 if _saved_data_statistics is not None:
                     state["data_statistics"] = _saved_data_statistics
+
+                # #172: reuse was attempted for the anchor but the result
+                # carries no reuse_validity verdict -> the prior script could
+                # not execute and full QC re-derived the model. Record the
+                # schema-drift caveat so the orchestrator can react.
+                if idx == 0 and reuse_script and not result.get("reuse_validity"):
+                    result["reuse_validity"] = {
+                        "reused": False,
+                        "source": reuse_source,
+                        "verdict": "script_failed",
+                        "message": (
+                            f"The locked fitting script from prior run "
+                            f"'{reuse_source or 'prior'}' could not execute "
+                            f"on this data; the model was re-derived from "
+                            f"scratch and the extracted-feature schema may "
+                            f"differ from the prior run."
+                        ),
+                    }
+                    result["quality_warning"] = result["reuse_validity"]["message"]
 
                 if result["success"] and result.get("script"):
                     base_scripts[regime_name] = result["script"]

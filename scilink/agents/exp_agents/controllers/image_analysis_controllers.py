@@ -463,6 +463,40 @@ def _load_prior_state(raw_path):
     return anchor_dir, data
 
 
+def _first_prior_image_script(state: dict):
+    """Return the first reusable analysis script for locked-script reuse (#172).
+
+    Mirrors the curve-fit helper: scans ``state['prior_analysis_paths']`` and
+    returns ``(script_text, source_label)`` for the first prior image-analysis
+    run that carries a saved analysis script under ``scripts/`` — a single-
+    image run writes ``scripts/analysis_script.py``; a series writes one
+    ``scripts/<image>.py`` per image (all share the locked pipeline, so the
+    first is a representative template). Returns ``(None, None)`` when no
+    prior paths are given or none carry a script, which keeps a normal
+    (no-prior) run byte-identical.
+    """
+    paths = state.get("prior_analysis_paths") or []
+    for raw_path in paths:
+        anchor_dir, _data = _load_prior_state(raw_path)
+        if anchor_dir is None:
+            continue
+        scripts_dir = anchor_dir / "scripts"
+        single = scripts_dir / "analysis_script.py"
+        candidate = None
+        if single.is_file():
+            candidate = single
+        elif scripts_dir.is_dir():
+            py_files = sorted(scripts_dir.glob("*.py"))
+            if py_files:
+                candidate = py_files[0]
+        if candidate is not None:
+            try:
+                return candidate.read_text(), (anchor_dir.name or str(anchor_dir))
+            except Exception:  # noqa: BLE001 - a malformed prior run is skipped
+                continue
+    return None, None
+
+
 def _append_prior_analysis_state(prompt: list, state: dict) -> None:
     """Surface a compact state summary from prior analyses to the planner.
 
@@ -2984,6 +3018,8 @@ Return JSON with:
         image_name: str,
         image_idx: int,
         is_regime_anchor: bool = False,
+        reuse_script: Optional[str] = None,
+        reuse_source: Optional[str] = None,
     ) -> dict:
         """Execute analysis with quality control, verification, and optional judge selection.
 
@@ -2995,6 +3031,16 @@ Return JSON with:
            - If still not approved: call judge to select best
         3. If still below quality threshold: try alternative pipelines
         4. If human feedback enabled: allow user to guide refinement
+
+        #172 locked-script reuse: when ``reuse_script`` is supplied (an anchor
+        fed a prior run's saved analysis script via ``prior_analysis_paths``),
+        the prior script is run verbatim on the new image first. If it
+        executes, its result is kept — regardless of the quality score — so
+        the extracted-feature schema stays consistent across an incremental
+        measurement campaign by construction. A single vision-verification
+        pass supplies a soft ``reuse_validity`` verdict the orchestrator can
+        act on; it never re-derives the pipeline. Full QC runs only when the
+        prior script cannot execute at all.
         """
         all_attempts = []
         verification_history = []
@@ -3006,6 +3052,90 @@ Return JSON with:
 
         # Anchor = first image overall OR first in a regime; gets full QC
         _is_anchor = image_idx == 0 or is_regime_anchor
+
+        # --- #172: locked-script reuse fast path ---
+        # A prior image-analysis run supplied via prior_analysis_paths means
+        # the new image is unit N+1 of that series: reuse the prior run's
+        # locked analysis script verbatim instead of re-deriving the pipeline.
+        # This keeps the extracted-feature schema consistent across an
+        # incremental campaign by construction. The vision verifier runs once
+        # as a soft validity *signal* (attached as reuse_validity for the
+        # orchestrator) — it never re-derives the pipeline, since a re-derived
+        # pipeline could change the feature columns. The only fallback to full
+        # QC is a prior script that cannot execute at all.
+        if reuse_script and _is_anchor:
+            self.logger.info(
+                f"   ♻️  Reusing locked analysis script from prior run "
+                f"'{reuse_source or 'prior'}'..."
+            )
+            reuse_result = self._process_single_image(
+                state=state, image_data=image_data, data_path=data_path,
+                image_name=image_name, image_idx=image_idx,
+                base_script=reuse_script,
+            )
+            if reuse_result.get("success"):
+                # Softer validity guard: a single vision-verification pass,
+                # no iterative re-derivation.
+                verification = self._verify_quality(
+                    state, reuse_result, history=[],
+                    verification_iter=0, annealing_level=0,
+                )
+                v_score = 0.0
+                if verification and isinstance(
+                    verification.get("quality_score"), (int, float)
+                ):
+                    v_score = verification["quality_score"]
+                verdict = "good" if v_score >= quality_threshold else "poor"
+                reuse_result["_quality_score"] = v_score
+                if verdict == "good":
+                    self.logger.info(
+                        f"   ✅ Reused script verified (score = {v_score:.2f} "
+                        f"≥ {quality_threshold}) — pipeline re-derivation "
+                        f"skipped"
+                    )
+                    message = (
+                        f"Reused the locked analysis script from prior run "
+                        f"'{reuse_source or 'prior'}'; vision verification "
+                        f"score {v_score:.2f} meets the threshold "
+                        f"{quality_threshold}."
+                    )
+                else:
+                    self.logger.warning(
+                        f"   ⚠️  Reused script verified low (score = "
+                        f"{v_score:.2f} < {quality_threshold}). Keeping the "
+                        f"result to preserve feature-schema consistency; "
+                        f"flagging it as low-confidence."
+                    )
+                    message = (
+                        f"Reused the locked analysis script from prior run "
+                        f"'{reuse_source or 'prior'}', but vision "
+                        f"verification scored {v_score:.2f}, below the "
+                        f"threshold {quality_threshold}. The new image may "
+                        f"not belong to this series, or imaging conditions "
+                        f"shifted. Extracted features are schema-consistent "
+                        f"but should be treated as low-confidence."
+                    )
+                reuse_result["reuse_validity"] = {
+                    "reused": True,
+                    "source": reuse_source,
+                    "quality_score": v_score,
+                    "threshold": quality_threshold,
+                    "verdict": verdict,
+                    "message": message,
+                }
+                reuse_result["quality_history"] = self._build_quality_history(
+                    v_score, quality_threshold, [],
+                    [verification] if verification else [], None,
+                )
+                if verdict == "poor":
+                    reuse_result["quality_warning"] = message
+                return reuse_result
+            self.logger.warning(
+                f"   ⚠️  Prior analysis script could not execute on this "
+                f"image (even after correction). Falling back to full "
+                f"pipeline re-derivation — the extracted-feature schema may "
+                f"differ from the prior run."
+            )
 
         # --- Initial analysis (skills at T=0 — guidance) ---
         state["_annealing_level"] = 0
@@ -4205,6 +4335,23 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
         else:
             first_in_regime = {0}
 
+        # #172: locked-script reuse. When prior_analysis_paths supplies an
+        # earlier image-analysis run, the image-0 anchor reuses that run's
+        # saved analysis script instead of re-deriving the pipeline. Skipped
+        # for multi-regime runs (a single prior script has no regime mapping).
+        reuse_script, reuse_source = _first_prior_image_script(state)
+        if reuse_script and regime_configs:
+            self.logger.info(
+                "   ♻️  Prior image-analysis run supplied, but this run is "
+                "multi-regime — locked-script reuse skipped."
+            )
+            reuse_script, reuse_source = None, None
+        elif reuse_script:
+            self.logger.info(
+                f"   ♻️  Prior image-analysis run '{reuse_source}' supplied "
+                f"— the anchor will reuse its locked analysis script (#172)."
+            )
+
         series_results = []
         base_scripts: Dict[str, str] = {}
         original_locked_config = state.get("locked_analysis_config", {})
@@ -4267,6 +4414,8 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
                     state=state, image_data=image_data, data_path=data_path,
                     image_name=image_name, image_idx=idx,
                     is_regime_anchor=(idx != 0 and idx in first_in_regime),
+                    reuse_script=(reuse_script if idx == 0 else None),
+                    reuse_source=(reuse_source if idx == 0 else None),
                 )
 
                 # Restore original state
@@ -4274,6 +4423,25 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
                     state["original_image_bytes"] = _saved_original_bytes
                 if _saved_image_statistics is not None:
                     state["image_statistics"] = _saved_image_statistics
+
+                # #172: reuse was attempted for the anchor but the result
+                # carries no reuse_validity verdict -> the prior script could
+                # not execute and full QC re-derived the pipeline. Record the
+                # schema-drift caveat so the orchestrator can react.
+                if idx == 0 and reuse_script and not result.get("reuse_validity"):
+                    result["reuse_validity"] = {
+                        "reused": False,
+                        "source": reuse_source,
+                        "verdict": "script_failed",
+                        "message": (
+                            f"The locked analysis script from prior run "
+                            f"'{reuse_source or 'prior'}' could not execute "
+                            f"on this image; the pipeline was re-derived from "
+                            f"scratch and the extracted-feature schema may "
+                            f"differ from the prior run."
+                        ),
+                    }
+                    result["quality_warning"] = result["reuse_validity"]["message"]
 
                 if result["success"] and result.get("script"):
                     base_scripts[regime_name] = result["script"]

@@ -1081,6 +1081,10 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             if series_results and series_results[0].get("quality_history"):
                 results["quality_history"] = series_results[0]["quality_history"]
 
+            # #172: surface the locked-script reuse verdict for the orchestrator
+            if series_results and series_results[0].get("reuse_validity"):
+                results["reuse_validity"] = series_results[0]["reuse_validity"]
+
         else:
             # Series: full structure with trends and flagged images
             successful = sum(
@@ -1122,9 +1126,15 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                         r.get("quality_history", {}).get("final_score")
                         if r.get("quality_history") else None
                     ),
+                    "reuse_validity": r.get("reuse_validity"),
                 }
                 for r in series_results
             ]
+
+            # #172: surface the anchor's locked-script reuse verdict at the
+            # top level for the orchestrator.
+            if series_results and series_results[0].get("reuse_validity"):
+                results["reuse_validity"] = series_results[0]["reuse_validity"]
 
             results["flagged_images"] = flagged_images
             results["flagged_images_analysis"] = synthesis.get(

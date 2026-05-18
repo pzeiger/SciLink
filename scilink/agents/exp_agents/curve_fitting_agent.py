@@ -933,6 +933,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             if series_results and series_results[0].get("quality_history"):
                 results["quality_history"] = series_results[0]["quality_history"]
 
+            # #172: surface the locked-script reuse verdict for the orchestrator
+            if series_results and series_results[0].get("reuse_validity"):
+                results["reuse_validity"] = series_results[0]["reuse_validity"]
+
         else:
             # Series: full structure with trends and flagged spectra
             successful = sum(1 for r in series_results if r.get("success", False))
@@ -971,9 +975,15 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "original_r2": r.get("original_r2"),
                     "locked_model_type": r.get("locked_model_type"),
                     "quality_history": r.get("quality_history"),
+                    "reuse_validity": r.get("reuse_validity"),
                 }
                 for r in series_results
             ]
+
+            # #172: surface the anchor's locked-script reuse verdict at the
+            # top level for the orchestrator.
+            if series_results and series_results[0].get("reuse_validity"):
+                results["reuse_validity"] = series_results[0]["reuse_validity"]
 
             results["flagged_spectra"] = flagged_spectra
             results["flagged_spectra_analysis"] = synthesis.get("flagged_spectra_analysis", {})
