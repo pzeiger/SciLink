@@ -71,8 +71,6 @@ all = [
 
 [project.scripts]
 scilink = "scilink.cli.main:main"
-scilink-workflows = "scilink.cli.workflows:main"
-scilink-agent = "scilink.cli.run_agent:main"
 scilink-ui = "scilink.cli.ui:main"
 scilink-mcp = "scilink.cli.serve:main"
 
