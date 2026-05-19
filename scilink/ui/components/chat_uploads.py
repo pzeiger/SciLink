@@ -295,8 +295,8 @@ def _render_meta_uploads(start_task_fn) -> None:
         'background:#8893a5;color:#fff;padding:2px 8px;border-radius:9px;'
         'letter-spacing:1px;font-weight:600;">BETA</span></p>'
         '<p class="upload-hero-subtitle">'
-        "Describe your research goal — Explore routes it to the analysis "
-        "and planning specialists</p>"
+        "Describe your research goal — mission control agent will route "
+        "it to the specialist agents</p>"
         "</div>",
         unsafe_allow_html=True,
     )
