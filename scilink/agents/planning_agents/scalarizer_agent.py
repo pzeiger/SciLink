@@ -61,13 +61,14 @@ class ScalarizerAgent(BaseAgent):
         google_api_key: Optional[str] = None,
         local_model: Optional[str] = None,
     ):
-        if not require_sandbox_approval(
-            context="ScalarizerAgent (scalarization of experimental data)"
-        ):
-            raise RuntimeError(
-                "ScalarizerAgent requires code execution but user declined. "
-                "Run in Docker, VM, or Colab for safe execution."
-            )
+        # Construction is always allowed.  The sandbox check is deferred to
+        # ``scalarize()`` (early gate, avoids LLM-call waste on decline) and
+        # to ``_execute_script`` (the actual subprocess boundary, defense-in-
+        # depth for any future caller that bypasses ``scalarize()``).  This
+        # lets the agent be instantiated in non-TTY contexts — Streamlit UI,
+        # scripts, CI, and meta-agent sessions that never actually scalarize.
+        # The first executed gate prompts the user once; the global cache in
+        # ``require_sandbox_approval`` short-circuits subsequent checks.
         super().__init__(output_dir)
         self.agent_type = "scalarizer"
 
@@ -144,7 +145,23 @@ class ScalarizerAgent(BaseAgent):
 
     def _execute_script(self, script_path: Path, args: List[str] = None) -> Dict[str, Any]:
         """Runs the generated python script in a subprocess."""
-       
+
+        # Defense-in-depth: ``scalarize()`` already gates on sandbox approval
+        # before any code is generated, but this method is the actual
+        # subprocess boundary — any future caller that bypasses
+        # ``scalarize()`` is still protected by the cache-cheap second check.
+        if not require_sandbox_approval(
+            context="ScalarizerAgent (scalarization of experimental data)"
+        ):
+            return {
+                "status": "failure",
+                "error": (
+                    "Sandbox approval declined — script not executed. "
+                    "Set UNSAFE_EXECUTION_OK=true or run inside Docker / "
+                    "VM / Colab to enable code execution."
+                ),
+            }
+
         # Construct command with arguments (if any)
         cmd = ["python", str(script_path)]
         if args:
@@ -270,8 +287,32 @@ class ScalarizerAgent(BaseAgent):
             - 'metrics': Dict of extracted scalars
             - 'source_script': Path to the generated Python script
         """
+        # Sandbox gate — fires here (the actual entry point that will run
+        # generated code) instead of in __init__, so the agent can be
+        # constructed in non-TTY contexts (Streamlit, scripts, CI, meta-agent
+        # sessions that may never scalarize anything).  The global cache in
+        # ``require_sandbox_approval`` short-circuits subsequent calls in the
+        # same session.  On decline we return a structured failure dict —
+        # callers in orchestrator_tools.py already check ``status != 'success'``,
+        # so the failure propagates correctly all the way up without
+        # triggering the in-loop "fix the code" retries.
+        if not require_sandbox_approval(
+            context="ScalarizerAgent (scalarization of experimental data)"
+        ):
+            return {
+                "status": "failure",
+                "metrics": {},
+                "source_script": None,
+                "column_roles": {},
+                "error": (
+                    "Sandbox approval declined — scalarization not executed. "
+                    "Set UNSAFE_EXECUTION_OK=true or run inside Docker / VM / "
+                    "Colab to enable code execution."
+                ),
+            }
+
         path_obj = Path(data_path)
-        
+
         # Initialize state
         self._init_state(current_data_path=data_path, current_objective=objective_query)
 
