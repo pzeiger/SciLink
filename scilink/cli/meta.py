@@ -45,6 +45,9 @@ Examples:
   scilink explore --model gemini-2.0-flash
   scilink explore --base-url https://my-proxy.example.com/v1 --model my-model
 
+  # Share custom domain skills with every specialist
+  scilink explore --skills ./raman_skill.md ./xrd_skill.md
+
 Modes — the meta has two levels (a delegation runs a specialist through its
 one-shot run_task, so the specialists' step-by-step co-pilot mode does not
 apply here):
@@ -98,7 +101,30 @@ Environment Variables:
     parser.add_argument('--restore', action='store_true',
                         help='Restore from previous checkpoint in session directory')
 
+    # Custom skills — shared with every specialist the meta delegates to
+    parser.add_argument(
+        '--skills',
+        type=str,
+        nargs='+',
+        dest='skill_files',
+        metavar='SKILL_FILE',
+        help=(
+            'Path(s) to custom skill .md files. Each skill is registered on '
+            'the meta-agent and shared with every specialist it delegates to '
+            '(analysis + planning). Example: '
+            'scilink explore --skills ./raman_skill.md ./ftir_skill.md'
+        )
+    )
+
     args = parser.parse_args()
+
+    # Validate custom skill files if provided
+    if args.skill_files:
+        for sf in args.skill_files:
+            if not Path(sf).exists():
+                parser.error(f"--skills path does not exist: {sf}")
+            if not sf.endswith('.md'):
+                parser.error(f"--skills file must be a .md file: {sf}")
 
     config = {
         'model_name': args.model,
@@ -111,6 +137,7 @@ Environment Variables:
         'initial_message': args.initial_message,
         'session_dir': args.session_dir,
         'restore': args.restore,
+        'skill_files': args.skill_files or [],
     }
 
     try:
@@ -174,6 +201,7 @@ class MetaPlayground:
         restore = self.config.get('restore', False)
 
         self._initial_message = self.config.get('initial_message')
+        self._skill_files = self.config.get('skill_files', [])
 
         mode_map = {
             'autopilot': MetaMode.AUTOPILOT,
@@ -258,6 +286,10 @@ a nested child sub-session under this meta session.
             traceback.print_exc()
             sys.exit(1)
 
+        # ── Register custom skills ──────────────────────────────────
+        if self._skill_files:
+            self._register_custom_skills(self._skill_files)
+
         # ── Session info ────────────────────────────────────────────
         print("\n" + "=" * 60)
         print("SESSION INFO")
@@ -277,6 +309,17 @@ a nested child sub-session under this meta session.
 
         print(f"\nDelegation Tools: {', '.join(self.agent.tools.functions_map.keys())}")
 
+    def _register_custom_skills(self, skill_files: list) -> None:
+        """Register custom skill .md files; each is shared with every specialist."""
+        for file_path in skill_files:
+            path = Path(file_path).expanduser().resolve()
+            print(f"\n📖 Registering custom skill: {path}")
+            try:
+                name = self.agent.register_skill(str(path))
+                print(f"   ✅ Skill '{name}' registered — shared with all specialists")
+            except Exception as e:
+                print(f"   ❌ Failed to register {path.name}: {e}")
+
     def print_help(self):
         print("\n" + "=" * 60)
         print("AVAILABLE COMMANDS")
@@ -286,6 +329,7 @@ a nested child sub-session under this meta session.
         print("  /children          List delegations made this session")
         print("  /status            Show current session state")
         print("  /mode [level]      Show or change meta autonomy mode")
+        print("  /skill <path>      Register a custom skill (.md), shared with specialists")
         print("  /clear             Clear screen")
         print("  /quit or /exit     Exit")
         print("\nOr just describe your research goal and let the meta-agent route it!")
@@ -347,6 +391,17 @@ a nested child sub-session under this meta session.
                 else:
                     print(f"\n   ❌ Unknown mode: {parts[1]}")
                     print("   Valid options: autopilot, autonomous")
+            return True
+
+        if cmd.startswith("/skill"):
+            # Parse the path from the original input — cmd is lower-cased and
+            # would corrupt a case-sensitive file path.
+            parts = user_input.strip().split(maxsplit=1)
+            if len(parts) < 2 or not parts[1].strip():
+                print("\n   Usage: /skill <path-to-skill.md>")
+                print("   Registers a custom skill and shares it with every specialist.")
+            else:
+                self._register_custom_skills([parts[1].strip()])
             return True
 
         if cmd == "/clear":
