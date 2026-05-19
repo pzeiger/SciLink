@@ -44,48 +44,28 @@ from ...skills.loader import list_skills, list_all_skills, load_skill
 
 # Full-text extraction for the read_document tool — a few documents read
 # straight into the LLM context, with no embeddings / chunking / vector store
-# (that is the planning KB's job, for large corpora). The fitz / docx readers
-# are imported lazily so this module stays importable without them.
+# (that is the knowledge KB's job, for large corpora).
 _READ_DOC_MAX_CHARS = 200_000  # ~50k tokens; longer documents are truncated
 
 
 def _extract_document_text(path: Path) -> Dict[str, Any]:
     """Extract plain text from a PDF / DOCX / Markdown / text file.
 
+    Thin wrapper over the shared ``scilink.parsers.extract_text`` (which adds
+    table-aware PDF extraction); it applies read_document's character cap.
     Returns a dict with ``text`` plus metadata (page/paragraph count,
     ``n_chars``, ``truncated``). Raises ValueError for an unsupported
     extension; reader errors propagate to the caller.
     """
-    ext = path.suffix.lower()
-    info: Dict[str, Any] = {}
-    if ext == ".pdf":
-        import fitz
-        doc = fitz.open(path)
-        try:
-            info["n_pages"] = doc.page_count
-            text = "\n\n".join(
-                doc[i].get_text() or "" for i in range(doc.page_count)
-            )
-        finally:
-            doc.close()
-    elif ext == ".docx":
-        import docx
-        d = docx.Document(str(path))
-        info["n_paragraphs"] = len(d.paragraphs)
-        text = "\n".join(p.text for p in d.paragraphs)
-    elif ext in (".md", ".txt"):
-        text = path.read_text(errors="replace")
-    else:
-        raise ValueError(
-            f"Unsupported document type '{ext}' — read_document handles "
-            f".pdf, .docx, .md, and .txt."
-        )
-    text = text.strip()
+    from scilink.parsers import extract_text
+
+    info = extract_text(path)
+    text = info.get("text", "")
     info["truncated"] = len(text) > _READ_DOC_MAX_CHARS
     if info["truncated"]:
         text = text[:_READ_DOC_MAX_CHARS]
-    info["text"] = text
-    info["n_chars"] = len(text)
+        info["text"] = text
+        info["n_chars"] = len(text)
     return info
 
 

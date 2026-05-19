@@ -12,7 +12,7 @@ from ...auth import get_internal_proxy_key
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from ...executors import require_sandbox_approval
-from .parser_utils import parse_json_from_response
+from scilink.knowledge import parse_json_from_response
 from .instruct import SCALARIZER_PROMPT, SCALARIZER_REFLECTION_PROMPT
 
 from ._deprecation import normalize_params

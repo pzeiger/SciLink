@@ -4,10 +4,45 @@ from typing import List, Dict, Any
 
 from .pdf_parser import extract_pdf_two_pass, chunk_text
 from .excel_parser import parse_adaptive_excel
-from .parser_utils import get_files_from_directory
 
 
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.gif'}
+
+# File extensions the ingestor / directory scanner recognises.
+SUPPORTED_EXTENSIONS = {
+    '.py', '.java', '.r', '.cpp', '.h', '.js', '.json',
+    '.csv', '.txt', '.md', '.pdf',
+    '.xlsx', '.xls',
+    '.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.gif'
+}
+
+
+def get_files_from_directory(directory_path: str) -> List[str]:
+    """
+    Recursively finds all supported files in a directory, ignoring hidden files.
+    """
+    found_files = []
+    path = Path(directory_path)
+
+    if not path.exists():
+        print(f"  - ⚠️ Directory not found: {directory_path}")
+        return []
+
+    print(f"  - 📂 Scanning directory: {path.name}...")
+
+    for root, dirs, files in os.walk(path):
+        # In-place modification to skip hidden dirs and common junk
+        dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('__pycache__', 'venv', 'env', 'node_modules', '.git')]
+
+        for file in files:
+            if file.startswith('.'): continue
+
+            file_path = Path(root) / file
+            if file_path.suffix.lower() in SUPPORTED_EXTENSIONS:
+                found_files.append(str(file_path))
+
+    print(f"    -> Found {len(found_files)} files in directory.")
+    return found_files
 
 def extract_images(file_paths: List[str]) -> List[str]:
     """

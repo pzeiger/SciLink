@@ -9,43 +9,11 @@ import json
 import pandas as pd
 import PIL.Image as PIL_Image
 
-from .excel_parser import parse_adaptive_excel
+from scilink.parsers import parse_adaptive_excel, SUPPORTED_EXTENSIONS
 
+# get_files_from_directory / SUPPORTED_EXTENSIONS / table_to_markdown now live
+# in scilink.parsers; parse_json_from_response lives in scilink.knowledge.
 
-# Match these to the extensions you check in planning_agent.py
-SUPPORTED_EXTENSIONS = {
-    '.py', '.java', '.r', '.cpp', '.h', '.js', '.json',
-    '.csv', '.txt', '.md', '.pdf',
-    '.xlsx', '.xls',
-    '.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.gif'
-}
-
-def get_files_from_directory(directory_path: str) -> List[str]:
-    """
-    Recursively finds all supported files in a directory, ignoring hidden files.
-    """
-    found_files = []
-    path = Path(directory_path)
-    
-    if not path.exists():
-        print(f"  - ⚠️ Directory not found: {directory_path}")
-        return []
-
-    print(f"  - 📂 Scanning directory: {path.name}...")
-
-    for root, dirs, files in os.walk(path):
-        # In-place modification to skip hidden dirs and common junk
-        dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('__pycache__', 'venv', 'env', 'node_modules', '.git')]
-        
-        for file in files:
-            if file.startswith('.'): continue
-            
-            file_path = Path(root) / file
-            if file_path.suffix.lower() in SUPPORTED_EXTENSIONS:
-                found_files.append(str(file_path))
-                
-    print(f"    -> Found {len(found_files)} files in directory.")
-    return found_files
 
 def generate_repo_map(root_dir: str) -> str:
     """
@@ -71,140 +39,6 @@ def generate_repo_map(root_dir: str) -> str:
             tree_lines.append(f"{indent}├── {path.name}")
             
     return "\n".join(tree_lines)
-
-def table_to_markdown(table: List[List[str]]) -> str:
-    """Converts a 2D list representation of a table into Markdown format."""
-    if not table or not table[0]: return ""
-    # Ensure all cells are strings before joining
-    cleaned_table = [[str(cell).strip() if cell is not None else "" for cell in row] for row in table]
-    header, *rows = cleaned_table
-    md = f"| {' | '.join(header)} |\n| {' | '.join(['---'] * len(header))} |\n"
-    for row in rows:
-        # Pad rows that are shorter than the header
-        while len(row) < len(header): row.append("")
-        # Truncate rows that are longer than the header
-        md += f"| {' | '.join(row[:len(header)])} |\n"
-    return md
-
-
-def parse_json_from_response(resp) -> "Tuple[Optional[Dict[str, Any]], Optional[str]]":
-    """
-    Robustly extracts and parses JSON from an LLM response object.
-    
-    Handles:
-    - Gemini: resp.text or resp.parts[0].text
-    - OpenAI/Anthropic wrapper: resp.text (via SimpleNamespace)
-    - Raw strings
-    - Markdown code fences (```json ... ```)
-    - Preamble/postamble text around JSON (common with Anthropic models)
-    """
-    import json
-    
-    json_text = ""
-    
-    # 1. Extract raw text from response object
-    try:
-        if hasattr(resp, 'text'): 
-            json_text = resp.text.strip()
-        elif hasattr(resp, 'parts') and resp.parts: 
-            json_text = resp.parts[0].text.strip()
-        elif isinstance(resp, str):
-            json_text = resp.strip()
-        else:
-            return None, f"LLM response format unexpected: {type(resp)}"
-            
-    except ValueError as e:
-        return None, f"Response blocked or empty (Safety Filter): {e}"
-    except Exception as e:
-        return None, f"Error extracting text from response: {e}"
-
-    if not json_text:
-        return None, "Empty response from LLM"
-
-    # 2. Strip Markdown code fences
-    if json_text.startswith("```json"):
-        json_text = json_text[len("```json"):].strip()
-    elif json_text.startswith("```"):
-        json_text = json_text[len("```"):].strip()
-    
-    if json_text.endswith("```"):
-        json_text = json_text[:-len("```")].strip()
-
-    # 3. Try direct parse first (fast path — works for Gemini and clean responses)
-    try:
-        return json.loads(json_text), None
-    except json.JSONDecodeError:
-        pass  # Fall through to extraction logic
-    
-    # 4. Extract JSON object from surrounding text (handles Anthropic preamble)
-    #    Find the outermost { ... } by brace matching
-    first_brace = json_text.find('{')
-    if first_brace == -1:
-        return None, (
-            f"No JSON object found in response. "
-            f"First 300 chars: {json_text[:300]}"
-        )
-    
-    # Match braces to find the complete JSON object
-    depth = 0
-    in_string = False
-    escape_next = False
-    last_brace = -1
-    
-    for i in range(first_brace, len(json_text)):
-        ch = json_text[i]
-        
-        if escape_next:
-            escape_next = False
-            continue
-        
-        if ch == '\\' and in_string:
-            escape_next = True
-            continue
-        
-        if ch == '"' and not escape_next:
-            in_string = not in_string
-            continue
-        
-        if in_string:
-            continue
-            
-        if ch == '{':
-            depth += 1
-        elif ch == '}':
-            depth -= 1
-            if depth == 0:
-                last_brace = i
-                break
-    
-    if last_brace == -1:
-        return None, (
-            f"Unbalanced braces in response. "
-            f"First 300 chars: {json_text[:300]}"
-        )
-    
-    extracted = json_text[first_brace:last_brace + 1]
-
-    try:
-        return json.loads(extracted), None
-    except json.JSONDecodeError:
-        pass
-
-    # Attempt to fix broken Unicode escapes (e.g. \u00B instead of \u00B5)
-    # by replacing malformed \uXXX sequences with the Unicode replacement char.
-    import re
-    sanitized = re.sub(
-        r'\\u([0-9a-fA-F]{1,3})(?![0-9a-fA-F])',
-        lambda m: chr(int(m.group(1), 16)) if len(m.group(1)) >= 2 else '\ufffd',
-        extracted,
-    )
-    try:
-        return json.loads(sanitized), None
-    except json.JSONDecodeError as e:
-        return None, (
-            f"Failed to decode JSON: {e}. "
-            f"Extracted text (first 500 chars): {extracted[:500]}"
-        )
 
 def append_experiment_result(file_path: str, parameters: Dict[str, float], results: Dict[str, float]):
     """

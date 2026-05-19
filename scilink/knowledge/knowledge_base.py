@@ -1,15 +1,17 @@
 import os
 import numpy as np
-import faiss
 import time
 import json
 from pathlib import Path
 import logging
 from typing import List, Dict, Any, Optional
 
-from ...auth import get_api_key, APIKeyNotFoundError
-from ...wrappers.openai_wrapper_embeddings import OpenAIAsEmbeddingModel
-from ...wrappers.litellm_wrapper import LiteLLMEmbeddingModel
+# `faiss` is imported lazily inside the methods that build/save/load the index
+# so importing this module (and the scilink.knowledge package) stays cheap.
+
+from ..auth import get_api_key, APIKeyNotFoundError
+from ..wrappers.openai_wrapper_embeddings import OpenAIAsEmbeddingModel
+from ..wrappers.litellm_wrapper import LiteLLMEmbeddingModel
 
 
 from ._deprecation import normalize_params
@@ -84,9 +86,11 @@ class KnowledgeBase:
 
     def build(self, chunks: List[Dict[str, any]], batch_size: int = 100):
         """
-        Processes a list of text chunks, generates embeddings in batches, 
+        Processes a list of text chunks, generates embeddings in batches,
         and builds the vector index.
         """
+        import faiss
+
         if not chunks:
             print("⚠️  KnowledgeBase build skipped: No chunks provided.")
             return
@@ -141,6 +145,8 @@ class KnowledgeBase:
 
     def save(self, index_path: str, chunks_path: str, repo_map_path: str = None, sources_path: str = None):
         """Saves the FAISS index, text chunks, and optionally the repo maps to disk."""
+        import faiss
+
         if self.index:
             faiss.write_index(self.index, index_path)
             print(f"  - FAISS index saved to {index_path}")
@@ -164,6 +170,8 @@ class KnowledgeBase:
 
     def load(self, index_path: str, chunks_path: str, repo_map_path: str = None, sources_path: str = None) -> bool:
         """Loads a pre-built FAISS index, chunks, and repo maps from disk."""
+        import faiss
+
         index_file = Path(index_path)
         chunks_file = Path(chunks_path)
         sources_file = Path(sources_path)

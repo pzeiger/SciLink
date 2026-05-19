@@ -1,16 +1,17 @@
-# planning_agents/excel_parser.py
-import pandas as pd
 import json
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+
+# `pandas` is imported lazily inside parse_adaptive_excel so importing this
+# module stays cheap for callers that don't touch tabular data.
 
 # If a file has this many rows or fewer, we embed it all in one chunk.
 SMALL_FILE_THRESHOLD = 150
 
 def parse_adaptive_excel(file_path: str, context_path: Optional[str] = None, row_chunk_size: int = 200) -> List[Dict[str, Any]]:
     """
-    Reads a Data file (Excel or CSV) and an optional JSON context file.    
-    
+    Reads a Data file (Excel or CSV) and an optional JSON context file.
+
     Adaptive Strategy:
     - If rows <= SMALL_FILE_THRESHOLD:
       Creates ONE chunk containing the summary, definitions, AND the full data table.
@@ -19,6 +20,8 @@ def parse_adaptive_excel(file_path: str, context_path: Optional[str] = None, row
       1. A single "summary chunk" with statistical info.
       2. Multiple "data chunks" by batching the rows.
     """
+    import pandas as pd
+
     path_obj = Path(file_path)
     print(f"  - Processing Data File '{path_obj.name}' with adaptive strategy...")
     all_chunks = []

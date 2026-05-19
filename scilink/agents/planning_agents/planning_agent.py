@@ -8,9 +8,9 @@ from typing import List, Dict, Any, Optional, Union
 from pathlib import Path
 from datetime import datetime
 
-from .knowledge_base import KnowledgeBase
+from scilink.knowledge import KnowledgeBase
 from .parser_utils import (
-    generate_repo_map, 
+    generate_repo_map,
     write_experiments_to_disk,
     resolve_primary_data_path,
     parse_multimodal_results
@@ -28,14 +28,13 @@ from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 
 from ._deprecation import normalize_params
 from .base_agent import BaseAgent
-from .knowledge_base import KnowledgeBase
 
 import warnings
 
 from ..lit_agents.literature_agent import LiteratureSearchAgent
 from ..lit_agents.optimize_query import optimize_search_query
 
-from .rag_engine import (
+from .planning_rag import (
     perform_science_rag,
     perform_code_rag,
     refine_plan_with_feedback,
@@ -45,7 +44,7 @@ from .rag_engine import (
 
 from ...skills.loader import load_skill
 
-from .ingestor import ingest_files, extract_images
+from scilink.parsers import ingest_files, extract_images
 
 from .user_interface import display_plan_summary, get_user_feedback
 

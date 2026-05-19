@@ -3825,7 +3825,7 @@ class OrchestratorTools:
                     current_prompt += f"\n\n**PREVIOUS ERROR:** {last_error}\nFix the script."
 
                 try:
-                    from .parser_utils import parse_json_from_response
+                    from scilink.knowledge import parse_json_from_response
                     response = self.orch.planner.model.generate_content(
                         [current_prompt],
                         generation_config={"max_output_tokens": 8192, "temperature": 0.0},
@@ -3984,7 +3984,7 @@ class OrchestratorTools:
                         generation_config={"max_output_tokens": 1024, "temperature": 0.0},
                     )
                     # LLM returns JSON: {"code": "...TODO lines..."}
-                    from .parser_utils import parse_json_from_response
+                    from scilink.knowledge import parse_json_from_response
                     result, parse_error = parse_json_from_response(response)
                     if parse_error or not result or "code" not in result:
                         # Fallback: treat response as raw code

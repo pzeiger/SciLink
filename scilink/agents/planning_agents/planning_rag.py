@@ -3,10 +3,8 @@ import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
-import PIL.Image as PIL_Image
-
-from .excel_parser import parse_adaptive_excel
-from .parser_utils import parse_json_from_response
+from scilink.parsers import parse_adaptive_excel
+from scilink.knowledge import run_rag, parse_json_from_response
 from .instruct import (
     HYPOTHESIS_GENERATION_INSTRUCTIONS,
     TEA_INSTRUCTIONS,
@@ -132,128 +130,52 @@ def perform_science_rag(objective: str,
                         external_context: Optional[str] = None,
                         skill_context: Optional[str] = None) -> Dict[str, Any]:
     """
-    Executes the Scientific/TEA RAG loop using the Docs KnowledgeBase.
-    Includes logic for handling Primary Data (Excel) and Fallback generation.
+    Executes the Scientific/TEA RAG loop over the Docs KnowledgeBase.
+
+    Thin planning-side wrapper over the shared ``scilink.knowledge.run_rag``
+    engine: it resolves planning's primary-data Excel summary and selects the
+    matching fallback instruction set, then delegates retrieval + generation.
     """
-    
-    # --- 1. Process Primary Data (e.g., Excel) ---
+
+    # --- Resolve primary data (Excel) into a summary string ---
     primary_data_str = None
     if primary_data_set:
         try:
-            chunks = parse_adaptive_excel(primary_data_set['file_path'], primary_data_set['metadata_path'])
-            if chunks: 
-                summary = next((c for c in chunks if c['metadata'].get('content_type') in ('dataset_summary', 'dataset_package')), chunks[0])
+            chunks = parse_adaptive_excel(
+                primary_data_set['file_path'], primary_data_set['metadata_path']
+            )
+            if chunks:
+                summary = next(
+                    (c for c in chunks if c['metadata'].get('content_type')
+                     in ('dataset_summary', 'dataset_package')),
+                    chunks[0],
+                )
                 primary_data_str = summary['text']
         except Exception as e:
             print(f"  - ⚠️ Warning: Failed to parse primary data set: {e}")
 
-    # --- 2. Retrieve Scientific Context (Docs KB Only) ---
-    print(f"\n--- Retrieving Scientific Context for {task_name} ---")
-    
-    doc_chunks = []
-    if kb_docs.index and kb_docs.index.ntotal > 0:
-        doc_chunks = kb_docs.retrieve(objective, top_k=10)
-    
-    unique_chunks = {c['text']: c for c in doc_chunks}.values()
-    
-    if not unique_chunks and not primary_data_str and not external_context:
-        retrieved_context_str = "No specific documents found in Knowledge Base."
-    else:
-        rag_str = "\n\n---\n\n".join(
-            f"Source: {Path(c['metadata'].get('source', 'N/A')).name}\nType: {c['metadata'].get('content_type')}\n\n{c['text']}" 
-            for c in unique_chunks
-        )
-        retrieved_context_str = ""
+    # --- Select the fallback instruction set matching the planning task ---
+    fallback_instructions = None
+    if instructions == HYPOTHESIS_GENERATION_INSTRUCTIONS:
+        fallback_instructions = HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
+    elif instructions == TEA_INSTRUCTIONS:
+        fallback_instructions = TEA_INSTRUCTIONS_FALLBACK
 
-        # Primary Data
-        # if primary_data_str: 
-        #     retrieved_context_str += f"## 📊 Primary Lab Data Summary\n{primary_data_str}\n\n"
-        
-        
-        # B. External Literature
-        if external_context:
-            retrieved_context_str += f"## 🌍 External Scientific Literature\n{external_context}\n\n"
-
-        # C. Local Documents
-        if rag_str: 
-            retrieved_context_str += f"## 📂 Retrieved Local Documents\n{rag_str}"
-
-    # --- 3. Construct Multimodal Prompt ---
-    loaded_images = []
-    img_desc_str = ""
-    
-    if image_paths and PIL_Image:
-        for p in image_paths:
-            try: 
-                loaded_images.append(PIL_Image.open(p))
-            except Exception as e:
-                print(f"  - ⚠️ Could not load image {p}: {e}")
-
-    if image_descriptions:
-        img_desc_str = json.dumps(image_descriptions, indent=2)
-
-    prompt_parts = [instructions, f"## User Objective:\n{objective}"]
-
-    if primary_data_str:
-        prompt_parts.append(f"\n## 📊 Primary Experimental Data:\n{primary_data_str}")
-    
-    if loaded_images:
-        prompt_parts.append("\n## Provided Images: (See attached)")
-        prompt_parts.extend(loaded_images)
-        if img_desc_str: prompt_parts.append(f"\n## Image Descriptions:\n{img_desc_str}")
-    
-    if additional_context:
-        prompt_parts.append(f"\n## Additional Context:\n{additional_context}")
-        
-    prompt_parts.append(f"\n## Retrieved Context:\n{retrieved_context_str}")
-
-    if skill_context:
-        prompt_parts.append(skill_context)
-
-    # --- 4. Generation & Fallback Logic ---
-    print(f"--- Generating {task_name} ---")
-    try:
-        # Attempt 1: Strict RAG Generation
-        response = model.generate_content(prompt_parts, generation_config=generation_config)
-        result, error_msg = parse_json_from_response(response)
-        
-        if error_msg: 
-            return {"error": f"JSON Parsing Error: {error_msg}"}
-
-        # Check for Insufficient Context
-        needs_fallback = False
-        if result.get("error") and "Insufficient" in str(result.get("error")):
-            needs_fallback = True
-            print(f"    - ⚠️ Strict generation failed: {result.get('error')}")
-        
-        # --- 5. Execution of Fallback ---
-        if needs_fallback:
-            print("    - 🔄 Entering Fallback Mode (General Knowledge)...")
-            
-            fallback_inst = None
-            if instructions == HYPOTHESIS_GENERATION_INSTRUCTIONS:
-                fallback_inst = HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
-            elif instructions == TEA_INSTRUCTIONS:
-                fallback_inst = TEA_INSTRUCTIONS_FALLBACK
-            
-            if not fallback_inst:
-                return result # No fallback available for this instruction set
-
-            prompt_parts[0] = fallback_inst
-            
-            fallback_response = model.generate_content(prompt_parts, generation_config=generation_config)
-            result, error_msg_fb = parse_json_from_response(fallback_response)
-            
-            if error_msg_fb:
-                return {"error": f"Fallback JSON Parsing Error: {error_msg_fb}"}
-            
-            print("    - ✅ Fallback generation successful.")
-
-        return result
-
-    except Exception as e:
-        logging.error(f"Error in perform_science_rag: {e}")
-        return {"error": str(e)}
+    return run_rag(
+        query=objective,
+        instructions=instructions,
+        kb=kb_docs,
+        model=model,
+        generation_config=generation_config,
+        images=image_paths,
+        image_descriptions=image_descriptions,
+        external_context=external_context,
+        additional_context=additional_context,
+        primary_data_str=primary_data_str,
+        skill_context=skill_context,
+        fallback_instructions=fallback_instructions,
+        task_name=task_name,
+    )
 
 
 def normalize_code(code: str) -> str:

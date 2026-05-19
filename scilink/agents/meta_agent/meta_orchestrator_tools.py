@@ -75,24 +75,20 @@ def _probe_file(path: Path) -> Dict[str, Any]:
         elif ext == ".pdf":
             info.update(kind="document", doc_type="pdf")
             try:
-                import fitz
-                doc = fitz.open(path)
-                try:
-                    info["n_pages"] = doc.page_count
-                    info["text_head"] = (
-                        doc[0].get_text() or "")[:_PROBE_TEXT_HEAD].strip()
-                finally:
-                    doc.close()
+                from scilink.parsers import extract_text
+                # max_pages=1 keeps the probe cheap — only a text head is needed.
+                doc_info = extract_text(path, max_pages=1)
+                info["n_pages"] = doc_info.get("n_pages")
+                info["text_head"] = doc_info["text"][:_PROBE_TEXT_HEAD].strip()
             except Exception as e:  # noqa: BLE001 - optional reader / bad PDF
                 info["note"] = f"page/text probe unavailable: {e}"
         elif ext == ".docx":
             info.update(kind="document", doc_type="docx")
             try:
-                import docx
-                d = docx.Document(str(path))
-                info["n_paragraphs"] = len(d.paragraphs)
-                text = "\n".join(p.text for p in d.paragraphs if p.text.strip())
-                info["text_head"] = text[:_PROBE_TEXT_HEAD].strip()
+                from scilink.parsers import extract_text
+                doc_info = extract_text(path)
+                info["n_paragraphs"] = doc_info.get("n_paragraphs")
+                info["text_head"] = doc_info["text"][:_PROBE_TEXT_HEAD].strip()
             except Exception as e:  # noqa: BLE001 - optional reader / bad docx
                 info["note"] = f"text probe unavailable: {e}"
         elif ext in (".md", ".txt"):
