@@ -353,7 +353,8 @@ class PlanningAgent(BaseAgent):
         doc_chunks = []
         if knowledge_paths:
             print(f"Processing {len(knowledge_paths)} Scientific Paths...")
-            doc_chunks.extend(ingest_files(knowledge_paths, is_code_mode=False))
+            doc_chunks.extend(ingest_files(knowledge_paths, is_code_mode=False,
+                                           ocr_model=self.model))
 
         if doc_chunks:
             print(f"  - Building Scientific KB with {len(doc_chunks)} chunks...")

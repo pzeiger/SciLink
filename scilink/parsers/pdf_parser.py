@@ -1,7 +1,15 @@
 import threading
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 from dataclasses import dataclass
 from pathlib import Path
+
+from .ocr import (
+    SPARSE_PAGE_CHAR_THRESHOLD,
+    DEFAULT_OCR_DPI,
+    MAX_OCR_PAGES,
+    OCR_MARKER,
+    ocr_pdf_pages,
+)
 
 # `fitz` (PyMuPDF) and `pdfplumber` are imported lazily inside the functions
 # that need them, so importing this module stays cheap for callers that only
@@ -75,24 +83,33 @@ def chunk_text(text: str, page_num: int, chunk_size: int, overlap: int) -> List[
 
 
 def _extract_pdf_blocks(pdf_path: str, table_timeout: int = 15,
-                        max_pages: Optional[int] = None
-                        ) -> Tuple[List[Tuple[int, str]], List[Dict[str, any]], int]:
-    """Shared two-pass PDF extraction.
+                        max_pages: Optional[int] = None,
+                        ocr_model: Any = None,
+                        ocr_dpi: int = DEFAULT_OCR_DPI,
+                        max_ocr_pages: int = MAX_OCR_PAGES
+                        ) -> Tuple[List[Tuple[int, str]], List[Dict[str, any]], int, set]:
+    """Shared two-pass PDF extraction, with an optional vision-OCR fallback.
 
     Pass 1 (PyMuPDF): fast per-page text + detection of pages with tables.
     Pass 2 (pdfplumber): high-accuracy table extraction on flagged pages only.
+    OCR fallback: pages whose embedded text layer is empty/sparse are rendered
+    and transcribed with ``ocr_model`` — when one is supplied.
 
-    Returns ``(page_texts, table_chunks, n_pages)`` where ``page_texts`` is an
-    ordered list of ``(page_number, text)``, ``table_chunks`` are
-    ``{'text', 'metadata'}`` dicts, and ``n_pages`` is the true page count.
-    When ``max_pages`` is set, Pass 1 stops after that many pages and Pass 2 is
-    skipped — a lightweight mode for previews/probes.
+    Returns ``(page_texts, table_chunks, n_pages, ocr_pages)`` where
+    ``page_texts`` is an ordered list of ``(page_number, text)``,
+    ``table_chunks`` are ``{'text', 'metadata'}`` dicts, ``n_pages`` is the
+    true page count, and ``ocr_pages`` is the set of 1-indexed pages whose
+    text came from vision-OCR. When ``max_pages`` is set, Pass 1 stops after
+    that many pages and both Pass 2 and OCR are skipped — a lightweight mode
+    for previews/probes.
     """
     import fitz  # PyMuPDF
 
     page_texts: List[Tuple[int, str]] = []
     table_chunks: List[Dict[str, any]] = []
     table_page_nums = set()
+    ocr_pages: set = set()
+    sparse_pages: List[int] = []
 
     # === PASS 1: Fast text extraction + table-page location (PyMuPDF) ===
     doc = fitz.open(pdf_path)
@@ -110,7 +127,11 @@ def _extract_pdf_blocks(pdf_path: str, table_timeout: int = 15,
             if full_page_text:
                 page_texts.append((page_num_one_indexed, full_page_text))
 
-            if page.find_tables():
+            # A near-empty text layer marks a scanned/sparse page — a candidate
+            # for the OCR fallback, and not worth handing to pdfplumber.
+            if len(full_page_text) < SPARSE_PAGE_CHAR_THRESHOLD:
+                sparse_pages.append(page_num_one_indexed)
+            elif page.find_tables():
                 table_page_nums.add(page_num_zero_indexed)
     finally:
         doc.close()
@@ -140,13 +161,29 @@ def _extract_pdf_blocks(pdf_path: str, table_timeout: int = 15,
         except Exception as e:
             print(f"❌ Error during table extraction (pdfplumber): {e}")
 
-    return page_texts, table_chunks, n_pages
+    # === OCR FALLBACK: transcribe scanned/sparse pages with a vision model ===
+    if ocr_model is not None and sparse_pages and max_pages is None:
+        transcriptions, _ = ocr_pdf_pages(
+            pdf_path, sparse_pages, ocr_model,
+            dpi=ocr_dpi, max_ocr_pages=max_ocr_pages,
+        )
+        if transcriptions:
+            ocr_pages = set(transcriptions)
+            # Replace any sparse text already captured for these pages with
+            # the OCR transcription, then keep page_texts in page order.
+            page_texts = [(p, t) for (p, t) in page_texts if p not in ocr_pages]
+            page_texts.extend(transcriptions.items())
+            page_texts.sort(key=lambda pt: pt[0])
+
+    return page_texts, table_chunks, n_pages, ocr_pages
 
 
 def _assemble_flat_text(page_texts: List[Tuple[int, str]],
-                        table_chunks: List[Dict[str, any]]) -> str:
+                        table_chunks: List[Dict[str, any]],
+                        ocr_pages: frozenset = frozenset()) -> str:
     """Join per-page text and per-page table markdown into one flat string,
-    in page order — tables placed after the text of their page."""
+    in page order — tables placed after the text of their page. Pages whose
+    text came from vision-OCR are prefixed with a provenance marker."""
     tables_by_page: Dict[int, List[str]] = {}
     for tc in table_chunks:
         tables_by_page.setdefault(tc['metadata']['page'], []).append(tc['text'])
@@ -154,7 +191,7 @@ def _assemble_flat_text(page_texts: List[Tuple[int, str]],
     parts: List[str] = []
     seen_pages = set()
     for page_num, text in page_texts:
-        parts.append(text)
+        parts.append(f"{OCR_MARKER}\n{text}" if page_num in ocr_pages else text)
         seen_pages.add(page_num)
         parts.extend(tables_by_page.get(page_num, []))
     # Tables on pages with no extracted text
@@ -165,34 +202,49 @@ def _assemble_flat_text(page_texts: List[Tuple[int, str]],
 
 
 def extract_pdf_text(pdf_path: str, table_timeout: int = 15,
-                     max_pages: Optional[int] = None) -> str:
+                     max_pages: Optional[int] = None,
+                     ocr_model: Any = None, ocr_dpi: int = DEFAULT_OCR_DPI,
+                     max_ocr_pages: int = MAX_OCR_PAGES) -> str:
     """Flat two-pass text extraction (PyMuPDF text + pdfplumber tables as
-    markdown), no chunking. For lightweight document reads."""
-    page_texts, table_chunks, _ = _extract_pdf_blocks(pdf_path, table_timeout, max_pages)
-    return _assemble_flat_text(page_texts, table_chunks)
+    markdown), no chunking. For lightweight document reads. When ``ocr_model``
+    is supplied, scanned/sparse pages are transcribed via vision-OCR."""
+    page_texts, table_chunks, _, ocr_pages = _extract_pdf_blocks(
+        pdf_path, table_timeout, max_pages, ocr_model, ocr_dpi, max_ocr_pages)
+    return _assemble_flat_text(page_texts, table_chunks, ocr_pages)
 
 
 def extract_pdf_two_pass(pdf_path: str, chunk_size: int = 500, overlap: int = 50,
-                         table_timeout: int = 15) -> List[Dict[str, any]]:
+                         table_timeout: int = 15, ocr_model: Any = None,
+                         ocr_dpi: int = DEFAULT_OCR_DPI,
+                         max_ocr_pages: int = MAX_OCR_PAGES) -> List[Dict[str, any]]:
     """
     A robust two-pass hybrid extraction pipeline for RAG.
     Pass 1 (PyMuPDF): Fast extraction of all text and identification of pages containing tables.
     Pass 2 (pdfplumber): High-accuracy extraction of tables from only the identified pages.
+    When ``ocr_model`` is supplied, scanned/sparse pages are transcribed via
+    vision-OCR; chunks from those pages are tagged ``metadata['ocr'] = True``.
     """
     print(f"Starting robust two-pass processing for: {pdf_path}")
 
     try:
-        page_texts, table_chunks, _ = _extract_pdf_blocks(pdf_path, table_timeout)
+        page_texts, table_chunks, _, ocr_pages = _extract_pdf_blocks(
+            pdf_path, table_timeout, ocr_model=ocr_model,
+            ocr_dpi=ocr_dpi, max_ocr_pages=max_ocr_pages)
     except Exception as e:
         print(f"❌ Error during PDF extraction: {e}")
         return []
 
     text_chunks: List[Dict[str, any]] = []
     for page_num, full_page_text in page_texts:
-        text_chunks.extend(chunk_text(full_page_text, page_num, chunk_size, overlap))
+        page_chunks = chunk_text(full_page_text, page_num, chunk_size, overlap)
+        if page_num in ocr_pages:
+            for c in page_chunks:
+                c['metadata']['ocr'] = True
+        text_chunks.extend(page_chunks)
 
     print(f"  - Extracted {len(text_chunks)} text chunks; "
-          f"found {len(table_chunks)} tables.")
+          f"found {len(table_chunks)} tables"
+          f"{f'; {len(ocr_pages)} page(s) via OCR' if ocr_pages else ''}.")
 
     # === Final Merge and Post-processing ===
     all_content = text_chunks + table_chunks

@@ -392,3 +392,106 @@ class MetaOrchestratorTools:
             },
             required=[],
         )
+
+        # ----- view_image -----------------------------------------------------
+        # Generic "view & describe an arbitrary image" — the meta itself has no
+        # multimodal input path, so this is how a notebook photo / diagram /
+        # screenshot / figure becomes content the meta can reason about. NOT
+        # for scientific images (route those to analysis for quantification).
+
+        _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff",
+                       ".bmp", ".gif", ".webp"}
+        _VIEW_IMAGE_DEFAULT_PROMPT = (
+            "Describe the contents of this image in detail. If it contains "
+            "any readable text — printed or handwritten — transcribe it "
+            "faithfully, rendering tables as GitHub-flavored Markdown. "
+            "Return your description and any transcription as plain text, "
+            "with no extra commentary."
+        )
+
+        def view_image(paths, question: str = None) -> str:
+            """Open one or more images and have the vision model describe
+            (and transcribe text/tables in) them."""
+            if isinstance(paths, str):
+                paths = [paths]
+            if not paths:
+                return json.dumps({"status": "error",
+                                   "message": "No image path provided."})
+            print(f"  🖼️  Tool: Viewing {len(paths)} image(s)...")
+
+            import io
+            from PIL import Image as _PILImage
+            from scilink.parsers.ocr import describe_image
+
+            prompt = question.strip() if question else _VIEW_IMAGE_DEFAULT_PROMPT
+            results, errors = [], []
+            for p in paths:
+                pp = Path(p)
+                if not pp.is_file():
+                    errors.append(f"Not a file: {p}")
+                    continue
+                if pp.suffix.lower() not in _IMAGE_EXTS:
+                    errors.append(f"Not an image file: {p}")
+                    continue
+                try:
+                    img = _PILImage.open(pp)
+                    if img.mode not in ("RGB", "L"):
+                        img = img.convert("RGB")
+                    # Cap the longest side at 2048 px — keeps fine print legible
+                    # while keeping payload size reasonable.
+                    img.thumbnail((2048, 2048))
+                    buf = io.BytesIO()
+                    img.save(buf, format="JPEG", quality=90)
+                    description = describe_image(
+                        buf.getvalue(), self.orch.model, prompt
+                    )
+                    results.append({"name": pp.name,
+                                    "description": description})
+                except Exception as e:  # noqa: BLE001 - one bad image must not break the tool
+                    logging.error(f"view_image failed for {p}: {e}")
+                    errors.append(f"Could not view {pp.name}: {e}")
+            if not results:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No images could be viewed.",
+                    "errors": errors,
+                })
+            return json.dumps({
+                "status": "success",
+                "n_images": len(results),
+                "images": results,
+                "errors": errors or None,
+            })
+
+        self._register_tool(
+            func=view_image,
+            name="view_image",
+            description=(
+                "Open one or more image files and have the vision model "
+                "describe them — including faithfully transcribing any "
+                "readable text or tables (printed or handwritten). Use this "
+                "for a photo of a notebook page, a diagram, a screenshot, a "
+                "figure, or any image that needs to be interpreted as "
+                "content. NOT for scientific images that need feature "
+                "extraction or quantification — route those to analysis. "
+                "Accepts .png, .jpg/.jpeg, .tif/.tiff, .bmp, .gif, .webp."
+            ),
+            parameters={
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Absolute path(s) to the image file(s) to view."
+                    ),
+                },
+                "question": {
+                    "type": "string",
+                    "description": (
+                        "Optional question or instruction (e.g. "
+                        "'transcribe the table' or 'what does the diagram "
+                        "show?'). Default is to describe + transcribe."
+                    ),
+                },
+            },
+            required=["paths"],
+        )

@@ -48,18 +48,20 @@ from ...skills.loader import list_skills, list_all_skills, load_skill
 _READ_DOC_MAX_CHARS = 200_000  # ~50k tokens; longer documents are truncated
 
 
-def _extract_document_text(path: Path) -> Dict[str, Any]:
+def _extract_document_text(path: Path, ocr_model: Any = None) -> Dict[str, Any]:
     """Extract plain text from a PDF / DOCX / Markdown / text file.
 
     Thin wrapper over the shared ``scilink.parsers.extract_text`` (which adds
     table-aware PDF extraction); it applies read_document's character cap.
-    Returns a dict with ``text`` plus metadata (page/paragraph count,
-    ``n_chars``, ``truncated``). Raises ValueError for an unsupported
-    extension; reader errors propagate to the caller.
+    When ``ocr_model`` is supplied, scanned/sparse PDF pages are transcribed
+    via the vision-OCR fallback. Returns a dict with ``text`` plus metadata
+    (page/paragraph count, ``n_chars``, ``truncated``, ``n_ocr_pages``).
+    Raises ValueError for an unsupported extension; reader errors propagate
+    to the caller.
     """
     from scilink.parsers import extract_text
 
-    info = extract_text(path)
+    info = extract_text(path, ocr_model=ocr_model)
     text = info.get("text", "")
     info["truncated"] = len(text) > _READ_DOC_MAX_CHARS
     if info["truncated"]:
@@ -4335,7 +4337,8 @@ class AnalysisOrchestratorTools:
                     errors.append(f"Not a file: {p}")
                     continue
                 try:
-                    docs.append((dp, _extract_document_text(dp)))
+                    docs.append((dp, _extract_document_text(
+                        dp, ocr_model=self.orch.model)))
                 except ValueError as e:
                     errors.append(str(e))
                 except Exception as e:
@@ -4364,10 +4367,16 @@ class AnalysisOrchestratorTools:
                 lit_path.write_text(combined)
             except Exception as e:
                 logging.error(f"read_document: could not save literature file: {e}")
+            n_ocr = sum(info.get("n_ocr_pages", 0) for _, info in docs)
             return json.dumps({
                 "status": "success",
                 "file_path": str(lit_path) if lit_path else None,
                 "n_documents": len(docs),
+                "n_ocr_pages": n_ocr,
+                "ocr_note": (
+                    f"{n_ocr} scanned page(s) had no text layer and were "
+                    "transcribed by vision-OCR — verify any figures/numerics."
+                ) if n_ocr else None,
                 "documents": [
                     {"name": dp.name,
                      **{k: v for k, v in info.items() if k != "text"}}

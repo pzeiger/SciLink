@@ -73,10 +73,14 @@ def extract_images(file_paths: List[str]) -> List[str]:
     return found_images
 
 
-def ingest_files(file_paths: List[str], is_code_mode: bool, code_chunk_size: int = 20000, repo_name: str = None) -> List[Dict[str, Any]]:
+def ingest_files(file_paths: List[str], is_code_mode: bool, code_chunk_size: int = 20000,
+                 repo_name: str = None, ocr_model: Any = None) -> List[Dict[str, Any]]:
     """
-    Recursively finds files and routes them to the 
+    Recursively finds files and routes them to the
     correct parser (PDF, Excel, or Text) based on extension.
+
+    When ``ocr_model`` is supplied, scanned/sparse PDF pages are transcribed
+    via the vision-OCR fallback.
     """
     chunks = []
     expanded_paths = []
@@ -123,7 +127,7 @@ def ingest_files(file_paths: List[str], is_code_mode: bool, code_chunk_size: int
         
         # --- ROUTE A: PDF Documents ---
         if file_ext == '.pdf':
-            pdf_chunks = extract_pdf_two_pass(f_path)
+            pdf_chunks = extract_pdf_two_pass(f_path, ocr_model=ocr_model)
             if is_code_mode:
                 for c in pdf_chunks: c['metadata']['content_type'] = 'code'
             chunks.extend(pdf_chunks)
