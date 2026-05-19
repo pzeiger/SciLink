@@ -1,7 +1,14 @@
-"""Vision-OCR fallback for scanned / image-only PDFs.
+"""Vision helpers for the parsers layer.
 
-When a PDF page carries no usable embedded text layer, the page is rendered
-to an image (PyMuPDF ``get_pixmap``) and transcribed with a vision LLM.
+Two responsibilities:
+
+- ``describe_image`` — a generic "send an image to a vision LLM with this
+  prompt" primitive, used by callers that want a description / transcription
+  of an arbitrary image (e.g. the meta ``view_image`` tool).
+- The PDF-OCR fallback — ``ocr_pdf_pages`` renders pages of a PDF whose
+  embedded text layer is empty/sparse via PyMuPDF ``get_pixmap`` and routes
+  each page image through ``transcribe_image`` (a specialization of
+  ``describe_image`` with an OCR-specific prompt).
 
 This module imports only ``fitz`` — the vision model is **injected** by the
 caller (any object with a ``generate_content`` method), so ``scilink/parsers/``
@@ -48,21 +55,30 @@ def render_pdf_page(page: Any, dpi: int = DEFAULT_OCR_DPI) -> bytes:
     return pix.tobytes("jpeg")
 
 
-def transcribe_image(image_bytes: bytes, model: Any) -> str:
-    """Transcribe a single page image with the injected vision model.
+def describe_image(image_bytes: bytes, model: Any, prompt: str,
+                   mime_type: str = "image/jpeg") -> str:
+    """Send an image to the injected vision model with the given prompt and
+    return the model's text response, or ``""`` on empty/error.
 
-    Returns the transcription, or an empty string on failure / empty output —
-    the caller is expected to fall back to whatever sparse text it already has.
+    Format-agnostic — accepts any image MIME type the model wrapper supports
+    (``image/jpeg``, ``image/png``, ...). Callers normalize as needed before
+    calling.
     """
     try:
         response = model.generate_content(
-            [OCR_PROMPT, {"mime_type": "image/jpeg", "data": image_bytes}]
+            [prompt, {"mime_type": mime_type, "data": image_bytes}]
         )
         text = getattr(response, "text", "") or ""
         return text.strip()
-    except Exception as e:  # noqa: BLE001 - one bad page must not abort the doc
-        logging.warning(f"Vision-OCR transcription failed: {e}")
+    except Exception as e:  # noqa: BLE001 - one bad image must not abort the caller
+        logging.warning(f"Vision describe_image failed: {e}")
         return ""
+
+
+def transcribe_image(image_bytes: bytes, model: Any) -> str:
+    """Transcribe a single page image with the OCR prompt — a specialization
+    of :func:`describe_image`."""
+    return describe_image(image_bytes, model, OCR_PROMPT)
 
 
 def ocr_pdf_pages(pdf_path: str,
