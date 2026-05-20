@@ -326,9 +326,9 @@ def _render_meta_uploads(start_task_fn) -> None:
         if files:
             save_meta_uploads(files)
         folder = st.text_input(
-            "or paste a folder path",
+            "or paste folder path(s)",
             key="meta_folder_path",
-            placeholder="/path/to/papers/ or /path/to/data/",
+            placeholder="/path/to/data/    (separate multiple with ',')",
             label_visibility="collapsed",
         )
         st.caption(
@@ -336,10 +336,15 @@ def _render_meta_uploads(start_task_fn) -> None:
             "to the analysis or planning specialist."
         )
 
-    folder = (folder or "").strip()
-    folder_ok = bool(folder) and Path(folder).is_dir()
-    if folder and not folder_ok:
-        st.warning(f"Folder not found: {folder}")
+    # Multi-folder input via comma separation — paths with a literal ',' in
+    # their name are rare; users with those can place them under a common
+    # parent and paste that instead.
+    candidates = [p.strip() for p in (folder or "").split(",") if p.strip()]
+    valid_folders = [p for p in candidates if Path(p).is_dir()]
+    missing = [p for p in candidates if not Path(p).is_dir()]
+    for m in missing:
+        st.warning(f"Folder not found: {m}")
+    folder_ok = bool(valid_folders)
 
     uploads = st.session_state.uploaded_meta_paths
     goal = (goal or "").strip()
@@ -360,11 +365,18 @@ def _render_meta_uploads(start_task_fn) -> None:
                 "Inspect them to determine what each file is, then route them "
                 "to the right specialist."
             )
-        if folder_ok:
-            parts.append(
-                f"Additional resources are in the folder `{folder}` — "
-                "inspect it as well."
-            )
+        if valid_folders:
+            if len(valid_folders) == 1:
+                parts.append(
+                    f"Additional resources are in the folder "
+                    f"`{valid_folders[0]}` — inspect it as well."
+                )
+            else:
+                listed = "\n".join(f"  - `{p}`" for p in valid_folders)
+                parts.append(
+                    f"Additional resources are in {len(valid_folders)} "
+                    f"folders — inspect them as well:\n{listed}"
+                )
         prompt = "\n\n".join(parts) if parts else "Please help with my research."
         st.session_state.chat_messages.append({"role": "user", "content": prompt})
         start_task_fn(prompt)
