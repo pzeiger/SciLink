@@ -505,7 +505,9 @@ class MetaOrchestratorTools:
         # model). NOT for registering a document into a planning KB — that's
         # what delegate_to_planning's `knowledge_paths` is for.
 
-        _DOCUMENT_EXTS = {".pdf", ".docx", ".md", ".txt"}
+        _DOCUMENT_EXTS = {".pdf", ".docx", ".md", ".txt",
+                          ".json", ".yaml", ".yml",
+                          ".csv", ".xlsx", ".xls"}
         _VIEW_DOC_MAX_CHARS = 200_000  # ~50k tokens; long docs are truncated
 
         def view_document(paths) -> str:
@@ -528,7 +530,7 @@ class MetaOrchestratorTools:
                 if pp.suffix.lower() not in _DOCUMENT_EXTS:
                     errors.append(
                         f"Not a supported document: {p} "
-                        f"(handles .pdf .docx .md .txt)"
+                        f"(handles {', '.join(sorted(_DOCUMENT_EXTS))})"
                     )
                     continue
                 try:
@@ -578,18 +580,23 @@ class MetaOrchestratorTools:
             func=view_document,
             name="view_document",
             description=(
-                "Open one or more documents (PDF, DOCX, Markdown, plain "
-                "text) and return their text content in this conversation. "
-                "Scanned / image-only PDFs are automatically OCR'd via the "
-                "vision model (the result reports n_ocr_pages plus a note "
-                "to verify any figures/numerics). Use this to inspect or "
-                "summarize a document's contents right here — e.g. to make "
-                "a routing decision, extract a reference excerpt to thread "
-                "into a delegate_to_* call's context, or answer a quick "
-                "question about a single file. NOT for ingesting a "
-                "document into a planning KnowledgeBase — for that, pass "
-                "the path as `knowledge_paths` in delegate_to_planning. "
-                "Accepts .pdf, .docx, .md, .txt."
+                "Open one or more documents and return their text content "
+                "in this conversation. Supports text-like files (.pdf, "
+                ".docx, .md, .txt, .json, .yaml/.yml) and tabular files "
+                "(.csv, .xlsx/.xls). Scanned / image-only PDFs are "
+                "automatically OCR'd via the vision model (the result "
+                "reports n_ocr_pages + a note to verify any "
+                "figures/numerics). Tabular files are previewed via the "
+                "adaptive parser — small files return the full table as "
+                "Markdown, large files a statistical summary; a sibling "
+                "JSON metadata file (e.g. data.json next to data.xlsx) "
+                "auto-enriches the preview. Use this to inspect / "
+                "summarize a file's contents right here — for a routing "
+                "decision, to extract context to thread into a "
+                "delegate_to_* call, or to answer a quick question about "
+                "a single file. NOT for ingesting into a planning "
+                "KnowledgeBase — for that, pass the path as "
+                "`knowledge_paths` in delegate_to_planning."
             ),
             parameters={
                 "paths": {
