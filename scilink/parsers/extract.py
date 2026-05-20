@@ -18,10 +18,16 @@ def extract_text(path: Union[str, Path], max_pages: int = None,
                  max_ocr_pages: int = MAX_OCR_PAGES) -> Dict[str, Any]:
     """Extract plain text (and markdown tables, for PDFs) from a document.
 
-    Supports ``.pdf``, ``.docx``, ``.md`` and ``.txt``. Returns a dict with
-    ``text``, ``n_chars`` and a format-specific count
-    (``n_pages`` for PDFs, ``n_paragraphs`` for DOCX). For a PDF it also
-    returns ``n_ocr_pages`` — pages transcribed via the vision-OCR fallback.
+    Supports text-like (``.pdf``, ``.docx``, ``.md``, ``.txt``, ``.json``,
+    ``.yaml``/``.yml``) and tabular (``.csv``, ``.xlsx``/``.xls``) documents.
+    Returns a dict with ``text``, ``n_chars`` and a format-specific count
+    (``n_pages`` for PDFs, ``n_paragraphs`` for DOCX). PDFs also report
+    ``n_ocr_pages`` — pages transcribed via the vision-OCR fallback.
+    Tabular files are previewed via the adaptive Excel parser — small files
+    yield the full table as Markdown, large files a statistical summary; an
+    auto-detected sibling JSON metadata file (e.g. ``data.json`` next to
+    ``data.xlsx``) enriches the preview with title / objective / column
+    definitions.
 
     No truncation is applied — any length cap is the caller's policy.
 
@@ -63,12 +69,32 @@ def extract_text(path: Union[str, Path], max_pages: int = None,
         d = docx.Document(str(path))
         info["n_paragraphs"] = len(d.paragraphs)
         text = "\n".join(p.text for p in d.paragraphs)
-    elif ext in (".md", ".txt"):
+    elif ext in (".md", ".txt", ".json", ".yaml", ".yml"):
         text = path.read_text(errors="replace")
+    elif ext in (".csv", ".xlsx", ".xls"):
+        from .excel_parser import parse_adaptive_excel
+        # Auto-discover a sibling JSON metadata file (e.g. data.xlsx +
+        # data.json with title / objective / column_definitions) — the same
+        # convention parse_adaptive_excel uses elsewhere in the codebase.
+        sidecar = path.with_suffix(".json")
+        chunks = parse_adaptive_excel(
+            str(path),
+            context_path=str(sidecar) if sidecar.exists() else None,
+        )
+        if chunks:
+            summary = next(
+                (c for c in chunks if c["metadata"].get("content_type")
+                 in ("dataset_summary", "dataset_package")),
+                chunks[0],
+            )
+            text = summary["text"]
+        else:
+            text = ""
     else:
         raise ValueError(
             f"Unsupported document type '{ext}' — extract_text handles "
-            f".pdf, .docx, .md, and .txt."
+            f".pdf, .docx, .md, .txt, .json, .yaml/.yml, "
+            f".csv and .xlsx/.xls."
         )
 
     text = text.strip()

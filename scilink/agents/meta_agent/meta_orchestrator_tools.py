@@ -495,3 +495,117 @@ class MetaOrchestratorTools:
             },
             required=["paths"],
         )
+
+        # ----- view_document -------------------------------------------------
+        # Open & inspect a document's text content directly in the meta's
+        # chat — the symmetric counterpart of view_image, for routing /
+        # summarization decisions without having to delegate to a specialist
+        # just to extract text. Scanned PDFs are OCR'd automatically via the
+        # parsers vision-OCR fallback (the orchestrator's model is the OCR
+        # model). NOT for registering a document into a planning KB — that's
+        # what delegate_to_planning's `knowledge_paths` is for.
+
+        _DOCUMENT_EXTS = {".pdf", ".docx", ".md", ".txt",
+                          ".json", ".yaml", ".yml",
+                          ".csv", ".xlsx", ".xls"}
+        _VIEW_DOC_MAX_CHARS = 200_000  # ~50k tokens; long docs are truncated
+
+        def view_document(paths) -> str:
+            """Read one or more documents and return their text content."""
+            if isinstance(paths, str):
+                paths = [paths]
+            if not paths:
+                return json.dumps({"status": "error",
+                                   "message": "No document path provided."})
+            print(f"  📄 Tool: Reading {len(paths)} document(s)...")
+
+            from scilink.parsers import extract_text
+
+            docs, errors = [], []
+            for p in paths:
+                pp = Path(p)
+                if not pp.is_file():
+                    errors.append(f"Not a file: {p}")
+                    continue
+                if pp.suffix.lower() not in _DOCUMENT_EXTS:
+                    errors.append(
+                        f"Not a supported document: {p} "
+                        f"(handles {', '.join(sorted(_DOCUMENT_EXTS))})"
+                    )
+                    continue
+                try:
+                    info = extract_text(pp, ocr_model=self.orch.model)
+                    text = info.get("text", "")
+                    truncated = len(text) > _VIEW_DOC_MAX_CHARS
+                    if truncated:
+                        text = text[:_VIEW_DOC_MAX_CHARS]
+                    doc_info = {
+                        "name": pp.name,
+                        "text": text,
+                        "n_chars": len(text),
+                        "truncated": truncated,
+                    }
+                    # Format-specific metadata flows through transparently
+                    # (n_pages for PDFs, n_paragraphs for DOCX, plus the
+                    # OCR page count when the vision fallback fired).
+                    for k in ("n_pages", "n_paragraphs", "n_ocr_pages"):
+                        if k in info:
+                            doc_info[k] = info[k]
+                    docs.append(doc_info)
+                except ValueError as e:
+                    # extract_text raises ValueError for genuinely unsupported
+                    # extensions — surface it but don't crash the tool.
+                    errors.append(str(e))
+                except Exception as e:  # noqa: BLE001 - one bad doc must not break the tool
+                    logging.error(f"view_document failed for {p}: {e}")
+                    errors.append(f"Could not read {pp.name}: {e}")
+            if not docs:
+                return json.dumps({"status": "error",
+                                   "message": "No documents could be read.",
+                                   "errors": errors})
+            n_ocr = sum(d.get("n_ocr_pages", 0) for d in docs)
+            return json.dumps({
+                "status": "success",
+                "n_documents": len(docs),
+                "n_ocr_pages": n_ocr,
+                "ocr_note": (
+                    f"{n_ocr} scanned page(s) had no text layer and were "
+                    "transcribed by vision-OCR — verify any figures/numerics."
+                ) if n_ocr else None,
+                "documents": docs,
+                "errors": errors or None,
+            })
+
+        self._register_tool(
+            func=view_document,
+            name="view_document",
+            description=(
+                "Open one or more documents and return their text content "
+                "in this conversation. Supports text-like files (.pdf, "
+                ".docx, .md, .txt, .json, .yaml/.yml) and tabular files "
+                "(.csv, .xlsx/.xls). Scanned / image-only PDFs are "
+                "automatically OCR'd via the vision model (the result "
+                "reports n_ocr_pages + a note to verify any "
+                "figures/numerics). Tabular files are previewed via the "
+                "adaptive parser — small files return the full table as "
+                "Markdown, large files a statistical summary; a sibling "
+                "JSON metadata file (e.g. data.json next to data.xlsx) "
+                "auto-enriches the preview. Use this to inspect / "
+                "summarize a file's contents right here — for a routing "
+                "decision, to extract context to thread into a "
+                "delegate_to_* call, or to answer a quick question about "
+                "a single file. NOT for ingesting into a planning "
+                "KnowledgeBase — for that, pass the path as "
+                "`knowledge_paths` in delegate_to_planning."
+            ),
+            parameters={
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Absolute path(s) to the document file(s) to read."
+                    ),
+                },
+            },
+            required=["paths"],
+        )
