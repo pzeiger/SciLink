@@ -591,10 +591,11 @@ class StructureGenerator:
 
                 current_script = script_content
 
-                # Save script
-                script_desc = f"{original_user_request[:30]}_cycle{attempt_number_overall}_attempt{attempt}"
+                # Save script (save_generated_script appends "_attempt{n}" itself,
+                # so script_desc carries only the request + cycle).
+                script_desc = f"{original_user_request[:30]}_cycle{attempt_number_overall}"
                 final_script_path = save_generated_script(
-                    current_script, script_desc, 1, output_dir=self.generated_script_dir
+                    current_script, script_desc, attempt, output_dir=self.generated_script_dir
                 )
                 
                 if not final_script_path:

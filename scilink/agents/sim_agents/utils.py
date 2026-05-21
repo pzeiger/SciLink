@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 from typing import Optional, List, Dict
 
@@ -370,8 +371,10 @@ def save_generated_script(script_content: str, description: str, attempt: int, o
         os.makedirs(output_dir, exist_ok=True)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # Sanitize description for use in filename
-        safe_desc = "".join(c if c.isalnum() else "_" for c in description[:30]).rstrip("_")
+        # Sanitize description for use in filename: collapse each run of
+        # non-alphanumeric chars into a single underscore (so "a, b" / "a. b"
+        # don't become "a__b"), strip edges, then cap the length.
+        safe_desc = re.sub(r"[^0-9A-Za-z]+", "_", description).strip("_")[:40]
         filename = f"script_{safe_desc}_attempt{attempt}_{timestamp}.py"
         saved_script_path = os.path.join(output_dir, filename)
 
