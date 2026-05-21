@@ -201,8 +201,10 @@ def test_mip_total_mismatch_rejected():
         exp_peaks=_make_exp_peaks(SI_PEAKS, SI_AMPS),
         algorithm="mip",
     )
+    # Verdict must reject; a coincidental position match on 1-2 peaks is
+    # allowed (Si 76.38 is within ~tol of Diamond 75.30 at scale ~1.014).
     assert out["verdict"] == "reject"
-    assert len(out["matched_peaks"]) == 0
+    assert len(out["matched_peaks"]) <= 2
 
 
 @_skip_no_pulp

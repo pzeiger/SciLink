@@ -422,24 +422,24 @@ def _solve_mip_for_scale(
 ) -> Optional[dict[str, Any]]:
     """Solve one MILP at a fixed lattice scale; returns assignment + shift + cost.
 
-    Decision variables:
-      x[i,j] ∈ {0,1} : 1 if exp peak i is matched to sim peak j
-      shift ∈ [shift_lo, shift_hi] : zero-shift (degrees)
-      r[i,j] ≥ 0 : matched residual (only meaningful when x[i,j]=1)
+    Two-pass approach to avoid a CBC interaction with the bilinear residual
+    constraint ``r <= tol * x`` that produced bound-violating "solutions" in
+    an earlier formulation.
 
-    Objective:
-      minimize  Σ r[i,j] + UNMATCHED_PENALTY * (n_exp - Σ x[i,j])
+    Pass 1 (MILP) — pure assignment with feasibility cone on shift:
 
-    Constraints:
-      Σ_j x[i,j] ≤ 1  ∀i (each exp peak matched at most once)
-      Σ_i x[i,j] ≤ 1  ∀j (each sim peak matched at most once)
-      r[i,j] ≤ tol * x[i,j]  ∀(i,j)  (residual zero when unmatched)
-      exp_i - scale·sim_j - shift - r[i,j] ≤ M·(1 - x[i,j])  ∀(i,j)
-      -(exp_i - scale·sim_j - shift) - r[i,j] ≤ M·(1 - x[i,j])  ∀(i,j)
+        Variables:  x[i,j] in {0,1} — 1 if exp i matched to sim j
+                    shift in [shift_lo, shift_hi] — zero-shift (degrees)
+        Constraints:
+            sum_j x[i,j] <= 1                          (each exp matched at most once)
+            sum_i x[i,j] <= 1                          (each sim matched at most once)
+            exp_i - scale*sim_j - shift <= tol + M(1 - x[i,j])
+            -(exp_i - scale*sim_j - shift) <= tol + M(1 - x[i,j])
+        Objective: maximize sum x[i,j]
 
-    The big-M constraints make the residual track |exp - scale·sim - shift|
-    only when x[i,j]=1. M is chosen as a comfortable upper bound on the
-    raw position residual.
+    Pass 2 (post-solve scoring) — evaluate ``|exp_i - scale*sim_j - shift|``
+    at the optimum for each matched pair; aggregate to a normalized cost in
+    [0, 1] where every unmatched peak contributes a full tolerance unit.
     """
     nE = exp_pl.n
     nS = sim_pl.n
@@ -447,71 +447,62 @@ def _solve_mip_for_scale(
         return None
 
     # Pre-prune (i,j) pairs whose minimum possible residual exceeds tol for
-    # any plausible shift — keeps the MILP small.
-    candidate_pairs = []
+    # any plausible shift — keeps the MILP small. A pair is feasible when
+    # some shift in [shift_lo, shift_hi] reduces |exp_i - α·sim_j - shift|
+    # below tol, equivalently raw = exp_i - α·sim_j lies in
+    # [shift_lo - tol, shift_hi + tol].
+    candidate_pairs: list[tuple[int, int]] = []
+    raw_lookup: dict[tuple[int, int], float] = {}
     for i in range(nE):
         for j in range(nS):
             raw = exp_pl.positions[i] - scale * sim_pl.positions[j]
-            if raw - shift_hi <= tol_deg and -(raw - shift_lo) <= tol_deg:
+            if shift_lo - tol_deg <= raw <= shift_hi + tol_deg:
                 candidate_pairs.append((i, j))
+                raw_lookup[(i, j)] = raw
     if not candidate_pairs:
-        # No (i,j) can possibly match — every exp peak unmatched.
+        # Nothing in this scale can match within tolerance under any shift.
         return {
-            "cost": float(nE),
+            "cost": 1.0,
             "matched_peaks": [],
             "unmatched_exp": list(range(nE)),
             "fitted_shift": 0.0,
         }
 
     M = max(
-        max(exp_pl.positions) - min(exp_pl.positions) if nE > 0 else 0,
-        max(sim_pl.positions) - min(sim_pl.positions) if nS > 0 else 0,
+        (max(exp_pl.positions) - min(exp_pl.positions)) if nE > 1 else 0.0,
+        (max(sim_pl.positions) - min(sim_pl.positions)) if nS > 1 else 0.0,
         1.0,
     ) + max(abs(shift_lo), abs(shift_hi)) + tol_deg + 1.0
 
-    UNMATCHED_PENALTY = tol_deg  # an unmatched peak costs the same as a max-tolerance match
-
-    prob = pulp.LpProblem("xrd_match", pulp.LpMinimize)
+    prob = pulp.LpProblem("xrd_match", pulp.LpMaximize)
     x = {
-        (i, j): pulp.LpVariable(f"x_{i}_{j}", cat=pulp.LpBinary)
-        for (i, j) in candidate_pairs
-    }
-    r = {
-        (i, j): pulp.LpVariable(f"r_{i}_{j}", lowBound=0.0, upBound=tol_deg)
-        for (i, j) in candidate_pairs
+        p: pulp.LpVariable(f"x_{p[0]}_{p[1]}", cat=pulp.LpBinary)
+        for p in candidate_pairs
     }
     shift = pulp.LpVariable("shift", lowBound=shift_lo, upBound=shift_hi)
 
-    # Objective: matched residuals + unmatched penalty
-    n_matched_expr = pulp.lpSum(x.values())
-    prob += (
-        pulp.lpSum(r.values())
-        + UNMATCHED_PENALTY * (nE - n_matched_expr)
-    )
+    # Objective: maximize the number of matched pairs. (Intensity-weighted
+    # ties could be broken with a small bonus term; omitted for v1.)
+    prob += pulp.lpSum(x.values())
 
     # Assignment constraints
-    for i in range(nE):
-        pairs_i = [(i, j) for (ii, j) in candidate_pairs if ii == i]
-        if pairs_i:
-            prob += pulp.lpSum(x[p] for p in pairs_i) <= 1, f"once_per_exp_{i}"
-    for j in range(nS):
-        pairs_j = [(i, j) for (i, jj) in candidate_pairs if jj == j]
-        if pairs_j:
-            prob += pulp.lpSum(x[p] for p in pairs_j) <= 1, f"once_per_sim_{j}"
+    by_i: dict[int, list[tuple[int, int]]] = {i: [] for i in range(nE)}
+    by_j: dict[int, list[tuple[int, int]]] = {j: [] for j in range(nS)}
+    for p in candidate_pairs:
+        by_i[p[0]].append(p)
+        by_j[p[1]].append(p)
+    for i, pairs in by_i.items():
+        if pairs:
+            prob += pulp.lpSum(x[p] for p in pairs) <= 1, f"once_per_exp_{i}"
+    for j, pairs in by_j.items():
+        if pairs:
+            prob += pulp.lpSum(x[p] for p in pairs) <= 1, f"once_per_sim_{j}"
 
-    # Residual bounding + tol on matched
-    for (i, j) in candidate_pairs:
-        raw_const = exp_pl.positions[i] - scale * sim_pl.positions[j]
-        # raw_const - shift = (exp_i - α·sim_j - shift)
-        prob += (
-            raw_const - shift - r[(i, j)] <= M * (1 - x[(i, j)]),
-            f"resid_pos_{i}_{j}",
-        )
-        prob += (
-            -(raw_const - shift) - r[(i, j)] <= M * (1 - x[(i, j)]),
-            f"resid_neg_{i}_{j}",
-        )
-        prob += r[(i, j)] <= tol_deg * x[(i, j)], f"resid_zero_when_unmatched_{i}_{j}"
+    # Tolerance cone: when x[i,j] = 1, |raw - shift| <= tol.
+    for p in candidate_pairs:
+        raw = raw_lookup[p]
+        prob += raw - shift <= tol_deg + M * (1 - x[p]), f"tol_pos_{p[0]}_{p[1]}"
+        prob += -(raw - shift) <= tol_deg + M * (1 - x[p]), f"tol_neg_{p[0]}_{p[1]}"
 
     solver = pulp.PULP_CBC_CMD(msg=False)
     status = prob.solve(solver)
@@ -519,27 +510,54 @@ def _solve_mip_for_scale(
         _logger.debug("MILP non-optimal at scale=%.5f: %s", scale, pulp.LpStatus[status])
         return None
 
-    matched_pairs = [
-        (i, j) for (i, j) in candidate_pairs if pulp.value(x[(i, j)]) >= 0.5
+    # Pass 2: with the assignment fixed, refine shift analytically. The shift
+    # that minimizes Σ |raw - shift| over the matched pairs is the L1 median
+    # (clipped to [shift_lo, shift_hi]). The MILP objective alone doesn't
+    # discriminate among shifts inside the tolerance cone — any feasible
+    # shift gives the same match count — so CBC may return a corner-of-the-
+    # cone shift that inflates the cost. The median-refinement step picks
+    # the best representative.
+    matched_raws = [
+        raw_lookup[p] for p in candidate_pairs
+        if pulp.value(x[p]) is not None and pulp.value(x[p]) >= 0.5
     ]
-    fitted_shift = float(pulp.value(shift))
-    matched_peaks = []
-    matched_exp_set = set()
-    for (i, j) in matched_pairs:
+    if matched_raws:
+        median_shift = float(np.median(matched_raws))
+        fitted_shift = float(np.clip(median_shift, shift_lo, shift_hi))
+    else:
+        fitted_shift = float(pulp.value(shift)) if pulp.value(shift) is not None else 0.0
+
+    matched_peaks: list[dict[str, Any]] = []
+    matched_exp_set: set[int] = set()
+    total_residual = 0.0
+    for p in candidate_pairs:
+        val = pulp.value(x[p])
+        if val is None or val < 0.5:
+            continue
+        i, j = p
+        residual = abs(raw_lookup[p] - fitted_shift)
+        # If median-refined shift pushed a marginal match outside the cone,
+        # drop it from the matched set.
+        if residual > tol_deg + 1e-9:
+            continue
         matched_exp_set.add(i)
-        raw_residual = exp_pl.positions[i] - scale * sim_pl.positions[j] - fitted_shift
+        total_residual += residual
         matched_peaks.append({
             "exp_idx": i,
             "sim_idx": j,
             "exp_pos": exp_pl.positions[i],
             "sim_pos": float(scale * sim_pl.positions[j] + fitted_shift),
-            "residual_deg": float(abs(raw_residual)),
+            "residual_deg": float(residual),
         })
     unmatched_exp = [i for i in range(nE) if i not in matched_exp_set]
-    cost = float(pulp.value(prob.objective)) / max(nE, 1)
+    # Normalized cost in [0, 1]: each unmatched peak costs tol, each matched
+    # pair costs its residual. Divide by tol * nE so a perfect identification
+    # gives ~0 and total mismatch gives 1.
+    raw_cost = total_residual + tol_deg * len(unmatched_exp)
+    cost = raw_cost / (tol_deg * max(nE, 1))
 
     return {
-        "cost": cost,
+        "cost": float(cost),
         "matched_peaks": matched_peaks,
         "unmatched_exp": unmatched_exp,
         "fitted_shift": fitted_shift,
