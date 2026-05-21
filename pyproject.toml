@@ -60,9 +60,14 @@ sim = [
 ui = [
     "streamlit>=1.37.0",
 ]
+structure-matching = [
+    "pymatgen-analysis-diffraction>=2024.0",
+    "mp-api>=0.45.0",
+]
 all = [
     "scilink[sim]",
     "scilink[ui]",
+    "scilink[structure-matching]",
 ]
 
 [project.urls]

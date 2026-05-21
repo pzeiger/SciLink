@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 
 pymatgen = pytest.importorskip("pymatgen")
@@ -24,6 +25,20 @@ from scilink.skills.structure_matching.xrd.search_structures import (
     _candidate_to_dict,
     _dedupe,
     search_structures,
+)
+from scilink.skills.structure_matching.xrd.simulate_xrd import (
+    PYMATGEN_XRD_AVAILABLE,
+    TOOL_SPEC as SIM_TOOL_SPEC,
+    simulate_xrd_pattern,
+)
+
+_skip_no_xrd = pytest.mark.skipif(
+    not PYMATGEN_XRD_AVAILABLE,
+    reason="pymatgen-analysis-diffraction not installed; pip install scilink[structure-matching]",
+)
+from scilink.skills.structure_matching.xrd.score_match import (
+    TOOL_SPEC as SCORE_TOOL_SPEC,
+    score_xrd_match,
 )
 
 
@@ -262,3 +277,136 @@ def test_search_truncates_to_top_n(mock_mprester, tmp_path):
     # Should be the ones with lowest e_hull (best rank_score)
     assert result["candidates"][0]["id"] == "mp-0"
     assert result["candidates"][-1]["id"] == "mp-4"
+
+
+# --- simulate_xrd_pattern -----------------------------------------------------
+
+def test_simulate_tool_spec_renders():
+    block = SIM_TOOL_SPEC.to_prompt()
+    assert "simulate_xrd_pattern" in block
+    assert "structure_path" in block
+
+
+@_skip_no_xrd
+def test_simulate_returns_silicon_peaks(tmp_path):
+    cif = tmp_path / "si.cif"
+    _write_cif(cif, _silicon())
+
+    out = simulate_xrd_pattern(str(cif), wavelength="CuKa", two_theta_range=(20, 80))
+
+    # Silicon (Fd-3m, a=5.43 Å) with CuKa has the (111) peak near 28.4°.
+    assert len(out["two_theta"]) > 0
+    assert len(out["two_theta"]) == len(out["intensities"]) == len(out["hkls"]) == len(out["d_spacings"])
+    assert min(out["two_theta"]) >= 20
+    assert max(out["two_theta"]) <= 80
+    assert any(abs(x - 28.4) < 0.5 for x in out["two_theta"])
+    assert all(20 <= x <= 80 for x in out["two_theta"])
+    assert max(out["intensities"]) == pytest.approx(100.0, abs=0.5)
+    # hkls should be 3-int lists
+    assert all(len(h) == 3 and all(isinstance(v, int) for v in h) for h in out["hkls"])
+
+
+@_skip_no_xrd
+def test_simulate_two_theta_range_clips(tmp_path):
+    cif = tmp_path / "si.cif"
+    _write_cif(cif, _silicon())
+
+    out = simulate_xrd_pattern(str(cif), two_theta_range=(40, 60))
+    assert all(40 <= x <= 60 for x in out["two_theta"])
+
+
+@_skip_no_xrd
+def test_simulate_wavelength_shifts_peaks(tmp_path):
+    cif = tmp_path / "si.cif"
+    _write_cif(cif, _silicon())
+
+    cu = simulate_xrd_pattern(str(cif), wavelength="CuKa")
+    mo = simulate_xrd_pattern(str(cif), wavelength="MoKa")
+    # MoKa (~0.71 Å) vs CuKa (~1.54 Å): shorter wavelength → smaller 2θ for same plane.
+    assert min(mo["two_theta"]) < min(cu["two_theta"])
+
+
+# --- score_xrd_match ----------------------------------------------------------
+
+def test_score_tool_spec_renders():
+    block = SCORE_TOOL_SPEC.to_prompt()
+    assert "score_xrd_match" in block
+
+
+def _synthetic_pattern(peak_positions, peak_intensities, grid=None, fwhm=0.15, noise=0.0):
+    """Build a synthetic experimental pattern by broadening peaks with Lorentzians."""
+    if grid is None:
+        grid = np.arange(10.0, 90.0, 0.05)
+    gamma = fwhm / 2.0
+    y = np.zeros_like(grid)
+    for x0, amp in zip(peak_positions, peak_intensities):
+        y += amp * (gamma ** 2) / ((grid - x0) ** 2 + gamma ** 2)
+    if noise:
+        rng = np.random.default_rng(0)
+        y = y + rng.normal(scale=noise * max(y), size=y.shape)
+    return grid.tolist(), y.tolist()
+
+
+def test_score_perfect_match_yields_accept():
+    peaks_x = [28.4, 47.3, 56.1]
+    peaks_y = [100.0, 60.0, 30.0]
+    grid, exp = _synthetic_pattern(peaks_x, peaks_y)
+
+    out = score_xrd_match(
+        exp_two_theta=grid, exp_intensity=exp,
+        sim_two_theta=peaks_x, sim_intensity=peaks_y,
+    )
+
+    assert out["verdict"] == "accept"
+    assert out["r_factor"] < 0.05
+    assert out["cosine_similarity"] > 0.99
+
+
+def test_score_total_mismatch_yields_reject():
+    grid, exp = _synthetic_pattern([28.4, 47.3, 56.1], [100, 60, 30])
+    # Simulated peaks at totally different positions
+    out = score_xrd_match(
+        exp_two_theta=grid, exp_intensity=exp,
+        sim_two_theta=[70.0, 80.0], sim_intensity=[100.0, 50.0],
+    )
+
+    assert out["verdict"] == "reject"
+    assert out["r_factor"] > 0.5
+
+
+def test_score_partial_match_yields_marginal_or_reject():
+    grid, exp = _synthetic_pattern([28.4, 47.3, 56.1], [100, 60, 30])
+    # One peak right, others wrong
+    out = score_xrd_match(
+        exp_two_theta=grid, exp_intensity=exp,
+        sim_two_theta=[28.4, 70.0], sim_intensity=[100.0, 50.0],
+    )
+    assert out["verdict"] in {"marginal", "reject"}
+
+
+def test_score_validates_array_shapes():
+    with pytest.raises(ValueError, match="same length"):
+        score_xrd_match(
+            exp_two_theta=[10.0, 20.0, 30.0],
+            exp_intensity=[1.0, 2.0],
+            sim_two_theta=[15.0],
+            sim_intensity=[1.0],
+        )
+
+
+def test_score_validates_fwhm():
+    with pytest.raises(ValueError, match="fwhm"):
+        score_xrd_match(
+            exp_two_theta=[10.0, 20.0], exp_intensity=[1.0, 2.0],
+            sim_two_theta=[15.0], sim_intensity=[1.0],
+            fwhm=0,
+        )
+
+
+def test_score_unknown_background_raises():
+    with pytest.raises(ValueError, match="background"):
+        score_xrd_match(
+            exp_two_theta=[10.0, 20.0], exp_intensity=[1.0, 2.0],
+            sim_two_theta=[15.0], sim_intensity=[1.0],
+            background="weird",
+        )
