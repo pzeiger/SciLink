@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from . import _cif_index
 from ._base import QuerySpec, StructureCandidate
 
 try:
@@ -47,58 +48,92 @@ class LocalCIFBackend:
         if not self.is_available():
             return []
 
-        target_elements = set(spec.chemistry)
+        # First try the parquet index (fast filter on chemistry + symmetry +
+        # lattice before any pymatgen parses). On small mirrors and when
+        # pyarrow is unavailable, this returns None and we fall back to the
+        # direct walk-and-parse path.
+        index = _cif_index.load_or_build_index(self.root_dir)  # type: ignore[arg-type]
+        if index is not None:
+            return self._query_via_index(index, spec)
+        return self._query_via_walk(spec)
+
+    def _query_via_index(self, index, spec: QuerySpec) -> list[StructureCandidate]:
+        paths = _cif_index.filter_index(
+            index,
+            chemistry=list(spec.chemistry),
+            space_group_hints=spec.space_group_hints,
+            lattice_param_ranges=spec.lattice_param_ranges,
+            top_n=spec.top_n,
+        )
         candidates: list[StructureCandidate] = []
-
-        for cif_path in sorted(self.root_dir.rglob("*.cif")):  # type: ignore[union-attr]
-            try:
-                struct = Structure.from_file(str(cif_path))
-            except Exception as e:
-                _logger.debug("Skipping %s: parse failed (%s)", cif_path, e)
-                continue
-
-            present_elements = {str(el) for el in struct.composition.elements}
-            if not target_elements.issubset(present_elements):
-                continue
-            if target_elements != present_elements:
-                continue
-
-            sg_symbol = None
-            sg_number = None
-            try:
-                sg = struct.get_space_group_info()
-                sg_symbol, sg_number = sg[0], sg[1]
-            except Exception:
-                pass
-
-            if spec.space_group_hints and sg_number not in spec.space_group_hints:
-                continue
-
-            lattice = struct.lattice
-            if spec.lattice_param_ranges and not _lattice_within_ranges(
-                lattice, spec.lattice_param_ranges,
-            ):
-                continue
-
-            candidates.append(StructureCandidate(
-                id=cif_path.stem,
-                source=self.name,
-                formula=str(struct.composition.reduced_formula),
-                space_group=sg_symbol,
-                structure_path=str(cif_path),
-                metadata={
-                    "spacegroup_number": sg_number,
-                    "lattice_a": lattice.a,
-                    "lattice_b": lattice.b,
-                    "lattice_c": lattice.c,
-                },
-                rank_score=1.0,
-            ))
-            if len(candidates) >= spec.top_n * 3:  # collect headroom before final dedup/rank
+        for cif_path_str in paths:
+            cand = self._build_candidate_from_cif(Path(cif_path_str), spec)
+            if cand is not None:
+                candidates.append(cand)
+            if len(candidates) >= spec.top_n * 3:
                 break
-
         candidates.sort(key=lambda c: c.id)
         return candidates[:spec.top_n]
+
+    def _query_via_walk(self, spec: QuerySpec) -> list[StructureCandidate]:
+        candidates: list[StructureCandidate] = []
+        for cif_path in sorted(self.root_dir.rglob("*.cif")):  # type: ignore[union-attr]
+            cand = self._build_candidate_from_cif(cif_path, spec)
+            if cand is not None:
+                candidates.append(cand)
+            if len(candidates) >= spec.top_n * 3:
+                break
+        candidates.sort(key=lambda c: c.id)
+        return candidates[:spec.top_n]
+
+    def _build_candidate_from_cif(
+        self, cif_path: Path, spec: QuerySpec,
+    ) -> Optional[StructureCandidate]:
+        """Parse one CIF and return a StructureCandidate if it matches the spec."""
+        target_elements = set(spec.chemistry)
+        try:
+            struct = Structure.from_file(str(cif_path))
+        except Exception as e:
+            _logger.debug("Skipping %s: parse failed (%s)", cif_path, e)
+            return None
+
+        present_elements = {str(el) for el in struct.composition.elements}
+        if not target_elements.issubset(present_elements):
+            return None
+        if target_elements != present_elements:
+            return None
+
+        sg_symbol = None
+        sg_number = None
+        try:
+            sg = struct.get_space_group_info()
+            sg_symbol, sg_number = sg[0], sg[1]
+        except Exception:
+            pass
+
+        if spec.space_group_hints and sg_number not in spec.space_group_hints:
+            return None
+
+        lattice = struct.lattice
+        if spec.lattice_param_ranges and not _lattice_within_ranges(
+            lattice, spec.lattice_param_ranges,
+        ):
+            return None
+
+        return StructureCandidate(
+            id=cif_path.stem,
+            source=self.name,
+            formula=str(struct.composition.reduced_formula),
+            space_group=sg_symbol,
+            structure_path=str(cif_path),
+            metadata={
+                "spacegroup_number": sg_number,
+                "lattice_a": lattice.a,
+                "lattice_b": lattice.b,
+                "lattice_c": lattice.c,
+            },
+            rank_score=1.0,
+        )
 
 
 def _lattice_within_ranges(lattice, ranges: dict) -> bool:
