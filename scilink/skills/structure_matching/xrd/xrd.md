@@ -1,5 +1,10 @@
 ---
 description: XRD structure matching — query crystal-structure databases (Materials Project, local CIF), simulate kinematic patterns, score by cross-correlation (fast) and Hanawalt / MIP peak-matching (robust).
+quality_gate:
+  metric: figure_of_merit
+  accept_threshold: 0.70
+  hard_reject_threshold: 0.40
+  direction: higher_is_better
 ---
 # XRD Structure Matching Skill
 

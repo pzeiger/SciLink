@@ -178,6 +178,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         outlier_sigma: float = 2.0,
         max_verification_iterations: int = 7,
         parallel_workers: int | None = None,
+        quality_gate: "QualityGate | dict | None" = None,
         **kwargs,
     ):
         # ====================================================================
@@ -214,6 +215,11 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         # Quality control settings
         self.r2_threshold = r2_threshold
+        # Optional non-R² gate override (skill or programmatic). When None,
+        # the framework falls back to the legacy R² gate built from
+        # r2_threshold — full backward compatibility.
+        from .quality_gate import _coerce as _coerce_gate
+        self.quality_gate = _coerce_gate(quality_gate)
         self.max_model_retries = max_model_retries
         self.outlier_sigma = outlier_sigma
         self.max_verification_iterations = max_verification_iterations
@@ -281,6 +287,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         r2_threshold: Optional[float] = None,
         max_model_retries: Optional[int] = None,
         outlier_sigma: Optional[float] = None,
+        quality_gate: "QualityGate | dict | None" = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -487,15 +494,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         
         self.logger.info("")
         self.logger.info(f"📈 CURVE FITTING ANALYSIS - {num_spectra} spectrum{'s' if num_spectra > 1 else ''}")
-        from .controllers.curve_fitting_controllers import UnifiedSeriesProcessingController as _USPC
-        _accept = float(effective_r2_threshold)
-        _floor = max(_accept - _USPC._r2_soft_margin(_accept), 0.0)
-        self.logger.info(
-            f"   Quality: R² ≥ {_accept:.3f} accepts (with clean residuals); "
-            f"R² < {_floor:.3f} hard-rejects; "
-            f"{_floor:.3f}–{_accept:.3f} is a soft band where the verifier "
-            f"can reject on physics grounds (systematic residuals, missing features)"
-        )
+        # The quality-gate-aware log line is emitted later, after the gate
+        # is resolved against skill metadata (skill frontmatter may declare
+        # a non-R² gate that overrides r2_threshold).
         if not is_single_spectrum:
             self.logger.info(f"   Outlier detection: {effective_outlier_sigma}σ")
         
@@ -554,6 +555,49 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # backwards compat; ``skills_loaded`` carries the full list.
         skill_state = self._load_skills_to_state(skill, domain="curve_fitting")
 
+        # Resolve effective QualityGate. Priority: explicit analyze() arg →
+        # __init__ default → first-loaded skill's frontmatter `quality_gate`
+        # block → legacy r2_threshold shortcut → R²≥0.95 framework default.
+        # When the gate's metric is r_squared, the resolved accept_threshold
+        # IS the r2_threshold used by every downstream gate site — full
+        # backward compatibility for conventional curve fits.
+        from .quality_gate import resolve_gate
+        first_skill_meta = (
+            skill_state.get("skill_sections", {}).get("meta", {})
+            if skill_state.get("skill_sections") else {}
+        )
+        effective_gate = resolve_gate(
+            call_override=quality_gate,
+            agent_default=self.quality_gate,
+            skill_meta=first_skill_meta,
+            legacy_threshold=effective_r2_threshold,
+        )
+        # When the resolved gate is r_squared, keep the legacy accept value
+        # exactly as today so every existing controller path runs unchanged.
+        # When the gate names a different metric, downstream sites still see
+        # the r2_threshold field but use the gate for the actual decision.
+        if effective_gate.metric == "r_squared":
+            effective_r2_threshold = effective_gate.accept_threshold
+            from .controllers.curve_fitting_controllers import (
+                UnifiedSeriesProcessingController as _USPC,
+            )
+            _accept = float(effective_r2_threshold)
+            _floor = max(_accept - _USPC._r2_soft_margin(_accept), 0.0)
+            self.logger.info(
+                f"   Quality: R² ≥ {_accept:.3f} accepts (with clean residuals); "
+                f"R² < {_floor:.3f} hard-rejects; "
+                f"{_floor:.3f}–{_accept:.3f} is a soft band where the verifier "
+                f"can reject on physics grounds (systematic residuals, missing features)"
+            )
+        else:
+            cmp = "≥" if effective_gate.direction == "higher_is_better" else "≤"
+            self.logger.info(
+                f"   Quality: {effective_gate.metric} {cmp} "
+                f"{effective_gate.accept_threshold:.3f} accepts "
+                f"({effective_gate.direction}); curve-fit verifier bypassed "
+                f"— skill workflow's own scoring is the verification."
+            )
+
         # Extract series metadata from system_info if not provided explicitly
         handled_system_info = self._handle_system_info(system_info)
         handled_system_info, series_metadata = self._extract_series_metadata(
@@ -587,6 +631,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
             # Prior curve-fit runs — artifacts surfaced to planner / script-gen
             "prior_analysis_paths": prior_analysis_paths or [],
+
+            # Effective quality gate (curve_fit_controllers reads via _gate()).
+            "quality_gate": effective_gate,
 
             # First spectrum (for planning)
             "data_path": spectrum_paths[0] if spectrum_paths else first_spectrum_name,

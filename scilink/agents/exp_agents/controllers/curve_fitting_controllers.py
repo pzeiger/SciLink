@@ -45,6 +45,21 @@ def _active_skill_names(state: dict) -> list[str]:
     return [legacy] if legacy else []
 
 
+def _gate(state: dict):
+    """Return the effective QualityGate for this analysis.
+
+    The agent stashes the resolved gate at ``state['quality_gate']`` in
+    ``CurveFittingAgent.analyze``. When absent (e.g. legacy callers
+    constructing a controller directly), falls back to the framework
+    default — R² ≥ 0.95 — so existing behavior is unchanged.
+    """
+    from ..quality_gate import R_SQUARED_DEFAULT
+    g = state.get("quality_gate")
+    if g is None:
+        return R_SQUARED_DEFAULT
+    return g
+
+
 def _tool_inventory_text(state: dict) -> str:
     """Render the curve-fitting tool inventory for the active skills.
 
@@ -2234,7 +2249,58 @@ Remember: Rejecting a good fit (R² > {accept_threshold:.2f}) to chase marginal 
         verifier can rate whether the current fit is physically better than
         the prior high-water mark.  ``best_verification`` (the verifier's
         last verdict on best) is used to summarize prior issues.
+
+        Workflow-style skills (where the active QualityGate uses a non-R²
+        metric such as figure_of_merit) bypass this verifier — the skill's
+        own scoring tools (e.g. score_xrd_match_robust) ARE the
+        verification, and the R²-shaped prompt would not apply.
         """
+        gate = _gate(state)
+        if gate.metric != "r_squared":
+            value = gate.extract(fit_result.get("fit_quality"))
+            if gate.is_accept(value):
+                cmp = "≥" if gate.direction == "higher_is_better" else "≤"
+                return {
+                    "should_accept": True,
+                    "overall_assessment": (
+                        f"Skill workflow gate satisfied: {gate.metric} = "
+                        f"{value:.4f} {cmp} {gate.accept_threshold:.4f}. "
+                        f"Curve-fit R² verifier bypassed for non-R² gates."
+                    ),
+                    "issues": [],
+                    "recommended_action": "accept_as_is",
+                }
+            elif gate.is_hard_reject(value):
+                return {
+                    "should_accept": False,
+                    "overall_assessment": (
+                        f"Skill workflow gate hard-rejects: {gate.metric} = "
+                        f"{value if value is not None else 'missing'} "
+                        f"vs hard-reject threshold {gate.hard_reject_threshold}."
+                    ),
+                    "issues": [{
+                        "location": "Workflow scoring",
+                        "problem": f"{gate.metric} below acceptable range",
+                        "suggested_fix": (
+                            "Re-plan the workflow — widen the database query, "
+                            "broaden the chemistry hypothesis, or verify the "
+                            "wavelength / experimental metadata."
+                        ),
+                    }],
+                    "recommended_action": "retry_fitting_attempt_with_changes",
+                }
+            else:
+                return {
+                    "should_accept": False,
+                    "overall_assessment": (
+                        f"Skill workflow gate marginal: {gate.metric} = "
+                        f"{value:.4f}. Below accept threshold "
+                        f"{gate.accept_threshold:.4f} but above hard-reject; "
+                        f"synthesis will report as marginal."
+                    ),
+                    "issues": [],
+                    "recommended_action": "accept_as_is",
+                }
         if not fit_result.get("visualization_bytes"):
             self.logger.warning("      No visualization available for LLM verification")
             return None
