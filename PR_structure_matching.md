@@ -14,7 +14,7 @@ structure_matching: XRD phase identification skill + configurable framework qual
 
 Adds a new skill bundle, `structure_matching/xrd`, that gives SciLink the ability to **identify a crystalline phase from an experimental XRD pattern by matching against crystal-structure databases**. The workflow is the one an XRD scientist runs by hand: query one or more databases for candidate structures, simulate each candidate's diffraction pattern, score against the experiment, rank.
 
-The skill is **multi-source from day one** via a `StructureBackend` protocol. v1 ships two concrete backends — **Materials Project** (`mp-api`) and **local CIF directory** (a folder of `.cif` files on disk, set via `SCILINK_LOCAL_CIF_DIR`) — plus an explicit **COD** stub. Adding ICSD, OQMD, AFLOW, NOMAD, or any custom source later is a one-class change: implement `is_available()` + `query(QuerySpec) → list[StructureCandidate]` and either call `register_backend(name, factory)` or declare an entry-point in your `pyproject.toml`. SciLink discovers it on import.
+The skill works with multiple structure databases out of the box. v1 supports **Materials Project** and a **local CIF folder** — any directory of `.cif` files on disk (useful if you have downloaded the COD bulk dump, maintain a curated reference library, or want to test against in-house structures not yet published). Adding other databases like ICSD, OQMD, AFLOW, or NOMAD is a small extension — about a hundred lines of Python plus one line of registration code, with no SciLink fork needed. See "Extending the backend list" in the technical section below for the recipe.
 
 Two scoring tiers ship together:
 
