@@ -18,11 +18,42 @@ SciLink provides three complementary agent systems that cover the full scientifi
 | **Analysis Agents** | Multi-modal data analysis | Image analysis, spectroscopy, hyperspectral datacubes, curve fitting |
 | **Simulation Agents** | Computational modeling | DFT calculations, classical MD (LAMMPS), structure recommendations |
 
-All systems support three autonomy levels:
+---
 
-- **Co-Pilot** (default) — Human leads, AI assists. Reviews every step.
-- **Autopilot** — AI leads, human reviews major decisions.
-- **Autonomous** — Full autonomy, no human review.
+## Core Capabilities
+
+- **RAG over your knowledge base.** User-supplied papers, project notes,
+  instrument manuals, and prior results are indexed and retrieved to ground
+  hypothesis generation and experiment design.
+
+- **Agentic Knowledge Query.** Complements RAG for *structured* data —
+  tabular files and record databases. The agent generates and executes
+  query code dynamically, no upfront schema definition required. Two
+  depths share the same machinery: `query_knowledge_data` for ad-hoc
+  exploration (*"what fields exist?"*, *"value range of X?"*) and
+  `screen_database` for production filter-and-rank passes with a
+  structured top-K output.
+
+- **Tools + code.** Pre-built or user-provided tools (such as pre-trained
+  ML models) combine with on-the-fly code generation to produce runnable
+  analysis scripts, simulation input decks, or lab-automation protocols.
+  Executors run locally, on HPC, or on lab instruments.
+
+- **Pluggable skill bundles.** Domain experts extend the platform to new
+  instrument data types or simulation methods by contributing self-contained
+  markdown files (plus optional Python helpers). The platform discovers
+  and routes to them automatically — no core-agent changes required.
+
+- **Three autonomy levels.** **Co-Pilot** (human leads, reviews every step),
+  **Autopilot** (AI leads, human reviews major decisions), and **Autonomous**
+  (no human review). The mode selects who holds the acceptance gate on
+  agent commitments.
+
+- **Simulated-annealing agentic pipelines.** Hold scientific priors strictly
+  at first, then progressively thaw the lock on the implementation plan
+  and domain-rule strictness only when iterative refinements fail to
+  converge — a literal Metropolis–Hastings step with verifier-driven
+  acceptance.
 
 ---
 
