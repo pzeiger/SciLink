@@ -171,8 +171,23 @@ def _resolve_skill_path(skill: str, domain: str) -> Path:
     Skills live at ``<root>/<domain>/<name>/<name>.md`` (Tier C bundle
     layout). Searches user-provided roots from ``$SCILINK_SKILLS_PATH``
     first (so user bundles can override built-in ones of the same
-    name), then the built-in ``scilink/skills/`` tree. A direct path to
-    a ``.md`` file is also accepted and bypasses the bundle lookup.
+    name), then the built-in ``scilink/skills/`` tree.
+
+    Three accepted forms for ``skill``:
+
+    1. ``"<name>"`` — bare skill name. First searched under the
+       requested ``domain``; if not found there, falls back to a
+       cross-domain search of every visible skill root. Cross-domain
+       lookup is what makes cross-cutting skills (e.g. ``"xrd"`` under
+       ``structure_matching/``) usable from agents whose default
+       domain is something else (e.g. ``CurveFittingAgent`` →
+       ``curve_fitting``).
+    2. ``"<domain>/<name>"`` — explicit domain-qualified name. Bypasses
+       the fallback search and goes straight to the named domain.
+    3. ``"/path/to/<name>.md"`` — direct path to a markdown file.
+
+    A bare-name lookup that matches the same ``<name>`` under multiple
+    domains is ambiguous and raises with the list of candidates.
     """
     candidate = Path(skill)
     if candidate.suffix.lower() == ".md":
@@ -180,16 +195,66 @@ def _resolve_skill_path(skill: str, domain: str) -> Path:
             return candidate
         raise FileNotFoundError(f"Skill file not found: {candidate}")
 
+    # Domain-qualified form: "<domain>/<name>"
+    if "/" in skill and not skill.startswith("/"):
+        explicit_domain, explicit_name = skill.split("/", 1)
+        if "/" in explicit_name:
+            raise ValueError(
+                f"Skill name '{skill}' is malformed; expected "
+                "'<domain>/<name>' or a bare '<name>'."
+            )
+        for root in _skill_roots():
+            bundle = root / explicit_domain / explicit_name / f"{explicit_name}.md"
+            if bundle.exists():
+                return bundle
+        raise FileNotFoundError(
+            f"Skill '{explicit_name}' not found in domain '{explicit_domain}'."
+        )
+
+    # Bare-name lookup: requested domain first, then fall back to all domains.
     for root in _skill_roots():
         bundle = root / domain / skill / f"{skill}.md"
         if bundle.exists():
             return bundle
 
-    available = list_skills(domain=domain)
+    matches = _find_skill_across_domains(skill)
+    if len(matches) == 1:
+        _logger.debug(
+            "Skill '%s' not found in domain '%s' — resolved cross-domain to %s.",
+            skill, domain, matches[0],
+        )
+        return matches[0]
+    if len(matches) > 1:
+        rendered = ", ".join(f"{p.parent.parent.name}/{skill}" for p in matches)
+        raise FileNotFoundError(
+            f"Skill '{skill}' is ambiguous across domains ({rendered}). "
+            f"Qualify it as '<domain>/{skill}'."
+        )
+
+    available_here = list_skills(domain=domain)
+    all_domains = list_all_skills()
     raise FileNotFoundError(
         f"Skill '{skill}' not found for domain '{domain}'. "
-        f"Available (user + built-in): {available}"
+        f"Available in '{domain}': {available_here}. "
+        f"All known skills: {all_domains}."
     )
+
+
+def _find_skill_across_domains(name: str) -> list[Path]:
+    """Return every ``<root>/<domain>/<name>/<name>.md`` across all roots."""
+    matches: list[Path] = []
+    seen: set[str] = set()
+    for root in _skill_roots():
+        if not root.is_dir():
+            continue
+        for domain_dir in sorted(root.iterdir()):
+            if not domain_dir.is_dir() or domain_dir.name.startswith(("_", ".")):
+                continue
+            bundle = domain_dir / name / f"{name}.md"
+            if bundle.exists() and str(bundle) not in seen:
+                seen.add(str(bundle))
+                matches.append(bundle)
+    return matches
 
 
 def _split_frontmatter(text: str, source: str = "<skill>") -> tuple[dict, str]:
