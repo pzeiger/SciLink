@@ -22,26 +22,31 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from .._backends import (
-    LocalCIFBackend,
-    MaterialsProjectBackend,
     QuerySpec,
     StructureBackend,
     StructureCandidate,
+    get_backend_factory,
+    registered_backends,
 )
-from .._backends.cod import CODBackend
 from ..._shared._spec import ToolSpec
 
 _logger = logging.getLogger(__name__)
 
 # Source rank order for dedup: when the same structure appears in multiple
-# backends, prefer the more authoritative source.
-_SOURCE_PREFERENCE = {"mp": 0, "cod": 1, "local": 2}
+# backends, prefer the more authoritative source. User-registered backends
+# not in this map default to rank 50 (between built-ins and "unknown");
+# tweak ``register_source_preference`` to override.
+_SOURCE_PREFERENCE: dict[str, int] = {"mp": 0, "cod": 1, "local": 2}
 
-_BACKEND_FACTORY = {
-    "mp": MaterialsProjectBackend,
-    "local": LocalCIFBackend,
-    "cod": CODBackend,
-}
+
+def register_source_preference(name: str, rank: int) -> None:
+    """Set the dedup priority of a backend (lower = preferred).
+
+    Mirrors :func:`scilink.skills.structure_matching._backends.register_backend`
+    — a user adding ICSD might call
+    ``register_source_preference('icsd', 0)`` to prefer it over MP.
+    """
+    _SOURCE_PREFERENCE[name] = int(rank)
 
 
 TOOL_SPEC = ToolSpec(
@@ -225,13 +230,19 @@ def _build_backends(
     sources: Optional[list[str]],
     warnings: list[str],
 ) -> list[StructureBackend]:
-    """Construct backend instances for ``sources`` (or auto-detect)."""
+    """Construct backend instances for ``sources`` (or auto-detect).
+
+    Backends come from :mod:`scilink.skills.structure_matching._backends`,
+    which carries both the built-in factories and any third-party backends
+    registered via ``register_backend()`` or the
+    ``scilink.structure_backends`` entry-point group.
+    """
     if sources is None:
-        sources = list(_BACKEND_FACTORY.keys())
+        sources = list(registered_backends().keys())
 
     backends: list[StructureBackend] = []
     for name in sources:
-        factory = _BACKEND_FACTORY.get(name)
+        factory = get_backend_factory(name)
         if factory is None:
             warnings.append(f"Unknown source '{name}' — skipping")
             continue

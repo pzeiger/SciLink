@@ -87,6 +87,16 @@ scilink-mcp = "scilink.cli.serve:main"
 #   my_xrd_agent = "my_package.agents:MyXRDAgent"
 [project.entry-points."scilink.agents"]
 
+# Third-party packages can advertise structure-database backends here.
+# Each entry maps a name (used as the `sources=` key in search_structures)
+# to a `StructureBackend` subclass. See
+# scilink/skills/structure_matching/_backends/__init__.py for the protocol.
+# Example entry in a third-party pyproject.toml:
+#   [project.entry-points."scilink.structure_backends"]
+#   icsd = "my_package.icsd_backend:ICSDBackend"
+#   oqmd = "my_package.oqmd_backend:OQMDBackend"
+[project.entry-points."scilink.structure_backends"]
+
 [tool.setuptools]
 include-package-data = true
 

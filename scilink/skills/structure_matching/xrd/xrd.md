@@ -36,6 +36,24 @@ tools the analysis script chains together:
 Install dependencies: `pip install scilink[structure-matching]` (pymatgen
 with the XRD analysis module, mp-api, pulp).
 
+**Extending the backend list.** Materials Project, local CIF, and COD
+ship in-package. ICSD, OQMD, AFLOW, NOMAD, and any custom database
+plug in through a small public API. A user implements a class
+satisfying the `StructureBackend` protocol
+(`is_available()` + `query(spec) -> list[StructureCandidate]`) and
+either calls `register_backend("icsd", ICSDBackend)` from their code,
+or declares it in their package's `pyproject.toml`:
+
+```toml
+[project.entry-points."scilink.structure_backends"]
+icsd = "my_package.icsd_backend:ICSDBackend"
+```
+
+SciLink discovers the entry point on import and the backend is then
+addressable as `sources=["icsd"]` in `search_structures`. See
+`scilink/skills/structure_matching/_backends/__init__.py` for the full
+protocol and the registration helpers.
+
 ## planning
 
 **Two-tier identification workflow** — both tiers usually run, never
