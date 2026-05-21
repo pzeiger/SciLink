@@ -52,27 +52,52 @@ either-alone:
    experimental peak list once with `extract_peaks`. For each surviving
    candidate from step 1, run `score_xrd_match_robust(algorithm='hanawalt')`.
    Report the best by figure-of-merit. Switch to `algorithm='mip'` when:
-   - The pattern is suspected multi-phase (mixture identification).
+   - The pattern is **suspected multi-phase** (see below — this is the
+     dominant trigger).
    - You need the fitted zero-shift and lattice scale reported as
      parameters (e.g., for downstream Rietveld initialization).
    - Hanawalt's top candidates are within ~10% FOM of each other and you
      want a provably optimal tie-breaker.
 
-**Two invocation modes for step 1:**
+**Three invocation modes for step 1:**
 
-- **Pre-fit pattern** — chemistry is hypothesized by the user / metadata
-  (e.g. "this is a TiO2 sample"). Query DB with `chemistry=[...]`,
-  optionally a `space_group_hints` list if the user names a polymorph.
-- **Post-fit pattern** — no chemistry hypothesis. Run `extract_peaks`
-  first to estimate the dominant peak positions, infer an approximate
-  lattice from the strongest peak via Bragg's law for a guessed crystal
-  system, then make a **single** `search_structures` call with a
-  list-of-lists chemistry hypothesis (e.g.
+- **Pre-fit pattern (single-phase)** — chemistry is hypothesized as one
+  compound (e.g. "this is a TiO2 sample" or `chemistry_hint=["Ti","O"]`
+  for the binary). Query DB with `chemistry=[Ti, O]` (single list);
+  optionally add `space_group_hints` if the user names a polymorph.
+
+- **Multi-phase mixture** — when the metadata / notes suggest a mixture
+  ("Si + Ge mixture", "suspected multi-phase", `chemistry_hint=["Si","C"]`
+  for two distinct elemental phases, etc.). Use the **list-of-lists**
+  chemistry form to get separate candidate lists per phase:
+  `chemistry=[["Si"], ["Ge"]]` — NOT `chemistry=["Si", "Ge"]` which would
+  ask the DB for Si-Ge *binary compounds* instead of Si and Ge
+  separately. For step 2 use **`algorithm='mip'` from the start** (not
+  Hanawalt) so the assignment problem can match peaks across both
+  phases simultaneously, and report identification per phase. The
+  R-factor in this case is dominated by whichever phase the LLM picks
+  first as "best"; per-phase FOMs are more informative than a single
+  overall verdict.
+
+- **Post-fit pattern (no chemistry hypothesis)** — no hint at all. Run
+  `extract_peaks` first to estimate the dominant peak positions, infer
+  an approximate lattice from the strongest peak via Bragg's law for a
+  guessed crystal system, then make a **single** `search_structures`
+  call with a list-of-lists chemistry hypothesis (e.g.
   `chemistry=[["Si"], ["C"], ["Ge"], ["Ti","O"]]`). The tool dispatches
   one DB query per hypothesis, dedupes, and merges results. **Never
   loop over single-chemistry `search_structures` calls** — that path
   has historically broken on consolidation, and the tool is built to
   handle multiple hypotheses in one invocation.
+
+**Recognizing the multi-phase trigger.** Any of these phrasings in
+`system_info` / notes mean "use the multi-phase mode": "mixture",
+"multi-phase", "two-phase", "binary mixture" (as opposed to "binary
+compound"), "co-existing phases", or `chemistry_hint` containing two
+elements with NO compound name (e.g. `["Si", "Ge"]` with note
+"suspected mixture" — the elements are distinct phases, not a
+compound). When in doubt, run multi-phase MIP — it's strictly more
+informative than Hanawalt for single-phase data too (just slower).
 
 **Bounding the candidate count.** Always set `search_structures(query={
 "top_n": N, ...})` with N in [3, 10]. More than 10 candidates per
