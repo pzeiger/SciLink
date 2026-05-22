@@ -97,6 +97,33 @@ When using `SCILINK_API_KEY`, also provide a `--base-url` pointing to your OpenA
 
 ---
 
+## Tracing
+
+By default SciLink records nothing about individual LLM calls. Enable tracing to append one JSON
+record per call — model, prompt messages, response text, token usage, and latency — to a JSONL file.
+Useful for cost accounting, model comparison, and variability / reproducibility studies.
+
+```python
+import scilink
+scilink.enable_tracing("run/llm_trace.jsonl")   # or: export SCILINK_TRACE_FILE=run/llm_trace.jsonl
+# ... run agents / workflows ...
+scilink.disable_tracing()
+```
+
+Each line of the trace is a JSON object:
+
+```json
+{"timestamp": "...", "model": "...", "messages": [...], "response_text": "...",
+ "finish_reason": "stop",
+ "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+ "latency_s": 0.0}
+```
+
+Tracing is global and opt-in — nothing is recorded unless you enable it. Inline image payloads are
+collapsed to `<image>` so traces stay small.
+
+---
+
 ## Quick Start
 
 SciLink can be used via the **CLI**, **web UI**, **MCP server**, or **Python API**.

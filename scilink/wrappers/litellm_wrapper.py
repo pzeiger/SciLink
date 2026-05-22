@@ -31,6 +31,7 @@ import re
 import base64
 import json
 import logging
+import time
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Union
 
@@ -101,6 +102,33 @@ def _normalize_model_name(model: str) -> str:
     
     # Default: return as-is, let LiteLLM figure it out
     return model
+
+
+def _record_trace(model: str, messages, response, latency_s: float) -> None:
+    """Record one completed LLM call to the opt-in global tracer (no-op if disabled)."""
+    try:
+        from .. import tracing
+        if not tracing.is_enabled():
+            return
+        text, finish = "", None
+        choices = getattr(response, "choices", None) or []
+        if choices:
+            message = getattr(choices[0], "message", None)
+            text = (getattr(message, "content", None) or "") if message else ""
+            finish = getattr(choices[0], "finish_reason", None)
+        usage = None
+        u = getattr(response, "usage", None)
+        if u is not None:
+            usage = {
+                "prompt_tokens": getattr(u, "prompt_tokens", None),
+                "completion_tokens": getattr(u, "completion_tokens", None),
+                "total_tokens": getattr(u, "total_tokens", None),
+            }
+        tracing.record(model=model, messages=messages, response_text=text,
+                       finish_reason=finish, usage=usage, latency_s=latency_s)
+    except Exception:
+        pass  # tracing must never break a generation
+
 
 def _check_litellm():
     """Raise ImportError if LiteLLM is not available."""
@@ -233,6 +261,7 @@ class LiteLLMGenerativeModel:
         params = self._build_params(generation_config, tools or self.tools)
         
         try:
+            _t0 = time.perf_counter()
             response = litellm.completion(
                 model=self.model,
                 messages=messages,
@@ -246,8 +275,9 @@ class LiteLLMGenerativeModel:
             if stream:
                 return self._handle_stream(response)
             
+            _record_trace(self.model, messages, response, time.perf_counter() - _t0)
             return self._to_legacy_response(response)
-            
+
         except Exception as e:
             logging.error(f"LiteLLM generation error: {e}")
             raise
@@ -561,6 +591,7 @@ class LiteLLMChatSession:
         
         params = self._model._build_params(generation_config, self._model.tools)
         
+        _t0 = time.perf_counter()
         response = litellm.completion(
             model=self._model.model,
             messages=messages,
@@ -575,6 +606,7 @@ class LiteLLMChatSession:
         
         self._history.append({"role": "user", "content": user_content})
         
+        _record_trace(self._model.model, messages, response, time.perf_counter() - _t0)
         legacy_response = self._model._to_legacy_response(response)
         
         if legacy_response.text:
