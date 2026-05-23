@@ -28,7 +28,9 @@ class StructureOrchestrator:
     and iterates on validator feedback until the structure passes (or a
     circuit-breaker fires). It does NOT generate any engine inputs — that is the
     job of a downstream simulation orchestrator (e.g. ``DFTOrchestrator``), which
-    composes this class for its structure step.
+    composes this class for its structure step. The chat
+    ``SimulationOrchestratorAgent`` tools delegate here too, so the loop lives in
+    exactly one place.
 
     The control flow here is deterministic Python; the LLM is used only within
     bounded steps (generation, validation), each returning a structured result.
@@ -110,7 +112,8 @@ class StructureOrchestrator:
         os.makedirs(output_dir, exist_ok=True)
 
     def build_structure(self, user_request: str,
-                        structure_class: str = "crystal") -> Dict[str, Any]:
+                        structure_class: str = "crystal",
+                        **kwargs) -> Dict[str, Any]:
         """
         Generate and validate an atomic structure from a natural-language request.
 
@@ -130,11 +133,15 @@ class StructureOrchestrator:
             Other classes such as ``"molecular"``, ``"condensed"``,
             ``"biomolecular"`` are added as skill bundles; if no bundle exists,
             generation falls back to generic.
+        **kwargs
+            Forwarded to :meth:`generate_and_validate` (``skill_content``,
+            ``prior_script``, ``validate``, ``max_cycles``, ``output_dir``).
 
         Returns the structure result dict:
             status                : "success" or "error"
             final_structure_path  : path to the generated structure (on success)
             final_script_path     : path to the script that built it
+            final_script_content  : source of the script that built it
             cycles_used           : number of generate/validate cycles taken
             validation_result     : validator feedback (issues, hints, ...)
             warning               : present if refinement stopped early
@@ -146,7 +153,7 @@ class StructureOrchestrator:
         print(f"📁 Output:  {self.output_dir}/")
         print(f"{'='*60}")
 
-        result = self.generate_and_validate(user_request, structure_class=structure_class)
+        result = self.generate_and_validate(user_request, structure_class=structure_class, **kwargs)
 
         if result.get("status") == "success":
             print(f"✅ Structure generated: "
@@ -194,20 +201,56 @@ class StructureOrchestrator:
         return "\n\n".join(parts)
 
     def generate_and_validate(self, user_request: str,
-                              structure_class: str = "crystal") -> Dict[str, Any]:
+                              structure_class: Optional[str] = "crystal",
+                              *,
+                              skill_content: Optional[str] = None,
+                              prior_script: Optional[str] = None,
+                              validate: bool = True,
+                              max_cycles: Optional[int] = None,
+                              output_dir: Optional[str] = None) -> Dict[str, Any]:
         """Generate and validate an atomic structure (the core refine loop).
 
-        ``structure_class`` selects a structure-generation skill bundle
-        (``scilink/skills/structure_generation/<structure_class>/``) whose guidance
-        is injected into the generation prompt; falls back to generic generation if
-        none exists.
+        This is the single home for the structure generate → validate → refine
+        loop; both ``DFTOrchestrator`` and the chat ``SimulationOrchestratorAgent``
+        tools delegate here rather than reimplementing it.
 
-        Includes a circuit-breaker that exits early when refinement stops making
+        Parameters
+        ----------
+        user_request : str
+            Natural-language description of the structure to build.
+        structure_class : str or None
+            Structure archetype; selects the ``structure_generation/<class>`` skill
+            bundle when ``skill_content`` is not supplied. Pass ``None`` to skip
+            auto-loading a class skill (e.g. when the caller fully controls
+            ``skill_content``).
+        skill_content : str, optional
+            Pre-rendered skill guidance injected verbatim. When given it is used
+            as-is and ``structure_class`` is not consulted for skill loading — this
+            lets callers compose multiple / user-registered skills themselves.
+        prior_script : str, optional
+            A previously generated script to modify (variant builds); applied to
+            the initial generation only.
+        validate : bool
+            When False, generate once and return without validation / refinement.
+        max_cycles : int, optional
+            Override for ``max_refinement_cycles`` for this call.
+        output_dir : str, optional
+            Per-call output directory for the structure / script (defaults to the
+            orchestrator's ``output_dir``).
+
+        Includes circuit-breakers that exit early when refinement stops making
         progress (issue count not strictly decreasing for 2 consecutive cycles,
         or generator returned an unchanged script).
         """
+        if output_dir is not None:
+            self.output_dir = output_dir
+            self.structure_generator.generated_script_dir = output_dir
+            os.makedirs(output_dir, exist_ok=True)
 
-        skill_content = self._load_structure_skill(structure_class)
+        if skill_content is None and structure_class is not None:
+            skill_content = self._load_structure_skill(structure_class)
+
+        max_cycles = self.max_refinement_cycles if max_cycles is None else max_cycles
 
         previous_script_content = None
         previous_structure_file = None
@@ -215,9 +258,9 @@ class StructureOrchestrator:
         validator_feedback = None
         attempt_history: list = []   # full per-cycle log: {script, issues, hints}
 
-        for cycle in range(self.max_refinement_cycles + 1):
+        for cycle in range(max_cycles + 1):
             cycle_num = cycle + 1
-            total_cycles = self.max_refinement_cycles + 1
+            total_cycles = max_cycles + 1
 
             if cycle == 0:
                 print(f"🔨 Generating structure (attempt {cycle_num}/{total_cycles})")
@@ -233,6 +276,7 @@ class StructureOrchestrator:
                 validator_feedback=validator_feedback if cycle > 0 else None,
                 attempt_history=attempt_history if cycle > 0 else None,
                 skill_content=skill_content,
+                prior_script_to_modify=prior_script if cycle == 0 else None,
             )
 
             if gen_result["status"] != "success":
@@ -245,6 +289,17 @@ class StructureOrchestrator:
             structure_file = gen_result["output_file"]
             script_content = gen_result["final_script_content"]
 
+            # Single-shot mode: caller asked for a build with no validation.
+            if not validate:
+                return {
+                    "status": "success",
+                    "final_structure_path": structure_file,
+                    "final_script_path": gen_result["final_script_path"],
+                    "final_script_content": script_content,
+                    "cycles_used": cycle_num,
+                    "validation_result": None,
+                }
+
             # CIRCUIT-BREAKER 1: generator returned an unchanged script.
             # Treat as "the model has nothing more to fix" and accept current state.
             if cycle > 0 and script_content == previous_script_content:
@@ -254,6 +309,7 @@ class StructureOrchestrator:
                     "status": "success",
                     "final_structure_path": previous_structure_file or structure_file,
                     "final_script_path": previous_final_script_path or gen_result["final_script_path"],
+                    "final_script_content": script_content,
                     "cycles_used": cycle_num,
                     "validation_result": validator_feedback,
                     "warning": "Refinement stopped: generator made no further changes.",
@@ -288,6 +344,7 @@ class StructureOrchestrator:
                     "status": "success",
                     "final_structure_path": structure_file,
                     "final_script_path": gen_result["final_script_path"],
+                    "final_script_content": script_content,
                     "cycles_used": cycle_num,
                     "validation_result": val_result
                 }
@@ -331,12 +388,13 @@ class StructureOrchestrator:
                         "status": "success",
                         "final_structure_path": structure_file,
                         "final_script_path": gen_result["final_script_path"],
+                        "final_script_content": script_content,
                         "cycles_used": cycle_num,
                         "validation_result": val_result,
                         "warning": warning,
                     }
 
-            if cycle < self.max_refinement_cycles:
+            if cycle < max_cycles:
                 print(f"🔄 Issues found, attempting refinement...")
                 continue
             else:
@@ -345,6 +403,7 @@ class StructureOrchestrator:
                     "status": "success",
                     "final_structure_path": structure_file,
                     "final_script_path": gen_result["final_script_path"],
+                    "final_script_content": script_content,
                     "cycles_used": cycle_num,
                     "validation_result": val_result,
                     "warning": "Structure may have validation issues"

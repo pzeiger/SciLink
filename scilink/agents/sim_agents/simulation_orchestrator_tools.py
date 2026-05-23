@@ -42,38 +42,42 @@ class SimulationOrchestratorTools:
         self.functions_map: Dict[str, Callable] = {}
         self.openai_schemas: list = []
 
-        # Lazily-initialized StructureGenerator reused across generate_structure
-        # / refine_structure calls. Its MaterialsProjectHelper instance (and
-        # therefore the MP record cache) survives between calls — so iterating
-        # on variants of the same material doesn't re-fetch the same MP query
-        # over and over.
-        self._sg = None
+        # Lazily-initialized StructureOrchestrator reused across
+        # generate_structure / refine_structure calls. It owns the shared
+        # StructureGenerator (so the MaterialsProjectHelper cache survives
+        # between calls), the validator, and the generate→validate→refine loop —
+        # the tools delegate to it rather than reimplementing that loop.
+        self._so = None
 
         self._register_all_tools()
 
-    def _get_structure_generator(self, workdir: str):
-        """Return a session-shared StructureGenerator, with its
-        ``generated_script_dir`` set to the per-call workdir.
-
-        Lazy-initializes on first call. Reuses the same instance — and its
-        MP-helper cache, model wrapper, and script executor — across all
-        `generate_structure` / `refine_structure` calls in the session.
+    def _get_structure_orchestrator(self, workdir: str):
+        """Return a session-shared StructureOrchestrator, lazy-initialized on
+        first call. Reuses the same instance — its StructureGenerator (and the
+        MP-helper cache), validator, model wrapper, and script executor — across
+        all generate_structure / refine_structure calls in the session. The
+        per-call output directory is passed through generate_and_validate.
         """
-        from .structure_agent import StructureGenerator
-        if self._sg is None:
-            self._sg = StructureGenerator(
+        from .structure_orchestrator import StructureOrchestrator
+        if self._so is None:
+            self._so = StructureOrchestrator(
                 api_key=self.orch.api_key,
                 base_url=self.orch.base_url,
-                model_name=self.orch.model_name,
-                generated_script_dir=str(workdir),
+                generator_model=self.orch.model_name,
+                validator_model=self.orch.model_name,
                 mp_api_key=self.orch.mp_api_key,
+                output_dir=str(workdir),
             )
-        else:
-            self._sg.generated_script_dir = str(workdir)
-            # ScriptExecutor's working_dir is per-call (passed to execute_script),
-            # so no mutation needed there. The model wrapper, MP helper, and
-            # cached MP records all stay live across calls.
-        return self._sg
+        return self._so
+
+    def _get_structure_generator(self, workdir: str):
+        """Return the session-shared StructureGenerator (owned by the shared
+        StructureOrchestrator), with its ``generated_script_dir`` set to the
+        per-call workdir. Used by refine_structure's single-step rewrite.
+        """
+        so = self._get_structure_orchestrator(str(workdir))
+        so.structure_generator.generated_script_dir = str(workdir)
+        return so.structure_generator
 
     # ------------------------------------------------------------------
     # Tool registration
@@ -228,64 +232,50 @@ class SimulationOrchestratorTools:
                     )
 
             try:
-                sg = self._get_structure_generator(str(workdir))
+                so = self._get_structure_orchestrator(str(workdir))
             except Exception as e:
                 return json.dumps({
                     "status": "error",
-                    "message": f"Failed to construct StructureGenerator: {e}",
+                    "message": f"Failed to construct StructureOrchestrator: {e}",
                 })
 
-            # Append POSCAR-format request so downstream VASP tools can read it.
-            request = description
-            if "poscar" not in request.lower():
-                request = request + ". Save the structure in POSCAR format."
-
-            # Cycle 1: initial generation OR modification of prior script.
-            result = sg.generate_script(
-                original_user_request=request,
-                attempt_number_overall=1,
-                is_refinement_from_validation=False,
+            # Delegate the whole generate → validate → refine loop to the
+            # StructureOrchestrator (single source of truth). structure_class is
+            # None here: the chat tool's skill axis is the user-supplied `skill`,
+            # already rendered into skill_content above — no class skill is
+            # auto-loaded. The orchestrator appends the POSCAR-format instruction.
+            result = so.generate_and_validate(
+                description,
+                structure_class=None,
                 skill_content=skill_content,
-                prior_script_to_modify=prior_script,
+                prior_script=prior_script,
+                validate=validate_and_refine,
+                max_cycles=max_refinement_cycles,
+                output_dir=str(workdir),
             )
             if result.get("status") != "success":
                 return json.dumps({
                     "status": "error",
-                    "message": result.get("message") or result.get("last_error") or "Unknown failure",
-                    "last_attempted_script_path": result.get("last_attempted_script_path"),
+                    "message": result.get("message") or "Structure generation failed",
                 })
 
+            val = result.get("validation_result")
             record = {
                 "slug": slug,
                 "description": description,
                 "structure_dir": str(workdir),
-                "poscar_path": result["output_file"],
+                "poscar_path": result["final_structure_path"],
                 "script_path": result["final_script_path"],
-                "script_content": result["final_script_content"],
+                "script_content": result.get("final_script_content"),
                 "skill": skill,
                 "based_on_slug": based_on_slug,
                 "incar_path": None,
                 "kpoints_path": None,
                 "vasp_summary": None,
-                "validation": None,
+                "validation": val,
                 "created_at": datetime.now().isoformat(),
             }
             self.orch.generated_structures.append(record)
-
-            # Optionally chain validate + refine internally so the user's
-            # chat doesn't pause between generate and validate in co-pilot
-            # mode (mirrors how analyze mode's run_analysis does build +
-            # validate + refine inside a single tool call).
-            cycles_used = 1
-            warning = None
-            if validate_and_refine:
-                cycles_used, warning = self._validate_refine_loop(
-                    record=record,
-                    sg=sg,
-                    original_request=request,
-                    skill_content=skill_content,
-                    max_cycles=max_refinement_cycles,
-                )
 
             return json.dumps({
                 "status": "success",
@@ -296,19 +286,19 @@ class SimulationOrchestratorTools:
                 "n_atoms": self._count_atoms(record["poscar_path"]),
                 "skill_used": skill,
                 "validation": {
-                    "status": (record.get("validation") or {}).get("status"),
+                    "status": (val or {}).get("status"),
                     "issue_count": len(
-                        (record.get("validation") or {}).get("all_identified_issues", []) or []
+                        (val or {}).get("all_identified_issues", []) or []
                     ),
-                    "overall_assessment": (record.get("validation") or {}).get("overall_assessment", ""),
-                } if record.get("validation") else None,
-                "refinement_cycles_used": cycles_used,
-                "warning": warning,
+                    "overall_assessment": (val or {}).get("overall_assessment", ""),
+                } if val else None,
+                "refinement_cycles_used": result.get("cycles_used", 1),
+                "warning": result.get("warning"),
                 "next_steps": (
                     "Generate VASP inputs with generate_vasp_inputs(...) "
                     "for the desired calculation type, or build a related "
                     "structure variant via another generate_structure call."
-                    if not warning
+                    if not result.get("warning")
                     else "Review the warning before proceeding to VASP inputs."
                 ),
             })
@@ -1746,167 +1736,6 @@ class SimulationOrchestratorTools:
     # ------------------------------------------------------------------
     # Helpers used by tool closures
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _print_validation_results(val_result: Dict[str, Any], cycle_num: int) -> None:
-        """Mirror DFTOrchestrator._print_validation_results so the simulate
-        orchestrator's chat shows the same structured assessment / issues /
-        improvements block users are used to from analyze→DFT runs."""
-        if val_result.get("status") == "success":
-            print(f"    ✅ Validation passed (cycle {cycle_num})")
-            return
-
-        issues = val_result.get("all_identified_issues", []) or []
-        hints = val_result.get("script_modification_hints", []) or []
-        assessment = val_result.get("overall_assessment", "No assessment provided")
-
-        print(f"    ⚠️  Validation (cycle {cycle_num}) found {len(issues)} issue(s):")
-        print(f"\n    📋 Overall Assessment:")
-        print(f"       {assessment}")
-        if issues:
-            print(f"\n    🔍 Specific Issues:")
-            for i, issue in enumerate(issues, 1):
-                print(f"       {i}. {issue}")
-        if hints:
-            print(f"\n    💡 Suggested Improvements:")
-            for i, hint in enumerate(hints, 1):
-                print(f"       {i}. {hint}")
-        print()
-
-    def _validate_refine_loop(self, record: Dict[str, Any], sg,
-                              original_request: str,
-                              skill_content: Optional[str],
-                              max_cycles: int) -> tuple:
-        """Run validate → refine → validate up to ``max_cycles`` times.
-
-        Updates ``record`` in place: after each cycle, ``poscar_path`` /
-        ``script_path`` / ``script_content`` are replaced with the latest
-        attempt and ``validation`` holds the latest validator output.
-
-        Mirrors DFTOrchestrator._generate_and_validate_structure's
-        circuit-breakers (unchanged-script and plateau-vs-divergence) AND
-        its progress-reporting format so users see the same "📋 Assessment
-        / 🔍 Issues / 💡 Improvements" block they're used to from
-        analyze-mode DFT runs.
-
-        Returns: (cycles_used, warning_or_None).
-        """
-        from .val_agent import StructureValidatorAgent
-
-        try:
-            validator = StructureValidatorAgent(
-                api_key=self.orch.api_key,
-                base_url=self.orch.base_url,
-                model_name=self.orch.model_name,
-            )
-        except Exception as e:
-            self.logger.warning(
-                f"Failed to construct validator: {e}. Skipping validate+refine."
-            )
-            return 1, f"Validation skipped (validator construction failed: {e})"
-
-        attempt_history: list = []
-        prev_script = record.get("script_content")
-
-        for cycle in range(1, max_cycles + 1):
-            print(f"🔍 Validating structure (cycle {cycle}/{max_cycles})...")
-            val = validator.validate_structure_and_script(
-                structure_file_path=record["poscar_path"],
-                generating_script_content=record["script_content"],
-                original_request=original_request,
-            )
-            record["validation"] = val
-            attempt_history.append({
-                "script": record["script_content"],
-                "issues": list(val.get("all_identified_issues", []) or []),
-                "hints": list(val.get("script_modification_hints", []) or []),
-            })
-
-            self._print_validation_results(val, cycle)
-
-            if val.get("status") == "success":
-                return cycle, None
-
-            # Plateau vs divergence circuit-breaker (mirrors DFTOrchestrator).
-            if len(attempt_history) >= 3:
-                n_now = len(attempt_history[-1]["issues"])
-                n_prev = len(attempt_history[-2]["issues"])
-                n_prev2 = len(attempt_history[-3]["issues"])
-                if n_now >= n_prev and n_prev >= n_prev2:
-                    if n_now > n_prev2:
-                        msg = (
-                            f"Refinement stopped: validator complaints "
-                            f"diverging ({n_prev2} → {n_prev} → {n_now}). "
-                            f"Structure may have substantial unresolved "
-                            f"issues; review before proceeding to VASP."
-                        )
-                        print(f"🛑 {msg}")
-                        return cycle, msg
-                    msg = (
-                        "Refinement stopped: issue count plateaued "
-                        "(likely cosmetic)."
-                    )
-                    print(f"🛑 {msg}")
-                    return cycle, msg
-
-            if cycle >= max_cycles:
-                msg = (
-                    f"Max refinement cycles ({max_cycles}) reached; "
-                    f"structure has unresolved validation issues."
-                )
-                print(f"⚠️  {msg}")
-                return cycle, msg
-
-            # Refine.
-            n_issues = len(val.get("all_identified_issues", []) or [])
-            print(f"🔄 Refining structure (cycle {cycle + 1}/{max_cycles}) — "
-                  f"addressing {n_issues} issue(s)")
-            refine_result = sg.generate_script(
-                original_user_request=original_request,
-                attempt_number_overall=cycle + 1,
-                is_refinement_from_validation=True,
-                previous_script_content=record["script_content"],
-                validator_feedback=val,
-                attempt_history=attempt_history,
-                skill_content=skill_content,
-            )
-            if refine_result.get("status") != "success":
-                # Surface the actual underlying error (often a truncated
-                # Python traceback from the failed inner-retry loop), and
-                # make it explicit that we're keeping the prior good state
-                # so the user knows the cycle-N structure is still usable.
-                last_err = (
-                    refine_result.get("last_error")
-                    or refine_result.get("message")
-                    or "(no detail captured)"
-                )
-                err_snippet = str(last_err).strip()
-                if len(err_snippet) > 800:
-                    err_snippet = err_snippet[:800] + "\n   [... truncated ...]"
-                print(f"❌ Refinement attempt for cycle {cycle + 1} failed.")
-                print(f"   Underlying error:\n   {err_snippet.replace(chr(10), chr(10) + '   ')}")
-                print(f"   Keeping the structure from cycle {cycle} "
-                      f"(POSCAR: {record['poscar_path']}).")
-                msg = (
-                    f"Refinement failed on cycle {cycle + 1} (kept the "
-                    f"structure from cycle {cycle}, which IS usable as a "
-                    f"DFT starting geometry — the failure was in the "
-                    f"validator-driven rewrite, not in the original build)."
-                )
-                return cycle, msg
-
-            new_script = refine_result["final_script_content"]
-            if new_script == prev_script:
-                msg = "Refinement stopped: generator made no further changes."
-                print(f"🛑 {msg}")
-                return cycle, msg
-
-            record["poscar_path"] = refine_result["output_file"]
-            record["script_path"] = refine_result["final_script_path"]
-            record["script_content"] = new_script
-            prev_script = new_script
-
-        return max_cycles, None
 
     def _load_skill_content(self, skill) -> Optional[str]:
         """Resolve one or more skill names to their content as a single block.
