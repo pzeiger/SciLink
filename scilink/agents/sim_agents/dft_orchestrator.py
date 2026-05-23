@@ -264,6 +264,46 @@ class DFTOrchestrator:
 
         return workflow_result
 
+    def build_structure(self, user_request: str) -> Dict[str, Any]:
+        """
+        Generate and validate an atomic structure from a natural-language request,
+        WITHOUT generating any DFT inputs.
+
+        Runs the same structure-generation + validation/refinement loop as Step 1 of
+        ``run_complete_workflow`` (so results are directly comparable), then stops.
+        Useful for structure-generation benchmarking and for engine-agnostic workflows
+        where the DFT inputs are produced separately (e.g. via ``PeriodicDFTAgent`` for
+        VASP, Quantum ESPRESSO, etc.).
+
+        Returns the structure result dict:
+            status                : "success" or "error"
+            final_structure_path  : path to the generated structure (on success)
+            final_script_path     : path to the ASE script that built it
+            cycles_used           : number of generate/validate cycles taken
+            validation_result     : validator feedback (issues, hints, ...)
+            warning               : present if refinement stopped early
+            message / cycle       : present on error
+        """
+        print(f"\n🏗️  Structure Generation & Validation")
+        print(f"{'='*60}")
+        print(f"📝 Request: {user_request}")
+        print(f"📁 Output:  {self.output_dir}/")
+        print(f"{'='*60}")
+
+        result = self._generate_and_validate_structure(user_request)
+
+        if result.get("status") == "success":
+            print(f"✅ Structure generated: "
+                  f"{os.path.basename(result['final_structure_path'])} "
+                  f"({result.get('cycles_used', '?')} cycle(s))")
+            if result.get("warning"):
+                print(f"⚠️  {result['warning']}")
+        else:
+            print(f"❌ Structure generation failed: {result.get('message', 'Unknown error')}")
+
+        self._save_workflow_log()
+        return result
+
     def refine_from_log(self, original_request: str, log_path: str) -> Dict[str, Any]:
         """
         Given a VASP stdout/stderr log file, iteratively refine INCAR/KPOINTS
