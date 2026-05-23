@@ -264,7 +264,7 @@ class DFTOrchestrator:
 
         return workflow_result
 
-    def build_structure(self, user_request: str) -> Dict[str, Any]:
+    def build_structure(self, user_request: str, scale: str = "crystal") -> Dict[str, Any]:
         """
         Generate and validate an atomic structure from a natural-language request,
         WITHOUT generating any DFT inputs.
@@ -275,6 +275,17 @@ class DFTOrchestrator:
         where the DFT inputs are produced separately (e.g. via ``PeriodicDFTAgent`` for
         VASP, Quantum ESPRESSO, etc.).
 
+        Parameters
+        ----------
+        user_request : str
+            Natural-language description of the structure to build.
+        scale : str
+            Simulation-scale domain whose structure-generation skill guides the build
+            (``scilink/skills/structure_generation/<scale>/``). Defaults to ``"crystal"``
+            (periodic crystals / supercells / defects / slabs). Other scales such as
+            ``"molecular"``, ``"condensed"``, ``"biomolecular"`` are added as skill bundles;
+            if no bundle exists for ``scale``, generation falls back to generic.
+
         Returns the structure result dict:
             status                : "success" or "error"
             final_structure_path  : path to the generated structure (on success)
@@ -284,13 +295,13 @@ class DFTOrchestrator:
             warning               : present if refinement stopped early
             message / cycle       : present on error
         """
-        print(f"\n🏗️  Structure Generation & Validation")
+        print(f"\n🏗️  Structure Generation & Validation  (scale: {scale})")
         print(f"{'='*60}")
         print(f"📝 Request: {user_request}")
         print(f"📁 Output:  {self.output_dir}/")
         print(f"{'='*60}")
 
-        result = self._generate_and_validate_structure(user_request)
+        result = self._generate_and_validate_structure(user_request, scale=scale)
 
         if result.get("status") == "success":
             print(f"✅ Structure generated: "
@@ -358,13 +369,48 @@ class DFTOrchestrator:
             "explanation":    plan.get("explanation", {})
         }
 
-    def _generate_and_validate_structure(self, user_request: str) -> Dict[str, Any]:
+    def _load_structure_skill(self, scale: str) -> Optional[str]:
+        """Load the structure-generation skill bundle for ``scale`` and assemble its
+        generation-facing guidance (overview / planning / implementation sections) into a
+        single text block to inject into the generator prompt. Returns None (generic
+        generation) when no bundle exists for ``scale``.
+        """
+        try:
+            from ...skills.loader import load_skill
+            parsed = load_skill(scale, domain="structure_generation")
+        except FileNotFoundError:
+            self.logger.info(
+                f"No structure_generation skill for scale='{scale}'; using generic generation."
+            )
+            return None
+        except Exception as e:
+            self.logger.warning(f"Failed to load structure_generation skill '{scale}': {e}")
+            return None
+
+        parts = []
+        for section in ("overview", "planning", "implementation"):
+            body = (parsed.get(section) or "").strip()
+            if body:
+                parts.append(f"## {section}\n{body}")
+        if not parts:
+            return None
+        self.logger.info(f"Loaded structure_generation skill: {parsed.get('name', scale)}")
+        return "\n\n".join(parts)
+
+    def _generate_and_validate_structure(self, user_request: str,
+                                         scale: str = "crystal") -> Dict[str, Any]:
         """Generate and validate atomic structure with improved output formatting.
+
+        ``scale`` selects a structure-generation skill bundle
+        (``scilink/skills/structure_generation/<scale>/``) whose guidance is injected into
+        the generation prompt; falls back to generic generation if none exists.
 
         Includes a circuit-breaker that exits early when refinement stops making
         progress (issue count not strictly decreasing for 2 consecutive cycles,
         or generator returned an unchanged script).
         """
+
+        skill_content = self._load_structure_skill(scale)
 
         previous_script_content = None
         previous_structure_file = None
@@ -389,6 +435,7 @@ class DFTOrchestrator:
                 previous_script_content=previous_script_content if cycle > 0 else None,
                 validator_feedback=validator_feedback if cycle > 0 else None,
                 attempt_history=attempt_history if cycle > 0 else None,
+                skill_content=skill_content,
             )
 
             if gen_result["status"] != "success":
