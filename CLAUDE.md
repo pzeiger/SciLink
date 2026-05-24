@@ -34,16 +34,16 @@ for Ramand and XRD.
 ## Foundation agents
 
 The architectural shape that makes the "skills, not new agents" preference
-work is the **foundation agent**: a single agent class designed to cover
-one broad domain ("modality") and specialized at runtime to specific
-techniques within that domain through pluggable skill bundles, rather than
-through subclassing. Today the analysis-side agents (`CurveFittingAgent`,
-`ImageAnalysisAgent`, `HyperspectralAnalysisAgent`) are the canonical
-examples; the proposed `OptimizationAgent` refactor (issue #196) follows
-this same shape for the optimization modality, and future simulation
-foundation agents (e.g., a DFT-side equivalent) should as well.
+work is the **foundation(al) agent**: a single agent class designed to
+cover one broad domain (its "modality") and specialized at runtime to
+specific techniques within that domain through pluggable skill bundles.
+Today the analysis-side agents (`CurveFittingAgent`, `ImageAnalysisAgent`,
+`HyperspectralAnalysisAgent`) are the canonical examples; the proposed
+`OptimizationAgent` refactor (issue #196) follows this same shape for the
+optimization modality, and future simulation foundation agents (e.g., a
+DFT-side equivalent) should as well.
 
-A foundation agent has five elements:
+A foundation(al) agent has five elements:
 
 1. **A modality-specific pipeline architecture.** Each foundation agent
    defines its own fixed sequence (and graph) of stages — planning,
@@ -80,15 +80,11 @@ A foundation agent has five elements:
 
 5. **An extensibility loop for open-ended per-task work, with
    modality-appropriate verification.** The agent ships with a stable
-   surface of hand-written tools and, where the modality needs it, also
-   generates per-task code at runtime that calls those tools. Generated
-   artifacts run in a sandbox, and the agent verifies the result before
-   accepting it. Both the scope of generation and the form of
-   verification vary by modality — e.g., a per-task analysis script
-   verified by visual and numerical inspection in analysis; a bounded
-   constraint or acquisition wrapper verified by numerical sanity tests
-   in optimization; an input deck verified by convergence checks in
-   simulation.
+   surface of specialized tools (e.g., SAM for image analysis) and,
+   where the modality needs it, also generates per-task code at
+   runtime. Generated artifacts run in a sandbox, and the agent
+   verifies the result before accepting it. Both the scope of
+   generation and the form of verification vary by modality.
 
 Elements (1)–(3) are the agent's structural contract (pipeline shape,
 baseline prompts at each stage, section vocabulary). Element (4) is how
