@@ -180,12 +180,21 @@ class StructureValidatorAgent:
         except Exception:
             pass
 
-        # Min pairwise distance with PBC — catches atom overlap / unphysical bonds
+        # Min pairwise distance — catches atom overlap / unphysical bonds.
+        # Use a KD-tree (O(N log N) memory) rather than the dense N×N
+        # get_all_distances matrix, which OOMs for large systems (a 20k-atom
+        # solvated protein needs ~3.4 GB and gets SIGKILLed).
         try:
-            dists = atoms.get_all_distances(mic=True)
-            np.fill_diagonal(dists, np.inf)
-            min_d = float(dists.min())
-            lines.append(f"- Min pairwise distance (with PBC): {min_d:.3f} Å")
+            from scipy.spatial import cKDTree
+            pos = atoms.get_positions()
+            boxsize = None
+            if bool(atoms.pbc.all()) and atoms.cell.orthorhombic:
+                boxsize = atoms.cell.lengths()
+                pos = pos % boxsize          # cKDTree(boxsize=...) needs coords in [0, L)
+            tree = cKDTree(pos, boxsize=boxsize)
+            nn = tree.query(pos, k=2)[0][:, 1]   # k=1 is the atom itself
+            min_d = float(nn.min())
+            lines.append(f"- Min pairwise distance{' (PBC)' if boxsize is not None else ''}: {min_d:.3f} Å")
         except Exception:
             pass
 
