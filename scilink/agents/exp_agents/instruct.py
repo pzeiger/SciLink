@@ -723,6 +723,9 @@ Decomposition is strongly preferred for exploratory work — it surfaces structu
 
 Default to `true` when in doubt, when no objective is given, or when the objective is exploratory ("characterize the sample", "find phases", "identify components"). Skipping decomposition forfeits the exploratory survey step, so the bar must be high.
 
+**Skill vs. objective precedence (decomposition stage only):**
+When an active domain skill (e.g. the EELS skill) provides planning guidance that assumes decomposition will run, that guidance shapes your *method choice* (NMF vs. PCA vs. ICA) and your component count estimate — but it does NOT override an explicit user opt-out from the decomposition stage. If the user's objective meets all three criteria above for `run_decomposition: false`, set it false even when the active skill's planning section assumes decomposition will run. The skill's guidance about HOW to perform the remaining stages (lineshape choice, preprocessing, model selection, validation rules) still applies to the dynamic-analysis step that follows. This precedence applies only to the skip-or-run decision for the decomposition stage; skill rules about *how* to perform any stage remain mandatory.
+
 **Component Count Considerations:**
 
 **System Complexity:**
