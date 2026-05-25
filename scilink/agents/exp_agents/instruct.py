@@ -1269,6 +1269,11 @@ You MUST output a valid JSON object.
 * For `custom_code` targets: `value = null` (the description field is what matters).
 * Targets of other types (e.g. legacy `"spatial"` or `"spectral"`) are NOT supported and will be ignored by the downstream pipeline. Do not emit them.
 
+**Required outputs (objective-aware QC enforcement):**
+When the user's objective explicitly names one or more scalar quantities that should be extracted per pixel (e.g. "peak position", "FWHM", "integrated area", "binding energy", "edge onset"), list the EXACT Snake_Case map keys you intend the generated code to produce for those quantities in the optional `required_outputs` field on the target. The downstream code-generation prompt will be told those keys are mandatory, and the dynamic-analysis run will retry (and ultimately fail the task) if any named output is missing from the returned `maps` dict OR fails its visual quality check. Leave `required_outputs` as an empty list when the user's objective is exploratory or when you are selecting features at your own initiative.
+
+Example: if the objective says *"extract the peak position (in eV) of the dominant feature at every pixel"*, the target should set `"required_outputs": ["Peak_Position"]`. The generated code's `maps` dict must then include a key named exactly `Peak_Position`.
+
 **Example 1: STOP (Decomposition Artifact)**
 {
   "refinement_needed": false,
@@ -1289,7 +1294,8 @@ You MUST output a valid JSON object.
       {
         "type": "custom_code",
         "description": "Map peak center position around 0.5 eV using Gaussian fitting or cross-correlation to quantify the spatial variation in peak energy across the sample.",
-        "value": null
+        "value": null,
+        "required_outputs": ["Peak_Center"]
       }
   ]
 }

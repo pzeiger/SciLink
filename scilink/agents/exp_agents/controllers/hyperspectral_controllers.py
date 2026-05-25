@@ -143,8 +143,30 @@ def build_code_generation_prompt(
     processing_note: str,
     hints: str | None = None,
     objective: str | None = None,
+    required_outputs: list[str] | None = None,
 ) -> str:
     hints_section = ""
+    if required_outputs:
+        keys_str = ", ".join(f'"{n}"' for n in required_outputs)
+        hints_section += f"""
+
+### REQUIRED OUTPUTS
+Your `maps` dict MUST contain the following keys (exact spelling):
+{keys_str}
+
+These keys represent quantities the user specifically asked for. Failure
+to include any of them — or producing them with values that visually fail
+quality checks (e.g. rail-gazing at parameter bounds, all-NaN, salt-and-
+pepper noise) — will cause this task to fail and force a retry. You MAY
+return additional keys, but the listed ones must be present and
+physically meaningful.
+
+If a previous attempt failed because a required output rail-gazed at
+parameter bounds, the fix is usually one of: (a) widen the parameter
+bounds, (b) use a better per-pixel initial guess (e.g. argmax of the
+spectrum after smoothing), (c) switch lineshape (Lorentzian vs Gaussian
+vs Voigt), or (d) add light per-pixel smoothing before fitting.
+"""
     if objective:
         hints_section += f"""
 
@@ -1539,7 +1561,17 @@ class RunDynamicAnalysisController:
         # --- MAIN LOOP: Process each target description separately ---
         for i, target in enumerate(custom_targets, 1):
             target_desc = target.get("description", "Analyze feature")
-            self.logger.info(f"👉 Task {i}/{len(custom_targets)}: {target_desc}")
+            # Objective-aware required outputs: when the refinement-LLM marked
+            # specific map keys as mandatory (driven by the user's stated
+            # objective), failing any of them triggers a retry instead of
+            # being silently dropped by the partial-success threshold.
+            required_outputs = list(target.get("required_outputs") or [])
+            if required_outputs:
+                self.logger.info(
+                    f"👉 Task {i}/{len(custom_targets)} (required outputs: {required_outputs}): {target_desc}"
+                )
+            else:
+                self.logger.info(f"👉 Task {i}/{len(custom_targets)}: {target_desc}")
 
             # 1. Define Prompt for this specific task
             base_prompt = build_code_generation_prompt(
@@ -1551,6 +1583,7 @@ class RunDynamicAnalysisController:
                 processing_note=processing_note,
                 hints=state.get("analysis_hints"),
                 objective=state.get("analysis_objective"),
+                required_outputs=required_outputs,
             )
 
             # Append a preprocessing-mask hint when one exists and identifies
@@ -1689,24 +1722,52 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                                 self.logger.warning(f"    ❌ Visual QC rejected {feature_name}: {critique}")
                                 qc_failures.append(f"{feature_name}: {critique}")
 
-                    # --- F. SUCCESS DECISION (Threshold Logic) ---
+                    # --- F. SUCCESS DECISION (Threshold + Required-Outputs Logic) ---
                     valid_count = len(current_run_valid_maps)
                     success_rate = valid_count / total_maps_expected if total_maps_expected > 0 else 0
 
-                    if valid_count > 0 and success_rate >= self.SUCCESS_THRESHOLD:                        
+                    # Required-outputs gate: every named output must be
+                    # present AND QC-pass. Failure here forces a retry, so
+                    # the partial-success threshold never silently drops the
+                    # user-asked-for quantity.
+                    valid_names = {m['name'] for m in current_run_valid_meta}
+                    missing_required = [n for n in required_outputs if n not in valid_names]
+                    if missing_required:
+                        relevant_critiques = [
+                            c for c in qc_failures
+                            if any(req in c for req in missing_required)
+                        ]
+                        absent_from_output = [
+                            n for n in missing_required if n not in maps_dict
+                        ]
+                        detail_parts = []
+                        if absent_from_output:
+                            detail_parts.append(
+                                f"keys absent from your `maps` dict: {absent_from_output}"
+                            )
+                        if relevant_critiques:
+                            detail_parts.append(
+                                f"QC critiques on required outputs: {relevant_critiques}"
+                            )
+                        detail = "; ".join(detail_parts) or "no further detail"
+                        raise ValueError(
+                            f"Required outputs failed: {missing_required}. {detail}"
+                        )
+
+                    if valid_count > 0 and success_rate >= self.SUCCESS_THRESHOLD:
                         status_msg = "✅ Success" if valid_count == total_maps_expected else "⚠️ Partial Success"
                         self.logger.info(f"    {status_msg} ({valid_count}/{total_maps_expected} passed). Committing valid maps.")
-                        
+
                         # 1. COMMIT Valid Images
                         for img_item in current_run_valid_images:
                             tools.save_image_bytes(img_item['data'], output_dir, img_item['filename'], self.logger)
                             if "analysis_images" not in state: state["analysis_images"] = []
                             state["analysis_images"].append(img_item)
-                        
+
                         # 2. COMMIT Data
                         all_valid_maps.extend(current_run_valid_maps)
                         all_valid_meta.extend(current_run_valid_meta)
-                        
+
                         task_success = True
                         break # Exit Retry Loop
                     else:
