@@ -1571,7 +1571,15 @@ class HumanFeedbackRefinementController:
             state["parameters_to_extract"] = []
             state["fitting_strategy"] = "Standard curve fitting"
             state["literature_query"] = None
-            state["locked_fitting_config"] = None
+            # Mirror the success-path config shape (not None) so downstream
+            # consumers that do `locked_fitting_config.copy()` /
+            # `.get("physical_model")` don't crash on the fallback path.
+            state["locked_fitting_config"] = {
+                "analysis_approach": state.get("analysis_approach"),
+                "physical_model": state.get("physical_model"),
+                "parameters_to_extract": state.get("parameters_to_extract", []),
+                "fitting_strategy": state.get("fitting_strategy"),
+            }
             state["series_analysis_plan"] = None
             state["regime_configs"] = None
 
@@ -2468,7 +2476,7 @@ Remember: Rejecting a good fit (R² > {accept_threshold:.2f}) to chase marginal 
         Apply LLM verification feedback to refine the fitting configuration.
         Returns updated config.
         """
-        config = state.get("locked_fitting_config", {}).copy()
+        config = (state.get("locked_fitting_config") or {}).copy()
 
         recommended_action = verification.get("recommended_action", "")
         if not recommended_action or recommended_action.lower() == "none":
@@ -2720,7 +2728,7 @@ Return JSON with:
         verification_history = []
         best_result = None
         best_r2 = -1.0
-        best_config = state.get("locked_fitting_config", {}).copy()
+        best_config = (state.get("locked_fitting_config") or {}).copy()
         # Option B gate: set to True if the verifier ever rejects best_result
         # without later approving it.  Drives the threshold short-circuit
         # at the post-loop checkpoint.
@@ -2814,13 +2822,13 @@ Return JSON with:
             r2 = result.get("fit_quality", {}).get("r_squared") or 0
             all_attempts.append({
                 "model": initial_model, "r2": r2, "result": result,
-                "config": state.get("locked_fitting_config", {}).copy(),
+                "config": (state.get("locked_fitting_config") or {}).copy(),
             })
 
             if r2 > best_r2:
                 best_r2 = r2
                 best_result = result
-                best_config = state.get("locked_fitting_config", {}).copy()
+                best_config = (state.get("locked_fitting_config") or {}).copy()
 
             # --- Verification loop (for anchor spectra: first overall or first in regime) ---
             fit_was_approved = False
@@ -2900,7 +2908,7 @@ Return JSON with:
                             note = (verification.get("comparison_note") or "physics improvement")[:90]
                             best_r2 = current_r2
                             best_result = current_result
-                            best_config = state.get("locked_fitting_config", {}).copy()
+                            best_config = (state.get("locked_fitting_config") or {}).copy()
                             state["locked_fitting_config"] = best_config
                             self.logger.info(
                                 f"   Retroactively promoted current (R² = {current_r2:.4f}) on physics — {note}"
@@ -2934,7 +2942,7 @@ Return JSON with:
                             # grounds (e.g. better peak shape).  Promote.
                             best_r2 = current_r2
                             best_result = current_result
-                            best_config = state.get("locked_fitting_config", {}).copy()
+                            best_config = (state.get("locked_fitting_config") or {}).copy()
                             best_verification = verification
                             best_ever_rejected = False
                             state["locked_fitting_config"] = best_config
@@ -3023,7 +3031,7 @@ Return JSON with:
                                 "model": f"Verification-{verification_iter + 1}",
                                 "r2": verified_r2,
                                 "result": verified_result,
-                                "config": state.get("locked_fitting_config", {}).copy(),
+                                "config": (state.get("locked_fitting_config") or {}).copy(),
                                 "verification": verification,
                             })
 
@@ -3044,7 +3052,7 @@ Return JSON with:
                             if verified_r2 > best_r2:
                                 best_r2 = verified_r2
                                 best_result = verified_result
-                                best_config = state.get("locked_fitting_config", {}).copy()
+                                best_config = (state.get("locked_fitting_config") or {}).copy()
                                 state["locked_fitting_config"] = best_config
                                 best_ever_rejected = False
                                 best_verification = None
@@ -3152,7 +3160,7 @@ Return JSON with:
                                 note = (final_verification.get("comparison_note") or "physics improvement")[:90]
                                 best_r2 = current_r2
                                 best_result = current_result
-                                best_config = state.get("locked_fitting_config", {}).copy()
+                                best_config = (state.get("locked_fitting_config") or {}).copy()
                                 self.logger.info(
                                     f"   Post-loop promoted current (R² = {current_r2:.4f}) on physics — {note}"
                                 )
