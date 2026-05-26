@@ -85,8 +85,9 @@ Initialization and bounds:
 **Reference edge energies (core-loss onset values).** The entries below
 are illustrative examples covering commonly encountered edges; the same
 chemical-shift / fine-structure principles apply to any core-loss edge.
-Consult tabulated EELS atlases (Gatan EELS Atlas, EELS.info) for
-elements and edges not listed.
+For elements / edges not listed, infer the initial edge energy from the
+data itself (the spectrum's rising-step or peak position) and keep fit
+bounds generous around that initial guess.
 
 Titanium Ti L2,3:
 - Ti L3 onset: ~456 eV (metal), ~458 eV (TiO2)
