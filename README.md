@@ -262,21 +262,11 @@ scilink analyze --agents ./my_xrd_agent.py
 
 # Planning Agents
 
-<img src="misc/scilink_plan.png" alt="SciLink Planning Agent" width="50%">
+<img src="misc/planning_screenshots.jpg" alt="SciLink Planning Agent" width="100%">
 
-The Planning Agents module automates experimental design, data analysis, and iterative optimization workflows.
+The Planning Agents module automates experimental design and iterative optimization workflows.
 
 ## Architecture
-
-```
-PlanningOrchestratorAgent (main coordinator)
-├── PlanningAgent (scientific strategy)
-│   ├── Dual KnowledgeBase (Docs KB + Code KB)
-│   ├── RAG Engine (retrieval-augmented generation)
-│   └── Literature Agent (external search)
-├── ScalarizerAgent (raw data → scalar metrics)
-└── BOAgent (Bayesian optimization)
-```
 
 | Agent | Purpose |
 |-------|---------|
@@ -368,18 +358,11 @@ result = bo.run_optimization_loop(
 
 # Experimental Analysis Agents
 
-<img src="misc/scilink_analyze.png" alt="SciLink Analysis Agent" width="50%">
+<img src="misc/analysis_screenshots.jpg" alt="SciLink Analysis Agent" width="100%">
 
 The Analysis Agents module provides automated scientific data analysis across multiple modalities.
 
 ## Architecture
-
-```
-AnalysisOrchestratorAgent (main coordinator)
-├── CurveFittingAgent (ID: 0)
-├── ImageAnalysisAgent (ID: 1)
-└── HyperspectralAnalysisAgent (ID: 2)
-```
 
 | ID | Agent | Use Case |
 |----|-------|----------|
