@@ -874,16 +874,18 @@ class CreateAnalysisPlotsController:
 class BuildHyperspectralPromptController:
     """
     [📝 Prep Step]
-    Assembles all results into the final prompt for interpretation.
-    THIS IS FOR A SINGLE ITERATION, NOT THE FINAL SYNTHESIS.
+    Assembles per-iteration decomposition results into the interpretation
+    prompt for this iteration. Distinct from
+    BuildHolisticSynthesisPromptController, which assembles the synthesis
+    prompt run after dynamic analysis completes.
     """
     def __init__(self, logger: logging.Logger):
         self.logger = logger
 
     def execute(self, state: dict) -> dict:
-        if state.get("error_dict"): 
+        if state.get("error_dict"):
             return state
-        self.logger.info("\n\n📝 --- PREP STEP: BUILDING FINAL PROMPT --- 📝\n")
+        self.logger.info("\n\n📝 --- PREP STEP: BUILDING ITERATION INTERPRETATION PROMPT --- 📝\n")
         
         # 1. Base Instruction & Context
         prompt_parts = [state["instruction_prompt"]]
@@ -1011,7 +1013,7 @@ Overlays showing where components are concentrated on the structural image.
         prompt_parts.append("\n\nProvide your analysis in the requested JSON format.")
 
         state["final_prompt_parts"] = prompt_parts
-        self.logger.info("✅ Prep Step Complete: Final prompt is ready.")
+        self.logger.info("✅ Prep Step Complete: Iteration interpretation prompt is ready.")
         return state
 
 

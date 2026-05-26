@@ -18,14 +18,14 @@ class RunFinalInterpretationController:
         self._parse_llm_response = parse_fn  # Pass in the agent's parser
 
     def execute(self, state: dict) -> dict:
-        self.logger.info("🧠 LLM Step: Generating final scientific interpretation...")
+        self.logger.info("🧠 LLM Step: Generating scientific interpretation...")
         prompt = state.get("final_prompt_parts")
-        
+
         if not prompt:
-            self.logger.error("Pipeline reached final step, but no 'final_prompt_parts' in state.")
-            state["error_dict"] = {"error": "Pipeline failed to build final prompt"}
+            self.logger.error("Interpretation step invoked with no 'final_prompt_parts' in state.")
+            state["error_dict"] = {"error": "Pipeline failed to build interpretation prompt"}
             return state
-        
+
         try:
             response = self.model.generate_content(
                 contents=prompt,
@@ -33,19 +33,19 @@ class RunFinalInterpretationController:
                 safety_settings=self.safety_settings,
             )
             result_json, error_dict = self._parse_llm_response(response)
-            
+
             state["result_json"] = result_json
             state["error_dict"] = error_dict
-            
+
             if not error_dict:
-                self.logger.info("✅ LLM Step Complete: Final analysis generated.")
+                self.logger.info("✅ LLM Step Complete: Interpretation generated.")
             else:
                 self.logger.error(f"❌ LLM Step Failed: {error_dict.get('details')}")
 
         except Exception as e:
             self.logger.exception(f"❌ LLM Step Failed: {e}")
             state["result_json"] = None
-            state["error_dict"] = {"error": "Final LLM analysis failed", "details": str(e)}
+            state["error_dict"] = {"error": "LLM interpretation step failed", "details": str(e)}
 
         return state
 
