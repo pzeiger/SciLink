@@ -2426,6 +2426,14 @@ Return a single JSON object with exactly these keys:
     "suggested_followup": "Next steps"
 }
 ```
+
+**Number of claims:** emit **exactly 1** `scientific_claims` entry for a \
+single spectrum — the single most important finding. Use 2 only when the \
+analysis genuinely surfaced two independent findings that cannot be \
+merged into one (e.g. a primary fitted quantity AND an unexpected \
+residual feature pointing to a different physical process). Never emit \
+more than 2. Do not pad the list with restatements of the same finding \
+in different words.
 """
 
 # Generic interpretation instruction used by feedback-refinement flows that do
@@ -2457,6 +2465,12 @@ If the residuals suggest the model is inadequate for part of the data, say so.
     "suggested_followup": "Next steps"
 }
 ```
+
+**Number of claims:** emit **exactly 1** `scientific_claims` entry — the \
+single most important finding from this spectrum. Use 2 only when the \
+analysis genuinely surfaced two independent findings that cannot be \
+merged. Never more than 2. Do not pad with restatements of the same \
+finding.
 """
 
 

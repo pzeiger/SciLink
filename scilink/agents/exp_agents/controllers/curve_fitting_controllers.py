@@ -5050,6 +5050,13 @@ instrumental drift) without explicit evidence.
     "caveats": "limitations and considerations, including model-vs-data divergence from Stage 2"
 }
 ```
+
+**Number of claims:** emit **at most 2** `scientific_claims` for a series — the \
+dominant trend across the spectra (1 claim) plus, only if independent, a \
+secondary finding (e.g. a flagged-spectrum anomaly that doesn't fit the \
+trend). One claim is the right answer when the series tells a single \
+coherent story. Never more than 2. Do not pad with restatements of the \
+same trend.
 '''
 
     def __init__(self, model, logger: logging.Logger, generation_config, safety_settings,
