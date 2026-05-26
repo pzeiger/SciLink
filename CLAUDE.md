@@ -99,6 +99,21 @@ simulation it could be computational method (DFT, classical MD,
 machine-learning potentials). Each foundation agent picks its own axis;
 the definition is agnostic about *what counts as a modality*.
 
+A note on the `analysis` / `implementation` section pair: codegen-capable
+foundation agents inject the active skill's `implementation` section into
+per-task code-gen prompts. The skill loader treats `analysis` and
+`implementation` as synonyms when only one is authored — copying the
+content to the other — so skills written under either name flow into
+code-gen identically. When *both* are authored (e.g. `force_field/amber`,
+`molecular_dynamics/lammps`, `machine_learning_potentials/chgnet`), they
+are left distinct: the author's convention there is `analysis` for input
+characterization ("what kind of system is this?") and `implementation`
+for the runnable script recipe. This synonym fold is historical: the
+section was originally `fitting` in the curve-fitting-only era, renamed
+to `analysis` when image_analysis joined, and is now `implementation` in
+the most recent sim_agents and hyperspectral work. Going forward, prefer
+`implementation`.
+
 ## Plan-mode capability boundaries
 
 Two settled conventions on where capability lives in plan mode:

@@ -54,33 +54,27 @@ mapping, phase identification, and chemical-state analysis.
 
 ## analysis
 
-**NMF component interpretation for EELS:**
-- Each NMF component spectrum should resemble a physically plausible EELS
-  signal: non-negative, with recognizable edge shapes or smooth background.
-- The background component typically shows a monotonically decreasing
-  power-law shape (A * E^-r) without sharp edge onsets.
-- Physical components show characteristic edge shapes: delayed maxima for
-  L2,3 edges (white lines), sawtooth onset for K edges, sharp threshold
-  for M4,5 edges.
-- Artifact components may show: oscillatory negative-positive patterns,
-  noise-like random fluctuations, or derivative-like shapes. These
-  indicate over-decomposition.
+**Per-pixel fitting recipes for EELS features.**
 
-**Identifying edge features in components:**
-- White lines (sharp peaks at edge onset) indicate transitions to
-  unfilled d or f states. Their intensity ratio encodes oxidation state
-  (e.g., Ti L3/L2 ratio increases with Ti valence).
-- Near-edge fine structure (ELNES) in the first 30-50 eV above the edge
-  onset reflects local coordination and bonding environment.
-- Extended fine structure (EXELFS) beyond 50 eV provides interatomic
-  distance information but is rarely resolved in NMF components.
+Core-loss edges: subtract a power-law background (`A * E^-r`, r typically
+2.5–5) fit to a pre-edge window, then fit the edge step plus any ELNES
+peaks with `lmfit.models.StepModel` + `GaussianModel` / `LorentzianModel`.
 
-**Spatial abundance map quality:**
-- Maps should show spatially coherent regions (grains, layers, interfaces)
-  rather than random pixel-level noise patterns.
-- Sharp boundaries in maps typically indicate real phase boundaries;
-  gradual transitions suggest intermixing, beam damage, or specimen
-  thickness variations.
+Low-loss plasmons: a Drude-Lorentz oscillator in loss space is the most
+physically faithful model. A Lorentzian-on-linear-background is an
+acceptable approximation when the peak sits well inside the measurement
+window. When the peak appears to lie outside the window, leave the
+center parameter unbounded above the window — the lineshape constrains
+it from the tail curvature.
+
+Initialization and bounds:
+- Initialize peak center at the argmax of a lightly smoothed (Savitzky-
+  Golay, window 5–9, polyorder 2) spectrum, not a fixed value.
+- Keep parameter bounds wider than the prior expectation — tight bounds
+  cause rail-gazing failures that the visual QC step will flag.
+- Mark per-pixel fits with R² < ~0.5 or parameters railed at a bound
+  as NaN so the dashboard histogram reveals real distributions, not
+  boundary spikes.
 
 ## interpretation
 

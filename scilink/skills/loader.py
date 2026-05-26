@@ -159,6 +159,29 @@ def load_skill(skill: str, domain: str = "curve_fitting") -> Dict:
     meta, body = _split_frontmatter(text, source=str(path))
     sections, extras = _parse_sections(body, source=str(path))
 
+    # Synonym fold: `analysis` and `implementation` are treated as synonyms
+    # for the codegen-recipe role across foundation agents (history: this
+    # section was originally `fitting` in the curve-fitting-only era,
+    # renamed to `analysis` when image_analysis joined, and is now
+    # `implementation` in the latest sim_agents and hyperspectral work).
+    # If exactly one of the pair carries content, copy it to the other so
+    # downstream consumers reading either name see the same recipe. If
+    # both are present, respect the author's intent and leave them
+    # distinct (e.g. amber, chgnet, lammps deliberately use `analysis` for
+    # input characterization and `implementation` for the script recipe).
+    impl = sections.get("implementation", "").strip()
+    ana = sections.get("analysis", "").strip()
+    if impl and not ana:
+        sections["analysis"] = sections["implementation"]
+        _logger.debug(
+            "Skill %s: copied `implementation` to `analysis` (synonym fold).", str(path)
+        )
+    elif ana and not impl:
+        sections["implementation"] = sections["analysis"]
+        _logger.debug(
+            "Skill %s: copied `analysis` to `implementation` (synonym fold).", str(path)
+        )
+
     sections["name"] = path.stem
     sections["meta"] = meta
     sections["extras"] = extras
