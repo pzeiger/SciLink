@@ -1562,11 +1562,17 @@ class RunDynamicAnalysisController:
     MAX_RETRIES = 5
     SUCCESS_THRESHOLD = 0.5  # If >50% of maps in a script pass QC, accept the run.
 
-    def __init__(self, model, logger, generation_config, safety_settings, parse_fn):
+    def __init__(self, model, logger, generation_config, safety_settings, parse_fn,
+                 executor_timeout: int = 600):
         self.model = model
         self.logger = logger
         self.generation_config = generation_config
         self.safety_settings = safety_settings
+        # In-process ExecutionTimeout for the generated code's exec()
+        # sandbox. Plumbed from HyperspectralAnalysisAgent's
+        # executor_timeout kwarg so the user's chosen limit is honored
+        # and the log line below reports the actual value.
+        self.executor_timeout = executor_timeout
         self._parse_llm_response = parse_fn
 
     def execute(self, state: dict) -> dict:
@@ -1702,14 +1708,14 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     }
                     
                     # Execute Code
-                    with ExecutionTimeout(seconds=600):
+                    with ExecutionTimeout(seconds=self.executor_timeout):
                         exec(code_str, global_scope, local_scope)
                     
                         if "analyze_feature" not in local_scope:
                             raise ValueError("Function 'analyze_feature' was not found in generated code.")
                         
                         # --- D. RUN ON DATA ---
-                        self.logger.info("    Executing generated code (timeout: 600s)...")
+                        self.logger.info(f"    Executing generated code (timeout: {self.executor_timeout}s)...")
                         func = local_scope["analyze_feature"]
                         result_dict = func(optimal_data, state["energy_axis"])
                     

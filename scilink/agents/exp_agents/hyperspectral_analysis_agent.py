@@ -71,7 +71,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Agent specific params
         spectral_unmixing_settings: dict | None = None,
         run_preprocessing: bool = True,
-        enable_human_feedback: bool = True
+        enable_human_feedback: bool = True,
+        executor_timeout: int = 600,
     ):
         
         if not require_sandbox_approval(
@@ -114,16 +115,23 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.spectral_settings['output_dir'] = str(self.output_dir)
         self.spectral_settings['feedback_depths'] = [0]
         
-        # Sub-agent initialization
+        # Sub-agent initialization. Pass executor_timeout so the
+        # preprocessor's custom-script execution honors the same limit
+        # the user set on the parent agent.
+        self.executor_timeout = executor_timeout
         preprocess_dir = self.output_dir / "preprocessing"
         self.preprocessor = HyperspectralPreprocessingAgent(
             api_key=self.api_key,
             model_name=model_name,
             base_url=self.base_url,
-            output_dir=str(preprocess_dir)
+            output_dir=str(preprocess_dir),
+            executor_timeout=executor_timeout,
         )
 
-        # Pipeline initialization
+        # Pipeline initialization. executor_timeout flows into
+        # RunDynamicAnalysisController's in-process ExecutionTimeout so
+        # the codegen sandbox honors the same limit and the log line
+        # reflects the actual value (not a hardcoded constant).
         pipeline_args = {
             "model": self.model,
             "logger": self.logger,
@@ -131,6 +139,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "safety_settings": self.safety_settings,
             "settings": self.spectral_settings,
             "parse_fn": self._parse_llm_response,
+            "executor_timeout": executor_timeout,
         }
 
         self.iteration_pipeline = create_hyperspectral_iteration_pipeline(
