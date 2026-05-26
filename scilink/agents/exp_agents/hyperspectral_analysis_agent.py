@@ -643,6 +643,12 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "instruction_prompt": instruction_prompt,
                 "settings": self.spectral_settings.copy(),
                 "iteration_title": "Global_Analysis",
+                # IterativeFeedbackController gates on current_depth in
+                # feedback_depths (default [0]) — must be set so the
+                # human-feedback prompt fires when enable_human_feedback
+                # is on. Phase C collapsed the recursion loop but kept
+                # this depth-based gate intact.
+                "current_depth": 0,
                 "structure_image_path": structure_image_path,
                 "structure_system_info": self._handle_system_info(structure_system_info),
                 "structure_image_blob": structure_image_blob,
