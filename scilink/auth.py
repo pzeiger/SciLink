@@ -192,7 +192,7 @@ def show_api_status():
 class APIKeyNotFoundError(Exception):
     """Raised when a required API key is not found."""
     
-    def __init__(self, service: str):
+    def __init__(self, service: str, additional_note: Optional[str] = None):
         suggestions = {
             'google': [
                 "Set environment variable: export GEMINI_API_KEY='your-key'",
@@ -233,6 +233,45 @@ class APIKeyNotFoundError(Exception):
         msg = f"API key for '{service}' not found.\n\nTry one of these options:\n"
         for tip in tips:
             msg += f"  • {tip}\n"
-        
+        if additional_note:
+            msg += f"\n{additional_note}\n"
+
         super().__init__(msg)
         self.service = service
+
+
+def require_vendor_credentials(model_name: str) -> None:
+    """Raise APIKeyNotFoundError if no vendor API key is available for ``model_name``.
+
+    Intended for the direct LiteLLM path (no ``base_url``). Wraps
+    ``litellm.validate_environment`` so the resulting message names both the
+    expected vendor env var(s) AND -- when ``SCILINK_API_KEY`` is set without
+    a ``base_url`` -- explains that ``SCILINK_API_KEY`` is the proxy key, not
+    a vendor credential.
+    """
+    import litellm  # local: keep auth.py lightweight at module load time
+    env = litellm.validate_environment(model_name)
+    if env["keys_in_environment"]:
+        return
+
+    expected = env["missing_keys"]
+    # Best-effort map from a LiteLLM env-var name back to an APIKeyNotFoundError
+    # service key (so the tips block is precise). Unknown env vars fall through
+    # and the env-var name itself is used as the service (the generic-tip path
+    # still names it).
+    _env_to_service = {
+        "ANTHROPIC_API_KEY": "anthropic",
+        "OPENAI_API_KEY": "openai",
+        "GOOGLE_API_KEY": "google",
+        "GEMINI_API_KEY": "google",
+    }
+    service = _env_to_service.get(expected[0], expected[0]) if expected else "unknown"
+
+    note = None
+    if get_internal_proxy_key():
+        note = (
+            "SCILINK_API_KEY is currently set, but it's the proxy key — vendors "
+            "reject it on the direct LiteLLM path. To use the internal proxy "
+            "instead, pass `base_url=` alongside SCILINK_API_KEY."
+        )
+    raise APIKeyNotFoundError(service, additional_note=note)

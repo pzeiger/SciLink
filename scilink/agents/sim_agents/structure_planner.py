@@ -39,10 +39,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
 
 from ...auth import (
-    get_api_key,
-    get_internal_proxy_key,
-    infer_provider,
-    APIKeyNotFoundError,
+    require_vendor_credentials,
 )
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .simulation_router import DEFAULT_SCALE_DESCRIPTIONS
@@ -158,13 +155,8 @@ class StructurePlanner:
         if model is not None:
             self.model = model
         else:
-            # Auto-discover the API key (provider inferred from the model name,
-            # internal-proxy key as fallback) — mirrors the orchestrators.
             if api_key is None and base_url is None:
-                provider = infer_provider(model_name) or "google"
-                api_key = get_api_key(provider) or get_internal_proxy_key()
-                if not api_key:
-                    raise APIKeyNotFoundError(provider)
+                require_vendor_credentials(model_name)
             self.model = LiteLLMGenerativeModel(
                 model=model_name, api_key=api_key, base_url=base_url
             )

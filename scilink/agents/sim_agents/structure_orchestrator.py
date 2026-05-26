@@ -9,9 +9,7 @@ from pathlib import Path
 
 from ...auth import (
     get_api_key,
-    get_internal_proxy_key,
-    infer_provider,
-    APIKeyNotFoundError,
+    require_vendor_credentials,
 )
 from .structure_agent import StructureGenerator
 from .val_agent import StructureValidatorAgent
@@ -49,10 +47,12 @@ class StructureOrchestrator:
         Initialize the structure orchestrator and its generator/validator agents.
 
         Args:
-            api_key: API key for the LLM provider. Auto-discovered from the
-                environment (provider inferred from ``generator_model``, with the
-                internal-proxy ``SCILINK_API_KEY`` as fallback) when both
-                ``api_key`` and ``base_url`` are None.
+            api_key: API key for the LLM provider. When both ``api_key`` and
+                ``base_url`` are None, LiteLLM auto-discovers the vendor env
+                var (``ANTHROPIC_API_KEY`` etc.); if none is available,
+                ``require_vendor_credentials`` raises with actionable guidance.
+                ``SCILINK_API_KEY`` is for internal-proxy use (pair with
+                ``base_url``).
             base_url: Optional base URL for an OpenAI-compatible internal proxy.
             mp_api_key: Materials Project API key for structure lookups
                 (auto-discovered when None).
@@ -63,15 +63,8 @@ class StructureOrchestrator:
             max_refinement_cycles: Maximum validator-guided correction cycles.
             script_timeout: Timeout (seconds) for executing generated ASE scripts.
         """
-        # Auto-discover API keys: infer provider from the generator model
-        # (LiteLLM routes by model prefix, so the key must match the model's
-        # provider). Fall back to the internal-proxy key (SCILINK_API_KEY) when
-        # no provider-specific key is set.
         if api_key is None and base_url is None:
-            provider = infer_provider(generator_model) or 'google'
-            api_key = get_api_key(provider) or get_internal_proxy_key()
-            if not api_key:
-                raise APIKeyNotFoundError(provider)
+            require_vendor_credentials(generator_model)
 
         if mp_api_key is None:
             mp_api_key = get_api_key('materials_project')

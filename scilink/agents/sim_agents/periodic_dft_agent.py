@@ -19,10 +19,8 @@ import json
 import logging
 from typing import Optional
 from ...auth import (
-    APIKeyNotFoundError,
-    get_api_key,
     get_internal_proxy_key,
-    infer_provider,
+    require_vendor_credentials,
 )
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
@@ -101,16 +99,8 @@ class PeriodicDFTAgent:
                 base_url=base_url
             )
         else:
-            # Public path: infer provider from the model name (LiteLLM
-            # routes by model prefix, so the key has to match the
-            # model's provider). Fall back to SCILINK_API_KEY when no
-            # provider-specific key is set in env. Same fix shape as
-            # DFTOrchestrator.
             if api_key is None:
-                provider = infer_provider(model_name) or "google"
-                api_key = get_api_key(provider) or get_internal_proxy_key()
-                if not api_key:
-                    raise APIKeyNotFoundError(provider)
+                require_vendor_credentials(model_name)
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key
