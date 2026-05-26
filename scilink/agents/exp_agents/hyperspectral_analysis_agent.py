@@ -128,10 +128,10 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             executor_timeout=executor_timeout,
         )
 
-        # Pipeline initialization. executor_timeout flows into
-        # RunDynamicAnalysisController's in-process ExecutionTimeout so
-        # the codegen sandbox honors the same limit and the log line
-        # reflects the actual value (not a hardcoded constant).
+        # Pipeline initialization. Shared kwargs go into pipeline_args;
+        # executor_timeout is iteration-only (the codegen sandbox lives
+        # in the iteration pipeline; the synthesis pipeline runs LLM
+        # calls + plotting only and has no code-execution step).
         pipeline_args = {
             "model": self.model,
             "logger": self.logger,
@@ -139,12 +139,12 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "safety_settings": self.safety_settings,
             "settings": self.spectral_settings,
             "parse_fn": self._parse_llm_response,
-            "executor_timeout": executor_timeout,
         }
 
         self.iteration_pipeline = create_hyperspectral_iteration_pipeline(
             **pipeline_args,
-            preprocessor=self.preprocessor
+            preprocessor=self.preprocessor,
+            executor_timeout=executor_timeout,
         )
         self.synthesis_pipeline = create_hyperspectral_synthesis_pipeline(
             **pipeline_args,
