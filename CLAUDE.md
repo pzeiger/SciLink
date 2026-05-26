@@ -1,8 +1,9 @@
 # SciLink — Architecture Notes
 
 Forward-looking design decisions and conventions. Intended for AI assistants
-and contributors working on the orchestrator stack. Codebase tour and
-per-module docs are elsewhere; this file is about *direction*.
+and contributors working on the agentic stack — orchestrators, foundation
+agents, and the skill subsystem. Codebase tour and per-module docs are
+elsewhere; this file is about *direction*.
 
 ## The mode universe is fixed at three
 
