@@ -1523,7 +1523,7 @@ The Orange line (Basis Component) is a reference to help understand what mixing 
 SPECTROSCOPY_VISUAL_QC_INSTRUCTIONS = """
 You are a Quality Assurance Scientist. You wrote code to model the feature: '{feature_desc}'.
 Below is the resulting 'Feature Dashboard'. Left=Map, Right=Histogram.
-
+{measurement_window_block}
 ### YOUR TASK
 Determine if this result captures a REAL physical signal, even if that signal is rare or sparse.
 
@@ -1534,7 +1534,7 @@ If the Histogram shows a large pile-up at zero/bounds (background) BUT there is 
 ### FAILURE CRITERIA (Reject ONLY if these are true):
 1. **Total Noise:** The map is pure 'static' (salt-and-pepper) with ZERO recognizable structure.
 2. **Total Algorithm Failure:** The histogram is a **SINGLE** sharp spike (Dirac delta) containing 100% of the data.
-3. **Complete Rail-Gazing:** The data is piled up at the min/max edges with **NO secondary distribution** visible.
+3. **Complete Rail-Gazing:** The data is piled up at the min/max edges with **NO secondary distribution** visible. **EXCEPTION — edge-of-window clustering:** when the feature is a peak position / center / onset energy / edge-energy quantity AND the histogram concentrates near the measurement-window boundary (within ~5% of the window width of either edge), this MAY be *physical edge-fitting* rather than algorithm failure. If the spectrum captures only the rising-edge or tail of a feature whose center lies near or outside the measurement window, the fit will correctly place the center at the window edge — that is success, not railing. When window-edge clustering and rail-gazing are visually indistinguishable from the dashboard alone, **err toward ACCEPT** and note the caveat that the feature may lie near/outside the measurement window. Reject as rail-gazing only when clustering occurs at an *interior* value clearly inside the window.
 
 ### SUCCESS CRITERIA (Accept if present):
 - **Structure:** Does the map show ANY structured domains, even if they are small?

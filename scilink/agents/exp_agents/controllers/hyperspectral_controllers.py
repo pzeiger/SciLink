@@ -1737,9 +1737,19 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         )
 
                         if dashboard_bytes:
-                            # 3. Visual QC (Generator-Judge Loop)
+                            # 3. Visual QC (Generator-Judge Loop). Pass the
+                            # measurement-window axis range so the QC critic
+                            # can distinguish physical edge-fitting (a feature
+                            # whose center lies near/outside the window) from
+                            # algorithm rail-gazing at a parameter bound.
                             self.logger.info(f"    👀 Performing Visual QC on {feature_name}...")
-                            is_valid, critique = self._check_result_visually(dashboard_bytes, f"{target_desc} ({feature_name})")
+                            is_valid, critique = self._check_result_visually(
+                                dashboard_bytes,
+                                f"{target_desc} ({feature_name})",
+                                axis_start=float(state['energy_axis'][0]),
+                                axis_end=float(state['energy_axis'][-1]),
+                                axis_units=axis_units,
+                            )
                             
                             if is_valid:
                                 # STAGE DATA (Do not commit to state yet)
@@ -1843,12 +1853,39 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
         self.logger.info(f"✅ Dynamic Analysis Complete. Total unique maps generated: {len(all_valid_maps)}")
         return state
 
-    def _check_result_visually(self, dashboard_bytes: bytes, feature_desc: str) -> tuple[bool, str]:
+    def _check_result_visually(
+        self,
+        dashboard_bytes: bytes,
+        feature_desc: str,
+        axis_start: float | None = None,
+        axis_end: float | None = None,
+        axis_units: str | None = None,
+    ) -> tuple[bool, str]:
         """
         Judge the Dashboard (Map + Histogram) with SPARSE SIGNAL AWARENESS.
+
+        When ``axis_start``/``axis_end``/``axis_units`` are provided, the QC
+        critic is told the measurement-window range so it can apply the
+        edge-of-window exception to its rail-gazing failure criterion (a
+        peak whose true center lies outside the spectral window will
+        correctly produce fitted centers clustered at the window edge —
+        physical edge-fitting, not algorithm failure).
         """
+        if axis_start is not None and axis_end is not None:
+            units = axis_units or ""
+            measurement_window_block = (
+                f"\n### MEASUREMENT WINDOW\n"
+                f"The input spectra span {axis_start:.4g}–{axis_end:.4g} {units}. "
+                f"Window width: {abs(axis_end - axis_start):.4g} {units}.\n"
+            )
+        else:
+            measurement_window_block = ""
+
         check_prompt = [
-            SPECTROSCOPY_VISUAL_QC_INSTRUCTIONS.format(feature_desc=feature_desc)
+            SPECTROSCOPY_VISUAL_QC_INSTRUCTIONS.format(
+                feature_desc=feature_desc,
+                measurement_window_block=measurement_window_block,
+            )
         ]
         check_prompt.append({"mime_type": "image/jpeg", "data": dashboard_bytes})
         
