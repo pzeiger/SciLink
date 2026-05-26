@@ -1,3 +1,6 @@
+---
+description: General AFM image analysis (topography, KPFM, PFM, conductance) where intensity is a physical quantity with units - emphasizes row alignment, pixel-square resampling, and physical-unit preservation through the pipeline.
+---
 # AFM Imaging Skill
 
 ## overview
