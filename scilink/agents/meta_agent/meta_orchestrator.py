@@ -310,6 +310,7 @@ class MetaOrchestratorAgent:
         futurehouse_api_key: Optional[str] = None,
         restore_checkpoint: bool = False,
         meta_mode: MetaMode = MetaMode.AUTOPILOT,
+        max_iterations: Optional[int] = None,
     ):
         self.logger = logging.getLogger(self.__class__.__name__)
 
@@ -379,6 +380,14 @@ class MetaOrchestratorAgent:
 
         self.message_count = 0
         self.last_checkpoint_message_count = 0
+
+        # Per-call tool-iteration cap. Mirrors the child orchestrators so a
+        # meta caller can raise it for long-running multi-delegation turns.
+        self.max_iterations = (
+            max_iterations if max_iterations is not None
+            else self.MAX_TOOL_ITERATIONS
+        )
+        self._last_chat_hit_iter_cap = False
 
         if restore_checkpoint and self.checkpoint_path.exists():
             self._restore_checkpoint()
@@ -1091,6 +1100,7 @@ class MetaOrchestratorAgent:
     def chat(self, user_input: str) -> str:
         """Main chat interface with robust function calling support."""
         self.message_count += 1
+        self._last_chat_hit_iter_cap = False
 
         # First-turn: fill the system prompt's specialist-capability inventory
         # from the children's live tool registries (idempotent thereafter).
@@ -1145,7 +1155,7 @@ class MetaOrchestratorAgent:
             self.messages = [system_msg] + recent_msgs
 
         iteration = 0
-        while iteration < self.MAX_TOOL_ITERATIONS:
+        while iteration < self.max_iterations:
             iteration += 1
             print(f"  ⏳ Waiting for meta-orchestrator response ...")
 
@@ -1213,6 +1223,7 @@ class MetaOrchestratorAgent:
                     "content": result,
                 })
 
+        self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."
 
     def _handle_litellm_chat(self, user_input: str) -> str:
@@ -1228,7 +1239,7 @@ class MetaOrchestratorAgent:
             self.messages = [system_msg] + recent_msgs
 
         iteration = 0
-        while iteration < self.MAX_TOOL_ITERATIONS:
+        while iteration < self.max_iterations:
             iteration += 1
             print(f"  ⏳ Waiting for meta-orchestrator response ...")
 
@@ -1301,4 +1312,5 @@ class MetaOrchestratorAgent:
                     "content": result,
                 })
 
+        self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."

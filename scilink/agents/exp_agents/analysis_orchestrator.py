@@ -499,6 +499,7 @@ class AnalysisOrchestratorAgent:
         analysis_mode: AnalysisMode = AnalysisMode.CO_PILOT,
         futurehouse_api_key: Optional[str] = None,
         image_analysis_depth: str = "basic",
+        max_iterations: Optional[int] = None,
         # Deprecated
         google_api_key: Optional[str] = None,
         local_model: Optional[str] = None,
@@ -608,7 +609,17 @@ class AnalysisOrchestratorAgent:
         
         self.message_count = 0
         self.last_checkpoint_message_count = 0
-        
+
+        # Per-call tool-iteration cap (handlers read self.max_iterations) and
+        # a flag they set when they hit the cap. chat() returns the warning
+        # string as before; run_task reads the flag to flip status from
+        # success → error so programmatic callers can detect exhaustion.
+        self.max_iterations = (
+            max_iterations if max_iterations is not None
+            else self.MAX_TOOL_ITERATIONS
+        )
+        self._last_chat_hit_iter_cap = False
+
         # Restore from checkpoint if requested
         if restore_checkpoint and self.checkpoint_path.exists():
             self._restore_checkpoint()
@@ -1260,7 +1271,8 @@ class AnalysisOrchestratorAgent:
     def chat(self, user_input: str) -> str:
         """Main chat interface with robust function calling support."""
         self.message_count += 1
-        
+        self._last_chat_hit_iter_cap = False
+
         # AUTO-CHECKPOINT: Every N messages
         if self.message_count - self.last_checkpoint_message_count >= self.CHECKPOINT_INTERVAL:
             print(f"  💾 Auto-checkpoint triggered (every {self.CHECKPOINT_INTERVAL} messages)...")
@@ -1291,7 +1303,8 @@ class AnalysisOrchestratorAgent:
             return f"❌ Error: {e}\n\n(Emergency checkpoint saved to {self.checkpoint_path})"
 
     def run_task(self, task: str, context: Optional[Dict[str, Any]] = None,
-                 autonomy: Optional[AnalysisMode] = None) -> Dict[str, Any]:
+                 autonomy: Optional[AnalysisMode] = None,
+                 max_iterations: Optional[int] = None) -> Dict[str, Any]:
         """Non-interactive entry point — used by the meta agent.
 
         Runs the task and returns a structured summary that's easy to
@@ -1343,12 +1356,24 @@ class AnalysisOrchestratorAgent:
         # human-feedback prompts to the user driving the session.
         run_mode = autonomy if autonomy is not None else AnalysisMode.AUTONOMOUS
         original_mode = self.analysis_mode
+        original_max_iter = self.max_iterations
         try:
             self.set_analysis_mode(run_mode)
+            if max_iterations is not None:
+                self.max_iterations = max_iterations
             try:
                 summary_text = self.chat(prompt)
-                status = "success"
-                error_msg: Optional[str] = None
+                # chat() handles the iteration-cap case internally and returns
+                # the warning string (preserving CLI/UI behavior); a flag on
+                # self tells us whether that happened so we can surface it as
+                # an error to programmatic callers instead of silently
+                # reporting success.
+                if self._last_chat_hit_iter_cap:
+                    status = "error"
+                    error_msg: Optional[str] = summary_text
+                else:
+                    status = "success"
+                    error_msg = None
             except Exception as e:
                 self.logger.exception(f"run_task failed: {e}")
                 summary_text = ""
@@ -1357,6 +1382,7 @@ class AnalysisOrchestratorAgent:
         finally:
             # Always restore the original mode, even if chat() raised.
             self.set_analysis_mode(original_mode)
+            self.max_iterations = original_max_iter
 
         # Derive the structured summary from the session-state delta.
         new_analyses = self.analysis_results[n_before:]
@@ -1476,7 +1502,7 @@ class AnalysisOrchestratorAgent:
         
         iteration = 0
         
-        while iteration < self.MAX_TOOL_ITERATIONS:
+        while iteration < self.max_iterations:
             iteration += 1
             
             print(f"  ⏳ Waiting for orchestrator response ...")
@@ -1544,6 +1570,7 @@ class AnalysisOrchestratorAgent:
                     "content": result
                 })
         
+        self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."
 
     def _handle_litellm_chat(self, user_input: str) -> str:
@@ -1560,7 +1587,7 @@ class AnalysisOrchestratorAgent:
         
         iteration = 0
         
-        while iteration < self.MAX_TOOL_ITERATIONS:
+        while iteration < self.max_iterations:
             iteration += 1
             
             print(f"  ⏳ Waiting for orchestrator response ...")
@@ -1637,6 +1664,7 @@ class AnalysisOrchestratorAgent:
                     "content": result
                 })
         
+        self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."
 
     def _load_history(self) -> List[Dict]:

@@ -576,6 +576,7 @@ class PlanningOrchestratorAgent:
         data_dir: Optional[str] = None,
         knowledge_dir: Optional[str] = None,
         code_dir: Optional[str] = None,
+        max_iterations: int = 20,
         # Deprecated
         google_api_key: Optional[str] = None,
         local_model: Optional[str] = None,
@@ -669,6 +670,13 @@ class PlanningOrchestratorAgent:
         # writes land in base_dir exactly as before.
         self._delegation_counter = 0
         self._active_output_subdir = None
+
+        # Per-call tool-iteration cap (handlers read self.max_iterations) and
+        # a flag the handlers raise when they hit the cap. chat() returns the
+        # warning string as before; run_task reads the flag to flip the
+        # delegation result's status from success → error.
+        self.max_iterations = max_iterations
+        self._last_chat_hit_iter_cap = False
 
         # Custom tools / MCP state
         self._tool_data_cache: Dict[tuple, Any] = {}
@@ -1191,6 +1199,7 @@ class PlanningOrchestratorAgent:
     def chat(self, user_input: str) -> str:
         """Main chat interface with robust function calling support."""
         self.message_count += 1
+        self._last_chat_hit_iter_cap = False
         
         # AUTO-CHECKPOINT: Every 10 messages
         if self.message_count - self.last_checkpoint_message_count >= 10:
@@ -1223,7 +1232,8 @@ class PlanningOrchestratorAgent:
             return f"❌ Error: {e}\n\n(Emergency checkpoint saved to {self.checkpoint_path})"
 
     def run_task(self, task: str, context: Optional[Dict[str, Any]] = None,
-                 autonomy: Optional[AutonomyLevel] = None) -> Dict[str, Any]:
+                 autonomy: Optional[AutonomyLevel] = None,
+                 max_iterations: Optional[int] = None) -> Dict[str, Any]:
         """Non-interactive entry point — used by the meta agent.
 
         Runs the task and returns a structured summary that's easy to
@@ -1304,12 +1314,24 @@ class PlanningOrchestratorAgent:
         # human-feedback prompts to the user driving the session.
         run_level = autonomy if autonomy is not None else AutonomyLevel.AUTONOMOUS
         original_level = self.autonomy_level
+        original_max_iter = self.max_iterations
         try:
             self.set_autonomy_level(run_level)
+            if max_iterations is not None:
+                self.max_iterations = max_iterations
             try:
                 summary_text = self.chat(prompt)
-                status = "success"
-                error_msg: Optional[str] = None
+                # chat() handles the iteration-cap case internally and returns
+                # the warning string (preserving CLI/UI behavior); a flag on
+                # self tells us whether that happened so we can surface it as
+                # an error to programmatic callers instead of silently
+                # reporting success.
+                if self._last_chat_hit_iter_cap:
+                    status = "error"
+                    error_msg: Optional[str] = summary_text
+                else:
+                    status = "success"
+                    error_msg = None
             except Exception as e:
                 logging.exception(f"run_task failed: {e}")
                 summary_text = ""
@@ -1318,6 +1340,7 @@ class PlanningOrchestratorAgent:
         finally:
             # Always restore the original level, even if chat() raised.
             self.set_autonomy_level(original_level)
+            self.max_iterations = original_max_iter
             # _active_output_subdir is scoped to this call; clear it so a
             # later direct chat() on the same instance writes to base_dir.
             self._active_output_subdir = None
@@ -1454,7 +1477,7 @@ class PlanningOrchestratorAgent:
 
         self._compress_large_tool_results()
 
-        max_iterations = 20
+        max_iterations = self.max_iterations
         iteration = 0
 
         while iteration < max_iterations:
@@ -1472,16 +1495,16 @@ class PlanningOrchestratorAgent:
                 tools=self.tools_for_model,
                 tool_choice="auto"
             )
-            
+
             message = response.choices[0].message
-            
+
             if not message.tool_calls:
                 self.messages.append({
                     "role": "assistant",
                     "content": message.content
                 })
                 return message.content
-            
+
             self.messages.append({
                 "role": "assistant",
                 "content": message.content,
@@ -1496,21 +1519,22 @@ class PlanningOrchestratorAgent:
                     } for tc in message.tool_calls
                 ]
             })
-            
+
             for tool_call in message.tool_calls:
                 func_name = tool_call.function.name
                 args = json.loads(tool_call.function.arguments)
-                
+
                 print(f"  🔧 Calling tool: {func_name}")
-                
+
                 result = self.tools.execute_tool(func_name, **args)
-                
+
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
                     "content": result
                 })
-        
+
+        self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."
 
     def _handle_litellm_chat(self, user_input: str) -> str:
@@ -1527,7 +1551,7 @@ class PlanningOrchestratorAgent:
 
         self._compress_large_tool_results()
 
-        max_iterations = 20
+        max_iterations = self.max_iterations
         iteration = 0
 
         while iteration < max_iterations:
@@ -1594,7 +1618,8 @@ class PlanningOrchestratorAgent:
                     "tool_call_id": tool_call.id,
                     "content": result
                 })
-        
+
+        self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."
 
     def _extract_response_text(self, response) -> str:

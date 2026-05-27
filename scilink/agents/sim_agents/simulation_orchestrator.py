@@ -262,6 +262,7 @@ class SimulationOrchestratorAgent:
         futurehouse_api_key: Optional[str] = None,
         hpc_connection=None,
         hpc_scheduler=None,
+        max_iterations: Optional[int] = None,
         # Deprecated
         google_api_key: Optional[str] = None,
         local_model: Optional[str] = None,
@@ -342,6 +343,16 @@ class SimulationOrchestratorAgent:
         self.message_count = 0
         self.last_checkpoint_message_count = 0
 
+        # Per-call tool-iteration cap (handlers read self.max_iterations) and
+        # a flag they set when they hit the cap. chat() returns the warning
+        # string as before; run_task reads the flag to flip status from
+        # success → error so programmatic callers can detect exhaustion.
+        self.max_iterations = (
+            max_iterations if max_iterations is not None
+            else self.MAX_TOOL_ITERATIONS
+        )
+        self._last_chat_hit_iter_cap = False
+
         # Restore from checkpoint if requested
         if restore_checkpoint and self.checkpoint_path.exists():
             self._restore_checkpoint()
@@ -401,6 +412,7 @@ class SimulationOrchestratorAgent:
 
     def chat(self, user_input: str) -> str:
         """Interactive chat — used by the CLI and UI."""
+        self._last_chat_hit_iter_cap = False
         if self.use_openai:
             response = self._handle_openai_chat(user_input)
         else:
@@ -411,7 +423,8 @@ class SimulationOrchestratorAgent:
         return response
 
     def run_task(self, task: str, context: Optional[Dict[str, Any]] = None,
-                 autonomy: Optional[SimulationMode] = None) -> Dict[str, Any]:
+                 autonomy: Optional[SimulationMode] = None,
+                 max_iterations: Optional[int] = None) -> Dict[str, Any]:
         """Non-interactive entry point — used by the meta agent.
 
         Runs the task and returns a structured summary that's easy to
@@ -461,12 +474,24 @@ class SimulationOrchestratorAgent:
         # human-feedback prompts to the user driving the session.
         run_mode = autonomy if autonomy is not None else SimulationMode.AUTONOMOUS
         original_mode = self.simulation_mode
+        original_max_iter = self.max_iterations
         try:
             self.set_simulation_mode(run_mode)
+            if max_iterations is not None:
+                self.max_iterations = max_iterations
             try:
                 summary_text = self.chat(prompt)
-                status = "success"
-                error_msg: Optional[str] = None
+                # chat() handles the iteration-cap case internally and returns
+                # the warning string (preserving CLI/UI behavior); a flag on
+                # self tells us whether that happened so we can surface it as
+                # an error to programmatic callers instead of silently
+                # reporting success.
+                if self._last_chat_hit_iter_cap:
+                    status = "error"
+                    error_msg: Optional[str] = summary_text
+                else:
+                    status = "success"
+                    error_msg = None
             except Exception as e:
                 self.logger.exception(f"run_task failed: {e}")
                 summary_text = ""
@@ -475,6 +500,7 @@ class SimulationOrchestratorAgent:
         finally:
             # Always restore the original mode, even if chat() raised.
             self.set_simulation_mode(original_mode)
+            self.max_iterations = original_max_iter
 
         # Derive the structured summary from session state.
         new_structures = (self.generated_structures or [])[n_before:]
@@ -718,7 +744,7 @@ class SimulationOrchestratorAgent:
             self.messages = [system_msg] + recent_msgs
 
         iteration = 0
-        while iteration < self.MAX_TOOL_ITERATIONS:
+        while iteration < self.max_iterations:
             iteration += 1
             print(f"  ⏳ Waiting for orchestrator response ...")
 
@@ -781,6 +807,7 @@ class SimulationOrchestratorAgent:
                     "content": result,
                 })
 
+        self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."
 
     def _handle_litellm_chat(self, user_input: str) -> str:
@@ -796,7 +823,7 @@ class SimulationOrchestratorAgent:
             self.messages = [system_msg] + recent_msgs
 
         iteration = 0
-        while iteration < self.MAX_TOOL_ITERATIONS:
+        while iteration < self.max_iterations:
             iteration += 1
             print(f"  ⏳ Waiting for orchestrator response ...")
 
@@ -867,6 +894,7 @@ class SimulationOrchestratorAgent:
                     "content": result,
                 })
 
+        self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."
 
     # ------------------------------------------------------------------
