@@ -5,6 +5,7 @@ import json
 
 from ...auth import (
     APIKeyNotFoundError, get_api_key, get_internal_proxy_key, infer_provider,
+    require_vendor_credentials,
 )
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
@@ -77,14 +78,11 @@ class StructureGenerator:
                 base_url=base_url
             )
         else:
-            # Public / LiteLLM — provider-inferred key, SCILINK_API_KEY fallback
+            # Public / LiteLLM — delegate model→provider→env-var resolution
+            # to LiteLLM (works for any model LiteLLM supports; raises a
+            # message naming the missing vendor env var if not).
             if api_key is None:
-                provider = infer_provider(model_name) or "google"
-                api_key = get_api_key(provider) or get_internal_proxy_key()
-            if not api_key:
-                raise APIKeyNotFoundError(
-                    infer_provider(model_name) or "google"
-                )
+                require_vendor_credentials(model_name)
             self.logger.info(f"StructureGenerator using LiteLLM: {model_name}")
             self.model = LiteLLMGenerativeModel(
                 model=model_name,

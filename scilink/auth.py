@@ -254,6 +254,14 @@ def require_vendor_credentials(model_name: str) -> None:
     if env["keys_in_environment"]:
         return
 
+    # Bedrock bearer-token escape hatch. LiteLLM honors AWS_BEARER_TOKEN_BEDROCK
+    # at call time (sets ``Authorization: Bearer …`` on the Bedrock request), but
+    # litellm.validate_environment only checks the traditional
+    # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY path. Recognize the bearer
+    # token here so a valid bearer-token Bedrock deployment isn't blocked.
+    if model_name.startswith("bedrock/") and os.getenv("AWS_BEARER_TOKEN_BEDROCK"):
+        return
+
     expected = env["missing_keys"]
     # Best-effort map from a LiteLLM env-var name back to an APIKeyNotFoundError
     # service key (so the tips block is precise). Unknown env vars fall through
