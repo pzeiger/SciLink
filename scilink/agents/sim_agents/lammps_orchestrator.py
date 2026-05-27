@@ -11,6 +11,7 @@ from typing import Dict, Any, Optional, List, Tuple
 
 from ...auth import (
     APIKeyNotFoundError, get_api_key, get_internal_proxy_key, infer_provider,
+    require_vendor_credentials,
 )
 from .lammps_agent import LAMMPSSimulationAgent
 from .lammps_updater import LAMMPSUpdater
@@ -47,14 +48,11 @@ class LAMMPSOrchestrator:
         self.working_dir = Path(working_dir).resolve()
         self.working_dir.mkdir(exist_ok=True, parents=True)
         
-        # Provider-inferred key with SCILINK_API_KEY as final fallback
+        # Delegate model→provider→env-var resolution to LiteLLM (works for
+        # any model LiteLLM supports; raises naming the missing vendor env
+        # var if not).
         if api_key is None:
-            provider = infer_provider(model_name) or "google"
-            api_key = get_api_key(provider) or get_internal_proxy_key()
-        if not api_key:
-            raise APIKeyNotFoundError(
-                infer_provider(model_name) or "google"
-            )
+            require_vendor_credentials(model_name)
         self.api_key = api_key
         
         self.model_name = model_name
@@ -1401,12 +1399,7 @@ class LAMMPSOrchestrator:
         base_url = kwargs.get('base_url')
         api_key = kwargs.get('api_key')
         if api_key is None:
-            provider = infer_provider(model_name) or "google"
-            api_key = get_api_key(provider) or get_internal_proxy_key()
-        if not api_key:
-            raise APIKeyNotFoundError(
-                infer_provider(model_name) or "google"
-            )
+            require_vendor_credentials(model_name)
     
         # Step 1: Prepare data file
         logging.info("\n📋 Step 1: Preparing data file...")

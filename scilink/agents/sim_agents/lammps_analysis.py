@@ -15,6 +15,7 @@ from typing import Dict, Any, List, Optional, Set
 
 from ...auth import (
     APIKeyNotFoundError, get_api_key, get_internal_proxy_key, infer_provider,
+    require_vendor_credentials,
 )
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
@@ -127,21 +128,19 @@ class LAMMPSAnalysisAgent:
                 base_url=base_url
             )
         else:
+            # Public / LiteLLM — delegate model→provider→env-var resolution
+            # to LiteLLM (works for any model LiteLLM supports; raises a
+            # message naming the missing vendor env var if not).
             if api_key is None:
-                provider = infer_provider(model_name) or "google"
-                api_key = get_api_key(provider) or get_internal_proxy_key()
-            if not api_key:
-                raise APIKeyNotFoundError(
-                    infer_provider(model_name) or "google"
-                )
+                require_vendor_credentials(model_name)
             self.logger.info(f"Using LiteLLM: {model_name}")
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key
             )
-        
+
         self.generation_config = None
-        
+
         # Initialize script executor
         self.executor = ScriptExecutor(
             timeout=executor_timeout,

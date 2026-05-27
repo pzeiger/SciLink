@@ -25,6 +25,7 @@ from typing import Dict, Any, Optional, List
 
 from ...auth import (
     APIKeyNotFoundError, get_api_key, get_internal_proxy_key, infer_provider,
+    require_vendor_credentials,
 )
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
@@ -92,17 +93,11 @@ class SimulationAgent(ABC):
                 model=model_name, api_key=api_key, base_url=base_url
             )
         else:
-            # Public LiteLLM path — provider-inferred key, with
-            # SCILINK_API_KEY as final fallback so users who store
-            # their provider key under SCILINK_API_KEY don't have to
-            # also set ANTHROPIC_API_KEY / GOOGLE_API_KEY / etc.
+            # Public / LiteLLM — delegate model→provider→env-var resolution
+            # to LiteLLM (works for any model LiteLLM supports; raises a
+            # message naming the missing vendor env var if not).
             if api_key is None:
-                provider = infer_provider(model_name) or "google"
-                api_key = get_api_key(provider) or get_internal_proxy_key()
-            if not api_key:
-                raise APIKeyNotFoundError(
-                    infer_provider(model_name) or "google"
-                )
+                require_vendor_credentials(model_name)
             self.logger.info(f"Using LiteLLM: {model_name}")
             self.model = LiteLLMGenerativeModel(
                 model=model_name, api_key=api_key

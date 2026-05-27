@@ -28,6 +28,7 @@ from ...auth import (
     get_api_key,
     get_internal_proxy_key,
     infer_provider,
+    require_vendor_credentials,
 )
 from ...skills.loader import load_skill
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
@@ -178,14 +179,11 @@ class VaspQualityAgent:
             source="VaspQualityAgent",
         )
 
-        # Provider-aware key resolution. Mirrors the fix recently landed
-        # in DFTOrchestrator -- infer the provider from the model name,
-        # then fall back to the SCILINK_API_KEY proxy.
+        # Public / LiteLLM — delegate model→provider→env-var resolution to
+        # LiteLLM (works for any model LiteLLM supports; raises a message
+        # naming the missing vendor env var if not).
         if api_key is None and base_url is None:
-            provider = infer_provider(model_name) or "google"
-            api_key = get_api_key(provider) or get_internal_proxy_key()
-            if not api_key:
-                raise APIKeyNotFoundError(provider)
+            require_vendor_credentials(model_name)
 
         if base_url:
             if api_key is None:
