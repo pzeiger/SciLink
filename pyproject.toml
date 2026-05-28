@@ -69,10 +69,15 @@ structure-matching = [
     "pulp>=2.7.0",
     "pyarrow>=14.0",
 ]
+ems = [
+    "abtem>=1.0",
+    "ase>=3.22",
+]
 all = [
     "scilink[sim]",
     "scilink[ui]",
     "scilink[structure-matching]",
+    "scilink[ems]",
 ]
 
 [project.urls]
