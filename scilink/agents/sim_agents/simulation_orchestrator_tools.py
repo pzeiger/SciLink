@@ -185,8 +185,12 @@ class SimulationOrchestratorTools:
                     {
                         "slug": s.get("slug"),
                         "description": s.get("description"),
+                        "type": s.get("type", "dft"),
                         "structure_path": s.get("structure_path"),
                         "input_files": s.get("input_files") or {},
+                        # EMS records carry these instead of input_files
+                        "script_path": s.get("script_path"),
+                        "output_path": s.get("output_path"),
                     } for s in structures
                 ],
                 "default_calc_params": params,
@@ -252,10 +256,11 @@ class SimulationOrchestratorTools:
                 "(per their `available_software.yaml`), (3) the LLM's "
                 "judgment on which scale fits the user's physics goal. "
                 "If the decision picks an engine you don't have a "
-                "concrete dispatch path for (anything other than VASP "
-                "today — LAMMPS / MLIP wiring is in progress), tell the "
-                "user explicitly that the routing matched but the "
-                "dispatch is the next-step follow-up."
+                "concrete dispatch path for (LAMMPS / MLIP wiring is "
+                "in progress), tell the user explicitly that the routing "
+                "matched but the dispatch is the next-step follow-up. "
+                "Note: electron_microscopy_simulation + abtem IS fully "
+                "dispatched — use generate_ems_simulation for those."
             ),
             parameters={
                 "user_goal": {
@@ -1275,10 +1280,17 @@ class SimulationOrchestratorTools:
                     {
                         "slug": s.get("slug"),
                         "description": s.get("description"),
+                        "type": s.get("type", "dft"),
                         "structure_dir": s.get("structure_dir"),
                         "structure_path": s.get("structure_path"),
                         "input_files": s.get("input_files") or {},
                         "has_validation": s.get("validation") is not None,
+                        # EMS fields
+                        "script_path": s.get("script_path"),
+                        "output_path": s.get("output_path"),
+                        "geometry_valid": (
+                            s.get("geometry_validation", {}) or {}
+                        ).get("valid"),
                         "created_at": s.get("created_at"),
                     } for s in structures
                 ],
@@ -1288,13 +1300,190 @@ class SimulationOrchestratorTools:
             func=list_generated_structures,
             name="list_generated_structures",
             description=(
-                "List all structures generated in this session with their "
-                "paths and current state (whether VASP inputs exist, whether "
-                "validation has been run). Use to remember what's been built "
-                "before deciding next steps."
+                "List all structures and simulations generated in this session "
+                "with their paths and current state. DFT records show whether "
+                "VASP inputs exist; EMS records show the generated script path "
+                "and output path. Use to remember what's been built before "
+                "deciding next steps."
             ),
             parameters={},
             required=[],
+        )
+
+        # =====================================================================
+        # 16. GENERATE EMS SIMULATION  (electron microscopy — abTEM)
+        # =====================================================================
+        def generate_ems_simulation(
+            structure_file: str,
+            research_goal: str,
+            beam_energy_kev: float = 200.0,
+            semiangle_mrad: float = 20.0,
+            output_format: str = "npz",
+            zone_axis: list = None,
+            tile: list = None,
+        ) -> str:
+            """Run EMSAgent.generate_simulation() and store the result."""
+            if not Path(structure_file).exists():
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Structure file not found: {structure_file}",
+                })
+
+            slug = self._make_slug(research_goal)
+            workdir = self.orch.structures_dir / slug
+            workdir.mkdir(parents=True, exist_ok=True)
+
+            try:
+                from .ems_agent import EMSAgent
+                agent = EMSAgent(
+                    working_dir=str(workdir),
+                    api_key=self.orch.api_key,
+                    base_url=self.orch.base_url,
+                    model_name=self.orch.model_name,
+                )
+            except Exception as exc:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Failed to construct EMSAgent: {exc}",
+                })
+
+            try:
+                result = agent.generate_simulation(
+                    structure_file=structure_file,
+                    research_goal=research_goal,
+                    beam_energy_kev=beam_energy_kev,
+                    semiangle_mrad=semiangle_mrad,
+                    output_format=output_format,
+                    zone_axis=zone_axis,
+                    tile=tile,
+                )
+            except Exception as exc:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"EMS simulation generation failed: {exc}",
+                })
+
+            geo_val = result.get("geometry_validation", {})
+            script_val = result.get("script_validation", {})
+
+            record = {
+                "type": "ems",
+                "slug": slug,
+                "description": research_goal,
+                "structure_dir": str(workdir),
+                "structure_file": structure_file,
+                "poscar_path": result.get("prepped_structure_path"),
+                "script_path": result.get("script_path"),
+                "output_path": result.get("output_path"),
+                "simulation_parameters": result.get("simulation_parameters"),
+                "geometry_validation": geo_val,
+                "skill_used": result.get("skill_used"),
+                "incar_path": None,
+                "kpoints_path": None,
+                "vasp_summary": None,
+                "created_at": datetime.now().isoformat(),
+            }
+            self.orch.generated_structures.append(record)
+
+            return json.dumps({
+                "status": "success",
+                "slug": slug,
+                "structure_dir": str(workdir),
+                "script_path": result.get("script_path"),
+                "prepped_structure_path": result.get("prepped_structure_path"),
+                "output_path": result.get("output_path"),
+                "skill_used": result.get("skill_used"),
+                "geometry_valid": geo_val.get("valid", True),
+                "geometry_warnings": geo_val.get("warnings", []),
+                "geometry_errors": geo_val.get("errors", []),
+                "script_valid": script_val.get("valid", True),
+                "simulation_parameters": result.get("simulation_parameters"),
+                "next_steps": (
+                    f"Script written to {result.get('script_path')}. "
+                    "Run with: python run_abtem.py  (requires abTEM + GPU/CPU). "
+                    "Output will be written to the output_path above."
+                ),
+            })
+
+        self._register_tool(
+            func=generate_ems_simulation,
+            name="generate_ems_simulation",
+            description=(
+                "Generate a runnable abTEM electron microscopy simulation script "
+                "for a given atomic structure. Handles structure preparation "
+                "(tiling, orthogonalization), parameter planning (energy, sampling, "
+                "detector geometry, frozen phonons), deterministic geometry "
+                "validation (antialiasing, cell orthogonality, slice thickness), "
+                "and LLM-driven script generation. "
+                "Returns script_path (run_abtem.py) and prepped_structure_path. "
+                "Supports HAADF/ABF/BF STEM, 4D-STEM/CBED (PixelatedDetector), "
+                "and PRISM acceleration. Engine: abTEM."
+            ),
+            parameters={
+                "structure_file": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path to the input structure file "
+                        "(CIF, VASP POSCAR, XYZ, extXYZ, or CFG). "
+                        "Must already exist locally. Use generate_structure "
+                        "first if you need to build the structure."
+                    ),
+                },
+                "research_goal": {
+                    "type": "string",
+                    "description": (
+                        "Natural-language description of the simulation goal "
+                        "(e.g. 'HAADF STEM image of Si along [001] at 200 keV', "
+                        "'4D-STEM datacube of ZnO for ptychography'). "
+                        "Drives parameter selection and detector choice."
+                    ),
+                },
+                "beam_energy_kev": {
+                    "type": "number",
+                    "description": (
+                        "Accelerating voltage in keV (default: 200). "
+                        "Typical values: 60–80 keV (beam-sensitive), "
+                        "100–120 keV (general), 200–300 keV (hard materials)."
+                    ),
+                },
+                "semiangle_mrad": {
+                    "type": "number",
+                    "description": (
+                        "Probe convergence semi-angle in mrad (default: 20). "
+                        "Typical: 10–15 mrad (uncorrected), 20–30 mrad (aberration-corrected)."
+                    ),
+                },
+                "output_format": {
+                    "type": "string",
+                    "enum": ["npz", "zarr"],
+                    "description": (
+                        "'npz' (default): NumPy archive, good for images and "
+                        "small diffraction datasets. "
+                        "'zarr': chunked, lazy, preferred for 4D-STEM datacubes "
+                        "and downstream TACAW analysis."
+                    ),
+                },
+                "zone_axis": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        "Miller indices of the beam direction, e.g. [0,0,1]. "
+                        "Auto-rotation is not yet implemented — supply a "
+                        "pre-oriented structure or omit this parameter. "
+                        "The agent will warn if a non-[001] axis is requested."
+                    ),
+                },
+                "tile": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        "[nx, ny, nz] tiling override. When omitted, the agent "
+                        "auto-tiles laterally to ensure a minimum 10 Å extent "
+                        "in x and y."
+                    ),
+                },
+            },
+            required=["structure_file", "research_goal"],
         )
 
         # =====================================================================
