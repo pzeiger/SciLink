@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scilink"
-version = "0.0.41"
+version = "0.0.43"
 authors = [
   { name="SciLink Team", email="maxim.ziatdinov@gmail.com" },
 ]
@@ -103,6 +103,7 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["."]
+include = ["scilink*"]
 
 [tool.setuptools.package-data]
 "scilink" = ["agents/sim_agents/docs/*.txt", "agents/sim_agents/docs/*.md", "ui/.streamlit/*.toml", "ui/assets/*.svg"]

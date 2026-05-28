@@ -11,12 +11,12 @@ logger = logging.getLogger(__name__)
 
 
 def load_image(image_path):
-    """Load an image from file (PNG, JPG, TIF, .npy, or .h5/.hdf5)."""
+    """Load an image from file (PNG, JPG, TIF, .npy, or .h5/.hdf5/.nxs)."""
     try:
         _, ext = os.path.splitext(image_path)
         ext = ext.lower()
 
-        if ext == '.npy' or ext in ('.h5', '.hdf5'):
+        if ext == '.npy' or ext in ('.h5', '.hdf5', '.nxs'):
             if ext == '.npy':
                 img_array = np.load(image_path)
             else:

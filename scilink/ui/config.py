@@ -32,6 +32,7 @@ SESSION_DIR_PREFIXES = {
 # ── File extensions ──────────────────────────────────────────────
 SUPPORTED_DATA_EXTENSIONS = (
     ".tif", ".tiff", ".png", ".jpg", ".npy", ".csv", ".txt", ".tsv", ".xlsx",
+    ".h5", ".hdf5", ".nxs",
 )
 
 # Vendor formats that SciLink itself cannot read; surfaced in the upload
@@ -43,7 +44,6 @@ VENDOR_DATA_EXTENSIONS = (
     ".gwy", ".gsf",
     ".spe", ".spc", ".spx",
     ".asc", ".dat",
-    ".h5", ".hdf5",
 )
 
 

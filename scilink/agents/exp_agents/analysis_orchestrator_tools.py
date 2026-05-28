@@ -1344,11 +1344,13 @@ class AnalysisOrchestratorTools:
                     except Exception as e:
                         result["preview_error"] = str(e)
 
-                elif extension in ['.h5', '.hdf5']:
+                elif extension in ['.h5', '.hdf5', '.nxs']:
                     # NeXus / SID-style HDF5 — produced by the SciFiReaders
                     # MCP server (read_scifireaders_file) or any sidpy
-                    # pipeline. Surface shape, dimensions, and metadata so
-                    # the LLM has enough to route to the right agent without
+                    # pipeline. ``.nxs`` is the official NeXus extension;
+                    # all three route through the same HDF5+NeXus reader.
+                    # Surface shape, dimensions, and metadata so the LLM
+                    # has enough to route to the right agent without
                     # needing the raw array inline.
                     self._examine_hdf5(path, result)
 
@@ -1885,11 +1887,11 @@ class AnalysisOrchestratorTools:
                 })
             
             # Accept standard image formats, plus the array-container formats
-            # load_image can read (.npy/.h5/.hdf5). The latter are generic
+            # load_image can read (.npy/.h5/.hdf5/.nxs). The latter are generic
             # containers — a .npy may hold a spectrum or datacube, not an
             # image — so the loaded array's shape is validated below.
             image_extensions = ['.tif', '.tiff', '.png', '.jpg', '.jpeg', '.bmp']
-            array_extensions = ['.npy', '.h5', '.hdf5']
+            array_extensions = ['.npy', '.h5', '.hdf5', '.nxs']
             suffix = path.suffix.lower()
             if suffix not in image_extensions and suffix not in array_extensions:
                 return json.dumps({
@@ -1897,7 +1899,7 @@ class AnalysisOrchestratorTools:
                     "message": (
                         f"Unsupported file type: {path.suffix}. preview_image "
                         "accepts .tif/.tiff/.png/.jpg/.jpeg/.bmp, or "
-                        ".npy/.h5/.hdf5 holding a 2-D or RGB image array."
+                        ".npy/.h5/.hdf5/.nxs holding a 2-D or RGB image array."
                     )
                 })
 
@@ -1980,10 +1982,10 @@ class AnalysisOrchestratorTools:
             name="preview_image",
             description=(
                 "Load a microscopy image preview for visual inspection. "
-                "Accepts .png/.tif/.jpg/.bmp and .npy/.h5 array files that "
-                "hold a 2-D or RGB image (a non-image array — spectrum, "
-                "datacube — is rejected with an explanation). Returns the "
-                "image as base64 for you to examine."
+                "Accepts .png/.tif/.jpg/.bmp and .npy/.h5/.hdf5/.nxs array "
+                "files that hold a 2-D or RGB image (a non-image array — "
+                "spectrum, datacube — is rejected with an explanation). "
+                "Returns the image as base64 for you to examine."
             ),
             parameters={
                 "image_path": {
