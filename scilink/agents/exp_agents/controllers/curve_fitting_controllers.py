@@ -1905,6 +1905,18 @@ Your guidance: '''
         adapted = re.sub(r'(["\'"]).*?temp_spectrum_\d+\.npy\1', f'"{data_path}"', adapted)
         adapted = re.sub(r'DATA_PATH\s*=\s*["\'"].*?["\'"]', f'DATA_PATH = "{data_path}"', adapted)
         adapted = re.sub(r'data_path\s*=\s*["\'"].*?["\'"]', f'data_path = "{data_path}"', adapted)
+        # Neutralize LLM-introduced `glob.glob('*.npy')` fallbacks: in parallel
+        # fan-out, multiple spectra's temp files coexist briefly, and a glob
+        # for `*.npy` can find a sibling spectrum's file instead of the
+        # adapted one. Constrain each glob to the pinned data_path. The
+        # `[^()]` class refuses to span nested parens so calls like
+        # `glob.glob(os.path.join(d, '*.npy'))` are left intact rather than
+        # being chopped mid-expression.
+        adapted = re.sub(
+            r'glob\.glob\s*\([^()]*\.npy[^()]*\)',
+            f'["{data_path}"]',
+            adapted,
+        )
         return adapted
 
     def _compute_statistics(self, curve_data: np.ndarray) -> dict:
