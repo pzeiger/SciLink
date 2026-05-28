@@ -61,6 +61,13 @@ _VASP_KEYS: tuple[str, ...] = (
     "vasp_extra_sbatch",
 )
 
+_EMS_KEYS: tuple[str, ...] = (
+    "ems_beam_energy_kev",
+    "ems_semiangle_mrad",
+    "ems_output_format",
+    "ems_structure_source",
+)
+
 
 def _load() -> Dict[str, Dict[str, Any]]:
     if not _STATE_PATH.exists():
@@ -114,3 +121,11 @@ def save_lammps() -> None:
 
 def save_vasp() -> None:
     _save_current("vasp", _VASP_KEYS)
+
+
+def apply_ems_defaults() -> None:
+    _apply("ems")
+
+
+def save_ems() -> None:
+    _save_current("ems", _EMS_KEYS)

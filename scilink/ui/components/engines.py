@@ -31,8 +31,8 @@ class Engine:
 @lru_cache(maxsize=1)
 def _engines() -> Tuple[Engine, ...]:
     # Imports are local to dodge any future circulars (sim_workflow /
-    # vasp_workflow have no dependency on this module today).
-    from scilink.ui.components import sim_workflow, vasp_workflow
+    # vasp_workflow / ems_workflow have no dependency on this module today).
+    from scilink.ui.components import sim_workflow, vasp_workflow, ems_workflow
 
     return (
         Engine(
@@ -46,6 +46,12 @@ def _engines() -> Tuple[Engine, ...]:
             label="VASP",
             icon="⚛️",
             render_workflow=vasp_workflow.render_agent_workflow,
+        ),
+        Engine(
+            key="ems",
+            label="abTEM (EM Simulation)",
+            icon="🔬",
+            render_workflow=ems_workflow.render_agent_workflow,
         ),
     )
 
