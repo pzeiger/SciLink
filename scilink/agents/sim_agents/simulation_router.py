@@ -66,6 +66,14 @@ DEFAULT_SCALE_DESCRIPTIONS: Dict[str, str] = {
         "but classical FF is too inaccurate. Engines: MACE (universal "
         "pretrained), NequIP, DeePMD."
     ),
+    "electron_microscopy_simulation": (
+        "Forward simulation of electron microscopy images and diffraction "
+        "patterns. Best for: HAADF/BF/ABF STEM images, 4D-STEM/CBED "
+        "diffraction datacubes, exit wave functions, TEM contrast. "
+        "Requires an oriented, tiled, orthogonal supercell; produces image "
+        "arrays or diffraction datacubes — not energies or forces. "
+        "Engines: abTEM, DrProbe, PySlice."
+    ),
 }
 
 
@@ -123,6 +131,16 @@ def discover_scale_agents() -> Dict[str, Dict[str, Any]]:
         }
     except ImportError as exc:
         _logger.debug("MLIPAgent not importable: %s", exc)
+
+    try:
+        from .ems_agent import EMSAgent
+        from ...skills.loader import list_skills
+        found["electron_microscopy_simulation"] = {
+            "agent_class": EMSAgent,
+            "supported": list_skills(domain="electron_microscopy_simulation"),
+        }
+    except ImportError as exc:
+        _logger.debug("EMSAgent not importable: %s", exc)
 
     return found
 

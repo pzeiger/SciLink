@@ -17,3 +17,4 @@ from .simulation_pipeline import run_complete_workflow
 from .simulation_orchestrator import SimulationOrchestratorAgent, SimulationMode
 from .simulation_router import SimulationRouter, discover_scale_agents
 from .structure_planner import StructurePlanner, StructureSpec
+from .ems_agent import EMSAgent

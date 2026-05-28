@@ -79,6 +79,14 @@ SCALE_POLICY: Dict[str, Dict[str, str]] = {
         "periodicity": "periodic box or cluster",
         "solvation": "explicit or none, as the chemistry requires",
     },
+    "electron_microscopy_simulation": {
+        "size_target": (
+            "medium — ~10^2–10^4 atoms; oriented supercell large enough to "
+            "contain the electron probe (typically ≥ 10 Å laterally after tiling)"
+        ),
+        "periodicity": "3D periodic, orthogonal cell; beam along c-axis",
+        "solvation": "none (vacuum; no explicit solvent — EM samples are dry/frozen)",
+    },
 }
 
 
@@ -92,7 +100,7 @@ class StructureSpec:
     :attr:`is_valid` (or call :meth:`raise_if_error`) before using the spec.
     """
     structure_class: Optional[str] = None      # crystal | molecular | condensed | biomolecular (None on error)
-    simulation_scale: Optional[str] = None     # periodic_dft | molecular_dft | molecular_dynamics | machine_learning_potentials
+    simulation_scale: Optional[str] = None     # periodic_dft | molecular_dft | molecular_dynamics | machine_learning_potentials | electron_microscopy_simulation
     engine: Optional[str] = None               # vasp | qe | pyscf | lammps | mace | ...
     size_target: Optional[str] = None
     periodicity: Optional[str] = None
@@ -273,7 +281,7 @@ class StructurePlanner:
             "OUTPUT FORMAT — return ONLY a JSON object, no prose:\n"
             "{\n"
             '  "structure_class": "<one of: crystal | molecular | condensed | biomolecular>",\n'
-            '  "simulation_scale": "<one of: periodic_dft | molecular_dft | molecular_dynamics | machine_learning_potentials>",\n'
+            '  "simulation_scale": "<one of: periodic_dft | molecular_dft | molecular_dynamics | machine_learning_potentials | electron_microscopy_simulation>",\n'
             '  "engine": "<engine name or null>",\n'
             '  "size_target": "<short phrase>",\n'
             '  "periodicity": "<3d | slab | none | box>",\n'
