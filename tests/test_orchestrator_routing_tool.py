@@ -132,3 +132,49 @@ def test_route_simulation_tool_required_args(tmp_path):
     required = schema["function"]["parameters"]["required"]
     assert "user_goal" in required
     assert "system_description" not in required  # optional
+
+
+# ─── generate_ems_simulation tool ──────────────────────────────────
+
+
+def test_generate_ems_simulation_tool_is_registered(tmp_path):
+    """The EMS dispatch tool appears in the registry and OpenAI schemas."""
+    orch = _MockOrch(model=MagicMock(), tmp_path=tmp_path)
+    tools = SimulationOrchestratorTools(orch)
+
+    assert "generate_ems_simulation" in tools.functions_map
+    schema_names = [s["function"]["name"] for s in tools.openai_schemas]
+    assert "generate_ems_simulation" in schema_names
+
+
+def test_generate_ems_simulation_required_args(tmp_path):
+    """structure_file + research_goal are required; instrument settings are
+    optional (omission lets the agent pick them from the goal)."""
+    orch = _MockOrch(model=MagicMock(), tmp_path=tmp_path)
+    tools = SimulationOrchestratorTools(orch)
+
+    schema = next(
+        s for s in tools.openai_schemas
+        if s["function"]["name"] == "generate_ems_simulation"
+    )
+    required = schema["function"]["parameters"]["required"]
+    assert "structure_file" in required
+    assert "research_goal" in required
+    assert "beam_energy_kev" not in required
+    assert "semiangle_mrad" not in required
+
+
+def test_generate_ems_simulation_missing_file_errors(tmp_path):
+    """A non-existent structure path returns an error JSON before any LLM or
+    ASE work — cheap to exercise hermetically."""
+    orch = _MockOrch(model=MagicMock(), tmp_path=tmp_path)
+    tools = SimulationOrchestratorTools(orch)
+
+    out = tools.execute_tool(
+        "generate_ems_simulation",
+        structure_file=str(tmp_path / "does_not_exist.cif"),
+        research_goal="HAADF image",
+    )
+    parsed = json.loads(out)
+    assert parsed["status"] == "error"
+    assert "not found" in parsed["message"].lower()

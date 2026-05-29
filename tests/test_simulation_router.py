@@ -59,6 +59,25 @@ def test_discover_scale_agents_includes_periodic_dft():
     assert "vasp" in scales["periodic_dft"]["supported"]
 
 
+def test_discover_scale_agents_includes_electron_microscopy():
+    """EMSAgent should be discovered with abTEM as a supported engine."""
+    scales = discover_scale_agents()
+    assert "electron_microscopy_simulation" in scales
+    assert "abtem" in scales["electron_microscopy_simulation"]["supported"]
+
+
+def test_electron_microscopy_scale_has_description_and_policy():
+    """The new scale must be known to both the router (description) and the
+    structure planner (build policy), or routing/planning silently skip it."""
+    from scilink.agents.sim_agents.structure_planner import SCALE_POLICY
+
+    assert "electron_microscopy_simulation" in DEFAULT_SCALE_DESCRIPTIONS
+    assert "electron_microscopy_simulation" in SCALE_POLICY
+    policy = SCALE_POLICY["electron_microscopy_simulation"]
+    for key in ("size_target", "periodicity", "solvation"):
+        assert policy.get(key), f"EMS scale policy missing {key!r}"
+
+
 # ─── candidate_engines: intersection ───────────────────────────────
 
 
