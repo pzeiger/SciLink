@@ -1,6 +1,9 @@
 """Shared constants and defaults for the SciLink Streamlit UI."""
 
 from pathlib import Path
+from typing import Dict, Optional, Tuple
+
+from .. import auth
 
 MODEL_OPTIONS = [
     "claude-opus-4-6",
@@ -88,3 +91,54 @@ SUPPORTED_META_EXTENSIONS = tuple(sorted(set(
 
 AVATAR_USER = str(Path(__file__).resolve().parent / "assets" / "avatar_user.svg")
 AVATAR_AGENT = str(Path(__file__).resolve().parent / "assets" / "avatar_agent.svg")
+
+
+# ── Credential prefill resolution ────────────────────────────────
+
+def resolve_prefill(
+    model: str, existing_base_url: str = ""
+) -> Dict[str, Tuple[str, Optional[str]]]:
+    """Resolve which environment variables prefill the credential form fields.
+
+    Pure function — no Streamlit / session_state — so the resolution rules
+    (especially the proxy-vs-vendor safety guard) are unit-testable in
+    isolation. The sidebar wraps this to seed widget state and render captions.
+
+    Returns ``{field: (value, env_var_name_or_None)}`` for fields
+    ``api_key``, ``base_url``, ``fh``, ``mp``. ``env_var_name`` is the variable
+    a value came from (for a "✓ from X" caption), or ``None`` when nothing was
+    detected for that field.
+
+    Resolution mirrors the backend's API-key handling:
+      - Proxy path: ``SCILINK_API_KEY`` fills the main key ONLY when a base URL
+        is available (``SCILINK_BASE_URL`` env, or one the user already entered),
+        because the proxy key is rejected by vendor endpoints without a base
+        URL. It is never routed to a vendor on its own.
+      - Otherwise the main key is the vendor key matching the model's provider
+        (``ANTHROPIC_API_KEY`` / ``OPENAI_API_KEY`` / ``GEMINI_API_KEY`` …).
+      - ``base_url`` prefills from ``SCILINK_BASE_URL`` when set.
+      - FutureHouse / Materials Project keys come from their own env vars,
+        independent of the model.
+    """
+    proxy_key = auth.get_internal_proxy_key()
+    proxy_url = auth.get_internal_proxy_base_url()
+
+    if proxy_key and (proxy_url or existing_base_url):
+        api: Tuple[str, Optional[str]] = (proxy_key, auth.INTERNAL_PROXY_KEY)
+    else:
+        found = auth.find_env_var_for_model(model)
+        api = (found[1], found[0]) if found else ("", None)
+
+    base: Tuple[str, Optional[str]] = (
+        (proxy_url, auth.INTERNAL_PROXY_BASE_URL) if proxy_url else ("", None)
+    )
+
+    fh = auth.find_env_var("futurehouse")
+    mp = auth.find_env_var("materials_project")
+
+    return {
+        "api_key": api,
+        "base_url": base,
+        "fh": (fh[1], fh[0]) if fh else ("", None),
+        "mp": (mp[1], mp[0]) if mp else ("", None),
+    }

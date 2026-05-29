@@ -23,6 +23,10 @@ ENV_VARS = {
 # Internal proxy key (separate from provider keys)
 INTERNAL_PROXY_KEY = 'SCILINK_API_KEY'
 
+# Internal proxy base URL — pairs with INTERNAL_PROXY_KEY so the proxy path
+# can be configured entirely from the environment (e.g. container deployments).
+INTERNAL_PROXY_BASE_URL = 'SCILINK_BASE_URL'
+
 
 def infer_provider(model_name: str) -> Optional[str]:
     """
@@ -65,11 +69,52 @@ def infer_provider(model_name: str) -> Optional[str]:
 def get_internal_proxy_key() -> Optional[str]:
     """
     Get API key for internal proxy deployments.
-    
+
     Returns:
         SCILINK_API_KEY value or None
     """
     return os.getenv(INTERNAL_PROXY_KEY)
+
+
+def get_internal_proxy_base_url() -> Optional[str]:
+    """
+    Get the base URL for internal proxy deployments.
+
+    Returns:
+        SCILINK_BASE_URL value or None
+    """
+    return os.getenv(INTERNAL_PROXY_BASE_URL)
+
+
+def find_env_var(service: str) -> Optional[tuple]:
+    """
+    Find the first set environment variable for a service.
+
+    Unlike ``get_api_key``, this returns the variable *name* alongside the
+    value, so callers (e.g. the UI) can show which env var supplied a key.
+
+    Args:
+        service: One of the keys in ``ENV_VARS`` (e.g. 'openai', 'futurehouse').
+
+    Returns:
+        ``(env_var_name, value)`` for the first set variable, or None.
+    """
+    for var_name in ENV_VARS.get(service, []):
+        value = os.getenv(var_name)
+        if value:
+            return var_name, value
+    return None
+
+
+def find_env_var_for_model(model_name: str) -> Optional[tuple]:
+    """
+    Find the set vendor env var matching a model's inferred provider.
+
+    Returns:
+        ``(env_var_name, value)`` or None (no provider inferred, or none set).
+    """
+    provider = infer_provider(model_name)
+    return find_env_var(provider) if provider else None
 
 
 class APIKeyManager:
