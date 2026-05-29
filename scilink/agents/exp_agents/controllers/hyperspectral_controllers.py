@@ -300,15 +300,34 @@ def _sanitize_filename(text: str) -> str:
 
 class RunPreprocessingController:
     """
-    [🛠️ Tool Step]
-    Runs the HyperspectralPreprocessingAgent.
+    [🛠️ Tool Step] The decomposition tool's own input-prep substage.
+
+    Cleans the cube *for decomposition* (despike / clip-iff-non-negative /
+    mask-threshold) and emits the SNR + mask metadata the component planner
+    consumes. It is no longer a standalone, universal preprocessing stage:
+    the per-pixel codegen receives the RAW cube and owns its own fittability
+    denoising. So this runs only when decomposition will run (gated on
+    ``skip_decomposition``). See docs/hyperspectral_codegen_relocation.md.
     """
     def __init__(self, logger: logging.Logger, preprocessor: HyperspectralPreprocessingAgent):
         self.logger = logger
         self.preprocessor = preprocessor
 
     def execute(self, state: dict) -> dict:
-        self.logger.info("\n\n🛠️ --- CALLING TOOL: PREPROCESSING AGENT --- 🛠️\n")
+        if state.get("error_dict"):
+            return state
+        self.logger.info("\n\n🛠️ --- DECOMPOSITION PREP (clean cube for decomposition) --- 🛠️\n")
+
+        # If decomposition is skipped, the per-pixel codegen uses the RAW cube
+        # anyway — no decomposition-prep is needed. Just surface SNR/mask so any
+        # downstream prompt that reads them stays populated.
+        if state.get("skip_decomposition"):
+            self.logger.info("Decomposition skipped → no decomposition-prep (codegen uses the raw cube).")
+            if "preprocessing_mask" not in state:
+                state["preprocessing_mask"] = np.ones(state["hspy_data"].shape[:2], dtype=bool)
+            state.setdefault("data_quality", {"reasoning": "Decomposition skipped; raw data used downstream."})
+            return state
+
         if not self.preprocessor:
             self.logger.warning("Preprocessing skipped: agent not initialized.")
             state["data_quality"] = {"reasoning": "Preprocessing skipped: agent not initialized."}
@@ -373,6 +392,20 @@ class GetInitialComponentParamsController:
 
         h, w, e = state["hspy_data"].shape
         data_quality = state.get("data_quality", {})
+        if not data_quality.get("snr_estimate"):
+            # Decomposition-prep now runs AFTER this estimate (it is the
+            # decomposition's own prep substage), so derive SNR from the raw cube
+            # here. See docs/hyperspectral_codegen_relocation.md.
+            try:
+                _snr = float(tools.estimate_global_snr(state["hspy_data"]))
+                data_quality = {
+                    "snr_estimate": round(_snr, 1),
+                    "reasoning": f"SNR estimated from the raw cube (≈{_snr:.1f}); "
+                                 f"decomposition preprocessing runs next.",
+                }
+                state["data_quality"] = data_quality
+            except Exception as _e:
+                self.logger.debug(f"raw SNR estimate failed: {_e}")
         axis_spec = resolve_axis_spec(state.get("system_info"))
 
         prompt_parts = [self.instructions]
