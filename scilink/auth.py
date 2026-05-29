@@ -58,11 +58,14 @@ def infer_provider(model_name: str) -> Optional[str]:
     # Infer from model name patterns
     if model_lower.startswith(('gpt-', 'o1-', 'o3-')):
         return 'openai'
+    # OpenAI embedding family: text-embedding-ada-002, text-embedding-3-*, ...
+    if model_lower.startswith('text-embedding-'):
+        return 'openai'
     if model_lower.startswith('claude'):
         return 'anthropic'
     if 'gemini' in model_lower:
         return 'google'
-    
+
     return None
 
 

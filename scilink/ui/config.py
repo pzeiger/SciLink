@@ -159,6 +159,28 @@ def resolve_prefill(
     }
 
 
+def resolve_embedding_prefill(
+    embedding_model: str,
+) -> Tuple[str, Optional[str]]:
+    """Resolve which env var prefills the embedding API key field.
+
+    Mirrors the main key's provider-matching heuristic but without the proxy
+    machinery (there is no embedding-specific proxy concept): the embedding
+    model name is mapped to a provider via ``infer_provider`` (handles
+    ``text-embedding-*`` → OpenAI and ``gemini-embedding-*`` → Google) and the
+    matching env var, if set, fills the field. Otherwise empty.
+
+    Returns ``(value, env_var_name_or_None)`` — same shape as the entries in
+    :func:`resolve_prefill`. The sidebar wraps this and feeds it through
+    :func:`reconcile_autofill` so switching the embedding model refreshes the
+    field without clobbering a value the user typed.
+    """
+    if not embedding_model:
+        return ("", None)
+    kv = auth.find_env_var_for_model(embedding_model)
+    return (kv[1], kv[0]) if kv else ("", None)
+
+
 def reconcile_autofill(
     current: Optional[str], prev_autofill: Optional[str], resolved: str
 ) -> Tuple[str, str]:

@@ -17,7 +17,9 @@ and tests opt back in with monkeypatch.setenv.
 import pytest
 
 from scilink import auth
-from scilink.ui.config import resolve_prefill, reconcile_autofill
+from scilink.ui.config import (
+    resolve_prefill, reconcile_autofill, resolve_embedding_prefill,
+)
 
 
 _RELEVANT_VARS = [
@@ -209,3 +211,46 @@ def test_reconcile_populates_when_provider_gains_key():
 
 def test_reconcile_idempotent_when_value_unchanged():
     assert reconcile_autofill("k-anthropic", "k-anthropic", "k-anthropic") == ("k-anthropic", "k-anthropic")
+
+
+# ─── Embedding model → provider env var ────────────────────────────
+
+
+def test_infer_provider_recognises_openai_embeddings():
+    assert auth.infer_provider("text-embedding-3-small") == "openai"
+    assert auth.infer_provider("text-embedding-3-large") == "openai"
+    assert auth.infer_provider("text-embedding-ada-002") == "openai"
+
+
+def test_infer_provider_recognises_google_embeddings():
+    assert auth.infer_provider("gemini-embedding-001") == "google"
+
+
+def test_resolve_embedding_prefill_openai(clean_env):
+    clean_env.setenv("OPENAI_API_KEY", "sk-oai")
+    assert resolve_embedding_prefill("text-embedding-3-small") == ("sk-oai", "OPENAI_API_KEY")
+
+
+def test_resolve_embedding_prefill_google(clean_env):
+    clean_env.setenv("GEMINI_API_KEY", "g-gem")
+    assert resolve_embedding_prefill("gemini-embedding-001") == ("g-gem", "GEMINI_API_KEY")
+
+
+def test_resolve_embedding_prefill_no_match_when_env_missing(clean_env):
+    """The matching env var is absent → leave the field empty (no borrowing)."""
+    clean_env.setenv("GOOGLE_API_KEY", "g-key")
+    assert resolve_embedding_prefill("text-embedding-3-small") == ("", None)
+
+
+def test_resolve_embedding_prefill_no_model_returns_empty(clean_env):
+    clean_env.setenv("OPENAI_API_KEY", "sk-oai")
+    assert resolve_embedding_prefill("") == ("", None)
+    assert resolve_embedding_prefill(None) == ("", None)
+
+
+def test_resolve_embedding_prefill_unknown_model_returns_empty(clean_env):
+    """A model name whose provider can't be inferred returns empty even when
+    vendor env vars are set."""
+    clean_env.setenv("OPENAI_API_KEY", "sk-oai")
+    clean_env.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    assert resolve_embedding_prefill("some-local-embedder") == ("", None)

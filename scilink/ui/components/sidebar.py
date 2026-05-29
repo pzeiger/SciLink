@@ -74,6 +74,32 @@ def _seed_credentials_from_env(model: str) -> dict:
     return sources
 
 
+def _seed_embedding_credential_from_env(embedding_model: str) -> str | None:
+    """Prefill ``cfg_embedding_api_key`` from the env var matching the embedding
+    model's provider.
+
+    Same dynamic-refresh / don't-clobber semantics as the main API key: the
+    field is re-resolved every render and refreshed via ``reconcile_autofill``
+    when the user switches embedding models to another vendor (e.g.
+    ``text-embedding-3-small`` → ``gemini-embedding-001``), but a value the user
+    typed themselves is preserved.
+
+    Returns the env var name when one was detected and the field still holds
+    the auto-filled value (for the "✓ from X" caption), else ``None``.
+    """
+    from ..config import resolve_embedding_prefill, reconcile_autofill
+
+    val, src = resolve_embedding_prefill(embedding_model)
+    new_val, new_auto = reconcile_autofill(
+        st.session_state.get("cfg_embedding_api_key"),
+        st.session_state.get("_cfg_embedding_api_key_autofill"),
+        val,
+    )
+    st.session_state["cfg_embedding_api_key"] = new_val
+    st.session_state["_cfg_embedding_api_key_autofill"] = new_auto
+    return src if (src and new_val == val) else None
+
+
 def _render_hpc_connection() -> None:
     """Compact HPC connection controls for the sidebar."""
     try:
@@ -318,13 +344,26 @@ def render_sidebar() -> None:
             )
             if st.session_state.get("cfg_embedding_preset") == "Custom":
                 st.text_input("Embedding model name", key="cfg_embedding_custom", disabled=_locked)
+
+            # Match the embedding model to its provider env var (text-embedding-*
+            # -> OPENAI_API_KEY, gemini-embedding-* -> GEMINI/GOOGLE_API_KEY).
+            _emb_preset = st.session_state.get("cfg_embedding_preset", "")
+            _emb_model = (
+                st.session_state.get("cfg_embedding_custom", "")
+                if _emb_preset == "Custom" else _emb_preset
+            )
+            _emb_src = _seed_embedding_credential_from_env(_emb_model) if not _locked else None
+
             st.text_input(
                 "Embedding API key (optional)",
                 type="password",
                 key="cfg_embedding_api_key",
                 disabled=_locked,
             )
-            st.caption("\u2139\ufe0f Leave blank to use the main API key")
+            if _emb_src:
+                st.caption(f"\u2713 loaded from `{_emb_src}`")
+            else:
+                st.caption("\u2139\ufe0f Leave blank to use the main API key")
 
         # The meta-agent has only two autonomy levels (a delegation is a
         # one-shot run_task, so the modes' step-by-step co-pilot does not
