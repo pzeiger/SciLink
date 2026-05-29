@@ -168,3 +168,57 @@ def test_from_mapping_minimal():
                        "hard_reject_threshold": 0.4})
     assert g.metric == "figure_of_merit"
     assert g.direction == "higher_is_better"  # defaulted
+
+
+# --- user_threshold override (experienced-user R²) ---------------------------
+
+class _CaptureLogger:
+    def __init__(self): self.warnings = []
+    def warning(self, msg): self.warnings.append(msg)
+
+
+def test_user_threshold_overrides_skill_r2_gate():
+    """A user R² override beats a skill's r_squared gate, and warns."""
+    skill_meta = {"quality_gate": {"metric": "r_squared", "accept_threshold": 0.90,
+                                   "hard_reject_threshold": 0.75}}
+    log = _CaptureLogger()
+    resolved = resolve_gate(skill_meta=skill_meta, user_threshold=0.85, logger=log)
+    assert resolved.metric == "r_squared"
+    assert resolved.accept_threshold == pytest.approx(0.85)
+    assert any("recommends 0.900" in w for w in log.warnings)
+
+
+def test_user_threshold_metric_guard_keeps_skill_gate():
+    """A bare R² override must NOT replace a skill's non-r_squared metric."""
+    skill_meta = {"quality_gate": {"metric": "figure_of_merit", "accept_threshold": 0.7,
+                                   "hard_reject_threshold": 0.4}}
+    log = _CaptureLogger()
+    resolved = resolve_gate(skill_meta=skill_meta, user_threshold=0.85, logger=log)
+    assert resolved.metric == "figure_of_merit"          # skill gate kept
+    assert resolved.accept_threshold == pytest.approx(0.7)
+    assert any("ignored" in w and "figure_of_merit" in w for w in log.warnings)
+
+
+def test_user_threshold_applies_with_no_skill():
+    resolved = resolve_gate(user_threshold=0.88, legacy_threshold=0.95)
+    assert resolved.metric == "r_squared"
+    assert resolved.accept_threshold == pytest.approx(0.88)
+
+
+def test_explicit_quality_gate_still_beats_user_threshold():
+    """An explicit quality_gate (full gate) outranks a numeric R² override."""
+    call_gate = QualityGate(metric="cost", accept_threshold=0.2,
+                            hard_reject_threshold=0.5, direction="lower_is_better")
+    resolved = resolve_gate(call_override=call_gate, user_threshold=0.85,
+                            skill_meta={"quality_gate": {"metric": "r_squared",
+                                                         "accept_threshold": 0.9,
+                                                         "hard_reject_threshold": 0.75}})
+    assert resolved.metric == "cost"
+
+
+def test_no_user_threshold_preserves_skill_over_legacy():
+    """Sanity: without a user override, skill still beats legacy (unchanged)."""
+    skill_meta = {"quality_gate": {"metric": "r_squared", "accept_threshold": 0.90,
+                                   "hard_reject_threshold": 0.75}}
+    resolved = resolve_gate(skill_meta=skill_meta, legacy_threshold=0.95)
+    assert resolved.accept_threshold == pytest.approx(0.90)  # skill, not legacy

@@ -2012,6 +2012,7 @@ class AnalysisOrchestratorTools:
             task_mode: str = None,
             prior_analysis_paths: List[str] = None,
             literature_file: str = None,
+            r2_threshold: float = None,
         ) -> str:
             """
             Execute analysis with the selected or specified agent.
@@ -2489,6 +2490,18 @@ class AnalysisOrchestratorTools:
                     analyze_kwargs["prior_analysis_paths"] = prior_analysis_paths
                 if literature_file:
                     analyze_kwargs["literature_file"] = literature_file
+                if r2_threshold is not None:
+                    # Experienced-user R² override. Only forward to agents whose
+                    # analyze() accepts it (currently CurveFitting); others have
+                    # no R² gate, so ignore it rather than error.
+                    import inspect as _inspect
+                    if "r2_threshold" in _inspect.signature(agent.analyze).parameters:
+                        analyze_kwargs["r2_threshold"] = float(r2_threshold)
+                    else:
+                        self.logger.info(
+                            f"   r2_threshold={r2_threshold} ignored: "
+                            f"{self.AGENT_NAMES.get(agent_id, 'agent')} has no R² gate."
+                        )
                 result = agent.analyze(**analyze_kwargs)
                 
                 # === Store result ===
@@ -2732,6 +2745,18 @@ class AnalysisOrchestratorTools:
                         "`task_mode='identification'` to preserve the unbiased "
                         "fit; in that case the literature still informs Stage-2 "
                         "candidate enumeration."
+                    )
+                },
+                "r2_threshold": {
+                    "type": "number",
+                    "description": (
+                        "CurveFitting agent only. Experienced-user override of the "
+                        "R² acceptance threshold (between 0 and 1, e.g. 0.90). Use "
+                        "ONLY when the user explicitly asks to loosen or tighten the "
+                        "fit-quality bar. It overrides the default and any active "
+                        "skill's R² gate (a warning is logged on conflict), but it "
+                        "will NOT replace a skill that scores by a non-R² metric. "
+                        "Leave unset for standard analyses."
                     )
                 }
             },

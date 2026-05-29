@@ -561,7 +561,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             call_override=quality_gate,
             agent_default=self.quality_gate,
             skill_meta=first_skill_meta,
-            legacy_threshold=effective_r2_threshold,
+            # An explicit analyze(r2_threshold=...) is an experienced-user
+            # override that wins over a skill gate (with the metric guard);
+            # the constructor default stays the low-priority legacy threshold.
+            user_threshold=r2_threshold,
+            legacy_threshold=self.r2_threshold,
+            logger=self.logger,
         )
         # When the resolved gate is r_squared, keep the legacy accept value
         # exactly as today so every existing controller path runs unchanged.

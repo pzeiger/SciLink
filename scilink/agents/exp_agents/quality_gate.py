@@ -152,32 +152,65 @@ def resolve_gate(
     call_override: Optional[Any] = None,
     agent_default: Optional[Any] = None,
     skill_meta: Optional[dict] = None,
+    user_threshold: Optional[float] = None,
     legacy_threshold: Optional[float] = None,
+    logger: Optional[Any] = None,
 ) -> QualityGate:
-    """Resolve the effective gate from all four sources.
+    """Resolve the effective gate from all sources.
 
     Priority (highest first):
-      1. ``call_override`` — explicit ``analyze(quality_gate=...)`` arg
-      2. ``agent_default`` — ``CurveFittingAgent(quality_gate=...)`` arg
-      3. ``skill_meta['quality_gate']`` — frontmatter block from the
-         active skill (or the first loaded skill in a multi-skill set).
-      4. ``legacy_threshold`` — when set, builds a QualityGate(metric=
-         'r_squared', accept_threshold=value). This handles the
-         pre-existing ``r2_threshold`` kwarg on analyze() / __init__.
-      5. :data:`R_SQUARED_DEFAULT`.
+      1. ``call_override`` — explicit ``analyze(quality_gate=...)`` arg (a full
+         gate, possibly with a non-R² metric — deliberate, wins over everything).
+      2. ``agent_default`` — ``CurveFittingAgent(quality_gate=...)`` arg.
+      3. ``user_threshold`` — an experienced user's explicit numeric R² override
+         (e.g. ``analyze(r2_threshold=...)`` from the UI/chat). Wins over a skill
+         gate, but ONLY for the threshold value. **Metric guard:** if the active
+         skill scores by a non-``r_squared`` metric, a bare R² number must not
+         silently replace that metric — the override is ignored (skill gate kept)
+         and a warning is logged. Changing the metric requires an explicit
+         ``quality_gate`` (layer 1), not a threshold number.
+      4. ``skill_meta['quality_gate']`` — frontmatter block from the active skill
+         (or the first loaded skill in a multi-skill set).
+      5. ``legacy_threshold`` — the agent constructor's ``r2_threshold`` default;
+         builds a ``QualityGate(metric='r_squared', accept_threshold=value)``.
+      6. :data:`R_SQUARED_DEFAULT`.
 
     Each layer can be either a :class:`QualityGate` instance or a plain
     dict (matching the dataclass fields). Dicts are coerced via
-    :func:`from_mapping`. ``None`` at any layer falls through.
+    :func:`from_mapping`. ``None`` at any layer falls through. ``logger`` (if
+    provided) receives a warning when a user R² override conflicts with, or is
+    blocked by, a skill gate.
     """
     for source in (call_override, agent_default):
         gate = _coerce(source)
         if gate is not None:
             return gate
-    if skill_meta:
-        gate = _coerce(skill_meta.get("quality_gate"))
-        if gate is not None:
-            return gate
+
+    skill_gate = _coerce((skill_meta or {}).get("quality_gate")) if skill_meta else None
+
+    # Experienced-user numeric R² override (layer 3): wins over the skill gate,
+    # but only as a threshold — never silently swaps a skill's non-R² metric.
+    if user_threshold is not None:
+        if skill_gate is not None and skill_gate.metric != "r_squared":
+            if logger is not None:
+                logger.warning(
+                    f"   R² override {float(user_threshold):.3f} ignored: the active "
+                    f"skill scores by '{skill_gate.metric}', not R². Keeping the "
+                    f"skill's quality gate. (To change the metric, pass an explicit "
+                    f"quality_gate; to change the threshold, configure it on the skill.)"
+                )
+            return skill_gate
+        if (logger is not None and skill_gate is not None
+                and skill_gate.metric == "r_squared"
+                and abs(skill_gate.accept_threshold - float(user_threshold)) > 1e-9):
+            logger.warning(
+                f"   Using user R² override {float(user_threshold):.3f} "
+                f"(active skill recommends {skill_gate.accept_threshold:.3f})."
+            )
+        return R_SQUARED_DEFAULT.with_accept_threshold(float(user_threshold))
+
+    if skill_gate is not None:
+        return skill_gate
     if legacy_threshold is not None:
         return R_SQUARED_DEFAULT.with_accept_threshold(float(legacy_threshold))
     return R_SQUARED_DEFAULT
