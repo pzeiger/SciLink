@@ -374,7 +374,7 @@ class RunPreprocessingController:
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"):
             return state
-        self.logger.info("\n\n🛠️ --- DECOMPOSITION PREP (clean cube for decomposition) --- 🛠️\n")
+        self.logger.info("\n\n🛠️ --- DECOMPOSITION PREP --- 🛠️\n")
 
         # If decomposition is skipped, the per-pixel codegen uses the RAW cube
         # anyway — no decomposition-prep is needed. Just surface SNR/mask so any
@@ -1021,7 +1021,7 @@ class DecompositionController:
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"):
             return state
-        self.logger.info("\n\n🧩 --- SPECTRAL DECOMPOSITION (cohesive step) --- 🧩\n")
+        self.logger.info("\n\n🧩 --- SPECTRAL DECOMPOSITION --- 🧩\n")
         for stage in self.stages:
             state = stage.execute(state)
             if state.get("error_dict"):
