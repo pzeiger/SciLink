@@ -2004,12 +2004,17 @@ Your guidance: '''
         if state.get("literature_context"):
             context_parts.append(state["literature_context"])
         skill_sections = state.get("skill_sections")
-        if skill_sections and skill_sections.get("analysis"):
+        # Prefer the `implementation` section for codegen. CLAUDE.md: implementation
+        # is the going-forward name; the loader's analysis<->implementation synonym
+        # fold makes single-section skills populate both, while dual-section skills
+        # keep `implementation` as the runnable recipe (not `analysis`).
+        codegen_recipe = (skill_sections or {}).get("implementation") or (skill_sections or {}).get("analysis")
+        if codegen_recipe:
             level = state.get("_annealing_level", 0)
             preamble = self._SKILL_STRICTNESS_SCHEDULE[
                 min(level, len(self._SKILL_STRICTNESS_SCHEDULE) - 1)
             ].format(name=state.get("skill_name", "skill"))
-            context_parts.append(preamble + skill_sections["analysis"])
+            context_parts.append(preamble + codegen_recipe)
 
         # Add sub-agent preprocessing array paths
         for key in ("fft_preprocessing", "sam_preprocessing"):
@@ -2143,12 +2148,14 @@ Your guidance: '''
             tool_inventory=format_tool_inventory("image_analysis", active_skills=active_skills),
         )
         skill_sections = state.get("skill_sections")
-        if skill_sections and skill_sections.get("analysis"):
+        # Prefer `implementation` for codegen (see the generate-script path).
+        codegen_recipe = (skill_sections or {}).get("implementation") or (skill_sections or {}).get("analysis")
+        if codegen_recipe:
             level = state.get("_annealing_level", 0)
             preamble = self._SKILL_STRICTNESS_SCHEDULE[
                 min(level, len(self._SKILL_STRICTNESS_SCHEDULE) - 1)
             ].format(name=state.get("skill_name", "skill"))
-            prompt += "\n\n" + preamble + skill_sections["analysis"]
+            prompt += "\n\n" + preamble + codegen_recipe
 
         response = self.model.generate_content(prompt)
         result, error = self._parse(response)
