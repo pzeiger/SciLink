@@ -42,19 +42,27 @@ def create_hyperspectral_iteration_pipeline(
 
     pipeline = []
 
-    # --- 1. PREPROCESSING (Only on first iteration) ---
-    if settings.get('run_preprocessing', True):
-        pipeline.append(RunPreprocessingController(logger, preprocessor))
-
-    # --- 2. SPECTRAL UNMIXING ---
+    # --- SPECTRAL DECOMPOSITION (owns its own input prep) ---
+    # Preprocessing is no longer a standalone universal stage: it cleans the cube
+    # *for decomposition* and is the decomposition tool's first substage. The
+    # per-pixel codegen receives the RAW cube and owns its own fittability
+    # denoising. See docs/hyperspectral_codegen_relocation.md.
     if settings.get('enabled', True):
 
-        # 2a. Auto-component workflow
+        # [🧠 LLM] Initial component/method guess — also decides skip_decomposition,
+        # using SNR estimated from the raw cube (prep runs after this).
         if settings.get('auto_components', True):
-            # [🧠 LLM] Get initial component guess
             pipeline.append(GetInitialComponentParamsController(
                 model, logger, generation_config, safety_settings, parse_fn
             ))
+
+        # [🛠️ Tool] Decomposition's own prep substage — runs after the skip
+        # decision; internally gated on `skip_decomposition`.
+        if settings.get('run_preprocessing', True):
+            pipeline.append(RunPreprocessingController(logger, preprocessor))
+
+        # Rest of the auto-component workflow operates on the cleaned cube.
+        if settings.get('auto_components', True):
             # [🛠️ Tool] Run NMF loop to get errors
             pipeline.append(RunComponentTestLoopController(logger, settings))
             # [🛠️ Tool] Create elbow plot from errors
@@ -64,10 +72,10 @@ def create_hyperspectral_iteration_pipeline(
                 model, logger, generation_config, safety_settings, parse_fn
             ))
 
-        # 2b. [🛠️ Tool] Run final NMF
+        # [🛠️ Tool] Run final NMF
         pipeline.append(RunFinalSpectralUnmixingController(logger, settings))
 
-        # 2c. [🛠️ Tool] Create all plots for analysis
+        # [🛠️ Tool] Create all plots for analysis
         pipeline.append(CreateAnalysisPlotsController(logger, settings))
 
     # --- 3. ITERATION ANALYSIS & REFINEMENT DECISION ---
