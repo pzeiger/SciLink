@@ -1316,8 +1316,8 @@ class SimulationOrchestratorTools:
         def generate_ems_simulation(
             structure_file: str,
             research_goal: str,
-            beam_energy_kev: float = 200.0,
-            semiangle_mrad: float = 20.0,
+            beam_energy_kev: float = None,
+            semiangle_mrad: float = None,
             output_format: str = "npz",
             zone_axis: list = None,
             tile: list = None,
@@ -1441,16 +1441,22 @@ class SimulationOrchestratorTools:
                 "beam_energy_kev": {
                     "type": "number",
                     "description": (
-                        "Accelerating voltage in keV (default: 200). "
-                        "Typical values: 60–80 keV (beam-sensitive), "
+                        "Accelerating voltage in keV. ALWAYS pass this when the "
+                        "user specifies an energy — it is authoritative and "
+                        "overrides the agent's own choice. Omit only when the "
+                        "user gave no energy, in which case the agent picks one "
+                        "from the goal. Typical values: 60–80 keV (beam-sensitive), "
                         "100–120 keV (general), 200–300 keV (hard materials)."
                     ),
                 },
                 "semiangle_mrad": {
                     "type": "number",
                     "description": (
-                        "Probe convergence semi-angle in mrad (default: 20). "
-                        "Typical: 10–15 mrad (uncorrected), 20–30 mrad (aberration-corrected)."
+                        "Probe convergence semi-angle in mrad. ALWAYS pass this "
+                        "when the user specifies a convergence angle — it is "
+                        "authoritative and overrides the agent's own choice. Omit "
+                        "only when the user gave none. Typical: 10–15 mrad "
+                        "(uncorrected), 20–30 mrad (aberration-corrected)."
                     ),
                 },
                 "output_format": {

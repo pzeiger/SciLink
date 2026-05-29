@@ -216,16 +216,44 @@ class EMSAgent(SimulationAgent):
         self,
         research_goal: str,
         system_info: Dict[str, Any],
-        beam_energy_kev: float = 200.0,
-        semiangle_mrad: float = 20.0,
+        beam_energy_kev: Optional[float] = None,
+        semiangle_mrad: Optional[float] = None,
         **kwargs,
     ) -> Dict[str, Any]:
-        """Choose EM simulation parameters from goal and system info."""
+        """Choose EM simulation parameters from goal and system info.
+
+        ``beam_energy_kev`` and ``semiangle_mrad`` are instrument settings: when
+        the caller supplies them they are AUTHORITATIVE and override whatever the
+        planning LLM proposes. The LLM still chooses the dependent parameters
+        (sampling, detector geometry, frozen phonons) — but around those fixed
+        values. When left as ``None`` the LLM is free to pick them from the goal.
+        """
         self.logger.info(f"Planning simulation: {research_goal[:80]}")
         elements_str = ", ".join(
             f"{e}: {c}" for e, c in system_info.get("element_counts", {}).items()
         )
         planning = self._get_skill_context(section="planning")
+
+        # Instrument settings the caller pinned. Inject them into the prompt so
+        # the LLM plans the dependent parameters (sampling/antialiasing, detector
+        # angles) to be consistent with them rather than choosing its own.
+        fixed_lines = []
+        if beam_energy_kev is not None:
+            fixed_lines.append(
+                f"- Beam energy: {beam_energy_kev * 1000.0:.0f} eV "
+                "(FIXED — use this exact value, do not change it)"
+            )
+        if semiangle_mrad is not None:
+            fixed_lines.append(
+                f"- Probe semiangle: {semiangle_mrad} mrad "
+                "(FIXED — use this exact value, do not change it)"
+            )
+        fixed_block = (
+            "FIXED INSTRUMENT SETTINGS (plan sampling and detector geometry to be "
+            "consistent with these; do not override them):\n"
+            + "\n".join(fixed_lines) + "\n\n"
+            if fixed_lines else ""
+        )
 
         prompt = (
             "Recommend electron microscopy simulation parameters for this goal.\n\n"
@@ -237,6 +265,7 @@ class EMSAgent(SimulationAgent):
             f"b={system_info.get('lateral_extent_b', 0):.2f}, "
             f"c={system_info.get('thickness', 0):.2f}\n"
             f"- Orthogonal: {system_info.get('is_orthogonal', False)}\n\n"
+            f"{fixed_block}"
             f"{planning}\n\n"
             "Return JSON with these exact keys:\n"
             "{\n"
@@ -260,10 +289,11 @@ class EMSAgent(SimulationAgent):
             self.logger.error(f"Planning LLM call failed: {exc}")
             params = {}
 
-        # Sensible defaults so callers always get a complete plan.
+        # Fallbacks so callers always get a complete plan. These apply only
+        # when neither the LLM nor the caller supplied a value.
         params.setdefault("technique", "multislice")
-        params.setdefault("beam_energy_ev", beam_energy_kev * 1000.0)
-        params.setdefault("semiangle_mrad", semiangle_mrad)
+        params.setdefault("beam_energy_ev", 200000.0)
+        params.setdefault("semiangle_mrad", 20.0)
         params.setdefault("sampling_angstrom", 0.05)
         params.setdefault("slice_thickness_angstrom", 2.0)
         params.setdefault("detector_type", "annular")
@@ -272,6 +302,14 @@ class EMSAgent(SimulationAgent):
         params.setdefault("frozen_phonon_configs", 8)
         params.setdefault("use_prism", False)
         params.setdefault("output_format", "npz")
+
+        # Caller-supplied instrument settings are authoritative. setdefault above
+        # cannot enforce this because the planning LLM always populates these keys
+        # (they're in the prompt schema), so override them explicitly here.
+        if beam_energy_kev is not None:
+            params["beam_energy_ev"] = beam_energy_kev * 1000.0
+        if semiangle_mrad is not None:
+            params["semiangle_mrad"] = semiangle_mrad
 
         for k, v in kwargs.items():
             params[k] = v
@@ -489,8 +527,8 @@ class EMSAgent(SimulationAgent):
         self,
         structure_file: str,
         research_goal: str,
-        beam_energy_kev: float = 200.0,
-        semiangle_mrad: float = 20.0,
+        beam_energy_kev: Optional[float] = None,
+        semiangle_mrad: Optional[float] = None,
         zone_axis: Optional[List[int]] = None,
         tile: Optional[List[int]] = None,
         output_format: str = "npz",
@@ -504,8 +542,11 @@ class EMSAgent(SimulationAgent):
         ----------
         structure_file:     Path to the input structure (CIF, VASP, XYZ, …).
         research_goal:      Natural-language description of the simulation goal.
-        beam_energy_kev:    Accelerating voltage in keV. Default 200 keV.
-        semiangle_mrad:     Probe convergence semi-angle in mrad. Default 20 mrad.
+        beam_energy_kev:    Accelerating voltage in keV. When None, the planning
+                            LLM picks it from the goal; when set, the value is
+                            authoritative (overrides the LLM). Default None.
+        semiangle_mrad:     Probe convergence semi-angle in mrad. Same precedence
+                            as beam_energy_kev. Default None.
         zone_axis:          Miller indices of beam direction (e.g. [0,0,1]).
                             Structure prep warns but does not yet auto-rotate.
         tile:               [nx, ny, nz] tiling override (auto-computed otherwise).
