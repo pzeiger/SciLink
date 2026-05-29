@@ -2204,6 +2204,13 @@ plan as specified and let the retry pipeline handle actual runtime failures.
      do NOT smooth (it broadens lines and biases linewidths).
    - **Background:** prefer fitting a background/baseline as a model parameter
      over subtracting it.
+   WHEN preprocessing IS appropriate:
+   - **Clipping:** setting negative values to zero is appropriate ONLY for
+     intensity-type spectra (Raman, PL, fluorescence) where negatives are noise;
+     NEVER for differential/derivative/absorption data, where negatives are real.
+   - **Denoising:** modest smoothing is acceptable ONLY when the data is genuinely
+     noisy (noise large relative to signal); prefer none for clean data, and never
+     on derivative spectra (see above).
    If you preprocess, keep both the raw and processed arrays so you can plot them.
 3. Implement your fitting approach (fit over the plan's fit domain).
 4. Compute R² and RMSE
