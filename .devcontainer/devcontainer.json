@@ -1,0 +1,51 @@
+{
+  // Standalone dev container for the SciLink repo: open the SciLink folder
+  // directly in VS Code and "Reopen in Container". The repo is mounted at
+  // /workspaces/SciLink and installed editable.
+  //
+  // The SAME Dockerfile is reused by the parent workshop's devcontainer.json
+  // (../../.devcontainer/devcontainer.json) when SciLink is checked out as a
+  // subfolder of that workshop. Keep the Dockerfile self-contained (build
+  // context = this repo root) so both entry points work.
+  "name": "SciLink",
+  "build": {
+    "context": "..",
+    "dockerfile": "Dockerfile",
+    "target": "dev"
+  },
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "remoteUser": "scilinkuser",
+  "updateRemoteUserUID": true,
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "charliermarsh.ruff",
+        "ms-toolsai.jupyter",
+        "tamasfe.even-better-toml",
+        "anthropic.claude-code"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "python.terminal.activateEnvironment": false,
+        "python.analysis.typeCheckingMode": "basic",
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+          "source.fixAll.ruff": "explicit",
+          "source.organizeImports.ruff": "explicit"
+        },
+        "files.trimTrailingWhitespace": true,
+        "jupyter.askForKernelRestart": false
+      }
+    }
+  },
+  "postCreateCommand": "bash -lc 'python -m pip install -e \"/workspaces/${localWorkspaceFolderBasename}[all]\" && python -m pip check'",
+  "containerEnv": {
+    "PYTHONUNBUFFERED": "1",
+    "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+    "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}",
+    "ANTHROPIC_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}",
+    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
+    "CLAUDE_CONFIG_DIR": "/workspaces/${localWorkspaceFolderBasename}/.claude"
+  }
+}
