@@ -51,6 +51,24 @@ from .instruct import (
 logger = logging.getLogger(__name__)
 
 
+def _empty_auxiliary_state() -> dict:
+    """Default auxiliary state — no companion datasets loaded.
+
+    ``auxiliary_items`` is the multi-auxiliary list (each entry has label /
+    array / axis / plot_bytes / summary / mime_type); the flat ``auxiliary_*``
+    keys mirror the first item for back-compat with single-aux readers. (#226)
+    """
+    return {
+        "auxiliary_items": [],
+        "auxiliary_plot_bytes": None,
+        "auxiliary_label": None,
+        "auxiliary_summary": None,
+        "auxiliary_mime_type": None,
+        "auxiliary_array": None,
+        "auxiliary_axis": None,
+    }
+
+
 class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
     Unified Curve Fitting Agent for spectroscopic analysis.
@@ -271,8 +289,8 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         objective: str | None = None,
         hints: str | None = None,
         series_metadata: Optional[dict] = None,
-        auxiliary_data: Optional[str] = None,
-        auxiliary_label: Optional[str] = None,
+        auxiliary_data: Optional[Union[str, List[str]]] = None,
+        auxiliary_label: Optional[Union[str, List[str]]] = None,
         # Domain skill
         skill: Optional[str] = None,
         # Prior knowledge from reference analyses
@@ -528,19 +546,14 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Compute statistics for first spectrum
         data_statistics = self._compute_statistics(processed_first_spectrum)
         
-        # Load auxiliary data if provided
-        aux_state = {
-            "auxiliary_plot_bytes": None,
-            "auxiliary_label": None,
-            "auxiliary_summary": None,
-            "auxiliary_mime_type": None,
-            "auxiliary_array": None,
-            "auxiliary_axis": None,
-        }
+        # Load auxiliary data if provided (one or several companion datasets)
+        aux_state = _empty_auxiliary_state()
         if auxiliary_data:
-            aux_state = self._load_auxiliary_data(auxiliary_data, auxiliary_label)
-            if aux_state.get("auxiliary_plot_bytes"):
-                self.logger.info(f"   Auxiliary data loaded: {aux_state['auxiliary_label']}")
+            aux_state = self._load_auxiliary_items(auxiliary_data, auxiliary_label)
+            n = len(aux_state.get("auxiliary_items", []))
+            if n:
+                names = ", ".join(it["label"] for it in aux_state["auxiliary_items"])
+                self.logger.info(f"   Auxiliary data loaded ({n}): {names}")
 
         # Load skill(s) if provided. ``skill`` accepts a single name/path or
         # a list — see PR 3 multi-skill support. Singular state fields
@@ -788,6 +801,50 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "y_std": float(np.nanstd(y)),
             "has_nans": bool(np.any(np.isnan(curve_data))),
         }
+
+    def _load_auxiliary_items(self, auxiliary_data, auxiliary_label) -> dict:
+        """Load one or several auxiliary datasets into the multi-aux state.
+
+        Accepts ``str | list[str]`` for both ``auxiliary_data`` and
+        ``auxiliary_label`` (parallel lists). Each file is loaded via
+        ``_load_auxiliary_data``; labels are made unique (auto-named ``aux_<i>``
+        when missing) and become the operand keys downstream. (#226)
+        """
+        paths = list(auxiliary_data) if isinstance(auxiliary_data, (list, tuple)) else [auxiliary_data]
+        labels = list(auxiliary_label) if isinstance(auxiliary_label, (list, tuple)) else [auxiliary_label]
+
+        items = []
+        used = set()
+        for i, p in enumerate(paths):
+            lbl = labels[i] if i < len(labels) else None
+            one = self._load_auxiliary_data(p, lbl)
+            name = one.get("auxiliary_label") or f"aux_{i}"
+            base, k = name, 1
+            while name in used:
+                name = f"{base}_{k}"; k += 1
+            used.add(name)
+            items.append({
+                "label": name,
+                "array": one.get("auxiliary_array"),
+                "axis": one.get("auxiliary_axis"),
+                "plot_bytes": one.get("auxiliary_plot_bytes"),
+                "summary": one.get("auxiliary_summary"),
+                "mime_type": one.get("auxiliary_mime_type"),
+            })
+
+        state = _empty_auxiliary_state()
+        state["auxiliary_items"] = items
+        if items:  # mirror first item into the flat keys (back-compat)
+            f = items[0]
+            state.update({
+                "auxiliary_plot_bytes": f["plot_bytes"],
+                "auxiliary_label": f["label"],
+                "auxiliary_summary": f["summary"],
+                "auxiliary_mime_type": f["mime_type"],
+                "auxiliary_array": f["array"],
+                "auxiliary_axis": f["axis"],
+            })
+        return state
 
     def _load_auxiliary_data(
         self, auxiliary_data: str, auxiliary_label: Optional[str]

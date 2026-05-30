@@ -227,24 +227,48 @@ def _append_deviation_note(prompt: list, fit_results: dict) -> None:
     )
 
 
+def _sanitize_aux_name(label: str, idx: int) -> str:
+    """Filesystem-safe stem for a per-auxiliary temp file."""
+    safe = re.sub(r'[^0-9A-Za-z_-]', '_', str(label)).strip('_')
+    return safe or f"aux{idx}"
+
+
+def _auxiliary_display_items(state: dict) -> list:
+    """Auxiliary datasets to show the LLM as context. Uses the multi-aux
+    ``auxiliary_items`` list when present, else synthesizes one entry from the
+    legacy flat keys (back-compat). Only items with a rendered plot. (#226)"""
+    items = state.get("auxiliary_items")
+    if not items:
+        if not state.get("auxiliary_plot_bytes"):
+            return []
+        items = [{
+            "label": state.get("auxiliary_label", "Auxiliary data"),
+            "summary": state.get("auxiliary_summary", ""),
+            "plot_bytes": state.get("auxiliary_plot_bytes"),
+            "mime_type": state.get("auxiliary_mime_type", "image/png"),
+        }]
+    return [it for it in items if it.get("plot_bytes")]
+
+
 def _append_auxiliary_context(prompt: list, state: dict) -> None:
-    """Append auxiliary reference data to an LLM prompt if available."""
-    if not state.get("auxiliary_plot_bytes"):
+    """Append auxiliary reference dataset(s) to an LLM prompt if available."""
+    items = _auxiliary_display_items(state)
+    if not items:
         return
-    label = state.get("auxiliary_label", "Auxiliary data")
-    summary = state.get("auxiliary_summary", "")
-    prompt.append(f"\n## Auxiliary Reference Data: {label}")
+    prompt.append("\n## Auxiliary Reference Data")
     prompt.append(
-        f"The user provided this auxiliary reference data: {label}. "
-        "Take it into account in your analysis and interpretation, but do NOT "
-        "fit or quantitatively analyze this auxiliary data."
+        "The user provided the following auxiliary reference dataset(s). Take "
+        "them into account in your analysis and interpretation, but do NOT fit "
+        "or quantitatively analyze the auxiliary data as if it were a measurement."
     )
-    if summary:
-        prompt.append(f"\nData summary: {summary}")
-    prompt.append({
-        "mime_type": state.get("auxiliary_mime_type", "image/png"),
-        "data": state["auxiliary_plot_bytes"]
-    })
+    for it in items:
+        prompt.append(f"\n### {it.get('label', 'Auxiliary data')}")
+        if it.get("summary"):
+            prompt.append(f"Data summary: {it['summary']}")
+        prompt.append({
+            "mime_type": it.get("mime_type", "image/png"),
+            "data": it["plot_bytes"],
+        })
 
 
 def _append_fit_domain_guidance(prompt: list, state: dict) -> None:
@@ -1771,45 +1795,52 @@ Your guidance: '''
         if prior_runs:
             context_parts.append(prior_runs)
 
-        # Optional auxiliary operand (#226): when a 1D auxiliary curve is aligned
-        # with the primary (same length), write it next to the spectrum and offer
-        # it to the generated script as an optional operand (e.g. baseline/
-        # reference subtraction). Otherwise it stays context-only (no resampling
-        # in v1) — the rendered plot still reaches the planning/interpretation LLM.
-        auxiliary_block = ""
-        aux_arr = state.get("auxiliary_array")
-        aux_axis = state.get("auxiliary_axis")
-        if aux_arr is not None and aux_axis is not None:
-            aux_arr = np.asarray(aux_arr)
-            aux_axis = np.asarray(aux_axis)
-            if aux_arr.ndim == 1 and aux_arr.shape[0] == stats["n_points"]:
-                aux_path = self.output_dir / "temp_auxiliary.npy"
-                np.save(aux_path, np.column_stack([aux_axis, aux_arr]))
-                label = state.get("auxiliary_label") or "reference"
-                auxiliary_block = (
-                    "\n**Optional reference/baseline operand:**\n"
-                    f"- Path: `{aux_path}` — a 2-column [x, y] NumPy array, "
-                    f"{aux_arr.shape[0]} points, on the same x-axis as the primary "
-                    f"(x range [{float(np.nanmin(aux_axis)):.6g}, "
-                    f"{float(np.nanmax(aux_axis)):.6g}]).\n"
-                    f"- This is \"{label}\". You MAY load it and use it numerically — "
-                    "e.g. subtract or divide its y-column from the primary — ONLY if "
-                    "your method needs it (background/baseline removal, normalization). "
-                    "The primary data is the base input; the reference is optional, "
-                    "never required.\n"
-                    "- Do NOT report findings about the reference as if it were a "
-                    "measurement; it is an operand for transforming the primary.\n"
+        # Optional auxiliary operand(s) (#226): for each 1D auxiliary curve aligned
+        # with the primary (same length), write it next to the spectrum and list
+        # it in a manifest the generated script MAY use (e.g. baseline subtraction,
+        # reference division). Misaligned ones stay context-only (no resampling in
+        # v1) — their rendered plot still reaches the planning/interpretation LLM.
+        operand_lines = []
+        for j, it in enumerate(state.get("auxiliary_items") or []):
+            arr = it.get("array")
+            axis = it.get("axis")
+            label = it.get("label") or f"reference_{j}"
+            if arr is None or axis is None:
+                continue
+            arr = np.asarray(arr)
+            axis = np.asarray(axis)
+            if arr.ndim == 1 and arr.shape[0] == stats["n_points"]:
+                safe = _sanitize_aux_name(label, j)
+                aux_path = self.output_dir / f"temp_auxiliary_{safe}.npy"
+                np.save(aux_path, np.column_stack([axis, arr]))
+                operand_lines.append(
+                    f"- \"{label}\": `{aux_path}` — a 2-column [x, y] array, "
+                    f"{arr.shape[0]} points, same x-axis as the primary "
+                    f"(x range [{float(np.nanmin(axis)):.6g}, {float(np.nanmax(axis)):.6g}])."
                 )
                 self.logger.info(
-                    f"🧩 Offering auxiliary '{label}' ({aux_arr.shape[0]} pts) as an "
+                    f"🧩 Offering auxiliary '{label}' ({arr.shape[0]} pts) as an "
                     f"optional fit-script operand."
                 )
             else:
                 self.logger.info(
-                    f"Auxiliary present but not aligned with the primary "
-                    f"({getattr(aux_arr, 'shape', None)} vs {stats['n_points']} pts); "
+                    f"Auxiliary '{label}' not aligned with the primary "
+                    f"({getattr(arr, 'shape', None)} vs {stats['n_points']} pts); "
                     f"kept as context only (not a fit-script operand)."
                 )
+
+        auxiliary_block = ""
+        if operand_lines:
+            auxiliary_block = (
+                "\n**Optional reference/baseline operand(s):**\n"
+                + "\n".join(operand_lines)
+                + "\n- You MAY load any of these and use it numerically — e.g. "
+                "subtract or divide its y-column from the primary — ONLY if your "
+                "method needs it (background/baseline removal, normalization). The "
+                "primary data is the base input; references are optional, never "
+                "required. Do NOT report findings about a reference as if it were a "
+                "measurement; it is an operand for transforming the primary.\n"
+            )
 
         prompt = self.script_instructions.format(
             analysis_approach=config.get("analysis_approach", "Fit the data"),
@@ -4425,6 +4456,11 @@ class AdaptiveRefitController:
             "auxiliary_label": state.get("auxiliary_label"),
             "auxiliary_summary": state.get("auxiliary_summary"),
             "auxiliary_mime_type": state.get("auxiliary_mime_type"),
+            # Multi-aux: carry the full item list + first-item operand arrays so
+            # operands flow through this sub-state path too (#226).
+            "auxiliary_items": state.get("auxiliary_items", []),
+            "auxiliary_array": state.get("auxiliary_array"),
+            "auxiliary_axis": state.get("auxiliary_axis"),
             "prior_knowledge": state.get("prior_knowledge", []),
             "analysis_images": [],
         }

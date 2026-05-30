@@ -113,24 +113,45 @@ def _append_prior_knowledge_context(prompt: list, state: dict) -> None:
                 prompt.append(f"- {f}")
 
 
+def _auxiliary_display_items(state: dict) -> list:
+    """Return the auxiliary datasets to show the LLM as context.
+
+    Uses the multi-aux ``auxiliary_items`` list when present, else synthesizes a
+    one-element list from the legacy flat keys (back-compat). Only items with a
+    rendered plot are returned. (#226)
+    """
+    items = state.get("auxiliary_items")
+    if not items:
+        if not state.get("auxiliary_plot_bytes"):
+            return []
+        items = [{
+            "label": state.get("auxiliary_label", "Auxiliary data"),
+            "summary": state.get("auxiliary_summary", ""),
+            "plot_bytes": state.get("auxiliary_plot_bytes"),
+            "mime_type": state.get("auxiliary_mime_type", "image/png"),
+        }]
+    return [it for it in items if it.get("plot_bytes")]
+
+
 def _append_auxiliary_context(prompt: list, state: dict) -> None:
-    """Append auxiliary reference data to an LLM prompt if available."""
-    if not state.get("auxiliary_plot_bytes"):
+    """Append auxiliary reference dataset(s) to an LLM prompt if available."""
+    items = _auxiliary_display_items(state)
+    if not items:
         return
-    label = state.get("auxiliary_label", "Auxiliary data")
-    summary = state.get("auxiliary_summary", "")
-    prompt.append(f"\n## Auxiliary Reference Data: {label}")
+    prompt.append("\n## Auxiliary Reference Data")
     prompt.append(
-        f"The user provided this auxiliary reference data: {label}. "
-        "Take it into account in your analysis and interpretation, but do NOT "
-        "fit or quantitatively analyze this auxiliary data."
+        "The user provided the following auxiliary reference dataset(s). Take "
+        "them into account in your analysis and interpretation, but do NOT fit "
+        "or quantitatively analyze the auxiliary data as if it were a measurement."
     )
-    if summary:
-        prompt.append(f"\nData summary: {summary}")
-    prompt.append({
-        "mime_type": state.get("auxiliary_mime_type", "image/png"),
-        "data": state["auxiliary_plot_bytes"]
-    })
+    for it in items:
+        prompt.append(f"\n### {it.get('label', 'Auxiliary data')}")
+        if it.get("summary"):
+            prompt.append(f"Data summary: {it['summary']}")
+        prompt.append({
+            "mime_type": it.get("mime_type", "image/png"),
+            "data": it["plot_bytes"],
+        })
 
 
 def _append_objective_context(prompt: list, state: dict) -> None:
@@ -1858,33 +1879,34 @@ class RunDynamicAnalysisController:
                 self.logger.warning(f"Could not build reconstruction cube: {e}")
                 reconstruction = None
 
-        # Offer a shape-aligned auxiliary dataset as an OPTIONAL numerical
-        # operand (issue #226): the user-supplied companion (reference/baseline/
-        # other channel) the generated code MAY divide by / mask with. Kept as
-        # context-only (NOT an operand) when it can't be aligned to the primary
-        # — v1 does no resampling. Raw `data` stays the base input.
+        # Offer shape-aligned auxiliary dataset(s) as OPTIONAL numerical operands
+        # (issue #226): the user-supplied companions (reference/baseline/other
+        # channels) the generated code MAY divide by / subtract / mask with,
+        # keyed by label. Each is kept context-only (NOT an operand) when it can't
+        # be aligned to the primary — v1 does no resampling. Raw `data` stays base.
         auxiliary_operands = {}
-        aux_arr = state.get("auxiliary_array")
-        if aux_arr is not None:
-            aux_arr = np.asarray(aux_arr)
-            h_, w_, e_ = optimal_data.shape
-            label = state.get("auxiliary_label") or "auxiliary"
+        h_, w_, e_ = optimal_data.shape
+        for it in (state.get("auxiliary_items") or []):
+            arr = it.get("array")
+            if arr is None:
+                continue
+            arr = np.asarray(arr)
+            label = it.get("label") or "auxiliary"
             aligned = (
-                (aux_arr.ndim == 1 and aux_arr.shape[0] == e_)   # reference spectrum (per channel)
-                or (aux_arr.ndim == 2 and aux_arr.shape == (h_, w_))  # per-pixel map (mask/normalize)
-                or (aux_arr.shape == optimal_data.shape)         # full companion cube
+                (arr.ndim == 1 and arr.shape[0] == e_)            # reference spectrum (per channel)
+                or (arr.ndim == 2 and arr.shape == (h_, w_))      # per-pixel map (mask/normalize)
+                or (arr.shape == optimal_data.shape)              # full companion cube
             )
             if aligned:
-                auxiliary_operands[label] = aux_arr
+                auxiliary_operands[label] = arr
                 self.logger.info(
-                    f"🧩 Offering auxiliary '{label}' {aux_arr.shape} as an "
-                    f"optional codegen operand."
+                    f"🧩 Offering auxiliary '{label}' {arr.shape} as an optional "
+                    f"codegen operand."
                 )
             else:
                 self.logger.info(
-                    f"Auxiliary '{label}' shape {aux_arr.shape} not aligned with "
-                    f"primary {optimal_data.shape}; kept as context only "
-                    f"(not a codegen operand)."
+                    f"Auxiliary '{label}' shape {arr.shape} not aligned with primary "
+                    f"{optimal_data.shape}; kept as context only (not an operand)."
                 )
 
         # --- MAIN LOOP: Process each target description separately ---

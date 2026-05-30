@@ -28,6 +28,24 @@ from ...skills.loader import load_skill
 from ._deprecation import normalize_params
 
 
+def _empty_auxiliary_state() -> dict:
+    """Default auxiliary state — no companion datasets loaded.
+
+    ``auxiliary_items`` is the multi-auxiliary list (each entry has label /
+    array / axis / plot_bytes / summary / mime_type). The flat ``auxiliary_*``
+    keys mirror the first item for back-compat with single-aux readers. (#226)
+    """
+    return {
+        "auxiliary_items": [],
+        "auxiliary_plot_bytes": None,
+        "auxiliary_label": None,
+        "auxiliary_summary": None,
+        "auxiliary_mime_type": None,
+        "auxiliary_array": None,
+        "auxiliary_axis": None,
+    }
+
+
 class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
     Hyperspectral Analysis Agent.
@@ -175,8 +193,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         hints: str | None = None,
         skill: str | None = None,
         prior_knowledge: list | None = None,
-        auxiliary_data: str | None = None,
-        auxiliary_label: str | None = None,
+        auxiliary_data: str | list[str] | None = None,
+        auxiliary_label: str | list[str] | None = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -272,23 +290,16 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # — see PR 3 multi-skill support.
         skill_state = self._load_skills_to_state(skill, domain="hyperspectral")
 
-        # Load auxiliary data if provided
-        auxiliary_state = {
-            "auxiliary_plot_bytes": None,
-            "auxiliary_label": None,
-            "auxiliary_summary": None,
-            "auxiliary_mime_type": None,
-            "auxiliary_array": None,
-            "auxiliary_axis": None,
-        }
+        # Load auxiliary data if provided (one or several companion datasets).
+        auxiliary_state = _empty_auxiliary_state()
         if auxiliary_data:
-            auxiliary_state = self._load_auxiliary_data(
+            auxiliary_state = self._load_auxiliary_items(
                 auxiliary_data, auxiliary_label
             )
-            if auxiliary_state.get("auxiliary_plot_bytes"):
-                self.logger.info(
-                    f"   Auxiliary data loaded: {auxiliary_state['auxiliary_label']}"
-                )
+            n = len(auxiliary_state.get("auxiliary_items", []))
+            if n:
+                names = ", ".join(it["label"] for it in auxiliary_state["auxiliary_items"])
+                self.logger.info(f"   Auxiliary data loaded ({n}): {names}")
 
         self.logger.info(f"\n{'='*80}")
         self.logger.info(f"🔬 HYPERSPECTRAL ANALYSIS")
@@ -488,6 +499,50 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             self.logger.error(f"Failed to load data from {data_path}: {e}")
             raise
 
+    def _load_auxiliary_items(self, auxiliary_data, auxiliary_label) -> dict:
+        """Load one or several auxiliary datasets into the multi-aux state.
+
+        Accepts ``str | list[str]`` for both ``auxiliary_data`` and
+        ``auxiliary_label`` (parallel lists). Each file is loaded via
+        ``_load_auxiliary_data``; labels are made unique (auto-named ``aux_<i>``
+        when missing). Labels become the operand keys downstream. (#226)
+        """
+        paths = list(auxiliary_data) if isinstance(auxiliary_data, (list, tuple)) else [auxiliary_data]
+        labels = list(auxiliary_label) if isinstance(auxiliary_label, (list, tuple)) else [auxiliary_label]
+
+        items = []
+        used = set()
+        for i, p in enumerate(paths):
+            lbl = labels[i] if i < len(labels) else None
+            one = self._load_auxiliary_data(p, lbl)
+            name = one.get("auxiliary_label") or f"aux_{i}"
+            base, k = name, 1
+            while name in used:
+                name = f"{base}_{k}"; k += 1
+            used.add(name)
+            items.append({
+                "label": name,
+                "array": one.get("auxiliary_array"),
+                "axis": one.get("auxiliary_axis"),
+                "plot_bytes": one.get("auxiliary_plot_bytes"),
+                "summary": one.get("auxiliary_summary"),
+                "mime_type": one.get("auxiliary_mime_type"),
+            })
+
+        state = _empty_auxiliary_state()
+        state["auxiliary_items"] = items
+        if items:  # mirror first item into the flat keys (back-compat)
+            f = items[0]
+            state.update({
+                "auxiliary_plot_bytes": f["plot_bytes"],
+                "auxiliary_label": f["label"],
+                "auxiliary_summary": f["summary"],
+                "auxiliary_mime_type": f["mime_type"],
+                "auxiliary_array": f["array"],
+                "auxiliary_axis": f["axis"],
+            })
+        return state
+
     def _load_auxiliary_data(
         self, auxiliary_data: str, auxiliary_label: str | None
     ) -> dict:
@@ -624,14 +679,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         if skill_state is None:
             skill_state = {"skill_name": None, "skill_sections": None, "skills_loaded": []}
         if auxiliary_state is None:
-            auxiliary_state = {
-                "auxiliary_plot_bytes": None,
-                "auxiliary_label": None,
-                "auxiliary_summary": None,
-                "auxiliary_mime_type": None,
-                "auxiliary_array": None,
-                "auxiliary_axis": None,
-            }
+            auxiliary_state = _empty_auxiliary_state()
 
         try:
             self.logger.info(f"--- Starting analysis pipeline for {data_path} ---")
