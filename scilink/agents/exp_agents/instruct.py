@@ -2189,6 +2189,7 @@ plan as specified and let the retry pipeline handle actual runtime failures.
 {tool_inventory}
 
 **Available Libraries:** numpy, pandas, scipy, lmfit, matplotlib, json
+*(NumPy 2.x: aliases removed in NumPy 2.0 raise `AttributeError` — use `np.trapezoid` not `np.trapz`; prefer `scipy.integrate.trapezoid` for integration.)*
 
 **Requirements:**
 1. Load data (handle .npy, .csv, .txt). The data you load is RAW — no preprocessing
@@ -2259,6 +2260,7 @@ FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed script.
 {tool_inventory}
 
 **Available Libraries:** numpy, pandas, scipy, lmfit, matplotlib, json
+*(NumPy 2.x: aliases removed in NumPy 2.0 raise `AttributeError` — use `np.trapezoid` not `np.trapz`; prefer `scipy.integrate.trapezoid` for integration.)*
 
 **CRITICAL:** Fix only the execution error. Do NOT change the fitting model, its parameters, or the overall analysis approach. The model is locked for series consistency.
 
