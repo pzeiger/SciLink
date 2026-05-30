@@ -7,29 +7,39 @@ existing data from metadata and reconstruct the original; it must NOT transform,
 scale, filter, fit, resample, denoise, or analyze anything. Analysis is always
 delegated.
 
-Enforcement is layered, the middle layer mechanical:
+Enforcement is layered:
   1. narrow prompt (read input → write data + metadata, values unchanged);
   2. ROUND-TRIP verification — the script must also reconstruct the original from
-     its two outputs, and we check reconstruction ≈ original. A script that
-     transformed the data cannot round-trip, so "prep only" is enforced, not just
-     requested. If losslessness can't be verified, the split is REJECTED (the
-     caller falls back to delegating the file as-is);
-  3. static import guard (no analysis libraries);
+     its two outputs, and we check reconstruction ≈ original. This confirms a
+     faithful reconstruction PATH exists; it does NOT, by itself, prove the data
+     leg (`data_path`, the file actually delegated) is untransformed, because the
+     reconstruction is produced by the same generated script and is not forced to
+     derive solely from the two split outputs. The data leg's fidelity rests on
+     the prompt + import guard; the round-trip is a strong corroborating signal,
+     not a hermetic proof. If the round-trip can't be verified, the split is
+     REJECTED;
+  3. static import guard (no analysis libraries — note numpy/pandas are allowed
+     and can transform, so this narrows but does not eliminate the surface);
   4. explicit documentation on the tool.
 """
 
+import ast
 import json
 import re
 from pathlib import Path
 
 import numpy as np
 
-# Libraries that signal analysis/computation rather than IO/parsing. A generated
-# prep script importing any of these is rejected before execution.
+# Modules that signal analysis/computation rather than IO/parsing. A generated
+# prep script importing any of these (or a submodule of one) is rejected before
+# execution. Entries are matched by dotted PREFIX, so `scipy.optimize` denies
+# `scipy.optimize.*` but leaves IO-only `scipy.io` / `scipy.sparse` available —
+# the granularity is deliberate (classic MATLAB .mat needs `scipy.io`).
 _ANALYSIS_IMPORT_DENYLIST = (
     "sklearn", "scipy.optimize", "scipy.signal", "scipy.ndimage",
-    "scipy.interpolate", "scipy.stats", "lmfit", "torch", "tensorflow",
-    "cv2", "skimage", "statsmodels", "matplotlib",
+    "scipy.interpolate", "scipy.stats", "scipy.fft", "scipy.fftpack",
+    "lmfit", "torch", "tensorflow", "cv2", "skimage", "statsmodels",
+    "matplotlib",
 )
 
 _PROMPT = '''You prepare a scientific data file for downstream analysis by
@@ -40,6 +50,16 @@ Input file: {path}
 
 Structural probe (evidence — do not assume beyond it):
 {probe}
+
+Common layouts you may encounter (illustrative, not exhaustive — let the probe
+decide):
+- A `.dat`/`.txt`/`.csv` with a metadata HEADER block (comment lines, `key: value`
+  or `key = value` pairs, a units row) ABOVE the numeric data rows.
+- A MATLAB `.mat` (or `.npz`/HDF5) where some keys are arrays (data) and others
+  are scalars/strings (metadata).
+- An HDF5/NeXus dataset carrying metadata in attributes alongside the array.
+- A vendor container interleaving an acquisition-parameter block with the signal.
+Identify which bytes/keys/lines are data vs metadata from the probe, then:
 
 Write a Python script that:
 1. Reads the input file.
@@ -53,7 +73,11 @@ Write a Python script that:
    (technique, instrument, sample, units, axes, wavelength, ...). If you need
    extra bookkeeping to reconstruct the original byte-for-byte (line endings,
    dtypes, column order, key order), nest ALL of it under a single
-   "_reconstruction" key so downstream sees clean metadata.
+   "_reconstruction" key so downstream sees clean metadata. A value can be both
+   meaningful AND needed for reconstruction — when scientific metadata lives in a
+   container's attributes/keys (HDF5 attrs, .npz/.mat keys), surface it at the
+   TOP LEVEL and, if needed, also record its placement under "_reconstruction";
+   do not relegate it to "_reconstruction" alone.
 5. RECONSTRUCTS the original file from those two outputs and writes it to
    "{recon_out}" (same format as the input). We will verify it matches the input.
 6. Prints exactly one line:
@@ -63,9 +87,10 @@ HARD CONSTRAINTS (a violation fails verification):
 - DO NOT transform, scale, normalize, filter, fit, resample, denoise, crop, or
   analyze the data. The data you write MUST be the original values, unchanged.
 - The reconstruction MUST reproduce the original file's data and metadata.
-- Allowed libraries ONLY: numpy, pandas, json, csv, struct, io, re, h5py, os,
-  pathlib. Do NOT import analysis libraries (sklearn, scipy.*, lmfit, torch,
-  cv2, skimage, matplotlib, ...).
+- Allowed libraries ONLY: numpy, pandas, json, csv, struct, io, re, h5py,
+  scipy.io (for MATLAB .mat read/write ONLY), os, pathlib. Do NOT import
+  analysis libraries — sklearn, lmfit, torch, cv2, skimage, matplotlib, or any
+  other scipy submodule (optimize, signal, ndimage, interpolate, stats, fft, ...).
 - No network, no plotting.
 
 Respond with a JSON object: {{"script": "<the full python script>"}}
@@ -88,16 +113,149 @@ def _extract_script(text: str) -> str:
     return m.group(1) if m else text
 
 
-def _static_guard(script: str) -> str | None:
-    """Return a rejection reason if the script imports an analysis library."""
-    for lib in _ANALYSIS_IMPORT_DENYLIST:
-        root = lib.split(".")[0]
-        if re.search(rf"^\s*(import|from)\s+{re.escape(root)}\b", script, re.MULTILINE):
-            return (
-                f"Generated prep script imports a forbidden analysis library "
-                f"('{root}'). File prep must use IO/parsing libraries only."
-            )
+def _denied_module(name: str) -> str | None:
+    """Return the denylist entry a dotted module name matches by prefix, else None.
+
+    ``scipy.optimize`` matches ``scipy.optimize`` and ``scipy.optimize.foo`` but
+    NOT ``scipy.io``; ``sklearn`` matches ``sklearn`` and any ``sklearn.*``.
+    """
+    parts = name.split(".")
+    for entry in _ANALYSIS_IMPORT_DENYLIST:
+        ep = entry.split(".")
+        if parts[: len(ep)] == ep:
+            return entry
     return None
+
+
+def _static_guard(script: str) -> str | None:
+    """Return a rejection reason if the script imports a denied analysis module.
+
+    Parses the script and inspects ``import``/``from`` statements so the dotted
+    denylist is honored precisely (e.g. ``from scipy import optimize`` is caught
+    while ``from scipy import io`` is allowed). Not a sandbox — dynamic imports
+    (``__import__``) are out of scope; the round-trip check is the real net.
+    """
+    try:
+        tree = ast.parse(script)
+    except SyntaxError:
+        # Unparseable code can't run, so it can't do harm; let execution surface
+        # the syntax error. Conservative root-level fallback just in case.
+        for entry in _ANALYSIS_IMPORT_DENYLIST:
+            root = entry.split(".")[0]
+            if re.search(rf"^\s*(import|from)\s+{re.escape(root)}\b", script, re.MULTILINE):
+                return f"Generated prep script imports a forbidden module ('{root}')."
+        return None
+
+    def reason(hit: str) -> str:
+        return (
+            f"Generated prep script imports a forbidden analysis module "
+            f"('{hit}'). File prep must use IO/parsing libraries only."
+        )
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                hit = _denied_module(alias.name)
+                if hit:
+                    return reason(hit)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:  # relative import — not a third-party analysis lib
+                continue
+            mod = node.module or ""
+            hit = _denied_module(mod)
+            if hit:
+                return reason(hit)
+            for alias in node.names:  # from pkg import submod
+                hit = _denied_module(f"{mod}.{alias.name}" if mod else alias.name)
+                if hit:
+                    return reason(hit)
+    return None
+
+
+def _members_equal(a, b) -> bool:
+    """Compare two arrays type-appropriately: numeric within tolerance, else exact.
+
+    Combined containers (e.g. ``.npz``) routinely hold non-numeric members —
+    string/object metadata keys — alongside the numeric data, so a blanket
+    ``np.allclose`` would raise on those and falsely fail the round-trip.
+    """
+    a, b = np.asarray(a), np.asarray(b)
+    if a.shape != b.shape:
+        return False
+    if np.issubdtype(a.dtype, np.number) and np.issubdtype(b.dtype, np.number):
+        return bool(np.allclose(a, b, equal_nan=True))
+    return bool(np.array_equal(a, b))
+
+
+def _attrs_equal(a: dict, b: dict) -> bool:
+    """Compare two attribute dicts (HDF5 attrs / .mat fields) member-wise."""
+    if set(a) != set(b):
+        return False
+    return all(_members_equal(a[k], b[k]) for k in a)
+
+
+def _h5_equal(original: Path, recon: Path) -> bool:
+    """Content-aware HDF5 comparison: a faithful re-write is rarely byte-identical
+    (chunking, compression, attribute/dataset order, timestamps all vary), so we
+    compare the group/dataset tree and attributes instead. ``h5py`` is already an
+    allowed prep library; if it is unavailable we cannot verify → reject.
+    """
+    try:
+        import h5py
+    except Exception:
+        return False
+
+    def collect(f):
+        items = {"/": ("group", None, dict(f.attrs))}
+
+        def visit(name, obj):
+            if isinstance(obj, h5py.Dataset):
+                items[name] = ("dataset", obj[()], dict(obj.attrs))
+            else:  # group
+                items[name] = ("group", None, dict(obj.attrs))
+
+        f.visititems(visit)
+        return items
+
+    try:
+        with h5py.File(original, "r") as fa, h5py.File(recon, "r") as fb:
+            a, b = collect(fa), collect(fb)
+            if set(a) != set(b):
+                return False
+            for k in a:
+                kind_a, val_a, attrs_a = a[k]
+                kind_b, val_b, attrs_b = b[k]
+                if kind_a != kind_b or not _attrs_equal(attrs_a, attrs_b):
+                    return False
+                if kind_a == "dataset" and not _members_equal(val_a, val_b):
+                    return False
+            return True
+    except Exception:
+        return False
+
+
+def _mat_equal(original: Path, recon: Path) -> bool:
+    """Content-aware MATLAB .mat comparison. Classic v5/6/7 .mat go through
+    ``scipy.io.loadmat`` (an IO module, allowed); v7.3 .mat are HDF5 and fall back
+    to :func:`_h5_equal`. Comparison ignores loadmat's ``__header__`` /
+    ``__version__`` / ``__globals__`` bookkeeping (the header carries a timestamp).
+    """
+    try:
+        from scipy.io import loadmat
+    except Exception:
+        return _h5_equal(original, recon)  # scipy absent → try HDF5 (v7.3 .mat)
+    try:
+        a, b = loadmat(original), loadmat(recon)
+    except NotImplementedError:
+        return _h5_equal(original, recon)  # v7.3 .mat is HDF5 under the hood
+    except Exception:
+        return False
+    skip = {"__header__", "__version__", "__globals__"}
+    ka = {k for k in a if k not in skip}
+    kb = {k for k in b if k not in skip}
+    if ka != kb:
+        return False
+    return all(_members_equal(a[k], b[k]) for k in ka)
 
 
 def _roundtrip_ok(original: Path, recon: Path) -> bool:
@@ -112,12 +270,17 @@ def _roundtrip_ok(original: Path, recon: Path) -> bool:
     ext = original.suffix.lower()
     try:
         if ext == ".npy":
-            return np.allclose(np.load(original), np.load(recon), equal_nan=True)
+            return _members_equal(np.load(original, allow_pickle=True),
+                                  np.load(recon, allow_pickle=True))
         if ext == ".npz":
-            a, b = np.load(original), np.load(recon)
+            a, b = np.load(original, allow_pickle=True), np.load(recon, allow_pickle=True)
             return set(a.files) == set(b.files) and all(
-                np.allclose(a[k], b[k], equal_nan=True) for k in a.files
+                _members_equal(a[k], b[k]) for k in a.files
             )
+        if ext in (".h5", ".hdf5", ".nxs", ".nx"):
+            return _h5_equal(original, recon)
+        if ext == ".mat":
+            return _mat_equal(original, recon)
         if ext in (".csv", ".tsv", ".txt", ".dat"):
             return _text_equal_tolerant(original.read_text(errors="replace"),
                                         recon.read_text(errors="replace"))
@@ -143,12 +306,14 @@ def _text_equal_tolerant(a: str, b: str) -> bool:
     return True
 
 
-def _verify(input_path: Path, result: dict) -> tuple[bool, str]:
-    """Verify the split is well-formed AND lossless. Returns (ok, reason)."""
-    data_out = Path(result.get("data_out", ""))
-    meta_out = Path(result.get("metadata_out", ""))
-    recon_out = Path(result.get("recon_out", ""))
+def _verify(input_path: Path, data_out: Path, meta_out: Path,
+            recon_out: Path) -> tuple[bool, str]:
+    """Verify the split is well-formed AND lossless. Returns (ok, reason).
 
+    ``data_out`` is the model's chosen data path (pulled from PREP_RESULT_JSON);
+    ``meta_out`` / ``recon_out`` are the template-fixed paths the caller owns, so
+    we verify (and later return) those rather than trusting the model's echo.
+    """
     if not data_out.exists():
         return False, f"data_out not written: {data_out}"
     try:
@@ -168,6 +333,8 @@ def _verify(input_path: Path, result: dict) -> tuple[bool, str]:
         meta = json.loads(meta_out.read_text())
     except (json.JSONDecodeError, OSError) as e:
         return False, f"metadata_out is not valid JSON: {e}"
+    # Reject empty metadata: a genuinely metadata-light file fails here and the
+    # meta bounces it back to the user rather than delegating a no-op split.
     if not isinstance(meta, dict) or not meta:
         return False, "metadata_out is empty or not a JSON object"
 
@@ -196,7 +363,8 @@ def prepare_inputs(input_path, model, executor, output_dir, probe=None,
         max_retries: extra attempts after the first (default 1).
 
     Returns a dict: on success ``{status:"success", data_path, metadata_path,
-    recon_path, attempts}``; otherwise ``{status:"error", message, attempts}``.
+    attempts}``; otherwise ``{status:"error", message, attempts}``. The
+    reconstruction used for the round-trip check is deleted once verified.
     The caller decides how to handle an error — the meta surfaces it to the user
     and asks how to proceed rather than silently delegating an unsplit file.
     """
@@ -256,15 +424,18 @@ def prepare_inputs(input_path, model, executor, output_dir, probe=None,
             prompt = base_prompt + f"\n\n### PREVIOUS ATTEMPT FAILED\n{last_reason}\nFix the output line."
             continue
 
-        ok, reason = _verify(input_path, result)
+        data_out = Path(result.get("data_out", ""))
+        ok, reason = _verify(input_path, data_out, metadata_out, recon_out)
         if ok:
+            # The reconstruction was only needed for the round-trip check; it is a
+            # full duplicate of the input, so drop it rather than leave it behind.
+            recon_out.unlink(missing_ok=True)
             if logger:
-                logger.info(f"✅ File prep OK ({reason}): data={result['data_out']}, metadata={metadata_out}")
+                logger.info(f"✅ File prep OK ({reason}): data={data_out}, metadata={metadata_out}")
             return {
                 "status": "success",
-                "data_path": result["data_out"],
+                "data_path": str(data_out),
                 "metadata_path": str(metadata_out),
-                "recon_path": str(recon_out),
                 "attempts": attempt,
             }
         last_reason = reason
@@ -272,6 +443,7 @@ def prepare_inputs(input_path, model, executor, output_dir, probe=None,
             logger.warning(f"📦 File prep verification failed: {reason}")
         prompt = base_prompt + f"\n\n### PREVIOUS ATTEMPT FAILED\n{reason}\nProduce a lossless split."
 
+    recon_out.unlink(missing_ok=True)  # drop any leftover from the last attempt
     return {
         "status": "error",
         "message": f"Could not produce a verified lossless split after "

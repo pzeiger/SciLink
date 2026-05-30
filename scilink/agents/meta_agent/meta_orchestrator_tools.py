@@ -433,7 +433,10 @@ class MetaOrchestratorTools:
                 executor=ScriptExecutor(timeout=120),
                 output_dir=self.orch.base_dir / "prepared",
                 probe=probe,
-                logger=getattr(self.orch, "logger", None),
+                logger=self.logger,
+                max_retries=2,  # 3 attempts total — binary containers (HDF5/.mat)
+                                # often need a correction pass; the round-trip net
+                                # keeps a bad accept unlikely, so retries are cheap.
             )
             return json.dumps(result, default=str)
 
