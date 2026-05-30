@@ -534,6 +534,8 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "auxiliary_label": None,
             "auxiliary_summary": None,
             "auxiliary_mime_type": None,
+            "auxiliary_array": None,
+            "auxiliary_axis": None,
         }
         if auxiliary_data:
             aux_state = self._load_auxiliary_data(auxiliary_data, auxiliary_label)
@@ -805,6 +807,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "auxiliary_label": auxiliary_label or Path(auxiliary_data).stem,
             "auxiliary_summary": None,
             "auxiliary_mime_type": None,
+            # Raw numbers retained so the generated fit script may use the
+            # auxiliary as an OPTIONAL operand (e.g. baseline subtraction), not
+            # only as a rendered picture. ``auxiliary_axis`` holds the x-axis of
+            # a 1D curve (for alignment); None for images. (#226)
+            "auxiliary_array": None,
+            "auxiliary_axis": None,
         }
 
         if not os.path.exists(auxiliary_data):
@@ -866,6 +874,8 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     f"X range: [{float(np.nanmin(x)):.4g}, {float(np.nanmax(x)):.4g}]. "
                     f"Y range: [{float(np.nanmin(y)):.4g}, {float(np.nanmax(y)):.4g}]."
                 )
+                result["auxiliary_array"] = np.asarray(y, dtype=float)
+                result["auxiliary_axis"] = np.asarray(x, dtype=float)
 
                 plot_info = {"title": result["auxiliary_label"]}
                 plot_data = np.column_stack([x, y])
@@ -885,6 +895,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     f"Image with shape {img.shape} "
                     f"(dtype: {img.dtype})."
                 )
+                result["auxiliary_array"] = img
                 if img.ndim == 3:
                     import cv2
                     img_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)

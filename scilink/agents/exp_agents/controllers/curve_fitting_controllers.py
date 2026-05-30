@@ -1771,6 +1771,46 @@ Your guidance: '''
         if prior_runs:
             context_parts.append(prior_runs)
 
+        # Optional auxiliary operand (#226): when a 1D auxiliary curve is aligned
+        # with the primary (same length), write it next to the spectrum and offer
+        # it to the generated script as an optional operand (e.g. baseline/
+        # reference subtraction). Otherwise it stays context-only (no resampling
+        # in v1) — the rendered plot still reaches the planning/interpretation LLM.
+        auxiliary_block = ""
+        aux_arr = state.get("auxiliary_array")
+        aux_axis = state.get("auxiliary_axis")
+        if aux_arr is not None and aux_axis is not None:
+            aux_arr = np.asarray(aux_arr)
+            aux_axis = np.asarray(aux_axis)
+            if aux_arr.ndim == 1 and aux_arr.shape[0] == stats["n_points"]:
+                aux_path = self.output_dir / "temp_auxiliary.npy"
+                np.save(aux_path, np.column_stack([aux_axis, aux_arr]))
+                label = state.get("auxiliary_label") or "reference"
+                auxiliary_block = (
+                    "\n**Optional reference/baseline operand:**\n"
+                    f"- Path: `{aux_path}` — a 2-column [x, y] NumPy array, "
+                    f"{aux_arr.shape[0]} points, on the same x-axis as the primary "
+                    f"(x range [{float(np.nanmin(aux_axis)):.6g}, "
+                    f"{float(np.nanmax(aux_axis)):.6g}]).\n"
+                    f"- This is \"{label}\". You MAY load it and use it numerically — "
+                    "e.g. subtract or divide its y-column from the primary — ONLY if "
+                    "your method needs it (background/baseline removal, normalization). "
+                    "The primary data is the base input; the reference is optional, "
+                    "never required.\n"
+                    "- Do NOT report findings about the reference as if it were a "
+                    "measurement; it is an operand for transforming the primary.\n"
+                )
+                self.logger.info(
+                    f"🧩 Offering auxiliary '{label}' ({aux_arr.shape[0]} pts) as an "
+                    f"optional fit-script operand."
+                )
+            else:
+                self.logger.info(
+                    f"Auxiliary present but not aligned with the primary "
+                    f"({getattr(aux_arr, 'shape', None)} vs {stats['n_points']} pts); "
+                    f"kept as context only (not a fit-script operand)."
+                )
+
         prompt = self.script_instructions.format(
             analysis_approach=config.get("analysis_approach", "Fit the data"),
             physical_model=config.get("physical_model", "Appropriate model"),
@@ -1783,6 +1823,7 @@ Your guidance: '''
             x_max=stats["x_range"][1],
             y_min=stats["y_range"][0],
             y_max=stats["y_range"][1],
+            auxiliary_block=auxiliary_block,
             tool_inventory=_tool_inventory_text(state),
         )
 

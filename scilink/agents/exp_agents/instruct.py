@@ -2185,7 +2185,7 @@ plan as specified and let the retry pipeline handle actual runtime failures.
 - Points: {n_points}
 - X: [{x_min:.6g}, {x_max:.6g}]
 - Y: [{y_min:.6g}, {y_max:.6g}]
-
+{auxiliary_block}
 {tool_inventory}
 
 **Available Libraries:** numpy, pandas, scipy, lmfit, matplotlib, json
