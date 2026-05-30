@@ -403,6 +403,71 @@ class MetaOrchestratorTools:
             required=[],
         )
 
+        # ----- prepare_inputs (lossless data/metadata split) ------------------
+        # The meta's ONLY code-generation surface, restricted to LOSSLESS file
+        # repackaging before delegation: split a single combined data+metadata
+        # file into a data file + a metadata JSON. Round-trip verified; NEVER
+        # used for analysis/computation — that is always delegated.
+        def prepare_inputs(path: str) -> str:
+            from ...utils.file_prep import prepare_inputs as _split_file
+            from ...executors import ScriptExecutor, require_sandbox_approval
+            p = Path(path)
+            if not p.exists() or not p.is_file():
+                return json.dumps({"status": "error",
+                                   "message": f"File not found: {p}"})
+            if not require_sandbox_approval(
+                context="Meta agent file preparation (lossless data/metadata split)"
+            ):
+                return json.dumps({
+                    "status": "error",
+                    "message": "Code execution declined; cannot prepare the file. "
+                               "Delegate it to the specialist as-is.",
+                })
+            try:
+                probe = _probe_file(p)
+            except Exception:
+                probe = None
+            result = _split_file(
+                p,
+                model=self.orch.model,
+                executor=ScriptExecutor(timeout=120),
+                output_dir=self.orch.base_dir / "prepared",
+                probe=probe,
+                logger=getattr(self.orch, "logger", None),
+            )
+            return json.dumps(result, default=str)
+
+        self._register_tool(
+            func=prepare_inputs,
+            name="prepare_inputs",
+            description=(
+                "Split ONE combined file that holds BOTH data and metadata into a "
+                "separate data file + metadata JSON, so the specialist receives a "
+                "clean (data, metadata) pair. Returns data_path + metadata_path; "
+                "thread them into the next delegate_to_* call. Use after "
+                "inspect_uploads when a probe shows data and metadata mixed in one "
+                "file (HDF5/NeXus with attributes, .npz with data+meta keys, a "
+                "CSV/text with a header/comment metadata block, a vendor container). "
+                "This is the META AGENT'S ONLY code-generation tool and it is "
+                "STRICTLY LIMITED to lossless file repackaging: the generated code "
+                "may only separate existing data from metadata and is round-trip "
+                "verified (the reconstruction must match the original) — it NEVER "
+                "transforms, computes, fits, or analyzes. All analysis is delegated. "
+                "On error (no verified lossless split), do NOT silently delegate — "
+                "tell the user and ask how to proceed (analyze as-is, or supply data "
+                "and metadata separately); fall back to as-is only if no user."
+            ),
+            parameters={
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path to the combined data+metadata file to split."
+                    ),
+                },
+            },
+            required=["path"],
+        )
+
         # ----- view_image -----------------------------------------------------
         # Generic "view & describe an arbitrary image" — the meta itself has no
         # multimodal input path, so this is how a notebook photo / diagram /
