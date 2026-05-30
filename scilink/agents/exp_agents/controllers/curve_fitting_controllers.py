@@ -262,6 +262,63 @@ def _append_auxiliary_context(prompt: list, state: dict) -> None:
         })
 
 
+def _append_column_structure(prompt: list, state: dict) -> None:
+    """Surface a >2-column file's structure so the planner can choose X/Y and
+    decide how to treat extra columns. No-op for ordinary <=2-column data."""
+    info = state.get("column_info")
+    if not info:
+        return
+    lines = [
+        f"\n## Column Structure",
+        f"This data file has {info['n_columns']} columns "
+        f"({'named' if info.get('names_known') else 'unnamed — referenced by index'}). "
+        "Decide which column is X and which is Y to fit, and note the role of the rest.",
+    ]
+    for c in info.get("per_column", []):
+        rng = (f"[{c['min']:.6g}, {c['max']:.6g}]"
+               if c.get("min") is not None else "(non-numeric)")
+        mono = ", monotonic" if c.get("monotonic") else ""
+        lines.append(f"- index {c['index']} \"{c['name']}\": range {rng}{mono}")
+    preview = info.get("preview_rows")
+    if preview:
+        lines.append("First rows: " + json.dumps(preview))
+    prompt.append("\n".join(lines))
+
+
+def _resolve_column_mapping(state: dict):
+    """Resolve the LLM's column_mapping against column_info into concrete indices.
+
+    Returns ``{x_index, y_index, names, note, extras}`` or None — None means fall
+    back to the deterministic heuristic (unresolvable / missing / x==y)."""
+    info = state.get("column_info")
+    cm = state.get("column_mapping")
+    if not info or not isinstance(cm, dict):
+        return None
+    names = info.get("names") or []
+    n = info["n_columns"]
+
+    def resolve(ref):
+        if isinstance(ref, bool):
+            return None
+        if isinstance(ref, int) and 0 <= ref < n:
+            return ref
+        if isinstance(ref, str):
+            low = ref.strip().lower()
+            for i, c in enumerate(names):
+                if str(c).strip().lower() == low:
+                    return i
+            if low.isdigit() and 0 <= int(low) < n:
+                return int(low)
+        return None
+
+    xi, yi = resolve(cm.get("x")), resolve(cm.get("y"))
+    if xi is None or yi is None or xi == yi:
+        return None
+    return {"x_index": xi, "y_index": yi, "names": names,
+            "note": state.get("column_mapping_note", ""),
+            "extras": cm.get("extras", [])}
+
+
 def _append_fit_domain_guidance(prompt: list, state: dict) -> None:
     """Surface a custom processing instruction to the planner as fit-domain
     guidance.
@@ -1218,6 +1275,44 @@ class HumanFeedbackRefinementController:
             state["_refine_feedback"] = feedback
             return state
 
+    def _apply_column_mapping_to_arrays(self, state: dict, mapping: dict) -> None:
+        """Re-slice in-memory array/DataFrame inputs to the LLM-chosen (x, y).
+
+        File inputs re-load lazily with the locked mapping (see the load path), so
+        only array/DataFrame inputs — whose data was reduced heuristically at
+        ingestion — need this in-memory correction. No-op otherwise.
+        """
+        raw = state.get("raw_first_spectrum_full")
+        if raw is None:
+            return
+        raw = np.asarray(raw)
+        if raw.ndim != 2:
+            return
+        if raw.shape[0] < raw.shape[1]:          # orient to (n_points, n_cols)
+            raw = raw.T
+        xi, yi = mapping["x_index"], mapping["y_index"]
+        if xi >= raw.shape[1] or yi >= raw.shape[1]:
+            return
+        xy = np.vstack([raw[:, xi], raw[:, yi]])  # (2, n)
+        stack = state.get("spectrum_stack")
+        if stack is not None and stack.shape[0] >= 1:
+            new_stack = stack.copy()
+            new_stack[0] = xy
+            state["spectrum_stack"] = new_stack
+        state["curve_data"] = xy
+        x, y = xy[0], xy[1]
+        state["data_statistics"] = {
+            "n_points": int(len(x)),
+            "x_range": [float(np.nanmin(x)), float(np.nanmax(x))],
+            "y_range": [float(np.nanmin(y)), float(np.nanmax(y))],
+            "y_mean": float(np.nanmean(y)),
+            "y_std": float(np.nanstd(y)),
+            "has_nans": bool(np.any(np.isnan(xy))),
+        }
+        self.logger.info(
+            f"  Re-sliced in-memory data to X=col {xi}, Y=col {yi} per column mapping."
+        )
+
     def _plan_analysis(self, state: dict) -> dict:
         prompt = [
             self.instructions,
@@ -1229,6 +1324,7 @@ class HumanFeedbackRefinementController:
 
         _append_objective_context(prompt, state)
         _append_fit_domain_guidance(prompt, state)
+        _append_column_structure(prompt, state)
 
         if state.get("analysis_hints"):
             prompt.append(f"\n## User Guidance\n{state['analysis_hints']}")
@@ -1275,6 +1371,17 @@ class HumanFeedbackRefinementController:
         state["parameters_to_extract"] = result.get("parameters_to_extract", [])
         state["fitting_strategy"] = result.get("fitting_strategy", "Standard fitting")
         state["literature_query"] = result.get("literature_query")
+
+        # Multi-column inputs: record the LLM's column decision (resolved + locked
+        # later). Only present when a Column Structure block was shown.
+        if state.get("column_info"):
+            state["column_mapping"] = result.get("column_mapping")
+            state["column_mapping_note"] = result.get("column_mapping_note", "")
+            if state["column_mapping"]:
+                self.logger.info(
+                    f"  Column mapping (LLM): {state['column_mapping']} "
+                    f"— {state['column_mapping_note']}"
+                )
 
         # Extract series analysis plan if present
         self._extract_series_plan(state, result)
@@ -1562,11 +1669,29 @@ class HumanFeedbackRefinementController:
                     self.logger.warning("  Max iterations reached.")
                     print("⚠️  Max refinements reached. Proceeding with current plan.")
 
+            # Resolve + lock the column mapping (>2-col inputs only). It applies to
+            # every spectrum (column roles are a file-structure property), so store
+            # it at a stable key the load path reads, and re-slice array/DataFrame
+            # inputs whose data is already in memory.
+            column_mapping = _resolve_column_mapping(state)
+            state["column_mapping_locked"] = column_mapping
+            if column_mapping:
+                self.logger.info(
+                    f"  ✅ Locked column mapping: X=col {column_mapping['x_index']}, "
+                    f"Y=col {column_mapping['y_index']}."
+                )
+                self._apply_column_mapping_to_arrays(state, column_mapping)
+            elif state.get("column_info"):
+                self.logger.info(
+                    "  Column mapping unresolved/absent — heuristic X/Y selection."
+                )
+
             state["locked_fitting_config"] = {
                 "analysis_approach": state.get("analysis_approach"),
                 "physical_model": state.get("physical_model"),
                 "parameters_to_extract": state.get("parameters_to_extract", []),
                 "fitting_strategy": state.get("fitting_strategy"),
+                "column_mapping": column_mapping,
             }
 
             # Build per-regime configs if series plan has multiple regimes
@@ -1586,6 +1711,8 @@ class HumanFeedbackRefinementController:
                         "fitting_strategy": regime.get(
                             "fitting_strategy", state.get("fitting_strategy")
                         ),
+                        # Column roles are a file property — same across regimes.
+                        "column_mapping": column_mapping,
                     }
                     for idx in regime.get("spectrum_indices", []):
                         regime_configs[idx] = regime_config
@@ -1616,7 +1743,9 @@ class HumanFeedbackRefinementController:
                 "physical_model": state.get("physical_model"),
                 "parameters_to_extract": state.get("parameters_to_extract", []),
                 "fitting_strategy": state.get("fitting_strategy"),
+                "column_mapping": None,
             }
+            state["column_mapping_locked"] = None
             state["series_analysis_plan"] = None
             state["regime_configs"] = None
 
@@ -2000,11 +2129,19 @@ Your guidance: '''
             "has_nans": bool(np.any(np.isnan(curve_data))),
         }
 
-    def _load_curve_data(self, data_path: str) -> np.ndarray:
-        """Load curve data from file, handling various formats."""
+    def _load_curve_data(self, data_path: str, column_mapping: dict = None) -> np.ndarray:
+        """Load curve data from file, handling various formats. When a locked
+        ``column_mapping`` is given (>2-col inputs), it selects the LLM-chosen
+        X/Y columns; otherwise the deterministic heuristic applies."""
         # Try using the project's load_curve_data function first
         try:
             from ....skills._shared.curve_fitting_tools import load_curve_data
+            if column_mapping:
+                return load_curve_data(
+                    data_path,
+                    system_info={"x_column": column_mapping.get("x_index"),
+                                 "y_column": column_mapping.get("y_index")},
+                    column_names=column_mapping.get("names"))
             return load_curve_data(data_path)
         except ImportError:
             pass
@@ -3727,7 +3864,8 @@ Return JSON with:
             else:
                 data_path = spectrum_paths[idx]
                 spectrum_name = Path(data_path).stem
-                curve_data = self._load_curve_data(data_path)
+                curve_data = self._load_curve_data(
+                    data_path, column_mapping=state.get("column_mapping_locked"))
 
             # Raw data is fed straight to the fit script, which owns preprocessing
             # (see docs/preprocessing_in_fit_loop.md). No separate preprocessing
@@ -4265,13 +4403,14 @@ class AdaptiveRefitController:
             conformance_instructions=conformance_instructions,
         )
 
-    def _load_spectrum(self, idx, spectrum_paths, spectrum_stack):
-        """Load spectrum data for re-analysis."""
+    def _load_spectrum(self, idx, spectrum_paths, spectrum_stack, column_mapping=None):
+        """Load spectrum data for re-analysis (honors the locked column mapping)."""
         if spectrum_stack is not None:
             return spectrum_stack[idx]
         if spectrum_paths and idx < len(spectrum_paths):
             try:
-                return self._fitting_helper._load_curve_data(spectrum_paths[idx])
+                return self._fitting_helper._load_curve_data(
+                    spectrum_paths[idx], column_mapping=column_mapping)
             except Exception as e:
                 self.logger.error(f"Failed to load {spectrum_paths[idx]}: {e}")
                 return None
@@ -4451,7 +4590,9 @@ class AdaptiveRefitController:
             name = entry["name"]
             self.logger.info(f"  Re-fitting [{idx}] {name} with '{target_model}'")
 
-            curve_data = self._load_spectrum(idx, spectrum_paths, spectrum_stack)
+            curve_data = self._load_spectrum(
+                idx, spectrum_paths, spectrum_stack,
+                column_mapping=state.get("column_mapping_locked"))
             if curve_data is None:
                 continue
 
@@ -4567,7 +4708,9 @@ class AdaptiveRefitController:
 
             self.logger.info(f"\n  Re-analyzing [{idx}] {name} (original R²={original_r2})")
 
-            curve_data = self._load_spectrum(idx, spectrum_paths, spectrum_stack)
+            curve_data = self._load_spectrum(
+                idx, spectrum_paths, spectrum_stack,
+                column_mapping=state.get("column_mapping_locked"))
             if curve_data is None:
                 self.logger.warning(f"  Could not load spectrum data for {name}, skipping")
                 continue

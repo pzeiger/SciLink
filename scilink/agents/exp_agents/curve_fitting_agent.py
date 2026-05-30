@@ -38,7 +38,10 @@ from ...executors import ScriptExecutor, require_sandbox_approval
 from ..lit_agents.literature_agent import FittingModelLiteratureAgent
 from .preprocess import CurvePreprocessingAgent
 from .pipelines.curve_fitting_pipelines import create_unified_curve_fitting_pipeline
-from ...skills._shared.curve_fitting_tools import load_curve_data, plot_curve_to_bytes
+from ...skills._shared.curve_fitting_tools import (
+    load_curve_data, plot_curve_to_bytes, select_xy_columns,
+    describe_columns, sniff_column_names,
+)
 from ._deprecation import normalize_params
 from ...skills.loader import load_skill
 
@@ -434,7 +437,16 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # orchestrator). Defaults to "fitting" when unset.
         effective_task_mode = self._resolve_task_mode(task_mode)
         
-        # Convert DataFrame to numpy array (first two numeric columns)
+        # Column structure for the planner (only populated for >2-col inputs);
+        # the LLM decides X/Y at planning, the heuristic is the fallback. The raw
+        # full first spectrum is retained so the lock step can re-slice array/
+        # DataFrame inputs (file inputs re-load with the locked mapping lazily).
+        column_info = None
+        raw_first_spectrum_full = None
+
+        # Convert DataFrame to a 2-column (x, y) array. With >2 numeric columns,
+        # capture the column structure for the planner, then heuristic-reduce for
+        # the planning plot/stats (the LLM's choice is applied at lock).
         if isinstance(data, pd.DataFrame):
             numeric_cols = data.select_dtypes(include="number")
             if numeric_cols.shape[1] < 2:
@@ -444,7 +456,11 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                               "details": f"Expected at least 2 numeric columns, got {numeric_cols.shape[1]}"},
                     "output_directory": str(self.output_dir)
                 }
-            data = numeric_cols.iloc[:, :2].to_numpy()
+            _col_names = [str(c) for c in numeric_cols.columns]
+            raw_first_spectrum_full = numeric_cols.to_numpy()
+            column_info = describe_columns(raw_first_spectrum_full, names=_col_names)
+            data = select_xy_columns(raw_first_spectrum_full, system_info=system_info,
+                                     logger_=self.logger, column_names=_col_names)
 
         # Parse input
         data_path, data_paths, data_array, error = self._parse_data_input(data)
@@ -478,9 +494,21 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 if spectrum_stack.shape[0] == 2:
                     # Shape (2, n): single spectrum with x and y
                     spectrum_stack = spectrum_stack[np.newaxis, :, :]
-                else:
+                elif spectrum_stack.shape[1] == 2:
                     # Shape (n, 2): single spectrum, transpose
                     spectrum_stack = spectrum_stack.T[np.newaxis, :, :]
+                else:
+                    # >2 columns (e.g. x, y, error): capture structure for the
+                    # planner, retain the raw (oriented to n_points×n_cols), then
+                    # heuristic-reduce; the LLM's choice is applied at lock.
+                    raw_first_spectrum_full = (
+                        spectrum_stack.T if spectrum_stack.shape[0] < spectrum_stack.shape[1]
+                        else spectrum_stack
+                    )
+                    column_info = describe_columns(raw_first_spectrum_full)
+                    xy = select_xy_columns(spectrum_stack, system_info=system_info,
+                                           logger_=self.logger)
+                    spectrum_stack = xy.T[np.newaxis, :, :]
                 self.logger.info(f"2D array provided, converted to shape {spectrum_stack.shape}")
             elif spectrum_stack.ndim != 3:
                 return {
@@ -511,8 +539,16 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             first_spectrum_name = "spectrum_0000"
         else:
             try:
-                first_spectrum = load_curve_data(spectrum_paths[0])
+                first_spectrum = load_curve_data(spectrum_paths[0], system_info=system_info)
                 first_spectrum_name = Path(spectrum_paths[0]).stem
+                # Capture the raw column structure for the planner (best-effort);
+                # the per-spectrum fit re-loads lazily with the locked mapping.
+                try:
+                    _raw0 = load_curve_data(spectrum_paths[0], auto_orient=False)
+                    column_info = describe_columns(
+                        _raw0, names=sniff_column_names(spectrum_paths[0]))
+                except Exception:
+                    column_info = None
             except Exception as e:
                 return {
                     "status": "error",
@@ -642,6 +678,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "data_statistics": data_statistics,
             "first_spectrum_preprocessed": first_spectrum_preprocess_quality is not None,
             "first_spectrum_preprocess_quality": first_spectrum_preprocess_quality,
+
+            # Multi-column (>2) inputs: full column structure for the planner to
+            # choose X/Y from, and the retained raw first spectrum for array/
+            # DataFrame re-slice at lock. Both None for the common <=2-col case.
+            "column_info": column_info,
+            "raw_first_spectrum_full": raw_first_spectrum_full,
 
             # Pipeline state
             "analysis_images": [{"label": "First Spectrum", "data": original_plot_bytes}],

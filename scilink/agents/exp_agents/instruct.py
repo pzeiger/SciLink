@@ -2082,6 +2082,14 @@ not style preferences.
   the user can refine before the plan is locked
 - This plan will be translated directly into code; any ambiguity forces the code generator to guess
 
+**Column selection (only when a "## Column Structure" section is present below):**
+The data file has more than two columns and NO assumption is made about their
+order. From the listed columns (names, ranges, monotonicity, preview), decide
+which column is the independent variable X and which is the dependent variable Y
+to fit. Note the role of any other columns (e.g. an uncertainty/error column, a
+second channel, an index, an irrelevant column) and how each should be treated.
+Refer to columns by name when names are given, otherwise by index.
+
 **Output Format:**
 ```json
 {
@@ -2090,9 +2098,13 @@ not style preferences.
     "physical_model": "Mathematical form — be specific: state the exact profile/function type, exact number of components, and baseline treatment",
     "parameters_to_extract": ["param1", "param2"],
     "fitting_strategy": "How you will fit (initial guesses, constraints, method)",
-    "literature_query": "Question for literature search to help with fitting, or null if not needed"
+    "literature_query": "Question for literature search to help with fitting, or null if not needed",
+    "column_mapping": {"x": "<column name or index>", "y": "<column name or index>", "extras": [{"ref": "<name or index>", "role": "uncertainty|channel|index|ignore|...", "use": "free-text or 'none'"}]},
+    "column_mapping_note": "Brief rationale for the column-role decision"
 }
 ```
+Include `column_mapping`/`column_mapping_note` ONLY when a "## Column Structure"
+section is present; omit them entirely for ordinary two-column data.
 """
 
 

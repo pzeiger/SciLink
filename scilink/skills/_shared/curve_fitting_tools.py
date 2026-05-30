@@ -38,25 +38,190 @@ def _try_orient_xy(data: np.ndarray) -> np.ndarray:
     return data
 
 
-def load_curve_data(data_path: str, auto_orient: bool = True) -> np.ndarray:
+# Column-name fragments that strongly suggest the independent (X) variable, used
+# to pick X from a >2-column table when no explicit hint is given.
+_X_AXIS_HINTS = (
+    "2theta", "two_theta", "twotheta", "theta", "angle", "wavelength", "wavenumber",
+    "energy", "ev", "raman", "shift", "time", "freq", "frequency", "temperature",
+    "temp", "field", "position", "distance", "voltage", "bias", "delay", "q", "x",
+)
+# Fragments suggesting a column is NOT the signal (uncertainty/weight columns) —
+# avoided when choosing Y.
+_NON_Y_HINTS = ("err", "error", "sigma", "std", "uncert", "weight", "noise")
+
+
+def _choose_xy_indices(arr, system_info, column_names, log):
+    """Pick (x_index, y_index) from a >2-column array.
+
+    Priority: (1) explicit ``x_column``/``y_column`` in system_info (name or
+    index); (2) a column whose name matches an axis hint as X + first non-error
+    column as Y; (3) the single monotonic column as X; (4) first two columns.
+    """
+    n = arr.shape[1]
+    si = system_info if isinstance(system_info, dict) else {}
+    names = column_names or si.get("columns")
+    low = [str(c).strip().lower() for c in names[:n]] if names and len(names) >= n else None
+
+    def resolve(spec):
+        if isinstance(spec, bool):
+            return None
+        if isinstance(spec, int) and 0 <= spec < n:
+            return spec
+        if isinstance(spec, str) and low:
+            for i, c in enumerate(low):
+                if c == spec.strip().lower():
+                    return i
+        return None
+
+    xi, yi = resolve(si.get("x_column")), resolve(si.get("y_column"))
+    if xi is not None and yi is not None and xi != yi:
+        return xi, yi
+
+    if low:  # name-hint heuristic
+        x_guess = next((i for i, c in enumerate(low)
+                        if any(h in c for h in _X_AXIS_HINTS)), None)
+        if x_guess is not None:
+            y_guess = next((i for i in range(n) if i != x_guess
+                            and not any(b in low[i] for b in _NON_Y_HINTS)),
+                           next((i for i in range(n) if i != x_guess), None))
+            return x_guess, y_guess
+
+    for i in range(n):  # monotonic-column heuristic
+        col = arr[:, i]
+        if col.size >= 2 and np.all(np.isfinite(col)) and \
+                (np.all(np.diff(col) > 0) or np.all(np.diff(col) < 0)):
+            return i, next(j for j in range(n) if j != i)
+
+    return 0, 1  # default: first two columns
+
+
+def select_xy_columns(data, system_info=None, logger_=None, column_names=None) -> np.ndarray:
+    """Reduce array-like curve data to a 2-column ``(x, y)`` array.
+
+    Curve fitting is a 1D (x, y) operation, but real files arrive with extra
+    columns (an error/weight column, multiple channels) or in row layout. This
+    centralizes the reduction: 1D → ``(index, y)``; row-major ``(2, N)`` →
+    transposed; ``(N, 2)`` → oriented; ``(N, M>2)`` → X/Y selected (see
+    ``_choose_xy_indices``) and the rest dropped (logged). Column SELECTION is an
+    analysis decision and so lives here — lossless file-prep keeps all columns.
+    """
+    log = logger_ or logger
+    arr = np.asarray(data)
+    if arr.ndim == 1:
+        return np.column_stack([np.arange(arr.size), arr])
+    if arr.ndim != 2:
+        raise ValueError(f"Expected 1D or 2D curve data, got {arr.ndim}D")
+    # Orient to (n_points, n_cols): curve data has many more points than columns.
+    if arr.shape[0] < arr.shape[1]:
+        arr = arr.T
+    n_cols = arr.shape[1]
+    if n_cols == 1:
+        return np.column_stack([np.arange(arr.shape[0]), arr[:, 0]])
+    if n_cols == 2:
+        return _try_orient_xy(np.ascontiguousarray(arr))
+    xi, yi = _choose_xy_indices(arr, system_info, column_names, log)
+    if log:
+        cols_desc = f" ({column_names})" if column_names else ""
+        log.warning(
+            f"select_xy_columns: {n_cols}-column data{cols_desc} reduced to "
+            f"(X=col {xi}, Y=col {yi}); other columns dropped for fitting."
+        )
+    return _try_orient_xy(np.column_stack([arr[:, xi], arr[:, yi]]))
+
+
+def describe_columns(data, names=None):
+    """Describe a >2-column table for the planning LLM, or None for <=2 columns.
+
+    Oriented to (n_points, n_cols) to match :func:`select_xy_columns`, so the
+    column indices the LLM returns line up with selection. Names are used when
+    provided (DataFrame/CSV header), else positional ``col_i``.
+    """
+    arr = np.asarray(data)
+    if arr.ndim != 2:
+        return None
+    if arr.shape[0] < arr.shape[1]:   # orient: many more points than columns
+        arr = arr.T
+    n_cols = arr.shape[1]
+    if n_cols <= 2:
+        return None
+    names_known = bool(names) and len(names) >= n_cols
+    names = ([str(c) for c in names[:n_cols]] if names_known
+             else [f"col_{i}" for i in range(n_cols)])
+    per_column = []
+    for i in range(n_cols):
+        col = arr[:, i]
+        is_num = np.issubdtype(col.dtype, np.number)
+        finite = col[np.isfinite(col)] if is_num else col
+        mono = (is_num and col.size >= 2
+                and (np.all(np.diff(col) > 0) or np.all(np.diff(col) < 0)))
+        per_column.append({
+            "index": i, "name": names[i],
+            "min": float(np.min(finite)) if is_num and finite.size else None,
+            "max": float(np.max(finite)) if is_num and finite.size else None,
+            "monotonic": bool(mono),
+        })
+    return {"n_columns": n_cols, "names": names, "names_known": names_known,
+            "per_column": per_column, "preview_rows": arr[:5].tolist()}
+
+
+def sniff_column_names(data_path):
+    """Best-effort header sniff for a delimited text file → column names or None.
+
+    None for headerless files (every header token parses as a number) and for
+    formats without a textual header (.npy / binary)."""
+    ext = os.path.splitext(str(data_path))[1].lower()
+    if ext not in (".csv", ".tsv", ".dat", ".txt"):
+        return None
+    try:
+        import pandas as pd
+        sep = "\t" if ext == ".tsv" else ("," if ext == ".csv" else r"\s+")
+        df = pd.read_csv(data_path, sep=sep, comment="#", nrows=5, engine="python")
+        cols = [str(c) for c in df.columns]
+
+        def _isnum(s):
+            cands = [s]
+            if s.count(".") > 1:           # drop pandas '.N' duplicate-name suffix
+                cands.append(s.rsplit(".", 1)[0])
+            for c in cands:
+                try:
+                    float(c); return True
+                except ValueError:
+                    pass
+            return False
+        # If most "names" parse as numbers, there was no header row (the data row
+        # was misread as the header) → positional names are the safe choice.
+        numeric = sum(_isnum(c) for c in cols)
+        return None if numeric * 2 >= len(cols) else cols
+    except Exception:
+        return None
+
+
+def load_curve_data(data_path: str, auto_orient: bool = True,
+                    system_info: dict = None, column_names: list = None) -> np.ndarray:
     """
     Robustly loads curve data (X, Y) from various file formats.
     Handles .npy, .h5/.hdf5/.nxs (NeXus), CSV, TSV, and whitespace separation
     automatically.
 
-    When ``auto_orient`` is True (default), a 2-column result whose first
-    column is non-monotonic but second column is monotonic is reoriented so
-    X comes first — fixing inputs where intensity precedes the independent
-    variable (e.g. CSVs whose header is ``intensity, time``). Pass
-    ``auto_orient=False`` for legacy raw-layout behavior.
+    When ``auto_orient`` is True (default), the result is normalized to a
+    2-column ``(X, Y)`` array via :func:`select_xy_columns`: a 2-column array is
+    oriented so the monotonic (X) column comes first, and a >2-column table (an
+    extra error/weight column, multiple channels) is reduced to the chosen X/Y
+    pair — guided by ``system_info`` (``x_column``/``y_column`` or ``columns``)
+    and ``column_names`` when given, else by an axis-name / monotonicity
+    heuristic. Pass ``auto_orient=False`` for legacy raw-layout behavior.
     """
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"File not found: {data_path}")
 
+    def _finish(arr):
+        return (select_xy_columns(arr, system_info=system_info,
+                                  column_names=column_names)
+                if auto_orient else arr)
+
     # Native numpy format
     if data_path.endswith('.npy'):
-        data = np.load(data_path)
-        return _try_orient_xy(data) if auto_orient else data
+        return _finish(np.load(data_path))
 
     # NeXus / HDF5 — pull the signal and (when present) its axis so we
     # can return (X, Y) pairs for callers that expect a 2D layout.
@@ -65,7 +230,7 @@ def load_curve_data(data_path: str, auto_orient: bool = True) -> np.ndarray:
         signal, axes = load_hdf5_signal(data_path, return_axes=True)
         if signal.ndim == 1 and axes and axes[0] is not None and axes[0].size == signal.size:
             return np.column_stack([axes[0], signal])
-        return _try_orient_xy(signal) if auto_orient else signal
+        return _finish(signal)
 
     attempts = [
         dict(),                                # whitespace-delimited, no header
@@ -78,7 +243,7 @@ def load_curve_data(data_path: str, auto_orient: bool = True) -> np.ndarray:
         try:
             data = np.loadtxt(data_path, **kw)
             if data.size > 0:
-                return _try_orient_xy(data) if auto_orient else data
+                return _finish(data)
         except Exception:
             pass
 
