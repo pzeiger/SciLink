@@ -59,6 +59,13 @@ from .instruct import (
 logger = logging.getLogger(__name__)
 
 
+def _empty_auxiliary_state() -> dict:
+    """Default auxiliary state — no companion datasets loaded. ``auxiliary_items``
+    is the list of per-dataset dicts (label / array / axis / plot_bytes /
+    summary / mime_type); labels become operand keys downstream. (#226)"""
+    return {"auxiliary_items": []}
+
+
 class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
     Unified Image Analysis Agent for general-purpose scientific image analysis.
@@ -224,8 +231,8 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         objective: str | None = None,
         hints: str | None = None,
         series_metadata: Optional[dict] = None,
-        auxiliary_data: Optional[str] = None,
-        auxiliary_label: Optional[str] = None,
+        auxiliary_data: Optional[Union[str, List[str]]] = None,
+        auxiliary_label: Optional[Union[str, List[str]]] = None,
         skill: Optional[str] = None,
         prior_knowledge: Optional[List[Dict[str, Any]]] = None,
         prior_analysis_paths: Optional[List[str]] = None,
@@ -369,19 +376,14 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Compute statistics
         image_statistics = self._compute_image_statistics(first_image)
 
-        # Load auxiliary data if provided
-        aux_state = {
-            "auxiliary_plot_bytes": None,
-            "auxiliary_label": None,
-            "auxiliary_summary": None,
-            "auxiliary_mime_type": None,
-        }
+        # Load auxiliary data if provided (one or several companion datasets)
+        aux_state = _empty_auxiliary_state()
         if auxiliary_data:
-            aux_state = self._load_auxiliary_data(auxiliary_data, auxiliary_label)
-            if aux_state.get("auxiliary_plot_bytes"):
-                self.logger.info(
-                    f"   📎 Auxiliary data loaded: {aux_state['auxiliary_label']}"
-                )
+            aux_state = self._load_auxiliary_items(auxiliary_data, auxiliary_label)
+            n = len(aux_state.get("auxiliary_items", []))
+            if n:
+                names = ", ".join(it["label"] for it in aux_state["auxiliary_items"])
+                self.logger.info(f"   📎 Auxiliary data loaded ({n}): {names}")
 
         # Load skill(s) if provided. Accepts a single name/path or a list
         # — see PR 3 multi-skill support.
@@ -614,15 +616,52 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         """Compute statistics for an image."""
         return compute_image_statistics(image)
 
+    def _load_auxiliary_items(self, auxiliary_data, auxiliary_label) -> dict:
+        """Load one or several auxiliary datasets into the multi-aux state.
+
+        Accepts ``str | list[str]`` for both args (parallel lists). Each file is
+        loaded via ``_load_auxiliary_data``; labels are deduped (auto-named
+        ``aux_<i>``) and become operand keys downstream. (#226)
+        """
+        paths = list(auxiliary_data) if isinstance(auxiliary_data, (list, tuple)) else [auxiliary_data]
+        labels = list(auxiliary_label) if isinstance(auxiliary_label, (list, tuple)) else [auxiliary_label]
+
+        items = []
+        used = set()
+        for i, p in enumerate(paths):
+            lbl = labels[i] if i < len(labels) else None
+            one = self._load_auxiliary_data(p, lbl)
+            name = one.get("auxiliary_label") or f"aux_{i}"
+            base, k = name, 1
+            while name in used:
+                name = f"{base}_{k}"; k += 1
+            used.add(name)
+            items.append({
+                "label": name,
+                "array": one.get("auxiliary_array"),
+                "axis": one.get("auxiliary_axis"),
+                "plot_bytes": one.get("auxiliary_plot_bytes"),
+                "summary": one.get("auxiliary_summary"),
+                "mime_type": one.get("auxiliary_mime_type"),
+            })
+        return {"auxiliary_items": items}
+
     def _load_auxiliary_data(
         self, auxiliary_data: str, auxiliary_label: Optional[str]
     ) -> dict:
-        """Load auxiliary data and return state fields for pipeline injection."""
+        """Load one auxiliary dataset (internal per-file contract).
+
+        Returns plot bytes + summary for the LLM AND the raw ``auxiliary_array``
+        (+ ``auxiliary_axis`` for 1D curves) so a co-registered companion may be
+        used as an optional numerical operand by generated code. (#226)
+        """
         result = {
             "auxiliary_plot_bytes": None,
             "auxiliary_label": auxiliary_label or Path(auxiliary_data).stem,
             "auxiliary_summary": None,
             "auxiliary_mime_type": None,
+            "auxiliary_array": None,
+            "auxiliary_axis": None,
         }
 
         if not os.path.exists(auxiliary_data):
@@ -639,6 +678,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 result["auxiliary_summary"] = (
                     f"Image with shape {img.shape} (dtype: {img.dtype})."
                 )
+                result["auxiliary_array"] = img
                 result["auxiliary_plot_bytes"] = image_to_thumbnail_bytes(img)
                 result["auxiliary_mime_type"] = "image/jpeg"
 
@@ -663,6 +703,8 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     f"X: [{float(np.nanmin(x)):.4g}, {float(np.nanmax(x)):.4g}]. "
                     f"Y: [{float(np.nanmin(y)):.4g}, {float(np.nanmax(y)):.4g}]."
                 )
+                result["auxiliary_array"] = np.asarray(y, dtype=float)
+                result["auxiliary_axis"] = np.asarray(x, dtype=float)
 
                 plot_info = {"title": result["auxiliary_label"]}
                 plot_data = np.column_stack([x, y])

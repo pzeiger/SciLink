@@ -114,23 +114,9 @@ def _append_prior_knowledge_context(prompt: list, state: dict) -> None:
 
 
 def _auxiliary_display_items(state: dict) -> list:
-    """Return the auxiliary datasets to show the LLM as context.
-
-    Uses the multi-aux ``auxiliary_items`` list when present, else synthesizes a
-    one-element list from the legacy flat keys (back-compat). Only items with a
-    rendered plot are returned. (#226)
-    """
-    items = state.get("auxiliary_items")
-    if not items:
-        if not state.get("auxiliary_plot_bytes"):
-            return []
-        items = [{
-            "label": state.get("auxiliary_label", "Auxiliary data"),
-            "summary": state.get("auxiliary_summary", ""),
-            "plot_bytes": state.get("auxiliary_plot_bytes"),
-            "mime_type": state.get("auxiliary_mime_type", "image/png"),
-        }]
-    return [it for it in items if it.get("plot_bytes")]
+    """Auxiliary datasets to show the LLM as context — items with a rendered
+    plot, from the multi-aux ``auxiliary_items`` list. (#226)"""
+    return [it for it in (state.get("auxiliary_items") or []) if it.get("plot_bytes")]
 
 
 def _append_auxiliary_context(prompt: list, state: dict) -> None:

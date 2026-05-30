@@ -3157,6 +3157,7 @@ code.
 - Shape: {shape}
 - dtype: {dtype}
 - Intensity range: [{intensity_min}, {intensity_max}]
+{auxiliary_block}
 
 {tool_inventory}
 
@@ -3236,6 +3237,7 @@ code.
 - Shape: {shape}
 - dtype: {dtype}
 - Intensity range: [{intensity_min}, {intensity_max}]
+{auxiliary_block}
 
 {tool_inventory}
 

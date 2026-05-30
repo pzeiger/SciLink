@@ -29,21 +29,10 @@ from ._deprecation import normalize_params
 
 
 def _empty_auxiliary_state() -> dict:
-    """Default auxiliary state — no companion datasets loaded.
-
-    ``auxiliary_items`` is the multi-auxiliary list (each entry has label /
-    array / axis / plot_bytes / summary / mime_type). The flat ``auxiliary_*``
-    keys mirror the first item for back-compat with single-aux readers. (#226)
-    """
-    return {
-        "auxiliary_items": [],
-        "auxiliary_plot_bytes": None,
-        "auxiliary_label": None,
-        "auxiliary_summary": None,
-        "auxiliary_mime_type": None,
-        "auxiliary_array": None,
-        "auxiliary_axis": None,
-    }
+    """Default auxiliary state — no companion datasets loaded. ``auxiliary_items``
+    is the list of per-dataset dicts (label / array / axis / plot_bytes /
+    summary / mime_type); labels become operand keys downstream. (#226)"""
+    return {"auxiliary_items": []}
 
 
 class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
@@ -529,19 +518,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "mime_type": one.get("auxiliary_mime_type"),
             })
 
-        state = _empty_auxiliary_state()
-        state["auxiliary_items"] = items
-        if items:  # mirror first item into the flat keys (back-compat)
-            f = items[0]
-            state.update({
-                "auxiliary_plot_bytes": f["plot_bytes"],
-                "auxiliary_label": f["label"],
-                "auxiliary_summary": f["summary"],
-                "auxiliary_mime_type": f["mime_type"],
-                "auxiliary_array": f["array"],
-                "auxiliary_axis": f["axis"],
-            })
-        return state
+        return {"auxiliary_items": items}
 
     def _load_auxiliary_data(
         self, auxiliary_data: str, auxiliary_label: str | None

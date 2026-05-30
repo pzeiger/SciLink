@@ -234,20 +234,9 @@ def _sanitize_aux_name(label: str, idx: int) -> str:
 
 
 def _auxiliary_display_items(state: dict) -> list:
-    """Auxiliary datasets to show the LLM as context. Uses the multi-aux
-    ``auxiliary_items`` list when present, else synthesizes one entry from the
-    legacy flat keys (back-compat). Only items with a rendered plot. (#226)"""
-    items = state.get("auxiliary_items")
-    if not items:
-        if not state.get("auxiliary_plot_bytes"):
-            return []
-        items = [{
-            "label": state.get("auxiliary_label", "Auxiliary data"),
-            "summary": state.get("auxiliary_summary", ""),
-            "plot_bytes": state.get("auxiliary_plot_bytes"),
-            "mime_type": state.get("auxiliary_mime_type", "image/png"),
-        }]
-    return [it for it in items if it.get("plot_bytes")]
+    """Auxiliary datasets to show the LLM as context — items with a rendered
+    plot, from the multi-aux ``auxiliary_items`` list. (#226)"""
+    return [it for it in (state.get("auxiliary_items") or []) if it.get("plot_bytes")]
 
 
 def _append_auxiliary_context(prompt: list, state: dict) -> None:
@@ -4452,15 +4441,9 @@ class AdaptiveRefitController:
             "analysis_objective": state.get("analysis_objective"),
             "skill_name": state.get("skill_name"),
             "skill_sections": state.get("skill_sections"),
-            "auxiliary_plot_bytes": state.get("auxiliary_plot_bytes"),
-            "auxiliary_label": state.get("auxiliary_label"),
-            "auxiliary_summary": state.get("auxiliary_summary"),
-            "auxiliary_mime_type": state.get("auxiliary_mime_type"),
-            # Multi-aux: carry the full item list + first-item operand arrays so
-            # operands flow through this sub-state path too (#226).
+            # Carry the multi-aux item list so display + operands flow through
+            # this sub-state path too (#226).
             "auxiliary_items": state.get("auxiliary_items", []),
-            "auxiliary_array": state.get("auxiliary_array"),
-            "auxiliary_axis": state.get("auxiliary_axis"),
             "prior_knowledge": state.get("prior_knowledge", []),
             "analysis_images": [],
         }

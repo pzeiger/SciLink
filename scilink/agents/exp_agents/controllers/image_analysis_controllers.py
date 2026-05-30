@@ -214,24 +214,37 @@ def build_verification_prompt_with_history(
     return "\n".join(lines)
 
 
+def _sanitize_aux_name(label: str, idx: int) -> str:
+    """Filesystem-safe stem for a per-auxiliary temp file."""
+    safe = re.sub(r'[^0-9A-Za-z_-]', '_', str(label)).strip('_')
+    return safe or f"aux{idx}"
+
+
+def _auxiliary_display_items(state: dict) -> list:
+    """Auxiliary datasets to show the LLM as context — items with a rendered
+    plot, from the multi-aux ``auxiliary_items`` list. (#226)"""
+    return [it for it in (state.get("auxiliary_items") or []) if it.get("plot_bytes")]
+
+
 def _append_auxiliary_context(prompt: list, state: dict) -> None:
-    """Append auxiliary reference data to an LLM prompt if available."""
-    if not state.get("auxiliary_plot_bytes"):
+    """Append auxiliary reference dataset(s) to an LLM prompt if available."""
+    items = _auxiliary_display_items(state)
+    if not items:
         return
-    label = state.get("auxiliary_label", "Auxiliary data")
-    summary = state.get("auxiliary_summary", "")
-    prompt.append(f"\n## Auxiliary Reference Data: {label}")
+    prompt.append("\n## Auxiliary Reference Data")
     prompt.append(
-        f"The user provided this auxiliary reference data: {label}. "
-        "Take it into account in your analysis and interpretation, but do NOT "
-        "fit or quantitatively analyze this auxiliary data."
+        "The user provided the following auxiliary reference dataset(s). Take "
+        "them into account in your analysis and interpretation, but do NOT fit "
+        "or quantitatively analyze the auxiliary data as if it were a measurement."
     )
-    if summary:
-        prompt.append(f"\nData summary: {summary}")
-    prompt.append({
-        "mime_type": state.get("auxiliary_mime_type", "image/png"),
-        "data": state["auxiliary_plot_bytes"]
-    })
+    for it in items:
+        prompt.append(f"\n### {it.get('label', 'Auxiliary data')}")
+        if it.get("summary"):
+            prompt.append(f"Data summary: {it['summary']}")
+        prompt.append({
+            "mime_type": it.get("mime_type", "image/png"),
+            "data": it["plot_bytes"],
+        })
 
 
 def _append_tool_inventory(
@@ -2095,10 +2108,60 @@ Your guidance: '''
                         lines.append(f"- `{path_str}`")
                 context_parts.append("\n".join(lines))
 
+        # Optional auxiliary operand(s) (#226): for each co-registered companion
+        # image aligned with the primary (same H×W), write it next to the image
+        # and list it in a manifest the generated script MAY use (e.g. a
+        # topography channel masking/informing a phase image). Misaligned ones
+        # stay context-only (no resampling in v1).
+        primary_shape = tuple(stats.get("shape") or ())
+        operand_lines = []
+        for j, it in enumerate(state.get("auxiliary_items") or []):
+            arr = it.get("array")
+            label = it.get("label") or f"reference_{j}"
+            if arr is None:
+                continue
+            arr = np.asarray(arr)
+            aligned = (
+                len(primary_shape) >= 2
+                and arr.ndim >= 2
+                and tuple(arr.shape[:2]) == primary_shape[:2]
+            )
+            if aligned:
+                safe = _sanitize_aux_name(label, j)
+                aux_path = Path(data_path).parent / f"temp_auxiliary_{safe}.npy"
+                np.save(aux_path, arr)
+                operand_lines.append(
+                    f"- \"{label}\": `{aux_path}` — a co-registered array of shape "
+                    f"{tuple(arr.shape)} (same H×W as the primary image)."
+                )
+                self.logger.info(
+                    f"🧩 Offering auxiliary '{label}' {tuple(arr.shape)} as an "
+                    f"optional image-script operand."
+                )
+            else:
+                self.logger.info(
+                    f"Auxiliary '{label}' shape {tuple(arr.shape)} not aligned with "
+                    f"primary {primary_shape}; kept as context only (not an operand)."
+                )
+
+        auxiliary_block = ""
+        if operand_lines:
+            auxiliary_block = (
+                "\n**Optional companion operand(s):**\n"
+                + "\n".join(operand_lines)
+                + "\n- You MAY load any of these (np.load) and use it numerically — "
+                "e.g. mask, normalize, divide, or correlate it with the primary — "
+                "ONLY if your method needs it. The primary image is the base input; "
+                "companions are optional, never required. Do NOT report findings "
+                "about a companion as if it were the measurement; it is an operand "
+                "for analyzing the primary.\n"
+            )
+
         from ....skills._shared._registry import format_tool_inventory
 
         active_skills = _active_skill_names(state)
         format_kwargs = dict(
+            auxiliary_block=auxiliary_block,
             analysis_approach=config.get("analysis_approach", "Analyze the image"),
             processing_pipeline=config.get("processing_pipeline", "Standard processing"),
             features_to_extract=", ".join(config.get("features_to_extract", [])) or "relevant features",
@@ -4955,10 +5018,7 @@ class ImageAdaptiveRefitController:
             "analysis_objective": state.get("analysis_objective"),
             "skill_name": state.get("skill_name"),
             "skill_sections": state.get("skill_sections"),
-            "auxiliary_plot_bytes": state.get("auxiliary_plot_bytes"),
-            "auxiliary_label": state.get("auxiliary_label"),
-            "auxiliary_summary": state.get("auxiliary_summary"),
-            "auxiliary_mime_type": state.get("auxiliary_mime_type"),
+            "auxiliary_items": state.get("auxiliary_items", []),
             "prior_knowledge": state.get("prior_knowledge", []),
             "analysis_images": [],
         }
