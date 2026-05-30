@@ -24,6 +24,7 @@ Enforcement is layered:
 """
 
 import ast
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -407,15 +408,20 @@ def prepare_inputs(input_path, model, executor, output_dir, probe=None,
     """
     input_path = Path(input_path)
     output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
     stem = re.sub(r"[^0-9A-Za-z_-]", "_", input_path.stem) or "input"
-    metadata_out = output_dir / f"{stem}_metadata.json"
-    recon_out = output_dir / f"{stem}_reconstructed{input_path.suffix}"
+    # Per-file subdirectory keyed on the absolute path: two uploads sharing a
+    # basename (e.g. runA/scan.tif and runB/scan.tif) must not clobber each
+    # other's metadata/recon/data outputs in a shared "prepared/" dir.
+    key = hashlib.sha1(str(input_path.resolve()).encode()).hexdigest()[:8]
+    file_out = output_dir / f"{stem}_{key}"
+    file_out.mkdir(parents=True, exist_ok=True)
+    metadata_out = file_out / f"{stem}_metadata.json"
+    recon_out = file_out / f"{stem}_reconstructed{input_path.suffix}"
 
     probe_str = json.dumps(probe, indent=2, default=str) if probe else \
         f"(no probe) extension={input_path.suffix}, size={input_path.stat().st_size} bytes"
     base_prompt = _PROMPT.format(
-        path=str(input_path), probe=probe_str, out_dir=str(output_dir),
+        path=str(input_path), probe=probe_str, out_dir=str(file_out),
         metadata_out=str(metadata_out), recon_out=str(recon_out),
     )
 
@@ -443,7 +449,7 @@ def prepare_inputs(input_path, model, executor, output_dir, probe=None,
             prompt = base_prompt + f"\n\n### PREVIOUS ATTEMPT FAILED\n{guard}\nUse IO/parsing libraries only."
             continue
 
-        exec_res = executor.execute_script(script, working_dir=str(output_dir))
+        exec_res = executor.execute_script(script, working_dir=str(file_out))
         if exec_res.get("status") != "success":
             last_reason = f"script execution failed: {exec_res.get('message', '')[:600]}"
             prompt = base_prompt + f"\n\n### PREVIOUS ATTEMPT FAILED\n{last_reason}\nFix the script."
