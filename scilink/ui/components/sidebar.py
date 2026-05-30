@@ -19,6 +19,7 @@ from ..config import (
     SUPPORTED_PLANNING_DATA_EXTENSIONS,
     extra_data_extensions_for,
 )
+from ...providers import provider_for
 
 
 _LOGO_DIR = Path(__file__).resolve().parent.parent / "assets"
@@ -220,7 +221,18 @@ def render_sidebar() -> None:
             model = st.text_input("Model name", key="cfg_model_custom", disabled=_locked)
         else:
             model = preset
-        api_key = st.text_input("API key", type="password", key="cfg_api_key", disabled=_locked)
+        spec = provider_for(model)
+        api_key = st.text_input(spec.key_label, type="password", key="cfg_api_key", disabled=_locked)
+        # Provider-specific inputs (e.g. AWS region for Bedrock) — rendered only
+        # for the matching provider; nothing extra shows for direct API providers.
+        for _pf in spec.fields:
+            if _pf.kind == "select":
+                _idx = _pf.options.index(_pf.default) if _pf.default in _pf.options else 0
+                st.selectbox(_pf.label, _pf.options, index=_idx,
+                             key=f"cfg_prov_{_pf.name}", help=_pf.help, disabled=_locked)
+            else:
+                st.text_input(_pf.label, value=_pf.default,
+                              key=f"cfg_prov_{_pf.name}", help=_pf.help, disabled=_locked)
         base_url = st.text_input("Base URL (optional)", key="cfg_base_url", disabled=_locked)
         fh_api_key = st.text_input("FutureHouse API key (optional)", type="password", key="cfg_fh_api_key", disabled=_locked)
         mp_api_key = st.text_input("Materials Project API key (optional)", type="password", key="cfg_mp_api_key", disabled=_locked)
@@ -660,9 +672,20 @@ def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key
     import scilink
     import scilink.executors as executors
 
-    resolved_key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
-    if not resolved_key and not base_url:
-        st.sidebar.error("Provide an API key or set an environment variable (GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY).")
+    spec = provider_for(model)
+    field_values = {f.name: st.session_state.get(f"cfg_prov_{f.name}", f.default) for f in spec.fields}
+    auth = spec.apply(pasted_key=api_key, values=field_values, base_url=base_url)
+    os.environ.update({k: v for k, v in auth.env.items() if v})
+
+    if auth.env:
+        # Env-var providers (e.g. Bedrock) authenticate via os.environ; the agent
+        # must receive api_key=None so litellm uses that credential chain.
+        resolved_key = None
+    else:
+        resolved_key = auth.api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+
+    if not (api_key or base_url or any(os.environ.get(e) for e in spec.cred_env)):
+        st.sidebar.error(spec.cred_error)
         return
 
     # Optional MP key: register so DFTOrchestrator's auto-discovery picks it up
@@ -899,17 +922,23 @@ def resume_session(
     import scilink
     import scilink.executors as executors
 
-    resolved_key = (
-        api_key
-        or os.environ.get("GEMINI_API_KEY")
-        or os.environ.get("OPENAI_API_KEY")
-        or os.environ.get("ANTHROPIC_API_KEY")
-    )
-    if not resolved_key and not base_url:
-        st.sidebar.error(
-            "Provide an API key or set an environment variable "
-            "(GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY)."
+    spec = provider_for(model)
+    field_values = {f.name: st.session_state.get(f"cfg_prov_{f.name}", f.default) for f in spec.fields}
+    auth = spec.apply(pasted_key=api_key, values=field_values, base_url=base_url)
+    os.environ.update({k: v for k, v in auth.env.items() if v})
+
+    if auth.env:
+        resolved_key = None
+    else:
+        resolved_key = (
+            auth.api_key
+            or os.environ.get("GEMINI_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("ANTHROPIC_API_KEY")
         )
+
+    if not (api_key or base_url or any(os.environ.get(e) for e in spec.cred_env)):
+        st.sidebar.error(spec.cred_error)
         return
 
     # Optional MP key registration (see start_session for rationale).
@@ -1158,19 +1187,30 @@ def _start_simulate_session(
     fh_api_key: str,
 ) -> None:
     """Lightweight session init for simulate mode (no heavy agent)."""
-    resolved_key = (
-        api_key
-        or os.environ.get("OPENAI_API_KEY")
-        or os.environ.get("ANTHROPIC_API_KEY")
-        or os.environ.get("GOOGLE_API_KEY")
-        or os.environ.get("GEMINI_API_KEY")
-    )
-    if not resolved_key and not base_url:
+    spec = provider_for(model)
+    field_values = {f.name: st.session_state.get(f"cfg_prov_{f.name}", f.default) for f in spec.fields}
+    auth = spec.apply(pasted_key=api_key, values=field_values, base_url=base_url)
+    os.environ.update({k: v for k, v in auth.env.items() if v})
+
+    if auth.env:
+        resolved_key = None
+    else:
+        resolved_key = (
+            auth.api_key
+            or os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("ANTHROPIC_API_KEY")
+            or os.environ.get("GOOGLE_API_KEY")
+            or os.environ.get("GEMINI_API_KEY")
+        )
+
+    if not (api_key or base_url or any(os.environ.get(e) for e in spec.cred_env)):
         st.sidebar.error("Provide an API key or set an environment variable.")
         return
 
-    # Set API key in environment so the simulation agent can find it
-    if api_key:
+    # Direct providers: export the typed key to the conventional vendor env var
+    # so the simulation agent can discover it. Env-var providers (e.g. Bedrock)
+    # already populated os.environ above, so skip the substring mapping.
+    if api_key and not auth.env:
         _m = model.lower()
         if any(x in _m for x in ("gpt", "o1", "o3", "o4")):
             os.environ.setdefault("OPENAI_API_KEY", api_key)
