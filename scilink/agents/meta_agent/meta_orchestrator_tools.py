@@ -43,6 +43,31 @@ def _has_comment_header(path: Path) -> bool:
     return False
 
 
+def _probe_delimited_text(path: Path, max_rows: int = 200):
+    """Probe a .dat/.txt as a delimited NUMERIC table, skipping a #/comment header.
+
+    Returns ``{n_columns, sampled_rows, dtypes}`` (positional dtypes, since such
+    files are usually headerless) when the body parses as numeric data, else None
+    (prose). A column counts as numeric when >80% of its sampled values parse as
+    numbers — tolerant of a single column-name header row above the data.
+    """
+    import pandas as pd
+    for sep in (r"\s+", ","):
+        try:
+            df = pd.read_csv(path, sep=sep, comment="#", header=None, nrows=max_rows,
+                             skip_blank_lines=True, engine="python")
+        except Exception:  # noqa: BLE001 - try the next separator
+            continue
+        if df.shape[0] < 3 or df.shape[1] < 1:
+            continue
+        frac_numeric = df.apply(pd.to_numeric, errors="coerce").notna().mean(axis=0)
+        ncols = int((frac_numeric > 0.8).sum())
+        if ncols >= 1:
+            return {"n_columns": ncols, "sampled_rows": int(df.shape[0]),
+                    "dtypes": {str(i): "float64" for i in range(ncols)}}
+    return None
+
+
 def _probe_file(path: Path) -> Dict[str, Any]:
     """Content-probe a single file for routing. Never raises — any failure
     is reported in the returned dict's ``note`` field."""
@@ -144,7 +169,20 @@ def _probe_file(path: Path) -> Dict[str, Any]:
                 info["text_head"] = doc_info["text"][:_PROBE_TEXT_HEAD].strip()
             except Exception as e:  # noqa: BLE001 - optional reader / bad docx
                 info["note"] = f"text probe unavailable: {e}"
-        elif ext in (".md", ".txt"):
+        elif ext in (".dat", ".txt"):
+            # .dat/.txt is often a delimited numeric table (frequently with a
+            # leading comment/metadata header) but may be prose. Probe it as a
+            # table when it parses as numeric data — so combined .dat/.txt files
+            # cluster like CSV in batch prep — else fall back to text.
+            parsed = _probe_delimited_text(path)
+            if parsed:
+                info.update(kind="table",
+                            has_comment_header=_has_comment_header(path), **parsed)
+            else:
+                text = path.read_text(errors="replace")
+                info.update(kind="text", n_chars=len(text),
+                            text_head=text[:_PROBE_TEXT_HEAD].strip())
+        elif ext == ".md":
             text = path.read_text(errors="replace")
             info.update(kind="text", n_chars=len(text),
                         text_head=text[:_PROBE_TEXT_HEAD].strip())
