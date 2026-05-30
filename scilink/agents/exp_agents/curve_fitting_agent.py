@@ -38,7 +38,9 @@ from ...executors import ScriptExecutor, require_sandbox_approval
 from ..lit_agents.literature_agent import FittingModelLiteratureAgent
 from .preprocess import CurvePreprocessingAgent
 from .pipelines.curve_fitting_pipelines import create_unified_curve_fitting_pipeline
-from ...skills._shared.curve_fitting_tools import load_curve_data, plot_curve_to_bytes
+from ...skills._shared.curve_fitting_tools import (
+    load_curve_data, plot_curve_to_bytes, select_xy_columns,
+)
 from ._deprecation import normalize_params
 from ...skills.loader import load_skill
 
@@ -434,7 +436,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # orchestrator). Defaults to "fitting" when unset.
         effective_task_mode = self._resolve_task_mode(task_mode)
         
-        # Convert DataFrame to numpy array (first two numeric columns)
+        # Convert DataFrame to a 2-column (x, y) array. With >2 numeric columns,
+        # the X/Y pair is selected from column names + system_info hints rather
+        # than blindly taking the first two.
         if isinstance(data, pd.DataFrame):
             numeric_cols = data.select_dtypes(include="number")
             if numeric_cols.shape[1] < 2:
@@ -444,7 +448,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                               "details": f"Expected at least 2 numeric columns, got {numeric_cols.shape[1]}"},
                     "output_directory": str(self.output_dir)
                 }
-            data = numeric_cols.iloc[:, :2].to_numpy()
+            data = select_xy_columns(numeric_cols.to_numpy(), system_info=system_info,
+                                     logger_=self.logger,
+                                     column_names=[str(c) for c in numeric_cols.columns])
 
         # Parse input
         data_path, data_paths, data_array, error = self._parse_data_input(data)
@@ -478,9 +484,14 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 if spectrum_stack.shape[0] == 2:
                     # Shape (2, n): single spectrum with x and y
                     spectrum_stack = spectrum_stack[np.newaxis, :, :]
-                else:
+                elif spectrum_stack.shape[1] == 2:
                     # Shape (n, 2): single spectrum, transpose
                     spectrum_stack = spectrum_stack.T[np.newaxis, :, :]
+                else:
+                    # >2 columns (e.g. x, y, error): select the X/Y pair, drop rest.
+                    xy = select_xy_columns(spectrum_stack, system_info=system_info,
+                                           logger_=self.logger)
+                    spectrum_stack = xy.T[np.newaxis, :, :]
                 self.logger.info(f"2D array provided, converted to shape {spectrum_stack.shape}")
             elif spectrum_stack.ndim != 3:
                 return {
@@ -511,7 +522,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             first_spectrum_name = "spectrum_0000"
         else:
             try:
-                first_spectrum = load_curve_data(spectrum_paths[0])
+                first_spectrum = load_curve_data(spectrum_paths[0], system_info=system_info)
                 first_spectrum_name = Path(spectrum_paths[0]).stem
             except Exception as e:
                 return {
