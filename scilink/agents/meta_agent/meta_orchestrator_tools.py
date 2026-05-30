@@ -188,7 +188,14 @@ class MetaOrchestratorTools:
                 "(status, summary, key_findings, files_produced, "
                 "suggested_followups, warnings, delegation_index). `task` must "
                 "be a complete, self-contained instruction including absolute "
-                "paths to any data files."
+                "paths to any data files. If the user supplies COMPANION / "
+                "REFERENCE datasets alongside the primary — e.g. an empty-sample "
+                "or baseline spectrum, an incident-beam / I0 reference, or a "
+                "co-registered channel — name "
+                "their absolute paths and their role (subtract / divide-by / "
+                "mask-with) in `task` (or `context`); the specialist passes them "
+                "through `run_analysis`'s `auxiliary_data`/`auxiliary_label` so "
+                "the generated code can use them as numerical operands."
             ),
             parameters={
                 "task": {
@@ -199,7 +206,10 @@ class MetaOrchestratorTools:
                     "type": "object",
                     "description": (
                         "Optional upstream findings / file paths (e.g. from an "
-                        "earlier delegation) to inform the task."
+                        "earlier delegation) to inform the task. May include "
+                        "companion/reference dataset paths and their role "
+                        "(baseline to subtract, reference to divide by, channel to "
+                        "mask with) for the specialist to pass as auxiliary operands."
                     ),
                 },
                 "context_from": {

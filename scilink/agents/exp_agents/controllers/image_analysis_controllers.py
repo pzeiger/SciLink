@@ -2111,7 +2111,7 @@ Your guidance: '''
         # Optional auxiliary operand(s) (#226): for each co-registered companion
         # image aligned with the primary (same H×W), write it next to the image
         # and list it in a manifest the generated script MAY use (e.g. a
-        # topography channel masking/informing a phase image). Misaligned ones
+        # co-registered channel masking/informing the primary). Misaligned ones
         # stay context-only (no resampling in v1).
         primary_shape = tuple(stats.get("shape") or ())
         operand_lines = []

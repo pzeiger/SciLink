@@ -2005,8 +2005,8 @@ class AnalysisOrchestratorTools:
             analysis_goal: str = None,
             objective: str = None,
             hints: str = None,
-            auxiliary_data: str = None,
-            auxiliary_label: str = None,
+            auxiliary_data = None,  # str | list[str] | None (#226 multi-aux)
+            auxiliary_label = None,  # str | list[str] | None
             skill = None,  # str | list[str] | None (PR 3 multi-skill)
             series_metadata: str = None,
             task_mode: str = None,
@@ -2025,10 +2025,13 @@ class AnalysisOrchestratorTools:
             a sandbox check is performed. If no sandbox is detected, the user is
             prompted to confirm before proceeding.
 
-            auxiliary_data and auxiliary_label can provide a complementary dataset
-            (e.g. TGA curve alongside DSC, or a microscopy image) as context for
-            the analysis without fitting/unmixing it. Supported by CurveFitting
-            and Hyperspectral agents.
+            auxiliary_data / auxiliary_label provide one or several companion
+            datasets (str or list). DUAL ROLE: always shown to the agent as
+            context, AND — when a companion is shape-aligned with the primary —
+            offered to the generated code as an OPTIONAL named numerical operand
+            (subtract a baseline, divide by an I0 reference, mask/normalize with a
+            co-registered channel); the label is the operand key. Supported by
+            CurveFitting, Hyperspectral, and Image agents.
 
             Series metadata resolution (in priority order):
 
@@ -2599,9 +2602,12 @@ class AnalysisOrchestratorTools:
                 "(e.g. 'Determine the oxidation state of Ti'). "
                 "Optional hints provide tactical guidance to steer the analysis "
                 "(e.g. 'focus on the Ti L-edge around 460 eV'). "
-                "Optional auxiliary_data provides a complementary dataset "
-                "(e.g. TGA alongside DSC, or microscopy image) as context. "
-                "Supported by CurveFitting and Hyperspectral agents. "
+                "Optional auxiliary_data (str or list) provides companion dataset(s) "
+                "— shown as context AND, when shape-aligned, usable by generated code "
+                "as an optional numerical operand (subtract a baseline, divide by an "
+                "I0 reference, mask/normalize with a co-registered channel); "
+                "auxiliary_label is the operand key. Supported by CurveFitting, "
+                "Hyperspectral, Image. "
                 "Optional skill provides domain-specific knowledge "
                 "(e.g. 'xps', 'xrd') for improved fitting and interpretation. "
                 "Returns analysis_id and output_directory for reference."
@@ -2639,21 +2645,36 @@ class AnalysisOrchestratorTools:
                     )
                 },
                 "auxiliary_data": {
-                    "type": "string",
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
                     "description": (
-                        "Path to an auxiliary dataset (1D curve or image) as visual "
-                        "context for the analysis. Can also be a visualization from "
-                        "a prior analysis. Only use this when the datasets are "
-                        "genuinely related (same sample, same region, or "
-                        "complementary techniques) — do not chain unrelated analyses."
+                        "Path (or list of paths) to companion dataset(s) — e.g. a "
+                        "reference/baseline spectrum, an incident-beam/I0 reference, "
+                        "or a co-registered channel. DUAL ROLE: always shown to the "
+                        "agent as visual "
+                        "context, AND — when a companion is shape-aligned with the "
+                        "primary — offered to the generated code as an OPTIONAL named "
+                        "numerical operand it may subtract / divide by / mask with "
+                        "(the matching auxiliary_label is the operand name). Pass "
+                        "several as a list with parallel auxiliary_label entries. Only "
+                        "use for genuinely related data (same sample/region or "
+                        "complementary techniques) — do not chain unrelated analyses. "
+                        "Supported by CurveFitting, Hyperspectral, and Image agents."
                     )
                 },
                 "auxiliary_label": {
-                    "type": "string",
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
                     "description": (
-                        "Description of auxiliary data and its relationship to the "
-                        "primary dataset, e.g. 'TGA curve collected simultaneously "
-                        "during DSC' or 'SEM analysis of the same region'"
+                        "Label(s) for the auxiliary dataset(s), parallel to "
+                        "auxiliary_data. Each label is BOTH the human description and "
+                        "the operand key the generated code addresses, e.g. "
+                        "'empty-sample baseline', 'incident beam I0', 'reference channel'. "
+                        "Use a list when auxiliary_data is a list."
                     )
                 },
                 "skill": {
