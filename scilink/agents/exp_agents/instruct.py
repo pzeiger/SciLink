@@ -2276,7 +2276,9 @@ FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed script.
 
 **CRITICAL:** Fix only the execution error. Do NOT change the fitting model, its parameters, or the overall analysis approach. The model is locked for series consistency.
 
-**Plot labels must be neutral** if your fix touches `fit_visualization.png`: \
+**I/O contract (do not deviate):** the data is `data.npy` in the current working directory — load it with `np.load` (do NOT look for .csv/.txt/.dat or glob for other files); save the plot to `visualization.png`; print one line `FIT_RESULTS_JSON:{{...}}` with the fit results. Missing any of these fails the run.
+
+**Plot labels must be neutral** if your fix touches `visualization.png`: \
 use "Data"/"Fit"/"Component N"/"Residuals" only — no material names, no peak assignments, no model names in titles/legends/annotations.
 
 **Response:** Return only `{{"diagnosis": "...", "script": "..."}}`
@@ -2297,8 +2299,8 @@ PLAN_CONFORMANCE_CHECK_INSTRUCTIONS = """You are verifying that a Python script 
 ```
 
 **EXECUTION CONTRACT (read before judging the script):**
-The script fits **exactly one spectrum at a time** — the data file already
-written to `temp_spectrum_<idx>.npy` for the current spectrum.  When the
+The script fits **exactly one spectrum at a time** — the data file is staged
+as `data.npy` in the current working directory.  When the
 plan is for a series, the agent invokes the same script per spectrum and
 aggregates results at a higher layer; scripts must NOT loop over multiple
 spectrum files, build cross-spectrum trends or comparisons, or
@@ -3269,12 +3271,11 @@ rewrite the analysis portion accordingly — but do not rewrite more than the \
 refined plan calls for.
 
 **Requirements:**
-1. Load image: use `np.load(path)` for .npy, or `cv2.imread(path, cv2.IMREAD_UNCHANGED)` \
-for standard formats (remember cv2 loads BGR — convert to RGB if 3-channel color). \
+1. Load the image array `data.npy` from the current working directory (`np.load`). \
 Check the image shape — it may have 2 or more channels that are not RGB. Access channels \
 via `image[:,:,0]`, `image[:,:,1]`, etc. Do not assume grayscale or RGB.
 2. Implement the refined analysis pipeline.
-3. Save visualization(s): `analysis_visualization.png` showing original image alongside \
+3. Save visualization(s): `visualization.png` showing original image alongside \
 key analysis results. Use subplots with clear labels. All visualizations must be saved \
 to the current working directory. Use `dpi=100`.
 4. Save key output arrays to the current working directory as `.npy` files. \
