@@ -1416,12 +1416,16 @@ class ImagePlanningController:
     def _extract_series_plan(self, state: dict, result: dict) -> None:
         """Extract and validate series_analysis_plan from LLM response."""
         series_plan = result.get("series_analysis_plan")
-        if not series_plan or state.get("is_single_image", True):
+        if not isinstance(series_plan, dict) or state.get("is_single_image", True):
             state["series_analysis_plan"] = None
             return
 
         num_images = state.get("num_images", 1)
-        regimes = series_plan.get("regimes", [])
+        # Defensively drop malformed (non-dict) regimes — an LLM/validator
+        # revision can return a regime as a bare string, which would otherwise
+        # crash regime.get(...) below.
+        regimes = [r for r in series_plan.get("regimes", []) if isinstance(r, dict)]
+        series_plan["regimes"] = regimes
 
         if not regimes:
             state["series_analysis_plan"] = None
