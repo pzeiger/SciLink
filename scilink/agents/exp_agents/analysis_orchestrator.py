@@ -1583,7 +1583,8 @@ class AnalysisOrchestratorAgent:
     def _handle_litellm_chat(self, user_input: str) -> str:
         """Handle chat with LiteLLM models with manual function calling loop."""
         import litellm
-        
+        from ...wrappers.litellm_wrapper import litellm_completion
+
         self.messages.append({"role": "user", "content": user_input})
         
         if len(self.messages) > 120:
@@ -1600,7 +1601,7 @@ class AnalysisOrchestratorAgent:
             print(f"  ⏳ Waiting for orchestrator response ...")
             
             try:
-                response = litellm.completion(
+                response = litellm_completion(
                     model=self.model.model,
                     messages=self.messages,
                     tools=self.tools_for_model,
@@ -1625,7 +1626,7 @@ class AnalysisOrchestratorAgent:
                 if not content and iteration > 0:
                     # LLM returned empty text after tool calls — ask for a summary
                     self.messages.append({"role": "user", "content": "Please briefly summarize what you just did and suggest next steps."})
-                    followup = litellm.completion(
+                    followup = litellm_completion(
                         model=self.model.model,
                         messages=self.messages,
                         tools=self.tools_for_model,

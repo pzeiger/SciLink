@@ -322,9 +322,10 @@ class StructureGenerator:
                                    *, api_key, model_name):
         """Tool-call loop using LiteLLM (public-API path)."""
         import litellm
+        from ...wrappers.litellm_wrapper import litellm_completion
 
         for _ in range(MAX_MP_RESOLVER_ITERATIONS):
-            resp = litellm.completion(
+            resp = litellm_completion(
                 model=model_name,
                 messages=messages,
                 tools=tools,

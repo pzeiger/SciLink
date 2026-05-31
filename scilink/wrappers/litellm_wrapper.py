@@ -144,8 +144,33 @@ def _check_litellm():
     import logging
     logging.getLogger("LiteLLM").setLevel(logging.WARNING)
     logging.getLogger("litellm").setLevel(logging.WARNING)
-    
+
     litellm.suppress_debug_info = True
+
+
+def _scope_drop_params(model) -> None:
+    """Enable LiteLLM param-dropping only for Bedrock models.
+
+    Bedrock rejects OpenAI-style params (e.g. ``tool_choice``) that Anthropic /
+    OpenAI / Gemini accept. Scoping ``drop_params`` to ``bedrock/*`` keeps the
+    strict error-on-unsupported behavior for every other provider, so a typo or
+    a genuinely-unsupported param still surfaces as an error there. Set per call
+    (not once globally) so a mixed-model session — e.g. a Bedrock chat model
+    alongside a Gemini/OpenAI embedding model — routes each call correctly.
+    """
+    if litellm is not None:
+        litellm.drop_params = str(model or "").startswith("bedrock/")
+
+
+def litellm_completion(*args, **kwargs):
+    """``litellm.completion`` with Bedrock-scoped param dropping.
+
+    Drop-in replacement for direct ``litellm.completion`` calls; see
+    :func:`_scope_drop_params`. Reads the target model from the ``model`` kwarg
+    (or first positional arg) and scopes param-dropping to it before the call.
+    """
+    _scope_drop_params(kwargs.get("model") or (args[0] if args else None))
+    return litellm.completion(*args, **kwargs)
 
 
 class LiteLLMGenerativeModel:
@@ -262,6 +287,7 @@ class LiteLLMGenerativeModel:
         
         try:
             _t0 = time.perf_counter()
+            _scope_drop_params(self.model)
             response = litellm.completion(
                 model=self.model,
                 messages=messages,
@@ -592,6 +618,7 @@ class LiteLLMChatSession:
         params = self._model._build_params(generation_config, self._model.tools)
         
         _t0 = time.perf_counter()
+        _scope_drop_params(self._model.model)
         response = litellm.completion(
             model=self._model.model,
             messages=messages,

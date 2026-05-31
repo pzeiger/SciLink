@@ -1229,6 +1229,7 @@ class MetaOrchestratorAgent:
     def _handle_litellm_chat(self, user_input: str) -> str:
         """Handle chat with LiteLLM models — manual tool-calling loop."""
         import litellm
+        from ...wrappers.litellm_wrapper import litellm_completion
 
         self.messages.append({"role": "user", "content": user_input})
 
@@ -1244,7 +1245,7 @@ class MetaOrchestratorAgent:
             print(f"  ⏳ Waiting for meta-orchestrator response ...")
 
             try:
-                response = litellm.completion(
+                response = litellm_completion(
                     model=self.model.model,
                     messages=self.messages,
                     tools=self.tools_for_model,
@@ -1271,7 +1272,7 @@ class MetaOrchestratorAgent:
                         "role": "user",
                         "content": "Please briefly summarize what you just did and suggest next steps.",
                     })
-                    followup = litellm.completion(
+                    followup = litellm_completion(
                         model=self.model.model,
                         messages=self.messages,
                         tools=self.tools_for_model,

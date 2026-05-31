@@ -812,6 +812,7 @@ class SimulationOrchestratorAgent:
     def _handle_litellm_chat(self, user_input: str) -> str:
         """Chat with LiteLLM models with manual function calling loop."""
         import litellm
+        from ...wrappers.litellm_wrapper import litellm_completion
 
         self.messages.append({"role": "user", "content": user_input})
 
@@ -827,7 +828,7 @@ class SimulationOrchestratorAgent:
             print(f"  ⏳ Waiting for orchestrator response ...")
 
             try:
-                response = litellm.completion(
+                response = litellm_completion(
                     model=self.model.model,
                     messages=self.messages,
                     tools=self.tools_for_model,
@@ -854,7 +855,7 @@ class SimulationOrchestratorAgent:
                         "role": "user",
                         "content": "Please briefly summarize what you just did and suggest next steps.",
                     })
-                    followup = litellm.completion(
+                    followup = litellm_completion(
                         model=self.model.model,
                         messages=self.messages,
                         tools=self.tools_for_model,
