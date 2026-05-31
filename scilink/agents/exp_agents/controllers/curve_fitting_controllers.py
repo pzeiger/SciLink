@@ -2992,6 +2992,12 @@ Return JSON with the refined fitting approach:
             return config
 
     def _get_human_feedback_for_poor_fit(self, state: dict, best_result: dict, all_attempts: List[dict]) -> Optional[dict]:
+        # No successful fit to review (every attempt failed → best_result is None).
+        # Don't solicit poor-fit feedback on a non-existent fit; let the caller
+        # fall through to graceful failure handling rather than dereferencing None.
+        if not best_result:
+            self.logger.warning("   All fitting attempts failed — no fit to review; skipping poor-fit feedback.")
+            return None
         models_tried = "\n".join([f"  - {a['model']}: R² = {a['r2']:.4f}" for a in all_attempts])
         
         print("")
@@ -3701,7 +3707,9 @@ Return JSON with:
         # level is reached when refits stall.
 
         # --- Human feedback for poor fit (if enabled) ---
-        if self.enable_human_feedback and _is_anchor:
+        # Guard `best_result`: when every fitting attempt failed it is None, and
+        # there is no fit to review — skip straight to graceful failure handling.
+        if self.enable_human_feedback and _is_anchor and best_result:
             feedback_result = self._get_human_feedback_for_poor_fit(state, best_result, all_attempts)
 
             if feedback_result:

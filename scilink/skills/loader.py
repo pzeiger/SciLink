@@ -33,6 +33,14 @@ _SKILLS_DIR = Path(__file__).parent
 
 _KNOWN_SECTIONS = {"overview", "planning", "analysis", "interpretation", "validation", "implementation"}
 
+# The three analysis modalities each operate on a different data shape
+# (1D curves / 2D images / 3D datacubes); their skills are NOT interchangeable.
+# A bare-name cross-domain fallback must not pull, e.g., the hyperspectral `eels`
+# datacube skill into CurveFittingAgent. Genuinely cross-cutting skills live in
+# OTHER (non-modality) domains (e.g. structure_matching/xrd) and stay usable
+# cross-domain.
+_MODALITY_DOMAINS = frozenset({"curve_fitting", "image_analysis", "hyperspectral"})
+
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 _logger = logging.getLogger(__name__)
@@ -241,6 +249,13 @@ def _resolve_skill_path(skill: str, domain: str) -> Path:
             return bundle
 
     matches = _find_skill_across_domains(skill)
+    # Block cross-modality leaks: when the requesting agent is one analysis
+    # modality, drop fallback matches that belong to a DIFFERENT modality (a
+    # skill authored for another data shape). Non-modality (cross-cutting)
+    # domains are unaffected and remain usable cross-domain.
+    if domain in _MODALITY_DOMAINS:
+        foreign = _MODALITY_DOMAINS - {domain}
+        matches = [m for m in matches if m.parent.parent.name not in foreign]
     if len(matches) == 1:
         _logger.debug(
             "Skill '%s' not found in domain '%s' — resolved cross-domain to %s.",
