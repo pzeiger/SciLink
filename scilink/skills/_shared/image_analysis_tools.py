@@ -43,6 +43,101 @@ def load_image_data(image_path: str) -> np.ndarray:
     return img
 
 
+def _jsonify_tag(value):
+    """Coerce a PIL TIFF tag value into a JSON-friendly form."""
+    try:
+        from PIL.TiffImagePlugin import IFDRational
+    except Exception:
+        IFDRational = ()
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if IFDRational and isinstance(value, IFDRational):
+        return float(value)
+    if isinstance(value, tuple):
+        return [_jsonify_tag(v) for v in value]
+    return value
+
+
+def _parse_image_description(desc: str):
+    """Parse an ImageDescription block into structured metadata when possible.
+
+    Handles the two common scientific conventions: ImageJ's ``key=value`` lines
+    and OME-TIFF's embedded XML (kept verbatim, not parsed, to avoid a dependency).
+    """
+    if not isinstance(desc, str) or not desc.strip():
+        return None
+    stripped = desc.lstrip()
+    if stripped.startswith("<?xml") or stripped.startswith("<OME"):
+        return {"format": "ome-xml", "xml": desc}
+    if "=" in desc and "\n" in desc:  # ImageJ-style key=value block
+        kv = {}
+        for line in desc.splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                kv[k.strip()] = v.strip()
+        if kv:
+            return {"format": "imagej", "fields": kv}
+    return None
+
+
+def _pixel_size_from_tags(named: dict):
+    """Derive pixel size from TIFF resolution tags (best effort)."""
+    xres, yres = named.get("XResolution"), named.get("YResolution")
+    if not xres or not yres:
+        return None
+    unit = {1: "none", 2: "inch", 3: "cm"}.get(named.get("ResolutionUnit"), "unknown")
+    try:
+        return {"x": 1.0 / float(xres), "y": 1.0 / float(yres),
+                "unit": f"per_{unit}" if unit not in ("none", "unknown") else unit}
+    except (ZeroDivisionError, TypeError, ValueError):
+        return None
+
+
+def extract_image_metadata(image_path: str) -> dict:
+    """Best-effort recovery of embedded metadata from an image file.
+
+    ``load_image_data`` reads pixels with OpenCV, which discards TIFF tags /
+    ImageDescription — the common carrier of scientific calibration and
+    acquisition parameters (pixel size, instrument, ImageJ/OME-XML blocks). This
+    recovers them so they can flow into ``system_info``. TIFF-focused today;
+    returns ``{}`` for other formats or when nothing readable is present. Never
+    raises — embedded metadata is best-effort, not load-critical.
+    """
+    ext = os.path.splitext(image_path)[1].lower()
+    if ext not in (".tif", ".tiff"):
+        return {}
+    try:
+        from PIL import Image
+        from PIL.TiffTags import TAGS as TIFF_TAGS
+    except Exception:
+        return {}
+    meta: dict = {}
+    try:
+        with Image.open(image_path) as im:
+            tags = getattr(im, "tag_v2", None)
+            if not tags:
+                return {}
+            named = {TIFF_TAGS.get(tid, str(tid)): _jsonify_tag(val)
+                     for tid, val in tags.items()}
+            desc = named.get("ImageDescription")
+            if desc:
+                meta["image_description"] = desc
+                parsed = _parse_image_description(desc)
+                if parsed:
+                    meta["image_description_parsed"] = parsed
+            for tag, key in (("Software", "software"), ("DateTime", "datetime"),
+                             ("Make", "make"), ("Model", "model")):
+                if named.get(tag):
+                    meta[key] = named[tag]
+            px = _pixel_size_from_tags(named)
+            if px:
+                meta["pixel_size"] = px
+            meta["tiff_tags"] = named
+    except Exception:
+        return {}
+    return meta
+
+
 def image_to_thumbnail_bytes(
     image: np.ndarray, max_dim: int = MAX_THUMBNAIL_DIM, quality: int = 85
 ) -> bytes:

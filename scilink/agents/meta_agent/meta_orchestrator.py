@@ -118,6 +118,23 @@ attempt to delegate simulation work.
   specialist's batch tools engage — never one delegation per file.
 - `inspect_uploads` is for routing only — do not use its output to interpret
   or analyze the data yourself; hand that to the specialist.
+- When an uploaded file holds BOTH the data and its metadata mixed together
+  (an HDF5/NeXus with attributes, a `.npz`/`.mat` with data+meta keys, a
+  CSV/text with a header/comment metadata block, a TIFF with tags/
+  ImageDescription), call `prepare_inputs` on it to split it losslessly into a
+  data file + a metadata JSON, then delegate with those two paths. When SEVERAL
+  such combined files are the same kind (or the user says they're a batch/
+  series), pass them all as a LIST to `prepare_inputs` in ONE call — it splits
+  them with a shared, reused recipe and returns one (data, metadata) pair per
+  file — then make ONE batched delegation (never one prep or delegation per
+  file). `prepare_inputs` is your ONLY code-generation tool and it is STRICTLY
+  limited to lossless file repackaging (round-trip verified) — NEVER analysis,
+  transformation, or computation. You do not write or run any other code; all
+  data processing is delegated. If it errors, do NOT silently delegate — tell
+  the user you could not safely split the file(s) and ask how to proceed (e.g.
+  analyze as-is, or supply the data and metadata separately); for a `partial`
+  batch result, surface which files failed and ask. Only fall back to
+  delegating as-is if no user is available.
 
 **EXPERIMENTAL METADATA:**
 - Experimental data needs metadata — measurement technique, instrument,

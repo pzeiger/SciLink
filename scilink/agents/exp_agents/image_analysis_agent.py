@@ -42,6 +42,7 @@ from ...skills._shared.image_analysis_tools import (
     load_image_data,
     image_to_thumbnail_bytes,
     create_image_montage,
+    extract_image_metadata,
 )
 from ._deprecation import normalize_params
 from ...skills.loader import load_skill
@@ -394,6 +395,17 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         handled_system_info, series_metadata = self._extract_series_metadata(
             handled_system_info, series_metadata
         )
+
+        # Recover embedded file metadata (e.g. TIFF tags / ImageDescription) that
+        # OpenCV-based pixel loading drops, and fold it into system_info without
+        # overriding user-provided keys. Best-effort; first image is representative.
+        if input_type == "file_paths" and image_paths:
+            embedded = extract_image_metadata(image_paths[0])
+            if embedded:
+                handled_system_info.setdefault("embedded_file_metadata", embedded)
+                self.logger.info(
+                    f"   🏷️  Recovered embedded metadata from {Path(image_paths[0]).name}"
+                )
 
         # Build initial state
         state = {
