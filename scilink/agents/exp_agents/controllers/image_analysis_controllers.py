@@ -32,6 +32,7 @@ from typing import Callable, Optional, Any, Dict, List
 import numpy as np
 
 from .._locked_exec import stage_and_run, script_uses_canonical_input, DATA_NAME, VIZ_NAME
+from ....utils.codegen_parse import parse_codegen_response
 
 
 # Anthropic's API rejects images over 5 MB. Cap below that with headroom
@@ -2185,7 +2186,7 @@ Your guidance: '''
             prompt = self.script_instructions.format(**format_kwargs)
 
         response = self.model.generate_content(prompt)
-        result, error = self._parse(response)
+        result, error = parse_codegen_response(response, field="script", logger=self.logger)
 
         if error or not result or "script" not in result:
             raise ValueError(f"Script generation failed: {error or 'no script'}")
@@ -2223,7 +2224,7 @@ Your guidance: '''
             prompt += "\n\n" + preamble + codegen_recipe
 
         response = self.model.generate_content(prompt)
-        result, error = self._parse(response)
+        result, error = parse_codegen_response(response, field="script", logger=self.logger)
 
         if error or not result or "script" not in result:
             raise ValueError(f"Correction failed: {error or 'no script'}")
@@ -3808,7 +3809,7 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
 
             try:
                 response = self.model.generate_content(prompt)
-                result, error = self._parse(response)
+                result, error = parse_codegen_response(response, field="script", logger=self.logger)
 
                 if not error and result and result.get("script"):
                     diagnosis = result.get("diagnosis", "")

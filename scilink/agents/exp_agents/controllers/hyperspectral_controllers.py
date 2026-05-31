@@ -28,6 +28,7 @@ from ..instruct import (
 
 from ....skills.hyperspectral.eels.eels import AGENT_METADATA_KEYS_TO_STRIP
 from ....executors import ExecutionTimeout
+from ....utils.codegen_parse import parse_codegen_response
 
 
 def _render_skill_block(state: dict, stage: str) -> str:
@@ -1964,8 +1965,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     # --- B. GENERATE CODE ---
                     self.logger.info(f"    (Attempt {retries+1}) Asking LLM to write code...")
                     response = self.model.generate_content(current_prompt, generation_config=self.generation_config)
-                    result_json, _ = self._parse_llm_response(response)
-                    code_str = result_json.get("code", "")
+                    result_json, _ = parse_codegen_response(response, field="code", logger=self.logger)
+                    code_str = (result_json or {}).get("code", "")
                     
                     # --- C. SANDBOX SETUP ---
                     local_scope = {}

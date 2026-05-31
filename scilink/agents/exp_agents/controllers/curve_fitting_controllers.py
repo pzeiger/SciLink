@@ -32,6 +32,7 @@ from typing import Callable, Optional, Any, Dict, List
 import numpy as np
 
 from .._locked_exec import stage_and_run, script_uses_canonical_input, DATA_NAME
+from ....utils.codegen_parse import parse_codegen_response
 
 
 def _active_skill_names(state: dict) -> list[str]:
@@ -2094,7 +2095,7 @@ Your guidance: '''
             )
 
         response = self.model.generate_content(prompt)
-        result, error = self._parse(response)
+        result, error = parse_codegen_response(response, field="script", logger=self.logger)
 
         if error or not result or "script" not in result:
             raise ValueError(f"Script generation failed: {error or 'no script'}")
@@ -2122,7 +2123,7 @@ Your guidance: '''
             prompt += "\n\n" + preamble + codegen_recipe
 
         response = self.model.generate_content(prompt)
-        result, error = self._parse(response)
+        result, error = parse_codegen_response(response, field="script", logger=self.logger)
 
         if error or not result or "script" not in result:
             raise ValueError(f"Correction failed: {error or 'no script'}")
@@ -5045,7 +5046,7 @@ Return JSON with:
         
         try:
             response = self.model.generate_content(contents=[prompt], generation_config=self.generation_config, safety_settings=self.safety_settings)
-            result_json, error_dict = self._parse(response)
+            result_json, error_dict = parse_codegen_response(response, field="script", logger=self.logger)
             if error_dict and not (result_json and 'script' in result_json):
                 return None
             return result_json
@@ -5089,7 +5090,7 @@ Return JSON with: {{"diagnosis": "...", "script": "corrected script"}}
         
         try:
             response = self.model.generate_content(contents=[prompt], generation_config=self.generation_config, safety_settings=self.safety_settings)
-            result_json, _ = self._parse(response)
+            result_json, _ = parse_codegen_response(response, field="script", logger=self.logger)
             if result_json:
                 self.logger.info(f"   📋 Diagnosis: {result_json.get('diagnosis', 'N/A')}")
                 return result_json.get("script")

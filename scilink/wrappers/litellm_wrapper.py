@@ -60,6 +60,31 @@ except ImportError:
     litellm = None
 
 
+# Fallback output ceiling for Bedrock models litellm cannot map (e.g. opus-4-6 in
+# litellm 1.83.10). Matches the known Bedrock opus-4-1 ceiling; ~5-8x the headroom
+# a generated analysis/fit script needs and within modern Claude-on-Bedrock limits.
+DEFAULT_MAX_OUTPUT_TOKENS = 32000
+
+
+def _resolve_max_output_tokens(model: str) -> int:
+    """Best-effort max output tokens for a model (Bedrock path only — see #238).
+
+    litellm fills ``max_tokens`` with the model's registered ceiling for direct
+    Anthropic/OpenAI/Gemini, but the Bedrock converse transform omits ``maxTokens``
+    when unset, so Bedrock falls back to a low server-side default and truncates
+    large generations. Returns litellm's registered ceiling when the model is
+    mapped (e.g. Bedrock opus-4-1 -> 32000), else ``DEFAULT_MAX_OUTPUT_TOKENS``. A
+    litellm upgrade that maps the model makes this resolve to the true ceiling.
+    """
+    try:
+        mt = litellm.get_max_tokens(model)
+        if mt:
+            return int(mt)
+    except Exception:
+        pass
+    return DEFAULT_MAX_OUTPUT_TOKENS
+
+
 def _ensure_gemini_api_key():
     """
     Ensure GEMINI_API_KEY is set for LiteLLM.
@@ -428,10 +453,17 @@ class LiteLLMGenerativeModel:
                 val = cfg.get(old)
                 if val is not None:
                     params[new] = val
-        
+
+        # Bedrock omits maxTokens when unset -> a low server-side default truncates
+        # large outputs (#238). Request the model's max on the Bedrock path only;
+        # every other provider already gets a sane ceiling from litellm, so leave
+        # their requests untouched. An explicit max_output_tokens above still wins.
+        if "max_tokens" not in params and str(self.model or "").startswith("bedrock/"):
+            params["max_tokens"] = _resolve_max_output_tokens(self.model)
+
         if tools:
             params["tools"] = tools
-        
+
         return params
     
     def _to_legacy_response(self, response, is_stream: bool = False):
@@ -458,10 +490,12 @@ class LiteLLMGenerativeModel:
                 message = getattr(choice, "delta", None)
             
             text = ""
+            raw_text = ""
             if message:
                 content = getattr(message, "content", None)
                 if content:
-                    text = self._clean_text(str(content))
+                    raw_text = str(content)
+                    text = self._clean_text(raw_text)
             
             tool_calls = getattr(message, "tool_calls", None) if message else None
             if tool_calls:
@@ -481,22 +515,29 @@ class LiteLLMGenerativeModel:
                         ))
             
             if text:
-                parts.append(SimpleNamespace(text=text, function_call=None))
-            
+                parts.append(SimpleNamespace(text=text, function_call=None, raw_text=raw_text))
+
             finish_reason = getattr(choice, "finish_reason", "stop")
             finish_map = {"stop": 1, "length": 0, "tool_calls": 2, "content_filter": 3}
             fr_int = finish_map.get(finish_reason, 1) if finish_reason else 1
-            
+
             content = SimpleNamespace(parts=parts, role="model")
             candidates.append(SimpleNamespace(content=content, finish_reason=fr_int))
-        
+
         first_text = ""
+        first_raw = ""
         if candidates and candidates[0].content.parts:
             for part in candidates[0].content.parts:
                 if hasattr(part, "text") and part.text:
                     first_text += part.text
-        
-        return SimpleNamespace(text=first_text, candidates=candidates)
+                if getattr(part, "raw_text", None):
+                    first_raw += part.raw_text
+
+        # raw_text preserves the model's UNCLEANED output. Codegen parsing must use
+        # it: _clean_text's embedded-JSON extraction (Pattern 3) greedily slices from
+        # the first '{' to the last '}', which mangles a raw script containing
+        # f-string/dict braces before the codegen parser ever sees it (#238).
+        return SimpleNamespace(text=first_text, candidates=candidates, raw_text=first_raw)
     
     def _clean_text(self, text: str) -> str:
         """

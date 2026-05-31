@@ -135,6 +135,17 @@ class LLMAgentMixin:
                 "details": str(e)
             }
     
+    def _parse_codegen_response(self, response: Any, field: str = "script") -> Tuple[Optional[dict], Optional[dict]]:
+        """Parse a codegen (script-generation) response — see ``utils.codegen_parse``.
+
+        Script-first + compile-checked, with distinct truncation detection. Use
+        this instead of ``_parse_llm_response`` for script/code generation;
+        structured-JSON responses (plans, validation, conformance) keep using
+        ``_parse_llm_response``.
+        """
+        from ...utils.codegen_parse import parse_codegen_response
+        return parse_codegen_response(response, field=field, logger=self.logger)
+
     def _extract_text_from_response(self, response: Any) -> str:
         """Extract text content from various LLM response formats."""
         if hasattr(response, 'text'):

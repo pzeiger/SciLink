@@ -18,6 +18,7 @@ from .instruct import (
 )
 from .utils import save_generated_script, MaterialsProjectHelper, MP_SEARCH_TOOL_SCHEMA
 from ...executors import ScriptExecutor, DEFAULT_TIMEOUT
+from ...utils.codegen_parse import parse_codegen_response
 
 from ._deprecation import normalize_params
 
@@ -577,12 +578,17 @@ class StructureGenerator:
                 if attempt > 1:
                     print(f"      🔧 Fixing script issues (attempt {attempt}/{MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS})")
                 
-                # Generate script via JSON response
-                response_data = self._generate_json(current_prompt)
-                script_content = response_data.get("script_content")
-                
+                # Generate script via robust, compile-checked extraction (#238):
+                # tolerates JSON-escaping breakage and flags truncation distinctly.
+                response = self.model.generate_content(current_prompt, generation_config=self.generation_config)
+                result_data, parse_error = parse_codegen_response(response, field="script_content", logger=self.logger)
+                script_content = (result_data or {}).get("script_content")
+
                 if not script_content:
-                    last_error_message = f"LLM response missing 'script_content' (attempt {attempt})"
+                    last_error_message = (
+                        (parse_error or {}).get("error")
+                        or f"LLM response missing 'script_content' (attempt {attempt})"
+                    )
                     self.logger.error(last_error_message)
                     if attempt == MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS:
                         break
