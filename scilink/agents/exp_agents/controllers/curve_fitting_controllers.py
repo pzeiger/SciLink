@@ -34,6 +34,126 @@ import numpy as np
 from .._locked_exec import stage_and_run, script_uses_canonical_input, DATA_NAME
 from ....utils.codegen_parse import parse_codegen_response
 
+# Canonical fitted-curve output the fit script saves alongside visualization.png.
+# Best-effort: when present it powers controller-side residual diagnostics; when
+# absent (older/refit scripts that didn't save it) diagnostics are simply skipped.
+FIT_NAME = "fit.npy"
+
+
+def _robust_noise_sigma(residual: np.ndarray) -> float:
+    """Per-point noise sigma from successive differences — robust to systematic
+    structure in the residual (a trend/oscillation barely affects neighbour diffs)."""
+    d = np.diff(residual)
+    d = d[np.isfinite(d)]
+    if d.size == 0:
+        return 0.0
+    mad = float(np.median(np.abs(d - np.median(d))))
+    sigma = 1.4826 * mad / np.sqrt(2.0)          # MAD of diffs -> per-point sigma
+    if not sigma or not np.isfinite(sigma):
+        sigma = float(np.std(d)) / np.sqrt(2.0)
+    return float(sigma)
+
+
+def _residual_diagnostics(x, y, fit, n_windows: int = 16):
+    """Structure-aware residual diagnostics from data and the fitted curve.
+
+    Pure NumPy on the saved fit array — reliable, unlike asking the vision model
+    to read small systematic residuals off a dynamic-range-crushed plot. Returns a
+    dict of global metrics plus the most systematic windows, or ``None`` if the
+    inputs can't be aligned (so the caller degrades to no-diagnostics gracefully).
+    """
+    try:
+        x = np.asarray(x, float).ravel()
+        y = np.asarray(y, float).ravel()
+        fit = np.asarray(fit, float)
+        if fit.ndim == 2:                        # accept [N,2] -> take y column
+            fit = fit[:, -1]
+        fit = fit.ravel()
+        if fit.shape[0] != y.shape[0] or x.shape[0] != y.shape[0]:
+            return None
+        resid = y - fit
+        m = np.isfinite(resid) & np.isfinite(x)
+        if int(m.sum()) < 8:
+            return None
+        x, resid = x[m], resid[m]
+        order = np.argsort(x)
+        x, resid = x[order], resid[order]
+
+        sigma = _robust_noise_sigma(resid) or (float(np.std(resid)) or 1.0)
+        nresid = resid / sigma
+        rms = float(np.sqrt(np.mean(resid ** 2)))
+        r0 = resid - resid.mean()
+        denom = float(np.sum(r0 * r0)) or 1.0
+        autocorr1 = float(np.sum(r0[:-1] * r0[1:]) / denom)
+        frac_gt3 = float(np.mean(np.abs(nresid) > 3.0))
+
+        edges = np.linspace(x.min(), x.max(), n_windows + 1)
+        windows = []
+        for i, (a, b) in enumerate(zip(edges[:-1], edges[1:])):
+            wm = (x >= a) & (x <= b) if i == n_windows - 1 else (x >= a) & (x < b)
+            if int(wm.sum()) < 4:
+                continue
+            wr = resid[wm]
+            wn = nresid[wm]
+            # Sign-changes of the BIN-AVERAGED residual, not the raw points:
+            # averaging cancels point noise so this counts *systematic*
+            # oscillation (a single bump -> 0, a peak shift -> 1, multiple
+            # unresolved peaks -> several), not noise crossings.
+            nb = int(min(10, max(3, wr.size // 8)))
+            cuts = np.linspace(0, wr.size, nb + 1).astype(int)
+            bmeans = np.array([wr[cuts[k]:cuts[k + 1]].mean()
+                               for k in range(nb) if cuts[k + 1] > cuts[k]])
+            bsigns = np.sign(bmeans)
+            bsigns = bsigns[bsigns != 0]
+            sign_changes = int(np.sum(bsigns[:-1] != bsigns[1:])) if bsigns.size > 1 else 0
+            j = int(np.argmax(np.abs(wn)))
+            windows.append({
+                "x_lo": float(a), "x_hi": float(b),
+                "rms_over_noise": float(np.sqrt(np.mean(wr ** 2)) / sigma),
+                "max_abs_norm": float(np.abs(wn[j])),
+                "x_at_max": float(x[wm][j]),
+                "sign_changes": sign_changes,
+            })
+        windows.sort(key=lambda w: w["rms_over_noise"], reverse=True)
+        return {
+            "noise_sigma": sigma,
+            "global_rms": rms,
+            "global_rms_over_noise": float(rms / sigma),
+            "autocorr_lag1": autocorr1,
+            "frac_points_gt_3sigma": frac_gt3,
+            "worst_windows": windows[:5],
+        }
+    except Exception:
+        return None
+
+
+def _format_residual_diagnostics(diag) -> str:
+    """Compact text block of residual diagnostics for the verifier prompt — gives
+    the LLM numbers to reason over instead of eyeballing a compressed plot."""
+    if not diag:
+        return ""
+    lines = [
+        "\n**RESIDUAL DIAGNOSTICS (computed from data − fit; use to locate "
+        "systematic structure the plot's dynamic range may hide):**",
+        f"- Noise σ (successive-difference estimate): {diag['noise_sigma']:.3g}",
+        f"- Global residual RMS: {diag['global_rms']:.3g} "
+        f"({diag['global_rms_over_noise']:.1f}× noise)",
+        f"- Lag-1 autocorrelation: {diag['autocorr_lag1']:.2f} "
+        f"(≳ 0.3 ⇒ systematic, not white noise)",
+        f"- Points beyond 3σ: {diag['frac_points_gt_3sigma'] * 100:.1f}%",
+    ]
+    flagged = [w for w in (diag.get("worst_windows") or []) if w["rms_over_noise"] >= 1.5]
+    if flagged:
+        lines.append("- Most systematic regions (RMS/noise · peak |resid|/σ · sign-changes):")
+        for w in flagged:
+            lines.append(
+                f"    • {w['x_lo']:.1f}–{w['x_hi']:.1f}: "
+                f"{w['rms_over_noise']:.1f}× · "
+                f"{w['max_abs_norm']:.0f}σ at x≈{w['x_at_max']:.1f} · "
+                f"{w['sign_changes']} sign-changes"
+            )
+    return "\n".join(lines)
+
 
 def _active_skill_names(state: dict) -> list[str]:
     """Return names of all currently-loaded skills from a pipeline state dict.
@@ -2085,10 +2205,15 @@ Your guidance: '''
                 f"{issues_text}\n\n"
                 "Adapt this script to the (possibly updated) locked plan above. "
                 "Preserve working scaffolding (data loading, output paths, numpy "
-                "formatting, 1D-vs-2D handling, FIT_RESULTS_JSON output) verbatim; "
+                "formatting, 1D-vs-2D handling, FIT_RESULTS_JSON output, and the "
+                "fit.npy save if present) verbatim; "
                 "only modify the model components, initial guesses, bounds, or "
                 "background treatment needed to address the issues. Do NOT "
-                "regenerate from scratch.\n\n"
+                "regenerate from scratch. If the RESIDUAL DIAGNOSTICS flagged a "
+                "localized region with RMS far above noise and repeated "
+                "sign-changes, treat that as under-resolved real structure there "
+                "(add a physically-nameable component or fix the peak shape), not "
+                "as noise.\n\n"
                 "```python\n"
                 f"{prior_script}\n"
                 "```\n"
@@ -2395,6 +2520,24 @@ Your guidance: '''
 
         fit_results = _parse_script_markers(run["stdout"])
 
+        # Best-effort residual diagnostics from the saved fitted curve (vision aid):
+        # reliable per-region structure metrics the verifier can reason over instead
+        # of eyeballing a dynamic-range-crushed plot. Skipped silently if fit.npy
+        # is absent (older/refit scripts) so this never breaks the fit path.
+        residual_diag = None
+        try:
+            fit_path = Path(item_dir) / FIT_NAME
+            if fit_path.exists():
+                cd = np.asarray(curve_data, float)
+                if cd.ndim == 2 and cd.shape[1] >= 2:
+                    xx, yy = cd[:, 0], cd[:, 1]
+                else:
+                    yy = cd.ravel()
+                    xx = np.arange(yy.shape[0], dtype=float)
+                residual_diag = _residual_diagnostics(xx, yy, np.load(fit_path))
+        except Exception:
+            residual_diag = None
+
         return {
             "index": spectrum_idx,
             "name": spectrum_name,
@@ -2407,6 +2550,7 @@ Your guidance: '''
             "deviation_note": fit_results.get("deviation_note") or fit_results.get("summary"),
             "visualization_path": run["visualization_path"],
             "visualization_bytes": run["visualization_bytes"],
+            "residual_diagnostics": residual_diag,
             "statistics": stats,
             "script": script,
             "script_errors": script_errors,
@@ -2423,7 +2567,7 @@ Your guidance: '''
 
 **FITTED PARAMETERS:**
 {parameters}
-{prior_best_section}
+{prior_best_section}{residual_diagnostics}
 ## STEP 1: CHECK FOR BROKEN FITS (reject immediately if ANY are true)
 
 - **Wrong x-range?** Does the plot show a completely different x-range than where the model components are defined? (e.g., plot shows 135-200 but components are at 300, 520, 860) → REJECT
@@ -2449,6 +2593,15 @@ configured acceptance target:
 - R² < {reject_threshold:.2f} (hard-reject floor — numerical fit is too poor)
 - Major systematic residual pattern across ENTIRE spectrum (any R²)
 - A prominent data feature is completely missed by the model (any R²)
+- **Under-resolved structure:** a *localized* region shows clearly systematic
+  residuals — RMS well above the noise AND repeated sign-changes (an
+  oscillation), at a named, visible spectral position — even if the rest of the
+  spectrum fits well. Use the RESIDUAL DIAGNOSTICS block above (if present): a
+  window with RMS ≫ noise and several sign-changes means the model is
+  *under-resolving real, repeating structure* there (an unresolved component, or
+  the wrong peak shape) — not random noise. When the data warrants it (and the
+  active constraint level permits model changes), the fix may be to add a
+  physically-nameable component or change the peak shape, not just retune.
 
 **Soft band ({reject_threshold:.2f} ≤ R² < {accept_threshold:.2f}):**
 - Numerical R² is borderline. Reject ONLY if you find concrete physics
@@ -2459,7 +2612,9 @@ configured acceptance target:
   trace is interpretable.
 
 **Do NOT reject for:**
-- Ambiguous or subtle features
+- Ambiguous or subtle features — but distinguish "subtle" (small, noise-level,
+  non-repeating) from "under-resolved" (localized, RMS ≫ noise, oscillating);
+  the latter is a real defect per the bullet above, not a subtlety to wave off.
 - Minor position offsets (<5%)
 - Large parameter uncertainties (that's just uncertainty, not failure)
 - "Could try different model" suggestions
@@ -2691,6 +2846,9 @@ Remember: Rejecting a good fit (R² > {accept_threshold:.2f}) to chase marginal 
             accept_threshold=self.r2_threshold,
             reject_threshold=self.r2_threshold - self._r2_soft_margin(self.r2_threshold),
             prior_best_section=prior_best_section,
+            residual_diagnostics=_format_residual_diagnostics(
+                fit_result.get("residual_diagnostics")
+            ),
         )
 
         # Constraint annealing: use caller-supplied level (adaptive) or fall

@@ -2228,6 +2228,13 @@ plan as specified and let the retry pipeline handle actual runtime failures.
 3. Implement your fitting approach (fit over the plan's fit domain).
 4. Compute R² and RMSE
 5. Save `visualization.png` (in the current working directory): data + fit + residuals (show individual components if multiple peaks).
+   **Make the residual diagnosable** (the reviewer reads this plot): put residuals
+   in their own panel, and when the data has a large dynamic range (the tallest
+   peak dwarfs the baseline and any fine structure), do NOT let the residual be
+   crushed by the tallest peak. Either plot a NORMALIZED residual (residual ÷ noise
+   level) alongside the raw residual, use a log or sqrt y-scale on the main panel,
+   and/or add a zoomed sub-panel over each region where the residual is largest, so
+   localized/systematic misfit is actually visible.
    If you applied any preprocessing, ALSO plot the raw data faintly (light grey,
    low alpha) so the reviewer can confirm preprocessing did not distort the
    fitted features.
@@ -2240,7 +2247,11 @@ NOT any material/phase name, NOT any model name)
    - Annotations: parameter values are OK (e.g. "FWHM=12"); physical assignments are NOT \
 (e.g. "sp² carbon" — do not add)
    - Axis labels: use xlabel/ylabel from sample metadata if provided; else generic "X" / "Y"
-6. Print results as JSON:
+6. Also save `fit.npy` (current working directory): a 1-D NumPy array of the fitted
+   model evaluated at the SAME x-points as `data.npy` (length N). The reviewer uses
+   it to compute residual diagnostics (residual = data_y − fit). If you masked or
+   excluded any points, still evaluate the model at all N x-points so lengths match.
+7. Print results as JSON:
 ```python
 results = {{
     "model_type": "description",
@@ -2276,7 +2287,7 @@ FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed script.
 
 **CRITICAL:** Fix only the execution error. Do NOT change the fitting model, its parameters, or the overall analysis approach. The model is locked for series consistency.
 
-**I/O contract (do not deviate):** the data is `data.npy` in the current working directory — load it with `np.load` (do NOT look for .csv/.txt/.dat or glob for other files); save the plot to `visualization.png`; print one line `FIT_RESULTS_JSON:{{...}}` with the fit results. Missing any of these fails the run.
+**I/O contract (do not deviate):** the data is `data.npy` in the current working directory — load it with `np.load` (do NOT look for .csv/.txt/.dat or glob for other files); save the plot to `visualization.png`; print one line `FIT_RESULTS_JSON:{{...}}` with the fit results. Missing any of these fails the run. Also keep saving `fit.npy` (1-D fitted curve at the `data.npy` x-points, length N) if the script you are fixing already did — it feeds the reviewer's residual diagnostics.
 
 **Plot labels must be neutral** if your fix touches `visualization.png`: \
 use "Data"/"Fit"/"Component N"/"Residuals" only — no material names, no peak assignments, no model names in titles/legends/annotations.
