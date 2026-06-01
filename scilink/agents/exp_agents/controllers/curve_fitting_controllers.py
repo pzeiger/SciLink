@@ -642,8 +642,13 @@ def _prior_curve_fit_block(state: dict) -> str:
     return (
         "\n## Prior Curve-Fit Runs\n"
         "Artifacts from earlier curve-fit analyses, provided as reference. "
-        "When the new data is the same kind of measurement, the saved "
-        "fitting script below can be reused for a consistent fit.\n"
+        "Decide for yourself how to use them given the goal: reuse the saved "
+        "script as-is to extend/reproduce a consistent fit, adapt it if the "
+        "model needs adjusting, or write a fresh script. If the goal is to "
+        "VERIFY or re-examine a prior result, derive the fit independently "
+        "rather than re-running the prior script — treat the prior numbers as a "
+        "hypothesis to test, since re-running the script that produced them "
+        "only reproduces them.\n"
         + "\n".join(blocks)
     )
 
@@ -4126,17 +4131,33 @@ Return JSON with:
         # earlier curve-fit run, the spectrum-0 anchor reuses that run's saved
         # fitting script instead of re-deriving the model. Skipped for
         # multi-regime runs (a single prior script has no regime mapping).
-        reuse_script, reuse_source = _first_prior_curve_fit_script(state)
+        # Locked-script reuse (#172) is an explicit opt-in (reuse_locked_script),
+        # not the default for a prior run being supplied. By default a follow-up
+        # that names prior_analysis_paths is AGENT-JUDGED: the prior fit summary +
+        # script are surfaced as reference in codegen and the agent decides
+        # whether to reuse, adapt, or rewrite. Verbatim reuse is for extending an
+        # ongoing campaign with a fixed model/feature schema — it cannot verify or
+        # deepen a prior result (re-running the script that produced it only
+        # reproduces it).
+        if state.get("reuse_locked_script"):
+            reuse_script, reuse_source = _first_prior_curve_fit_script(state)
+        else:
+            reuse_script, reuse_source = None, None
         if reuse_script and regime_configs:
             self.logger.info(
-                "   ♻️  Prior curve-fit run supplied, but this run is "
-                "multi-regime — locked-script reuse skipped."
+                "   ♻️  Locked-script reuse requested, but this run is "
+                "multi-regime — reuse skipped."
             )
             reuse_script, reuse_source = None, None
         elif reuse_script:
             self.logger.info(
-                f"   ♻️  Prior curve-fit run '{reuse_source}' supplied — the "
-                f"anchor will reuse its locked fitting script (#172)."
+                f"   ♻️  Locked-script reuse (opt-in) — anchor will reuse the "
+                f"fitting script from prior run '{reuse_source}' (#172)."
+            )
+        elif state.get("prior_analysis_paths"):
+            self.logger.info(
+                "   🧭 Prior curve-fit run(s) supplied as reference — the agent "
+                "will decide whether to reuse, adapt, or rewrite the fit."
             )
 
         results_by_idx: Dict[int, dict] = {}

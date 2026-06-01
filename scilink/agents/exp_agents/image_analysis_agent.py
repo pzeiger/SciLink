@@ -237,6 +237,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         skill: Optional[str] = None,
         prior_knowledge: Optional[List[Dict[str, Any]]] = None,
         prior_analysis_paths: Optional[List[str]] = None,
+        # Opt-in: force verbatim reuse of the prior locked analysis script
+        # (#172) — for extending an ongoing campaign with a fixed analysis /
+        # feature-table schema. Default False: prior runs are agent-judged
+        # reference material (reuse / adapt / rewrite is the agent's call).
+        reuse_locked_script: bool = False,
         literature_file: Optional[str] = None,
         # Quality control overrides
         outlier_sigma: Optional[float] = None,
@@ -427,6 +432,9 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # Prior knowledge
             "prior_knowledge": prior_knowledge or [],
             "prior_analysis_paths": prior_analysis_paths or [],
+            # Opt-in verbatim reuse of the prior locked script (#172); default
+            # False — prior runs are agent-judged reference material.
+            "reuse_locked_script": bool(reuse_locked_script),
             # First image (for planning)
             "image_path": (
                 image_paths[0] if image_paths else first_image_name
@@ -1049,6 +1057,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "prior_analysis_paths": tier1_state.get(
                 "prior_analysis_paths", []
             ),
+            # NB: deliberately NOT carrying reuse_locked_script into Tier 2.
+            # Tier 2 is the "build on Tier 1, go deeper" pass — it must never
+            # verbatim-reuse the locked script (that would defeat deepening).
+            # Absent here, the controller's state.get(...) defaults to
+            # agent-judged (no reuse), which is correct.
             # Sub-agent results
             "fft_preprocessing": None,
             "sam_preprocessing": None,

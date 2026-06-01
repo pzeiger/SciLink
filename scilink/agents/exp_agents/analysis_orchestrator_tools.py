@@ -2011,6 +2011,7 @@ class AnalysisOrchestratorTools:
             series_metadata: str = None,
             task_mode: str = None,
             prior_analysis_paths: List[str] = None,
+            reuse_locked_script: bool = False,
             literature_file: str = None,
             r2_threshold: float = None,
         ) -> str:
@@ -2491,6 +2492,8 @@ class AnalysisOrchestratorTools:
                     analyze_kwargs["prior_knowledge"] = self.orch.active_knowledge
                 if prior_analysis_paths:
                     analyze_kwargs["prior_analysis_paths"] = prior_analysis_paths
+                if reuse_locked_script:
+                    analyze_kwargs["reuse_locked_script"] = True
                 if literature_file:
                     analyze_kwargs["literature_file"] = literature_file
                 if r2_threshold is not None:
@@ -2735,23 +2738,36 @@ class AnalysisOrchestratorTools:
                         "the curve-fitting agent — for a prior curve-fit run "
                         "the saved fitting script and fit summary are surfaced "
                         "to its planning and script-generation stages.\n"
-                        "LOCKED EXTRACTION-SCRIPT REUSE: when the new data is "
-                        "the NEXT MEASUREMENT of the SAME measurement series as "
-                        "the prior run — the same kind of unit, only the "
-                        "control parameters differ (a new point in a "
-                        "Bayesian-optimization / closed-loop campaign) — the "
-                        "agent reuses the prior run's locked extraction script "
-                        "verbatim instead of re-deriving the model/pipeline. "
-                        "This guarantees the new feature row has the SAME "
-                        "columns as the campaign, which the planning-side "
-                        "feature-table append strictly requires. ONLY pass "
-                        "prior_analysis_paths when the new data genuinely "
-                        "continues that series; if it is a different kind of "
-                        "measurement, do NOT pass it (a fresh analysis is "
-                        "correct — forcing the prior recipe would be wrong). "
-                        "The run reports a `reuse_validity` verdict "
-                        "(`good` / `poor` / `script_failed`) — read it and act "
-                        "on a non-`good` verdict (see the system guidance)."
+                        "By default the prior run is REFERENCE MATERIAL: the "
+                        "agent decides for itself whether to reuse, adapt, or "
+                        "rewrite the prior script given the goal. Pass this for "
+                        "ANY follow-up that should build on a prior run — "
+                        "verification, deeper analysis, or extending a series. "
+                        "For a verification / re-examination the agent derives "
+                        "the result independently (re-running the script that "
+                        "produced a result cannot verify it). To FORCE verbatim "
+                        "reuse of the prior locked extraction script, ALSO set "
+                        "`reuse_locked_script=true` (see that parameter)."
+                    )
+                },
+                "reuse_locked_script": {
+                    "type": "boolean",
+                    "description": (
+                        "Opt-in, default false. Set true ONLY when the new data "
+                        "is the NEXT MEASUREMENT of the SAME series as a run in "
+                        "`prior_analysis_paths` — the same kind of unit, only "
+                        "the control parameters differ (a new point in a "
+                        "Bayesian-optimization / closed-loop campaign). It forces "
+                        "the agent to reuse that run's locked extraction script "
+                        "VERBATIM instead of re-deriving the model, guaranteeing "
+                        "the new feature row has the SAME columns as the campaign "
+                        "(which the planning-side feature-table append strictly "
+                        "requires). The run then reports a `reuse_validity` "
+                        "verdict (`good` / `poor` / `script_failed`) — read it "
+                        "and act on a non-`good` verdict. Do NOT set it for "
+                        "verification or deeper-analysis follow-ups, or for a "
+                        "different kind of measurement — leave it false so the "
+                        "agent decides how to use the prior run as reference."
                     )
                 },
                 "literature_file": {

@@ -299,21 +299,28 @@ examine_data returns data_type:
   succeeded, say so plainly — do not fabricate quantitative findings from a
   file's description or metadata.
 - Before launching a fresh `run_analysis`, consider whether a prior analysis from
-  `list_results()` already covers the new request's prerequisites (e.g. existing
-  segmentation, fits, abundance maps). If so, pass its `output_directory` via
-  `prior_analysis_paths` so the new run can build on it instead of recomputing.
+  `list_results()` is relevant to the new request (existing segmentation, fits,
+  abundance maps, or a result to verify / deepen). If so, pass its
+  `output_directory` via `prior_analysis_paths`: the prior run becomes REFERENCE
+  MATERIAL and the agent decides whether to reuse, adapt, or rewrite its script
+  for the new goal. For a verification or re-examination the agent re-derives the
+  result independently — do NOT expect or force a verbatim re-run, since
+  re-running the script that produced a result cannot verify it.
 
 **INCREMENTAL MEASUREMENT SERIES (locked extraction-script reuse):**
 - When the new data is the NEXT MEASUREMENT of an existing measurement series —
   the same kind of unit as a prior run, only the control parameters differ
   (e.g. a new point added to a Bayesian-optimization / closed-loop campaign) —
-  pass that prior run's `output_directory` via `prior_analysis_paths`. The agent
-  reuses the prior run's locked extraction recipe (fitting script / image
-  pipeline) verbatim, so the new feature row has the SAME columns as the rest of
-  the campaign — which a downstream feature-table / BO append strictly requires.
-- Decide deliberately whether the new data IS a continuation. If it is a
-  different kind of measurement, do NOT pass `prior_analysis_paths` — a fresh
-  analysis is correct; forcing the prior recipe would extract the wrong things.
+  pass that prior run's `output_directory` via `prior_analysis_paths` AND set
+  `reuse_locked_script=true`. The agent then reuses the prior run's locked
+  extraction recipe (fitting script / image pipeline) verbatim, so the new
+  feature row has the SAME columns as the rest of the campaign — which a
+  downstream feature-table / BO append strictly requires.
+- `reuse_locked_script` is ONLY for this continuation case. Decide deliberately:
+  for a verification, a deeper analysis, or a different kind of measurement,
+  leave it false (the default) — the agent treats the prior run as reference and
+  derives the result itself; forcing the prior recipe would extract the wrong
+  things or merely reproduce the result you meant to check.
 - After such a run, READ the `reuse_validity` field in the `run_analysis`
   result and act on its `verdict`:
   - `good` — the reused recipe fits the new measurement well; proceed normally.
@@ -321,7 +328,7 @@ examine_data returns data_type:
     reused recipe fits this measurement poorly. Surface the `reuse_warning` to
     the user: the new measurement may not belong to this series, or conditions
     shifted. If you judge it is genuinely a different measurement, re-run
-    `run_analysis` WITHOUT `prior_analysis_paths` for a correct fresh analysis.
+    `run_analysis` WITHOUT `reuse_locked_script` for a correct fresh analysis.
   - `script_failed` — the reused recipe could not run and the model/pipeline was
     re-derived from scratch, so the feature columns may differ from the
     campaign. Flag this clearly to the user — a campaign append may break.

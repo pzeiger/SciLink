@@ -4319,7 +4319,14 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
         # earlier image-analysis run, the image-0 anchor reuses that run's
         # saved analysis script instead of re-deriving the pipeline. Skipped
         # for multi-regime runs (a single prior script has no regime mapping).
-        reuse_script, reuse_source = _first_prior_image_script(state)
+        # #172 locked-script reuse is now an explicit opt-in. Without it a
+        # follow-up is agent-judged: the prior run (incl. its script) is
+        # surfaced as reference in codegen and the agent decides reuse / adapt /
+        # rewrite. Verbatim reuse cannot verify or deepen a prior result.
+        if state.get("reuse_locked_script"):
+            reuse_script, reuse_source = _first_prior_image_script(state)
+        else:
+            reuse_script, reuse_source = None, None
         if reuse_script and regime_configs:
             self.logger.info(
                 "   ♻️  Prior image-analysis run supplied, but this run is "

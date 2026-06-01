@@ -288,8 +288,13 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Prior knowledge from reference analyses
         prior_knowledge: Optional[List[Dict[str, Any]]] = None,
         # Prior curve-fit runs whose saved artifacts (fitting script, fit
-        # summary) the new run may consume as reference.
+        # summary) the new run may consume as reference. By default these are
+        # agent-judged reference material (reuse / adapt / rewrite is the
+        # agent's call). Set ``reuse_locked_script=True`` ONLY to force verbatim
+        # reuse of the prior locked script — for extending an ongoing campaign
+        # with a fixed model / feature-table schema (#172).
         prior_analysis_paths: Optional[List[str]] = None,
+        reuse_locked_script: bool = False,
         literature_file: Optional[str] = None,
         # Quality control overrides (optional)
         r2_threshold: Optional[float] = None,
@@ -667,6 +672,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
             # Prior curve-fit runs — artifacts surfaced to planner / script-gen
             "prior_analysis_paths": prior_analysis_paths or [],
+            # Opt-in: force verbatim reuse of the prior locked script (#172).
+            # Default False — prior runs are agent-judged reference material.
+            "reuse_locked_script": bool(reuse_locked_script),
 
             # Effective quality gate (curve_fit_controllers reads via _gate()).
             "quality_gate": effective_gate,
