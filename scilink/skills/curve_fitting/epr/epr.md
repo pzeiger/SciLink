@@ -1,5 +1,6 @@
 ---
 description: CW-EPR axial powder fitting for S=1/2 systems at X-band — extracts g_par, g_perp, A_par, and linewidth from the first-derivative spectrum, with an optional second isotropic component for radical/defect contamination near g≈2.
+technique: [EPR, ESR, "electron paramagnetic resonance", "electron spin resonance"]
 quality_gate:
   metric: r_squared
   accept_threshold: 0.90

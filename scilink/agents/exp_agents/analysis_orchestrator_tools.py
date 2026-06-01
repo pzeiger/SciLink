@@ -121,13 +121,21 @@ def _build_skill_description(agent_registry: dict = None,
         for name in names:
             try:
                 parsed = load_skill(name, domain=domain)
-                desc = (parsed.get("meta") or {}).get("description")
+                meta = parsed.get("meta") or {}
+                desc = meta.get("description")
                 if not desc:
                     desc = parsed.get("overview", "").split("\n")[0].strip()
                 # Trim trailing punctuation so the join with ". " below
                 # doesn't produce ".." or ".;".
                 desc = desc.rstrip(".;,") if desc else desc
-                skill_descs.append(f"'{name}' — {desc}" if desc else f"'{name}'")
+                # Surface the declared measurement technique(s) explicitly so the
+                # selector can technique-match instead of inferring from prose.
+                techs = meta.get("technique")
+                if isinstance(techs, str):
+                    techs = [techs]
+                tech_tag = f" [technique: {', '.join(map(str, techs))}]" if techs else ""
+                body = f"{desc}" if desc else ""
+                skill_descs.append(f"'{name}'{tech_tag}" + (f" — {body}" if body else ""))
             except Exception:
                 skill_descs.append(f"'{name}'")
         parts.append(f"Built-in {domain} skills: {'; '.join(skill_descs)}.")
@@ -137,9 +145,10 @@ def _build_skill_description(agent_registry: dict = None,
 
     parts.append(
         "Only select a skill whose measurement technique matches the data's "
-        "technique (each skill names its technique in its description above); if "
-        "none matches, omit `skill` and let the agent's baseline handle it — do "
-        "not substitute the nearest-sounding skill."
+        "technique — compare the data's technique (from the metadata) against "
+        "each skill's `[technique: …]` tag above. If none matches, omit `skill` "
+        "and let the agent's baseline handle it; do not substitute the "
+        "nearest-sounding skill."
     )
 
     return " ".join(parts)

@@ -1,5 +1,6 @@
 ---
 description: p-XRD profile fitting — per-peak pseudo-Voigt fits with FWHM, position, and intensity; Scherrer crystallite size and Williamson-Hall microstrain from the fitted line widths.
+technique: [XRD, "X-ray diffraction", "powder diffraction", pXRD]
 quality_gate:
   metric: r_squared
   accept_threshold: 0.95
