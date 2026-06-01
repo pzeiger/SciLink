@@ -842,20 +842,23 @@ else:
             )
 
     _has_conversation = bool(st.session_state.chat_messages)
-    # plan and meta accept a free-text goal with no prior upload.
-    _free_start_modes = ("plan", "meta")
-    if st.session_state.app_mode == "meta":
-        _chat_placeholder = "Describe your research goal..."
-    elif st.session_state.app_mode == "plan":
-        _chat_placeholder = "Message the planning agent..."
-    elif _has_conversation:
-        _chat_placeholder = "Message the analysis agent..."
-    else:
+    # Every mode has a dedicated start screen (goal field + a Start/Analyze
+    # button) in render_pre_chat_uploads, so the bottom chat input is for
+    # *continuing* a conversation and stays disabled until one exists.
+    # (Previously plan/meta left it enabled at the start, duplicating the start
+    # form and dropping any text typed into it.)
+    _chat_disabled = task.is_running or not _has_conversation
+    if _has_conversation:
+        if st.session_state.app_mode == "meta":
+            _chat_placeholder = "Message mission control..."
+        elif st.session_state.app_mode == "plan":
+            _chat_placeholder = "Message the planning agent..."
+        else:
+            _chat_placeholder = "Message the analysis agent..."
+    elif st.session_state.app_mode == "analyze":
         _chat_placeholder = "Upload data and click Analyze to start"
-
-    _chat_disabled = task.is_running or (
-        not _has_conversation and st.session_state.app_mode not in _free_start_modes
-    )
+    else:
+        _chat_placeholder = "Enter your goal in the form above to start"
     # Render the chat input inside the Chat tab container. A top-level
     # st.chat_input is pinned to the bottom of the whole app and shows on
     # every tab; scoping it to chat_tab keeps it on the Chat tab only.
