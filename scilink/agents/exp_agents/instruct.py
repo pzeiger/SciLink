@@ -2054,8 +2054,10 @@ meaning is always preferred over a complex model with marginally better fit stat
 - Treat R² as a sanity check, not an optimization target. An R² of 0.96 with 3 physically
   meaningful components is far superior to R² of 0.99 with 6 components where half are
   fitting noise or compensating for an incorrect baseline.
-- If residuals show systematic structure, first reconsider the baseline or peak shape
-  (e.g., Voigt vs Gaussian) before adding more peaks.
+- If residuals show systematic structure, first reconsider the baseline, then the lineshape,
+  before adding peaks. Structured residuals on a band may reflect one mode with an asymmetric
+  lineshape (Pearson VII, skewed Voigt, Fano) or a genuine additional component — judge on
+  physical grounds; don't default to two symmetric peaks merely to absorb asymmetry or tails.
 
 **Domain Skill Rules (when provided):** If a "MANDATORY Domain Skill Rules" section appears \
 below, its rules are MANDATORY constraints on your analysis plan. These rules encode validated \
