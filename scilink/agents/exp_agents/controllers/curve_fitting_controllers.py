@@ -1539,14 +1539,15 @@ class HumanFeedbackRefinementController:
         return state
 
     def _validate_plan(self, state: dict) -> dict:
-        """Validate the proposed fitting plan against data and skill rules.
+        """Validate the proposed fitting plan against the data (and skill rules
+        when a skill is loaded).
 
-        Mirrors ImageAnalysisAgent's _validate_plan. Only runs when skill
-        rules are present — without skills there's nothing to enforce.
+        Always runs (matching ImageAnalysisAgent): the data-grounded sanity
+        check — do the planned peaks exist, is the plot consistent with the
+        model — is useful even without a skill. Skill-conformance is enforced
+        only when skill rules are present (the validation prompt applies the
+        "MANDATORY Domain Skill Rules" clause conditionally).
         """
-        if not state.get("skill_sections"):
-            return state
-
         from ..instruct import CURVE_FITTING_PLAN_VALIDATION_PROMPT
 
         regime_section = ""
@@ -1572,9 +1573,13 @@ class HumanFeedbackRefinementController:
         prompt_parts = [prompt_text]
         _append_skill_context(prompt_parts, state, "planning")
 
-        if state.get("original_plot_bytes"):
+        # For a series, show the multi-spectrum scout overlay (the single
+        # first-spectrum plot is uninformative — and can render blank — for a
+        # series); fall back to the single-spectrum plot otherwise.
+        data_plot = state.get("scout_overlay_plot") or state.get("original_plot_bytes")
+        if data_plot:
             prompt_parts.append("\n**Data:**")
-            prompt_parts.append({"mime_type": "image/png", "data": state["original_plot_bytes"]})
+            prompt_parts.append({"mime_type": "image/png", "data": data_plot})
 
         try:
             response = self.model.generate_content(
@@ -1681,12 +1686,16 @@ class HumanFeedbackRefinementController:
     def _extract_series_plan(self, state: dict, result: dict) -> None:
         """Extract and validate series_analysis_plan from LLM response."""
         series_plan = result.get("series_analysis_plan")
-        if not series_plan or state.get("is_single_spectrum", True):
+        if not isinstance(series_plan, dict) or state.get("is_single_spectrum", True):
             state["series_analysis_plan"] = None
             return
 
         num_spectra = state.get("num_spectra", 1)
-        regimes = series_plan.get("regimes", [])
+        # Defensively drop malformed (non-dict) regimes — an LLM/validator
+        # revision can return a regime as a bare string, which would otherwise
+        # crash regime.get(...) below.
+        regimes = [r for r in series_plan.get("regimes", []) if isinstance(r, dict)]
+        series_plan["regimes"] = regimes
 
         if not regimes:
             state["series_analysis_plan"] = None
