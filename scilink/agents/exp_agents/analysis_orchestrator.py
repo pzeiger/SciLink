@@ -1573,11 +1573,13 @@ class AnalysisOrchestratorAgent:
                     } for tc in message.tool_calls
                 ]
             })
-            
+
+            self._print_assistant_reasoning(message.content)
+
             for tool_call in message.tool_calls:
                 func_name = tool_call.function.name
                 args = json.loads(tool_call.function.arguments)
-                
+
                 print(f"  🔧 Calling tool: {func_name}")
                 
                 result = self.tools.execute_tool(func_name, **args)
@@ -1590,6 +1592,20 @@ class AnalysisOrchestratorAgent:
         
         self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."
+
+    def _print_assistant_reasoning(self, content) -> None:
+        """Surface the LLM's interim reasoning that accompanies a tool call.
+
+        Without this the console jumps straight to "🔧 Calling tool: …", so a
+        deliberate step — e.g. re-running an analysis to verify a methodological
+        concern — reads like a silent loop. The text is already in history; this
+        just shows it so the user can see *why* the next tool is being called.
+        """
+        if not content:
+            return
+        text = content.strip() if isinstance(content, str) else str(content).strip()
+        if text:
+            print(f"  💭 {text}")
 
     def _handle_litellm_chat(self, user_input: str) -> str:
         """Handle chat with LiteLLM models with manual function calling loop."""
@@ -1665,14 +1681,16 @@ class AnalysisOrchestratorAgent:
                 ]
             }
             self.messages.append(assistant_msg)
-            
+
+            self._print_assistant_reasoning(content)
+
             for tool_call in tool_calls:
                 func_name = tool_call.function.name
                 try:
                     args = json.loads(tool_call.function.arguments)
                 except json.JSONDecodeError:
                     args = {}
-                
+
                 print(f"  🔧 Calling tool: {func_name}")
                 
                 result = self.tools.execute_tool(func_name, **args)
