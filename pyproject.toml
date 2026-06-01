@@ -61,7 +61,10 @@ ui = [
     "streamlit>=1.37.0",
 ]
 structure-matching = [
-    "pymatgen>=2024.0",
+    # Cap <2026: pymatgen 2026.x makes pymatgen.analysis a namespace package and
+    # drops bundled pymatgen.analysis.phase_diagram, which breaks the emmet-core /
+    # mp-api import chain (MPRester) that the Materials Project backend needs.
+    "pymatgen>=2024.6.10,<2026",
     "mp-api>=0.45.0",
     "pulp>=2.7.0",
     "pyarrow>=14.0",
