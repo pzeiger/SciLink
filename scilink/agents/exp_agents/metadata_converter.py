@@ -172,6 +172,8 @@ Identify Experiment Type: First, determine the general experiment_type (e.g., Mi
 
 Fill Core Fields: Populate the required fields: experiment_type, experiment (including technique), and sample (including material). Extract other details like instrument or conditions into experiment.details or sample.description if available.
 
+Faithful Extraction — DO NOT FABRICATE (CRITICAL): Record ONLY information stated in the description. Do NOT add, infer, or enrich the metadata with domain knowledge the source text does not contain — in particular, do NOT invent expected/characteristic peak positions, known phase transitions, typical parameter values, or literature constants for the named material. Downstream analysis treats sample.description and experiment.details as factual experimental context and will try to act on any peaks/features named there, so fabricated expectations actively mislead it. If the author explicitly provided such details (expected peaks, transitions, prior values), preserve them verbatim — the rule is to neither invent nor drop. When unsure whether a detail came from the text or from your own knowledge, leave it out.
+
 Fill Conditional Fields based on Type:
 
 If Microscopy: Focus on extracting spatial_info (field of view and units). Omit or use null for spectroscopy/curve fields if not relevant.
