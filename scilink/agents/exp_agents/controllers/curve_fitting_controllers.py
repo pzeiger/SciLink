@@ -1780,7 +1780,9 @@ class HumanFeedbackRefinementController:
         # show "N/A" for a regime whose model is in fact known.
         for regime in regimes:
             if not regime.get("physical_model"):
-                regime["physical_model"] = series_plan.get("physical_model")
+                regime["physical_model"] = (
+                    series_plan.get("physical_model") or "Model to be determined from the data"
+                )
             if not regime.get("fitting_strategy"):
                 regime["fitting_strategy"] = series_plan.get("fitting_strategy")
             if not regime.get("parameters_to_extract"):
@@ -1914,7 +1916,7 @@ class HumanFeedbackRefinementController:
 
             state["locked_fitting_config"] = {
                 "analysis_approach": state.get("analysis_approach"),
-                "physical_model": state.get("physical_model"),
+                "physical_model": state.get("physical_model") or "Model to be determined from the data",
                 "parameters_to_extract": state.get("parameters_to_extract", []),
                 "fitting_strategy": state.get("fitting_strategy"),
                 "column_mapping": column_mapping,
@@ -3409,8 +3411,8 @@ Return JSON with:
 
         # --- Initial fit (skills mandatory at T=0) ---
         state["_annealing_level"] = 0
-        initial_model = state.get('locked_fitting_config', {}).get('physical_model', 'Initial model')
-        self.logger.info(f"   Attempt 1: {initial_model[:80]}...")
+        initial_model = state.get('locked_fitting_config', {}).get('physical_model') or 'Initial model'
+        self.logger.info(f"   Attempt 1: {str(initial_model)[:80]}...")
 
         result = self._fit_single_spectrum(
             state=state, curve_data=curve_data, data_path=data_path,

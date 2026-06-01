@@ -2130,7 +2130,7 @@ Add a `"series_analysis_plan"` field to your JSON response:
 {{
     "observations": "...",
     "analysis_approach": "...",
-    "physical_model": "primary model (for the first/majority regime)",
+    "physical_model": "the model for the first/majority regime as a concrete one-line summary — never null (the regimes list below is authoritative and drives the fit)",
     "parameters_to_extract": ["param1", "param2"],
     "fitting_strategy": "...",
     "literature_query": "...",
@@ -2157,6 +2157,12 @@ Add a `"series_analysis_plan"` field to your JSON response:
 ```
 
 **Rules:**
+- The `regimes` list is AUTHORITATIVE — it is what drives the fit. The top-level
+  `physical_model` / `fitting_strategy` are only a human-readable summary. If your
+  reasoning concludes N distinct regimes, emit exactly N entries in `regimes`, each
+  with its own `physical_model` / `fitting_strategy` / `parameters_to_extract`. Do NOT
+  describe a regime in the prose that you do not materialize as a structured entry, and
+  do not fold temperatures the prose treats differently into one regime.
 - Every spectrum index (0 through {num_spectra_minus_1}) must appear in exactly ONE regime.
 - Each regime must have at least one spectrum.
 - Only use multiple regimes when you can clearly see different spectral character.
