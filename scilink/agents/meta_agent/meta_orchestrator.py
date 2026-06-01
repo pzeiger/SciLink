@@ -960,6 +960,29 @@ class MetaOrchestratorAgent:
         }
         if result.get("error"):
             summary["error"] = result["error"]
+        # Guardrail against the "empty-but-successful" state: a child can report
+        # status="success" yet return no extractable findings (e.g. a synthesis
+        # parse failure left detailed_analysis/scientific_claims blank). Left
+        # unflagged, the meta LLM reads the empty result and re-delegates the
+        # identical task — re-running the same data the same way reproduces the
+        # same empty result, i.e. a loop. Surface it explicitly so the LLM
+        # changes course instead of retrying blindly. Findings presence is keyed
+        # on key_findings/summary, NOT files_produced — the run can emit files
+        # (fit scripts, plots) while the interpretation came back empty.
+        has_findings = bool(summary["key_findings"]) or bool((summary["summary"] or "").strip())
+        if summary["status"] == "success" and not has_findings:
+            summary["findings_status"] = "empty_but_successful"
+            note = (
+                "Delegation reported success but returned no extractable findings "
+                "(empty key_findings and summary). Do NOT re-delegate the identical "
+                "task expecting a different result — re-running the same data the "
+                "same way reproduces the same empty result. Inspect files_produced, "
+                "report the gap to the user, or change the approach."
+            )
+            warnings = list(summary.get("warnings") or [])
+            if note not in warnings:
+                warnings.append(note)
+            summary["warnings"] = warnings
         # Domain-specific field, passed through lightly.
         if "analyses" in result:
             summary["analyses"] = result["analyses"]
