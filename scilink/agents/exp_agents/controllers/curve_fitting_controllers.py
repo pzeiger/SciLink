@@ -4112,12 +4112,9 @@ Return JSON with:
                             unit_str = f" {_unit}" if _unit else ""
                             span = f"{min(vv)}" if min(vv) == max(vv) else f"{min(vv)}-{max(vv)}"
                             rng = f" ({span}{unit_str})"
-                    bar = "  " + "─" * 56
-                    regime_markers[indices[0]] = [
-                        "", bar,
-                        f"  ▸ Regime {rnum}/{len(regimes)}: {regime.get('name', 'Unnamed')}{rng}",
-                        bar,
-                    ]
+                    line = f"  ▸ Regime {rnum}/{len(regimes)}: {regime.get('name', 'Unnamed')}{rng}"
+                    bar = "  " + "─" * max(len(line) - 2, 0)  # rule spans the text width
+                    regime_markers[indices[0]] = ["", bar, line, bar]
             self.logger.info(f"   Regimes: {len(regimes)}")
             self.logger.info(
                 f"   First-in-regime spectra (full QC): {sorted(first_in_regime)}"
@@ -5532,7 +5529,7 @@ same trend.
 
     def _synthesize_single_spectrum(self, state: dict) -> dict:
         self.logger.info("")
-        self.logger.info("🔬 SINGLE SPECTRUM INTERPRETATION (staged)")
+        self.logger.info("🔬 SINGLE SPECTRUM INTERPRETATION")
 
         from ..instruct import (
             FITTING_INTERPRETATION_STAGE1,
@@ -5634,7 +5631,7 @@ same trend.
 
     def _synthesize_series(self, state: dict) -> dict:
         self.logger.info("")
-        self.logger.info("🔬 SERIES SYNTHESIS (staged)")
+        self.logger.info("🔬 SERIES SYNTHESIS")
 
         from ..instruct import (
             ID_MODE_INTERPRETATION_STAGE1_ADDENDUM,
