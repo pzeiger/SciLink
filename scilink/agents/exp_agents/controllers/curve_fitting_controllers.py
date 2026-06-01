@@ -4053,33 +4053,38 @@ Return JSON with:
             return []
         
         r2_array = np.array(r2_values)
-        mean_r2 = np.mean(r2_array)
-        std_r2 = np.std(r2_array)
-        
+        # Robust center/scale (median + MAD). A single bad fit can't mask itself
+        # by inflating the statistic the way mean/std let it — with mean/std a
+        # lone outlier in an n-point series caps at √(n-1)σ (exactly 2.0 for
+        # n=5), so it could never exceed a 2σ threshold and got mislabeled
+        # "consistent with series". MAD is unaffected by the outlier itself.
+        median_r2 = float(np.median(r2_array))
+        mad = float(np.median(np.abs(r2_array - median_r2)))
+        # 1.4826·MAD ≈ σ for normal data; floor it so a near-identical series
+        # (MAD≈0) doesn't flag trivial scatter while a real gap still registers.
+        robust_scale = max(1.4826 * mad, 0.02)
+
         flagged = []
-        
+
         for r in series_results:
             if not r["success"]:
                 flagged.append({
                     "index": r["index"], "name": r["name"], "reason": "fit_failed",
-                    "r_squared": None, "series_mean": float(mean_r2), "series_std": float(std_r2),
+                    "r_squared": None, "series_mean": median_r2, "series_std": robust_scale,
                     "deviation_sigma": None,
                     "recommendation": "Check data quality and consider manual inspection. The fitting script failed to execute successfully."
                 })
                 continue
-            
+
             r2 = r.get("fit_quality", {}).get("r_squared")
             if r2 is None:
                 continue
-            
+
             below_threshold = r2 < self.r2_threshold
-            
-            if std_r2 > 0.001:
-                deviation_sigma = (mean_r2 - r2) / std_r2
-                is_outlier = deviation_sigma > self.outlier_sigma
-            else:
-                deviation_sigma = 0
-                is_outlier = False
+            # Robust z-score; only a fit *below* the series median can be an
+            # outlier (a better-than-typical fit is never flagged).
+            deviation_sigma = (median_r2 - r2) / robust_scale
+            is_outlier = deviation_sigma > self.outlier_sigma
             
             if below_threshold or is_outlier:
                 if is_outlier and not below_threshold:
@@ -4087,14 +4092,14 @@ Return JSON with:
                     recommendation = "Fit quality significantly worse than series average. Possible causes: phase transition, sample change, or instrument artifact. Consider detailed inspection - may indicate interesting physics."
                 elif below_threshold and not is_outlier:
                     reason = "below_threshold"
-                    recommendation = "Fit quality below threshold but consistent with series. The chosen model may not be optimal for this data type."
+                    recommendation = "Fit quality below threshold but in line with the rest of the series (R² is not a statistical outlier) — the chosen model may be suboptimal for this data type."
                 else:
                     reason = "outlier_and_below_threshold"
                     recommendation = "Significant fit quality issue. This spectrum behaves differently from others in the series. Strongly recommend manual review - could indicate interesting physics, phase transition, or data quality issue."
-                
+
                 flagged.append({
                     "index": r["index"], "name": r["name"], "reason": reason,
-                    "r_squared": float(r2), "series_mean": float(mean_r2), "series_std": float(std_r2),
+                    "r_squared": float(r2), "series_mean": median_r2, "series_std": robust_scale,
                     "deviation_sigma": float(deviation_sigma) if deviation_sigma else None,
                     "recommendation": recommendation
                 })
@@ -4116,7 +4121,7 @@ Return JSON with:
             lines.append(f"R² range: {min(r2_values):.4f} - {max(r2_values):.4f}")
             lines.append(f"R² mean ± std: {np.mean(r2_values):.4f} ± {np.std(r2_values):.4f}")
             lines.append(f"Quality threshold: {self.r2_threshold}")
-            lines.append(f"Outlier detection: {self.outlier_sigma}σ below mean")
+            lines.append(f"Outlier detection: {self.outlier_sigma}σ below median (robust/MAD)")
             lines.append("")
         
         by_reason = {}
@@ -4140,9 +4145,9 @@ Return JSON with:
             for f in items:
                 lines.append(f"  • {f['name']} (index {f['index']})")
                 if f["r_squared"] is not None:
-                    lines.append(f"    R² = {f['r_squared']:.4f} (series mean: {f['series_mean']:.4f})")
+                    lines.append(f"    R² = {f['r_squared']:.4f} (series median: {f['series_mean']:.4f})")
                     if f["deviation_sigma"] is not None:
-                        lines.append(f"    Deviation: {f['deviation_sigma']:.1f}σ below mean")
+                        lines.append(f"    Deviation: {f['deviation_sigma']:.1f}σ below median")
                 lines.append(f"    → {f['recommendation']}")
                 lines.append("")
         
@@ -6011,9 +6016,9 @@ class UnifiedCurveReportController:
             html += f'<span class="flagged-badge" style="background-color: {color};">{label}</span></div>'
             
             if f.get("r_squared") is not None:
-                html += f'<p><strong>R²:</strong> {f["r_squared"]:.4f} (series mean: {f["series_mean"]:.4f})</p>'
+                html += f'<p><strong>R²:</strong> {f["r_squared"]:.4f} (series median: {f["series_mean"]:.4f})</p>'
                 if f.get("deviation_sigma") is not None:
-                    html += f'<p><strong>Deviation:</strong> {f["deviation_sigma"]:.1f}σ below mean</p>'
+                    html += f'<p><strong>Deviation:</strong> {f["deviation_sigma"]:.1f}σ below median</p>'
             
             html += f'<p class="flagged-recommendation">{f["recommendation"]}</p>'
             
