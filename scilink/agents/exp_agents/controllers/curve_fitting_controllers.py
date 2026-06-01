@@ -127,6 +127,40 @@ def _residual_diagnostics(x, y, fit, n_windows: int = 16):
         return None
 
 
+def _canonical_r2(y, fit):
+    """R² of the *saved* fitted curve vs the data, over the finite,
+    length-matched points (same alignment guards as ``_residual_diagnostics``).
+
+    This is computed from the canonical ``data.npy`` / ``fit.npy`` arrays — the
+    exact curve that is plotted and shown to the verifier — so it can't diverge
+    from the displayed fit the way a script's self-reported R² can. Returns
+    ``None`` when the arrays can't be aligned (length mismatch, e.g. a partial
+    fit saved as a short array) or there is too little finite signal, so the
+    caller keeps the self-reported value. Callers use it to raise a
+    broken-low self-report (``max(self, recompute)``) — never to lower a
+    deliberate windowed/partial fit's number.
+    """
+    try:
+        y = np.asarray(y, float).ravel()
+        fit = np.asarray(fit, float)
+        if fit.ndim == 2:                       # accept [N,2] -> take y column
+            fit = fit[:, -1]
+        fit = fit.ravel()
+        if fit.shape[0] != y.shape[0]:
+            return None
+        m = np.isfinite(y) & np.isfinite(fit)
+        if int(m.sum()) < 8:
+            return None
+        yy, ff = y[m], fit[m]
+        ss_tot = float(np.sum((yy - yy.mean()) ** 2))
+        if ss_tot <= 0:
+            return None
+        ss_res = float(np.sum((yy - ff) ** 2))
+        return 1.0 - ss_res / ss_tot
+    except Exception:
+        return None
+
+
 def _format_residual_diagnostics(diag) -> str:
     """Compact text block of residual diagnostics for the verifier prompt — gives
     the LLM numbers to reason over instead of eyeballing a compressed plot."""
@@ -1911,6 +1945,44 @@ class HumanFeedbackRefinementController:
         return state
 
 
+def _write_series_fit_results(output_dir, state, series_results, quality_settings):
+    """Write ``series_fit_results.json`` from the current ``series_results``.
+
+    Called after initial fitting AND re-called after the adaptive refit, so the
+    file reflects adopted refits. It feeds the BO/planning feature table
+    (``write_feature_table``) and the #172 prior-run reference summary
+    (``_load_prior_curve_fit_state``); a stale copy would carry pre-refit values
+    for refitted spectra. Counts are recomputed from ``series_results`` so the
+    re-write stays correct regardless of caller.
+    """
+    output_dir = Path(output_dir)
+    rows = [r for r in series_results if isinstance(r, dict)]
+    num_spectra = len(rows)
+    successful = sum(1 for r in rows if r.get("success"))
+    flagged_count = sum(1 for r in rows if r.get("flagged"))
+    serializable_results = [
+        {k: v for k, v in r.items() if k not in ("visualization_bytes", "_winning_config")}
+        for r in rows
+    ]
+    payload = {
+        "timestamp": datetime.now().isoformat(),
+        "total_spectra": num_spectra,
+        "successful": successful,
+        "flagged_count": flagged_count,
+        "is_single_spectrum": state.get("is_single_spectrum", num_spectra <= 1),
+        "series_metadata": state.get("series_metadata", {}),
+        "quality_settings": quality_settings or {},
+        "locked_config": state.get("locked_fitting_config"),
+        "series_analysis_plan": state.get("series_analysis_plan"),
+        "locked_preprocessing_strategy": state.get("locked_preprocessing_strategy"),
+        "results": serializable_results,
+    }
+    results_path = output_dir / "series_fit_results.json"
+    with open(results_path, "w") as f:
+        json.dump(payload, f, indent=2, default=str)
+    return str(results_path)
+
+
 class UnifiedSeriesProcessingController:
     """
     Processes ALL spectra using the locked fitting model.
@@ -2538,6 +2610,7 @@ Your guidance: '''
         # reliable per-region structure metrics the verifier can reason over instead
         # of eyeballing a dynamic-range-crushed plot. Skipped silently if fit.npy
         # is absent (older/refit scripts) so this never breaks the fit path.
+        fit_quality = dict(fit_results.get("fit_quality", {}) or {})
         residual_diag = None
         try:
             fit_path = Path(item_dir) / FIT_NAME
@@ -2548,7 +2621,30 @@ Your guidance: '''
                 else:
                     yy = cd.ravel()
                     xx = np.arange(yy.shape[0], dtype=float)
-                residual_diag = _residual_diagnostics(xx, yy, np.load(fit_path))
+                fit_arr = np.load(fit_path)
+                residual_diag = _residual_diagnostics(xx, yy, fit_arr)
+
+                # Trust the saved fit over a broken self-reported R². The
+                # self-report is computed inside the (LLM-generated) script and
+                # can diverge from the curve it actually saved/plotted. We only
+                # override UPWARD — a recompute higher than the self-report means
+                # the saved fit is genuinely better than the script claimed. A
+                # *lower* recompute is left alone: it usually means a deliberate
+                # windowed/partial fit, where the script's own (windowed) number
+                # is the meaningful one. None (length mismatch / no signal) also
+                # keeps the self-report.
+                recomputed_r2 = _canonical_r2(yy, fit_arr)
+                self_r2 = fit_quality.get("r_squared")
+                if recomputed_r2 is not None:
+                    if isinstance(self_r2, (int, float)) and abs(recomputed_r2 - self_r2) > 0.05:
+                        self.logger.info(
+                            f"   ⚠️  R² from saved fit ({recomputed_r2:.4f}) "
+                            f"diverges from self-reported ({self_r2:.4f})."
+                        )
+                    if self_r2 is None or recomputed_r2 > self_r2:
+                        if isinstance(self_r2, (int, float)):
+                            fit_quality["r_squared_self_reported"] = self_r2
+                        fit_quality["r_squared"] = recomputed_r2
         except Exception:
             residual_diag = None
 
@@ -2560,7 +2656,7 @@ Your guidance: '''
             "error": None,
             "model_type": fit_results.get("model_type"),
             "parameters": fit_results.get("parameters", {}),
-            "fit_quality": fit_results.get("fit_quality", {}),
+            "fit_quality": fit_quality,
             "deviation_note": fit_results.get("deviation_note") or fit_results.get("summary"),
             "visualization_path": run["visualization_path"],
             "visualization_bytes": run["visualization_bytes"],
@@ -4458,33 +4554,15 @@ Return JSON with:
         if flagged_count > 0:
             self.logger.warning(f"⚠️ {flagged_count} spectra flagged for review")
         
-        results_path = self.output_dir / "series_fit_results.json"
-        with open(results_path, 'w') as f:
-            serializable_results = []
-            for r in series_results:
-                r_copy = {k: v for k, v in r.items() if k not in ("visualization_bytes", "_winning_config")}
-                serializable_results.append(r_copy)
-            
-            json.dump({
-                "timestamp": datetime.now().isoformat(),
-                "total_spectra": num_spectra,
-                "successful": successful,
-                "flagged_count": flagged_count,
-                "is_single_spectrum": is_single,
-                "series_metadata": state.get("series_metadata", {}),
-                "quality_settings": {
-                    "r2_threshold": self.r2_threshold,
-                    "max_model_retries": self.max_model_retries,
-                    "outlier_sigma": self.outlier_sigma,
-                },
-                "locked_config": state.get("locked_fitting_config"),
-                "series_analysis_plan": state.get("series_analysis_plan"),
-                "locked_preprocessing_strategy": state.get("locked_preprocessing_strategy"),
-                "results": serializable_results
-            }, f, indent=2, default=str)
-        
-        state["series_results_path"] = str(results_path)
-        
+        state["series_results_path"] = _write_series_fit_results(
+            self.output_dir, state, series_results,
+            quality_settings={
+                "r2_threshold": self.r2_threshold,
+                "max_model_retries": self.max_model_retries,
+                "outlier_sigma": self.outlier_sigma,
+            },
+        )
+
         return state
     
     def _wrap_text(self, text: str, width: int = 70) -> list:
@@ -5086,6 +5164,24 @@ class AdaptiveRefitController:
                 })
             else:
                 self.logger.info(f"  No improvement: R² {original_r2} → {new_r2:.4f}, keeping original")
+                # The refit ran in the same spectrum directory and overwrote the
+                # kept fit's visualization.png. Restore the kept fit's plot so the
+                # report shows the fit whose metrics it records — not the
+                # discarded refit's. (fit.npy is a transient consumed only at fit
+                # time for residual diagnostics and never read afterwards, so it
+                # is left as-is.)
+                kept = series_results[idx] if idx < len(series_results) else None
+                if isinstance(kept, dict):
+                    vpath = kept.get("visualization_path")
+                    vbytes = kept.get("visualization_bytes")
+                    if vpath and vbytes:
+                        try:
+                            with open(vpath, "wb") as fh:
+                                fh.write(vbytes)
+                        except Exception as e:  # noqa: BLE001
+                            self.logger.warning(
+                                f"  Could not restore original plot for {name}: {e}"
+                            )
                 refit_summary.append({
                     "index": idx, "name": name,
                     "original_r2": original_r2, "new_r2": new_r2,
@@ -5147,6 +5243,21 @@ class AdaptiveRefitController:
 
         improved_count = sum(1 for r in refit_summary if r["improved"])
         self.logger.info(f"\n🔄 Adaptive refit complete: {improved_count}/{len(refit_candidates)} spectra improved")
+
+        # Refresh series_fit_results.json so adopted refits are reflected. It was
+        # written before this step (post-initial-fit) and feeds the BO/planning
+        # feature table and the #172 prior-run reference summary; without this,
+        # refitted spectra would carry their pre-refit values there.
+        if improved_count > 0:
+            fh = self._fitting_helper
+            _write_series_fit_results(
+                self.output_dir, state, series_results,
+                quality_settings={
+                    "r2_threshold": fh.r2_threshold,
+                    "max_model_retries": fh.max_model_retries,
+                    "outlier_sigma": fh.outlier_sigma,
+                },
+            )
 
         return state
 
