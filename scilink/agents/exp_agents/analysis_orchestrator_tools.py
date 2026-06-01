@@ -135,6 +135,13 @@ def _build_skill_description(agent_registry: dict = None,
     if custom_skills:
         parts.append(f"Custom skills: {sorted(custom_skills.keys())}.")
 
+    parts.append(
+        "Only select a skill whose measurement technique matches the data's "
+        "technique (each skill names its technique in its description above); if "
+        "none matches, omit `skill` and let the agent's baseline handle it — do "
+        "not substitute the nearest-sounding skill."
+    )
+
     return " ".join(parts)
 
 
