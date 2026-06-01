@@ -1936,6 +1936,44 @@ class HumanFeedbackRefinementController:
         return state
 
 
+def _write_series_fit_results(output_dir, state, series_results, quality_settings):
+    """Write ``series_fit_results.json`` from the current ``series_results``.
+
+    Called after initial fitting AND re-called after the adaptive refit, so the
+    file reflects adopted refits. It feeds the BO/planning feature table
+    (``write_feature_table``) and the #172 prior-run reference summary
+    (``_load_prior_curve_fit_state``); a stale copy would carry pre-refit values
+    for refitted spectra. Counts are recomputed from ``series_results`` so the
+    re-write stays correct regardless of caller.
+    """
+    output_dir = Path(output_dir)
+    rows = [r for r in series_results if isinstance(r, dict)]
+    num_spectra = len(rows)
+    successful = sum(1 for r in rows if r.get("success"))
+    flagged_count = sum(1 for r in rows if r.get("flagged"))
+    serializable_results = [
+        {k: v for k, v in r.items() if k not in ("visualization_bytes", "_winning_config")}
+        for r in rows
+    ]
+    payload = {
+        "timestamp": datetime.now().isoformat(),
+        "total_spectra": num_spectra,
+        "successful": successful,
+        "flagged_count": flagged_count,
+        "is_single_spectrum": state.get("is_single_spectrum", num_spectra <= 1),
+        "series_metadata": state.get("series_metadata", {}),
+        "quality_settings": quality_settings or {},
+        "locked_config": state.get("locked_fitting_config"),
+        "series_analysis_plan": state.get("series_analysis_plan"),
+        "locked_preprocessing_strategy": state.get("locked_preprocessing_strategy"),
+        "results": serializable_results,
+    }
+    results_path = output_dir / "series_fit_results.json"
+    with open(results_path, "w") as f:
+        json.dump(payload, f, indent=2, default=str)
+    return str(results_path)
+
+
 class UnifiedSeriesProcessingController:
     """
     Processes ALL spectra using the locked fitting model.
@@ -4507,33 +4545,15 @@ Return JSON with:
         if flagged_count > 0:
             self.logger.warning(f"⚠️ {flagged_count} spectra flagged for review")
         
-        results_path = self.output_dir / "series_fit_results.json"
-        with open(results_path, 'w') as f:
-            serializable_results = []
-            for r in series_results:
-                r_copy = {k: v for k, v in r.items() if k not in ("visualization_bytes", "_winning_config")}
-                serializable_results.append(r_copy)
-            
-            json.dump({
-                "timestamp": datetime.now().isoformat(),
-                "total_spectra": num_spectra,
-                "successful": successful,
-                "flagged_count": flagged_count,
-                "is_single_spectrum": is_single,
-                "series_metadata": state.get("series_metadata", {}),
-                "quality_settings": {
-                    "r2_threshold": self.r2_threshold,
-                    "max_model_retries": self.max_model_retries,
-                    "outlier_sigma": self.outlier_sigma,
-                },
-                "locked_config": state.get("locked_fitting_config"),
-                "series_analysis_plan": state.get("series_analysis_plan"),
-                "locked_preprocessing_strategy": state.get("locked_preprocessing_strategy"),
-                "results": serializable_results
-            }, f, indent=2, default=str)
-        
-        state["series_results_path"] = str(results_path)
-        
+        state["series_results_path"] = _write_series_fit_results(
+            self.output_dir, state, series_results,
+            quality_settings={
+                "r2_threshold": self.r2_threshold,
+                "max_model_retries": self.max_model_retries,
+                "outlier_sigma": self.outlier_sigma,
+            },
+        )
+
         return state
     
     def _wrap_text(self, text: str, width: int = 70) -> list:
@@ -5214,6 +5234,21 @@ class AdaptiveRefitController:
 
         improved_count = sum(1 for r in refit_summary if r["improved"])
         self.logger.info(f"\n🔄 Adaptive refit complete: {improved_count}/{len(refit_candidates)} spectra improved")
+
+        # Refresh series_fit_results.json so adopted refits are reflected. It was
+        # written before this step (post-initial-fit) and feeds the BO/planning
+        # feature table and the #172 prior-run reference summary; without this,
+        # refitted spectra would carry their pre-refit values there.
+        if improved_count > 0:
+            fh = self._fitting_helper
+            _write_series_fit_results(
+                self.output_dir, state, series_results,
+                quality_settings={
+                    "r2_threshold": fh.r2_threshold,
+                    "max_model_retries": fh.max_model_retries,
+                    "outlier_sigma": fh.outlier_sigma,
+                },
+            )
 
         return state
 
