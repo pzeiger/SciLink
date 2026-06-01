@@ -1430,11 +1430,16 @@ class HumanFeedbackRefinementController:
                     range_str = f" ({min(valid_vals)}-{max(valid_vals)} {unit})" if valid_vals else ""
                 else:
                     range_str = ""
+                # Fall back to the top-level plan fields so a regime the LLM left
+                # sparse never renders as all-N/A.
+                model = regime.get("physical_model") or series_plan.get("physical_model") or "N/A"
+                strategy = regime.get("fitting_strategy") or series_plan.get("fitting_strategy") or "N/A"
+                params = regime.get("parameters_to_extract") or series_plan.get("parameters_to_extract", [])
                 print(f"\n  Regime {i}: {regime.get('name', 'Unnamed')}")
                 print(f"    Spectra: indices {indices}{range_str}")
-                print(f"    Model: {regime.get('physical_model', 'N/A')}")
-                print(f"    Strategy: {regime.get('fitting_strategy', 'N/A')}")
-                print(f"    Parameters: {', '.join(regime.get('parameters_to_extract', []))}")
+                print(f"    Model: {model}")
+                print(f"    Strategy: {strategy}")
+                print(f"    Parameters: {', '.join(params)}")
 
             transitions = series_plan.get("transition_points", [])
             if transitions:
@@ -1752,6 +1757,34 @@ class HumanFeedbackRefinementController:
             regimes[0]["spectrum_indices"] = sorted(
                 set(regimes[0]["spectrum_indices"]) | missing
             )
+
+        # Drop regimes that ended up fitting no spectra. The LLM sometimes names
+        # an aspirational regime (e.g. "split doublet") but commits every
+        # spectrum to one regime; the orphan-reassignment above then leaves the
+        # other empty. An empty regime fits nothing — it would pollute the banner,
+        # the report, the regime-locking step, and the per-index regime loops — so
+        # it is removed here rather than carried forward.
+        dropped = [r.get("name", "unnamed") for r in regimes if not r["spectrum_indices"]]
+        regimes = [r for r in regimes if r["spectrum_indices"]]
+        series_plan["regimes"] = regimes
+        if dropped:
+            self.logger.warning(
+                f"  Dropped {len(dropped)} empty regime(s) (no spectra assigned): {dropped}"
+            )
+        if not regimes:
+            state["series_analysis_plan"] = None
+            return
+
+        # Backfill per-regime model/strategy/params from the top-level plan when
+        # the LLM populated only the top level — otherwise the display and report
+        # show "N/A" for a regime whose model is in fact known.
+        for regime in regimes:
+            if not regime.get("physical_model"):
+                regime["physical_model"] = series_plan.get("physical_model")
+            if not regime.get("fitting_strategy"):
+                regime["fitting_strategy"] = series_plan.get("fitting_strategy")
+            if not regime.get("parameters_to_extract"):
+                regime["parameters_to_extract"] = series_plan.get("parameters_to_extract", [])
 
         state["series_analysis_plan"] = series_plan
         self.logger.info(
