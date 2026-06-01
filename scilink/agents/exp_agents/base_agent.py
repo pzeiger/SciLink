@@ -146,6 +146,24 @@ class LLMAgentMixin:
         from ...utils.codegen_parse import parse_codegen_response
         return parse_codegen_response(response, field=field, logger=self.logger)
 
+    def _salvage_synthesis_fields(self, response: Any) -> Optional[dict]:
+        """Best-effort recovery of synthesis fields — see ``utils.synthesis_parse``.
+
+        When the synthesis step's strict ``_parse_llm_response`` fails (commonly
+        an unescaped quote/newline in the long ``detailed_analysis`` narrative),
+        this recovers the narrative (and the claims list when clean) instead of
+        dropping the whole payload to ``{"error": …}`` — which would yield a
+        ``success`` result with empty findings and, under the meta agent, a
+        re-delegation loop. Returns ``None`` when nothing usable is recovered, so
+        the caller keeps the original parse error.
+        """
+        from ...utils.synthesis_parse import salvage_synthesis_fields
+        try:
+            raw = self._extract_text_from_response(response) or ""
+        except Exception:
+            return None
+        return salvage_synthesis_fields(raw)
+
     def _extract_text_from_response(self, response: Any) -> str:
         """Extract text content from various LLM response formats."""
         if hasattr(response, 'text'):

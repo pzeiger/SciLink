@@ -4088,13 +4088,34 @@ Return JSON with:
         series_plan = state.get("series_analysis_plan")
         regime_configs = state.get("regime_configs")
 
+        # Regime-boundary markers, keyed by the regime's first spectrum index.
+        # Emitted as the loop reaches each boundary so transitions are visible
+        # while the fit streams — not only in the upfront plan (the inline
+        # "(regime: …)" tag alone made boundaries hard to spot in the log).
+        regime_markers: Dict[int, list] = {}
         if series_plan and regime_configs:
             first_in_regime: set = set()
-            for regime in series_plan.get("regimes", []):
+            regimes = series_plan.get("regimes", [])
+            series_metadata = state.get("series_metadata", {})
+            _values = series_metadata.get("values", [])
+            _unit = series_metadata.get("unit", "")
+            for rnum, regime in enumerate(regimes, 1):
                 indices = sorted(regime.get("spectrum_indices", []))
-                if indices:
-                    first_in_regime.add(indices[0])
-            self.logger.info(f"   Regimes: {len(series_plan.get('regimes', []))}")
+                if not indices:
+                    continue
+                first_in_regime.add(indices[0])
+                if len(regimes) > 1:
+                    rng = ""
+                    if _values:
+                        vv = [_values[i] for i in indices if i < len(_values)]
+                        if vv:
+                            unit_str = f" {_unit}" if _unit else ""
+                            span = f"{min(vv)}" if min(vv) == max(vv) else f"{min(vv)}-{max(vv)}"
+                            rng = f" ({span}{unit_str})"
+                    line = f"  ▸ Regime {rnum}/{len(regimes)}: {regime.get('name', 'Unnamed')}{rng}"
+                    bar = "  " + "─" * max(len(line) - 2, 0)  # rule spans the text width
+                    regime_markers[indices[0]] = ["", bar, line, bar]
+            self.logger.info(f"   Regimes: {len(regimes)}")
             self.logger.info(
                 f"   First-in-regime spectra (full QC): {sorted(first_in_regime)}"
             )
@@ -4153,6 +4174,10 @@ Return JSON with:
 
             # Temporarily set the config for this spectrum
             state["locked_fitting_config"] = spectrum_config
+
+            # Regime-transition marker at each regime boundary.
+            for _line in regime_markers.get(idx, ()):
+                self.logger.info(_line)
 
             if is_single:
                 self.logger.info(f"Fitting: {spectrum_name}")
@@ -5504,7 +5529,7 @@ same trend.
 
     def _synthesize_single_spectrum(self, state: dict) -> dict:
         self.logger.info("")
-        self.logger.info("🔬 SINGLE SPECTRUM INTERPRETATION (staged)")
+        self.logger.info("🔬 SINGLE SPECTRUM INTERPRETATION")
 
         from ..instruct import (
             FITTING_INTERPRETATION_STAGE1,
@@ -5588,8 +5613,13 @@ same trend.
             result_json, error_dict = self._parse(response)
 
             if error_dict:
-                self.logger.error(f"Synthesis failed: {error_dict}")
-                state["synthesis_result"] = {"error": str(error_dict)}
+                salvaged = self._salvage_synthesis_fields(response)
+                if salvaged:
+                    self.logger.warning("Synthesis JSON parse failed; salvaged detailed_analysis from raw text.")
+                    state["synthesis_result"] = salvaged
+                else:
+                    self.logger.error(f"Synthesis failed: {error_dict}")
+                    state["synthesis_result"] = {"error": str(error_dict)}
             else:
                 state["synthesis_result"] = result_json
                 self.logger.info("✅ Single spectrum synthesis complete.")
@@ -5601,7 +5631,7 @@ same trend.
 
     def _synthesize_series(self, state: dict) -> dict:
         self.logger.info("")
-        self.logger.info("🔬 SERIES SYNTHESIS (staged)")
+        self.logger.info("🔬 SERIES SYNTHESIS")
 
         from ..instruct import (
             ID_MODE_INTERPRETATION_STAGE1_ADDENDUM,
@@ -5752,8 +5782,13 @@ same trend.
             result_json, error_dict = self._parse(response)
 
             if error_dict:
-                self.logger.error(f"Series synthesis failed: {error_dict}")
-                state["synthesis_result"] = {"error": str(error_dict)}
+                salvaged = self._salvage_synthesis_fields(response)
+                if salvaged:
+                    self.logger.warning("Series synthesis JSON parse failed; salvaged detailed_analysis from raw text.")
+                    state["synthesis_result"] = salvaged
+                else:
+                    self.logger.error(f"Series synthesis failed: {error_dict}")
+                    state["synthesis_result"] = {"error": str(error_dict)}
             else:
                 state["synthesis_result"] = result_json
                 self.logger.info("✅ Series synthesis complete.")
