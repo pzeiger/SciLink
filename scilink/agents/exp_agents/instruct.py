@@ -2090,6 +2090,11 @@ to fit. Note the role of any other columns (e.g. an uncertainty/error column, a
 second channel, an index, an irrelevant column) and how each should be treated.
 Refer to columns by name when names are given, otherwise by index.
 
+**Fit the full measured range.** Plan to fit the complete spectrum / full
+physically-relevant range; do not truncate the data or narrow the window to a
+sub-region to obtain a higher R² unless there is a clear physics reason or the
+user explicitly asked.
+
 **Output Format:**
 ```json
 {
@@ -2225,7 +2230,11 @@ plan as specified and let the retry pipeline handle actual runtime failures.
      noisy (noise large relative to signal); prefer none for clean data, and never
      on derivative spectra (see above).
    If you preprocess, keep both the raw and processed arrays so you can plot them.
-3. Implement your fitting approach (fit over the plan's fit domain).
+3. Implement your fitting approach over the plan's fit domain. Fit the FULL
+   measured range — do NOT truncate the data or narrow the fit window to raise R²
+   (e.g. fitting one peak while ignoring real signal elsewhere) unless there is a
+   clear physics reason or the user explicitly requested it; report R² over the
+   full domain you are modelling, not a hand-picked sub-region.
 4. Compute R² and RMSE
 5. Save `visualization.png` (in the current working directory): data + fit + residuals (show individual components if multiple peaks).
    **Make the residual diagnosable** (the reviewer reads this plot): put residuals
@@ -2285,7 +2294,7 @@ FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed script.
 **Available Libraries:** numpy, pandas, scipy, lmfit, matplotlib, json
 *(NumPy 2.x: aliases removed in NumPy 2.0 raise `AttributeError` — use `np.trapezoid` not `np.trapz`; prefer `scipy.integrate.trapezoid` for integration.)*
 
-**CRITICAL:** Fix only the execution error. Do NOT change the fitting model, its parameters, or the overall analysis approach. The model is locked for series consistency.
+**CRITICAL:** Fix only the execution error. Do NOT change the fitting model, its parameters, the fit domain/window, or the overall analysis approach — and never narrow the window or truncate the data to raise R². The model is locked for series consistency.
 
 **I/O contract (do not deviate):** the data is `data.npy` in the current working directory — load it with `np.load` (do NOT look for .csv/.txt/.dat or glob for other files); save the plot to `visualization.png`; print one line `FIT_RESULTS_JSON:{{...}}` with the fit results. Missing any of these fails the run. Also keep saving `fit.npy` (1-D fitted curve at the `data.npy` x-points, length N) if the script you are fixing already did — it feeds the reviewer's residual diagnostics.
 
