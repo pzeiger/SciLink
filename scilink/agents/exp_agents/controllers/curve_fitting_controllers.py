@@ -5588,8 +5588,13 @@ same trend.
             result_json, error_dict = self._parse(response)
 
             if error_dict:
-                self.logger.error(f"Synthesis failed: {error_dict}")
-                state["synthesis_result"] = {"error": str(error_dict)}
+                salvaged = self._salvage_synthesis_fields(response)
+                if salvaged:
+                    self.logger.warning("Synthesis JSON parse failed; salvaged detailed_analysis from raw text.")
+                    state["synthesis_result"] = salvaged
+                else:
+                    self.logger.error(f"Synthesis failed: {error_dict}")
+                    state["synthesis_result"] = {"error": str(error_dict)}
             else:
                 state["synthesis_result"] = result_json
                 self.logger.info("✅ Single spectrum synthesis complete.")
@@ -5752,8 +5757,13 @@ same trend.
             result_json, error_dict = self._parse(response)
 
             if error_dict:
-                self.logger.error(f"Series synthesis failed: {error_dict}")
-                state["synthesis_result"] = {"error": str(error_dict)}
+                salvaged = self._salvage_synthesis_fields(response)
+                if salvaged:
+                    self.logger.warning("Series synthesis JSON parse failed; salvaged detailed_analysis from raw text.")
+                    state["synthesis_result"] = salvaged
+                else:
+                    self.logger.error(f"Series synthesis failed: {error_dict}")
+                    state["synthesis_result"] = {"error": str(error_dict)}
             else:
                 state["synthesis_result"] = result_json
                 self.logger.info("✅ Series synthesis complete.")

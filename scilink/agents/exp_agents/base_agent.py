@@ -146,6 +146,77 @@ class LLMAgentMixin:
         from ...utils.codegen_parse import parse_codegen_response
         return parse_codegen_response(response, field=field, logger=self.logger)
 
+    def _salvage_synthesis_fields(self, response: Any) -> Optional[dict]:
+        """Best-effort recovery of synthesis fields from a malformed-JSON response.
+
+        The synthesis step asks for a structured object whose dominant field is a
+        long free-text narrative (``detailed_analysis``). Some providers return
+        that narrative with unescaped quotes/newlines, so strict JSON parsing
+        fails and the whole payload would otherwise be dropped to ``{"error": …}``
+        — yielding a ``success`` result with empty findings (and, for the meta
+        agent, a re-delegation loop). This recovers the narrative by string-
+        boundary extraction (tolerant of stray quotes, the dominant failure mode)
+        plus the ``scientific_claims`` / ``candidate_identifications`` list when
+        its JSON array parses cleanly. Returns ``None`` when no usable narrative
+        can be recovered, so the caller keeps the original parse error.
+        """
+        import re
+        try:
+            raw = self._extract_text_from_response(response) or ""
+        except Exception:
+            return None
+        if not raw.strip():
+            return None
+
+        recovered: dict = {}
+
+        # detailed_analysis: take the string value from its key up to the next
+        # top-level key or the closing brace, tolerating unescaped inner quotes.
+        m = re.search(r'"detailed_analysis"\s*:\s*"', raw)
+        if m:
+            rest = raw[m.end():]
+            end_markers = [
+                r'"\s*,\s*"[A-Za-z_][A-Za-z0-9_]*"\s*:',  # next top-level key
+                r'"\s*\}\s*$',                            # final closing brace
+            ]
+            cut = None
+            for pat in end_markers:
+                mm = re.search(pat, rest)
+                if mm:
+                    cut = mm.start() if cut is None else min(cut, mm.start())
+            narrative = rest[:cut] if cut is not None else rest
+            narrative = (narrative
+                         .replace('\\n', '\n').replace('\\t', '\t')
+                         .replace('\\r', '\r').replace('\\"', '"')
+                         .replace('\\\\', '\\'))
+            narrative = narrative.strip().rstrip('}').strip().rstrip('"').strip()
+            if len(narrative) >= 40:
+                recovered["detailed_analysis"] = narrative
+
+        # scientific_claims / candidate_identifications: recover the array only
+        # if it parses cleanly (secondary; failure here just omits the field).
+        for key in ("scientific_claims", "candidate_identifications"):
+            am = re.search(r'"' + key + r'"\s*:\s*\[', raw)
+            if not am:
+                continue
+            i = raw.index('[', am.start())
+            depth = 0
+            for j in range(i, len(raw)):
+                if raw[j] == '[':
+                    depth += 1
+                elif raw[j] == ']':
+                    depth -= 1
+                    if depth == 0:
+                        break
+            try:
+                arr = json.loads(raw[i:j + 1])
+                if isinstance(arr, list):
+                    recovered[key] = arr
+            except Exception:
+                pass
+
+        return recovered if recovered.get("detailed_analysis") else None
+
     def _extract_text_from_response(self, response: Any) -> str:
         """Extract text content from various LLM response formats."""
         if hasattr(response, 'text'):
