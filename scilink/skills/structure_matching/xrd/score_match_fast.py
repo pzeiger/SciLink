@@ -15,7 +15,7 @@ import logging
 from typing import Any, Sequence
 
 import numpy as np
-from scipy.signal import correlate
+from scipy.signal import correlate, find_peaks, peak_widths
 
 from ..._shared._spec import ToolSpec
 
@@ -39,7 +39,7 @@ TOOL_SPEC = ToolSpec(
     import_line="from scilink.skills.structure_matching.xrd.score_match_fast import score_xrd_match_fast",
     signature=(
         "score_xrd_match_fast(exp_two_theta, exp_intensity, sim_two_theta, "
-        "sim_intensity, fwhm=0.15, shift_search=(-0.5, 0.5), "
+        "sim_intensity, fwhm='auto', shift_search=(-0.5, 0.5), "
         "scale_search=(0.99, 1.01, 0.0025), background='subtract_min') -> dict"
     ),
     parameters={
@@ -60,8 +60,13 @@ TOOL_SPEC = ToolSpec(
             "description": "Simulated peak intensities (relative) from simulate_xrd_pattern.",
         },
         "fwhm": {
-            "type": "float",
-            "description": "Lorentzian FWHM (degrees) for broadening simulated peaks. Default 0.15.",
+            "type": "float | str",
+            "description": (
+                "Lorentzian FWHM (degrees) for broadening simulated peaks. "
+                "Default 'auto' estimates it from the experimental peak widths "
+                "(floored at 0.15°), so broad nanocrystalline patterns match "
+                "without manual tuning; pass a number to force an exact width."
+            ),
         },
         "shift_search": {
             "type": "tuple",
@@ -96,7 +101,7 @@ def score_xrd_match_fast(
     exp_intensity: Sequence[float],
     sim_two_theta: Sequence[float],
     sim_intensity: Sequence[float],
-    fwhm: float = 0.15,
+    fwhm: float | str = "auto",
     shift_search: tuple = (-0.5, 0.5),
     scale_search: tuple | None = (0.98, 1.02, 0.002),
     background: str = "subtract_min",
@@ -113,16 +118,6 @@ def score_xrd_match_fast(
         raise ValueError("sim_two_theta and sim_intensity must have the same length")
     if exp_x.size < 16:
         raise ValueError("exp_two_theta must contain at least 16 points for cross-correlation")
-    if fwhm <= 0:
-        raise ValueError("fwhm must be positive")
-    if sim_x.size == 0:
-        return {
-            "correlation": 0.0,
-            "fitted_shift": 0.0,
-            "fitted_scale": 1.0,
-            "verdict": "reject",
-            "fwhm_used": float(fwhm),
-        }
 
     if background == "subtract_min":
         exp_y = exp_y - float(np.min(exp_y))
@@ -132,6 +127,29 @@ def score_xrd_match_fast(
     grid_step = float(np.mean(np.diff(exp_x)))
     if grid_step <= 0:
         raise ValueError("exp_two_theta must be monotonically increasing")
+
+    # Resolve the simulated-pattern broadening. 'auto' (default) matches it to
+    # the experimental peak width, so a nanocrystalline (broad) pattern is not
+    # penalised by an over-sharp simulated profile — the failure mode where a
+    # broadened correct phase scores worse than a wrong sharp one. Floored at
+    # 0.15° so sharp patterns are byte-for-byte identical to the historical
+    # fixed default; a numeric value still forces an exact width.
+    if isinstance(fwhm, str):
+        if fwhm != "auto":
+            raise ValueError(f"fwhm must be a positive number or 'auto', got {fwhm!r}")
+        fwhm = _estimate_exp_fwhm(exp_y, grid_step)
+    fwhm = float(fwhm)
+    if fwhm <= 0:
+        raise ValueError("fwhm must be positive")
+
+    if sim_x.size == 0:
+        return {
+            "correlation": 0.0,
+            "fitted_shift": 0.0,
+            "fitted_scale": 1.0,
+            "verdict": "reject",
+            "fwhm_used": float(fwhm),
+        }
 
     scales = _build_scale_grid(scale_search)
 
@@ -186,6 +204,31 @@ def score_xrd_match_fast(
 
 
 # --- numerical helpers --------------------------------------------------------
+
+def _estimate_exp_fwhm(exp_y, grid_step: float, floor: float = 0.15, ceil: float = 1.0) -> float:
+    """Median FWHM (degrees) of the strongest experimental peaks, for adaptive
+    simulated-pattern broadening. Floored so sharp patterns keep the historical
+    0.15° default and only genuinely broad (nanocrystalline) patterns widen;
+    falls back to the floor when too few peaks are resolvable."""
+    try:
+        y = np.asarray(exp_y, dtype=float)
+        ymax = float(y.max())
+        if ymax <= 0:
+            return floor
+        min_sep = max(1, int(round(0.1 / grid_step)))
+        idx, _ = find_peaks(y, prominence=0.05 * ymax, distance=min_sep)
+        if idx.size == 0:
+            return floor
+        widths_samples, _, _, _ = peak_widths(y, idx, rel_height=0.5)
+        fwhms = np.asarray(widths_samples, dtype=float) * grid_step
+        fwhms = fwhms[fwhms > 0]
+        if fwhms.size == 0:
+            return floor
+        return float(min(max(float(np.median(fwhms)), floor), ceil))
+    except Exception:
+        return floor
+
+
 
 def _build_scale_grid(scale_search: tuple | None) -> np.ndarray:
     if scale_search is None:
