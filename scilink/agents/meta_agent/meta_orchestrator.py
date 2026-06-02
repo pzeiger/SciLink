@@ -947,6 +947,7 @@ class MetaOrchestratorAgent:
             "key_findings": result.get("key_findings", []),
             "files_produced": result.get("files_produced", []),
             "feature_tables": result.get("feature_tables", []),
+            "distilled_skills": result.get("distilled_skills", []),
             "suggested_followups": result.get("suggested_followups", []),
             "warnings": result.get("warnings", []),
             "error": result.get("error"),
@@ -991,6 +992,27 @@ class MetaOrchestratorAgent:
             if note not in warnings:
                 warnings.append(note)
             summary["warnings"] = warnings
+        # Provisional skills auto-distilled during this delegation. Surface them
+        # with a mode-appropriate nudge so the meta LLM offers the user a review
+        # (AUTOPILOT) or simply notes them (AUTONOMOUS) — acting via the
+        # review_distilled_skills tool. They are held out of auto-routing until
+        # promoted, so doing nothing is safe.
+        distilled = result.get("distilled_skills") or []
+        if distilled:
+            summary["distilled_skills"] = distilled
+            if self.meta_mode == MetaMode.AUTOPILOT:
+                summary["distilled_skills_action"] = (
+                    "This run learned a new reusable skill from a hard (T=2) fit, "
+                    "saved PROVISIONAL. Tell the user briefly, then ask whether to "
+                    "promote it (auto-usable in future runs), keep it provisional, "
+                    "or discard it — and call review_distilled_skills accordingly."
+                )
+            else:
+                summary["distilled_skills_action"] = (
+                    "A new skill was distilled and kept provisional (not auto-routed). "
+                    "Note it in your summary; the user can review it later via "
+                    "`scilink memory` or review_distilled_skills."
+                )
         # Domain-specific field, passed through lightly.
         if "analyses" in result:
             summary["analyses"] = result["analyses"]

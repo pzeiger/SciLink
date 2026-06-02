@@ -441,6 +441,77 @@ class MetaOrchestratorTools:
             required=[],
         )
 
+        # -- review_distilled_skills ----------------------------------------
+        def review_distilled_skills(action: str = "list", skill: str = None,
+                                    to_domain: str = None) -> str:
+            from ...skills._shared import _memory
+
+            act = (action or "list").lower()
+            if act == "list":
+                rows = _memory.list_memory(provisional=True)
+                print(f"  🧠 {len(rows)} provisional distilled skill(s) awaiting review.")
+                return json.dumps({
+                    "status": "success", "action": "list",
+                    "provisional_skills": rows,
+                }, default=str)
+
+            if not skill or "/" not in skill:
+                return json.dumps({
+                    "status": "error",
+                    "message": "For show/promote/discard, pass skill as '<domain>/<name>'.",
+                })
+            domain, name = skill.split("/", 1)
+            try:
+                if act == "show":
+                    return json.dumps({
+                        "status": "success", "action": "show", "skill": skill,
+                        "markdown": _memory.show_memory(domain, name),
+                    }, default=str)
+                if act == "promote":
+                    res = _memory.promote_memory(domain, name, to_domain=to_domain)
+                    print(f"  ✅ Promoted distilled skill '{skill}' (now auto-routable).")
+                    return json.dumps({"status": "success", "action": "promote", **res}, default=str)
+                if act in ("discard", "prune"):
+                    res = _memory.prune_memory(domain, name)
+                    print(f"  🗑️  Discarded distilled skill '{skill}'.")
+                    return json.dumps({"status": "success", "action": "discard", **res}, default=str)
+            except FileNotFoundError as e:
+                return json.dumps({"status": "error", "message": str(e)})
+            return json.dumps({"status": "error", "message": f"Unknown action: {action}"})
+
+        self._register_tool(
+            func=review_distilled_skills,
+            name="review_distilled_skills",
+            description=(
+                "Review and act on PROVISIONAL skills auto-distilled from "
+                "successful hard (T=2 hot-annealing) curve fits. When a "
+                "delegate_to_analysis result reports `distilled_skills`, a new "
+                "reusable skill was learned but is held provisional — discoverable "
+                "but kept OUT of auto-routing until you promote it. Use this tool "
+                "to: `list` the provisional skills; `show` one to inspect its "
+                "recipe; `promote` one so future runs can auto-select it; or "
+                "`discard` one that isn't worth keeping. In autopilot, ASK the "
+                "user which action they want before promoting or discarding; in "
+                "autonomous mode, leave skills provisional and just note them."
+            ),
+            parameters={
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "show", "promote", "discard"],
+                    "description": "What to do (default: list).",
+                },
+                "skill": {
+                    "type": "string",
+                    "description": "Skill reference '<domain>/<name>' (required for show/promote/discard).",
+                },
+                "to_domain": {
+                    "type": "string",
+                    "description": "Optional: on promote, move the skill into a curated domain.",
+                },
+            },
+            required=[],
+        )
+
         # -- inspect_uploads ------------------------------------------------
         def inspect_uploads(path: str = None) -> str:
             base = Path(path) if path else (self.orch.base_dir / "uploads")

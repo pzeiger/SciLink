@@ -1452,12 +1452,25 @@ class AnalysisOrchestratorAgent:
                 if ft.is_file():
                     feature_tables.append(str(ft.resolve()))
 
+        # distilled_skills: provisional skill bundles auto-distilled from T=2
+        # (hot-annealing) successes during this run. Surfaced so the meta agent
+        # can offer the user a review (promote / keep / discard) — see the
+        # meta agent's review_distilled_skills tool. Paths into the persistent
+        # store (~/.scilink/graduated_skills).
+        distilled_skills: List[str] = []
+        for rec in new_analyses:
+            full = rec.get("full_result") or {}
+            for path in full.get("distilled_skills", []) or []:
+                if path not in distilled_skills:
+                    distilled_skills.append(path)
+
         result = {
             "status": status,
             "task": task,
             "summary": summary_text,
             "files_produced": files_produced,
             "feature_tables": feature_tables,
+            "distilled_skills": distilled_skills,
             "key_findings": key_findings,
             "suggested_followups": suggested_followups,
             "analyses": [

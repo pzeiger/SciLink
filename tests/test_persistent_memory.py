@@ -295,3 +295,67 @@ class TestT2DistillHook:
         from scilink.agents.exp_agents.curve_fitting_agent import CurveFittingAgent
         agent = self._fake_agent(str(tmp_path), self._Model())
         assert CurveFittingAgent._maybe_distill_t2_skills(agent, self._hot_state()) == []
+
+
+# ──────────────────────────────────────────────────────────────
+# Meta-agent review tool (PR3b)
+# ──────────────────────────────────────────────────────────────
+
+class TestMetaReviewTool:
+    def _seed_provisional(self):
+        from scilink.skills._shared._graduation import graduate_to_skill_file
+        graduate_to_skill_file(
+            knowledge_entry={"summary": "s"},
+            skill_name="auto_demo_x", domain="curve_fitting",
+            llm_call=lambda p: json.dumps({"description": "d", "overview": "o", "analysis": "recipe"}),
+            fresh_template="{skill_name}{domain}{knowledge_text}",
+            update_template="{skill_name}{existing_skill}{new_knowledge}",
+            extra_meta={"provisional": True, "provenance": "t2_autodistill", "r_squared": 0.99},
+        )
+
+    def _tools(self):
+        import types
+        from scilink.agents.meta_agent.meta_orchestrator_tools import MetaOrchestratorTools
+        # Closures only touch the orchestrator at call time, not registration.
+        return MetaOrchestratorTools(types.SimpleNamespace())
+
+    def test_review_tool_registered(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCILINK_HOME", str(tmp_path))
+        assert "review_distilled_skills" in self._tools().functions_map
+
+    def test_list_show_promote_discard(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCILINK_HOME", str(tmp_path))
+        from scilink.skills._shared import _memory
+        self._seed_provisional()
+        fn = self._tools().functions_map["review_distilled_skills"]
+
+        listed = json.loads(fn(action="list"))
+        assert len(listed["provisional_skills"]) == 1
+
+        shown = json.loads(fn(action="show", skill="curve_fitting/auto_demo_x"))
+        assert "recipe" in shown["markdown"]
+
+        promoted = json.loads(fn(action="promote", skill="curve_fitting/auto_demo_x"))
+        assert promoted["status"] == "success"
+        assert _memory.list_memory(provisional=True) == []
+        assert len(_memory.list_memory(provisional=False)) == 1
+
+        discarded = json.loads(fn(action="discard", skill="curve_fitting/auto_demo_x"))
+        assert discarded["status"] == "success"
+        assert _memory.list_memory() == []
+
+    def test_meta_tools_import_is_ase_free(self):
+        import subprocess, sys, textwrap
+        script = textwrap.dedent("""
+            import sys
+            class B:
+                def find_spec(self, n, p, t=None):
+                    if n == 'ase' or n.startswith('ase.'): raise ImportError('blocked')
+                    return None
+            sys.meta_path.insert(0, B())
+            from scilink.agents.meta_agent.meta_orchestrator_tools import MetaOrchestratorTools
+            assert 'ase' not in sys.modules
+            print('OK')
+        """)
+        p = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+        assert p.returncode == 0 and "OK" in p.stdout, p.stderr

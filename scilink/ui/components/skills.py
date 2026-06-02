@@ -23,6 +23,9 @@ def render_skills_tab() -> None:
     with right_col:
         _render_available_skills(agent)
 
+    st.divider()
+    _render_memory_section()
+
 
 def _render_upload_section(agent) -> None:
     """Upload custom skill files."""
@@ -91,3 +94,69 @@ def _render_available_skills(agent) -> None:
             st.markdown(f"- `{name}`")
     else:
         st.caption("No custom skills registered yet.")
+
+
+def _render_memory_section() -> None:
+    """Persistent memory — graduated and auto-distilled skills under ~/.scilink.
+
+    Provisional skills (auto-distilled from successful T=2 curve fits) are shown
+    with a badge and can be promoted (made auto-routable) or pruned. Promoted
+    skills survive sessions and pip upgrades and are auto-discovered by the loader.
+    """
+    from scilink.skills._shared import _memory
+
+    st.subheader("🧠 Persistent Memory")
+    st.caption(
+        "Graduated and auto-distilled skills stored under `~/.scilink` — they "
+        "survive sessions and upgrades. Provisional skills (from hard T=2 fits) "
+        "are held out of auto-routing until you promote them."
+    )
+
+    try:
+        rows = _memory.list_memory()
+    except Exception as e:
+        st.error(f"Could not read persistent memory: {e}")
+        return
+
+    if not rows:
+        st.caption("No persisted skills yet.")
+        return
+
+    provisional = [r for r in rows if r["provisional"]]
+    promoted = [r for r in rows if not r["provisional"]]
+
+    if provisional:
+        st.markdown(f"**Provisional — awaiting review ({len(provisional)})**")
+        for r in provisional:
+            _render_memory_row(_memory, r, provisional=True)
+    if promoted:
+        st.markdown(f"**Promoted ({len(promoted)})**")
+        for r in promoted:
+            _render_memory_row(_memory, r, provisional=False)
+
+
+def _render_memory_row(_memory, r, *, provisional: bool) -> None:
+    ref = f"{r['domain']}/{r['name']}"
+    badge = "🟡 provisional" if provisional else "✅ promoted"
+    r2 = f" · R²={r['r_squared']}" if r.get("r_squared") is not None else ""
+    with st.expander(f"{badge} · `{ref}`{r2}", expanded=False):
+        if r.get("description"):
+            st.markdown(f"_{r['description']}_")
+        if r.get("provenance"):
+            st.caption(f"provenance: {r['provenance']}"
+                       + (f" · session: {r['session']}" if r.get("session") else ""))
+        try:
+            st.markdown(_memory.show_memory(r["domain"], r["name"]))
+        except Exception as e:
+            st.warning(f"Could not render skill: {e}")
+
+        c1, c2 = st.columns(2)
+        if provisional:
+            if c1.button("Promote", key=f"promote::{ref}", type="primary"):
+                _memory.promote_memory(r["domain"], r["name"])
+                st.success(f"Promoted {ref} — now auto-routable.")
+                st.rerun()
+        if c2.button("Prune", key=f"prune::{ref}"):
+            _memory.prune_memory(r["domain"], r["name"])
+            st.warning(f"Pruned {ref}.")
+            st.rerun()
