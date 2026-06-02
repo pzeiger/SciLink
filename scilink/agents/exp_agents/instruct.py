@@ -2761,7 +2761,8 @@ You MUST output a valid JSON object with exactly two keys:
 Ensure the final output is ONLY the JSON object and nothing else.
 """
 
-KNOWLEDGE_TO_SKILL_INSTRUCTIONS = """You are an expert scientific data analyst. You need to convert accumulated knowledge into a structured, reusable skill document.
+KNOWLEDGE_TO_SKILL_INSTRUCTIONS = """You are an expert scientific data analyst. \
+Convert accumulated analysis knowledge into a structured, reusable skill description for downstream agents.
 
 **Skill Name:** {skill_name}
 **Domain:** {domain}
@@ -2769,39 +2770,29 @@ KNOWLEDGE_TO_SKILL_INSTRUCTIONS = """You are an expert scientific data analyst. 
 **Source Knowledge:**
 {knowledge_text}
 
-**Source Analysis Details:**
-{analysis_details}
-
 **Instructions:**
-Begin the document with a YAML frontmatter block containing a single one-line `description:` field — a self-contained sentence that lets a downstream agent decide whether this skill is relevant. Do not end the description with a period. Then organize the knowledge into exactly five sections, each containing actionable, specific guidance. Use markdown formatting.
+Return a JSON object with exactly the following keys. Each value contains actionable, specific guidance \
+derived from the source knowledge. Use markdown formatting *within* section values when helpful (lists, \
+inline code, fenced code blocks), but do not include section headings (`##`) or YAML frontmatter — those \
+are added by the caller.
 
----
-description: <one-line, self-contained, no trailing period>
----
+{{
+  "description": "<one self-contained sentence (no trailing period) that lets a downstream agent decide if this skill is relevant>",
+  "overview": "<what domain/technique this skill covers, what data it applies to, and when to use it>",
+  "planning": "<strategy constraints, recommended parameter ranges, setup considerations, and any user-specified corrections or preferences>",
+  "analysis": "<code patterns, workflows, or processing steps that have proven effective; include specific parameter values that worked>",
+  "interpretation": "<reference values, peak assignments, expected ranges, and how to read results; include quantitative benchmarks from the findings>",
+  "validation": "<quality criteria, acceptable tolerances, failure indicators, sanity checks, and any corrections from user feedback>"
+}}
 
-## overview
-Describe what domain/technique this skill covers, what types of data it applies to, and when to use it.
+Output ONLY the JSON object. Do not wrap in code blocks. Do not include any prose outside the JSON."""
 
-## planning
-List strategy constraints, recommended parameter ranges, and setup considerations. Include any user-specified corrections or preferences.
-
-## analysis
-Describe code patterns, workflows, or processing steps that have proven effective. Include specific parameter values that worked.
-
-## interpretation
-Provide reference values, peak assignments, expected ranges, and how to interpret results. Include quantitative benchmarks from the key findings.
-
-## validation
-Define quality criteria, acceptable tolerance ranges, failure indicators, and sanity checks. Include any corrections from user feedback.
-
-Output ONLY the skill document content in markdown, starting with the `---` frontmatter block followed by `## overview`. Do not wrap in code blocks. Use level-2 headings (`##`) for the sections — level-1 (`#`) is not parsed by the loader.
-"""
-
-SKILL_UPDATE_INSTRUCTIONS = """You are an expert scientific data analyst. You need to update an existing skill document with new knowledge while preserving what is already correct.
+SKILL_UPDATE_INSTRUCTIONS = """You are an expert scientific data analyst. \
+Update an existing skill with new knowledge while preserving what is already correct.
 
 **Skill Name:** {skill_name}
 
-**Existing Skill Content:**
+**Existing Skill (as JSON):**
 {existing_skill}
 
 **New Knowledge to Incorporate:**
@@ -2809,15 +2800,53 @@ SKILL_UPDATE_INSTRUCTIONS = """You are an expert scientific data analyst. You ne
 
 **Instructions:**
 1. Review the existing skill content carefully.
-2. Integrate the new findings into the appropriate sections.
+2. Integrate the new findings into the appropriate section. Consolidate related guidance — \
+   prefer merging into existing content over restating.
 3. Do NOT remove existing content unless the new knowledge explicitly contradicts it.
-4. When there is a conflict, prefer the newer knowledge but note the discrepancy.
-5. Maintain the five-section structure (overview, planning, analysis, interpretation, validation), each at level-2 (`##`) heading depth.
-6. Add new quantitative details, parameter ranges, or heuristics from the new knowledge.
-7. Preserve the YAML frontmatter at the top (the `---`-delimited block). If the new knowledge materially changes the skill's purpose, update the `description:` field; otherwise leave it intact. If the existing skill has no frontmatter, add one with a one-line `description:` synthesized from the overview.
+4. When there is a conflict, prefer the newer knowledge but note the discrepancy briefly.
+5. If the new knowledge materially changes the skill's purpose, update the description; \
+   otherwise leave it intact.
+6. Keep prose tight. The skill is read into LLM context every time.
 
-Output ONLY the updated skill document content in markdown, starting with the `---` frontmatter block followed by `## overview`. Do not wrap in code blocks.
-"""
+Return a JSON object with the SAME keys as the existing skill (description, overview, planning, \
+analysis, interpretation, validation) reflecting the merged skill content.
+
+Output ONLY the JSON object. Do not wrap in code blocks. Do not include any prose outside the JSON."""
+
+T2_DISTILL_INSTRUCTIONS = """You are an expert scientific data analyst. A curve-fitting run had to \
+abandon its planned model and the available domain skills, regenerate a fitting approach from scratch \
+(the "hot annealing" stage), and only then succeeded. Distill that successful, novel approach into a \
+*generalized*, reusable skill so a future run on a similar problem can apply it directly.
+
+**Skill Name:** {skill_name}
+**Domain:** {domain}
+
+**What happened (locked plan, final model, deviation, fit quality, and the working script):**
+{knowledge_text}
+
+**Instructions:**
+Generalize — describe the *method*, not this one dataset. Abstract away dataset-specific file paths, \
+hard-coded array sizes, and magic numbers; state the model form, the parameter initialization/bounds \
+strategy, and the fitting procedure in reusable terms. Explain WHY the original plan was insufficient \
+and what the successful approach changed.
+
+The exact working script will be appended verbatim to the implementation section by the system as a \
+reference example — do NOT paste the script back; write the generalized recipe instead.
+
+Return a JSON object with exactly the following keys. Use markdown formatting *within* values when \
+helpful (lists, inline code), but no section headings (`##`) or YAML frontmatter — those are added by \
+the caller.
+
+{{
+  "description": "<one self-contained sentence (no trailing period) naming the technique/model so a downstream agent can decide if this skill is relevant>",
+  "overview": "<what kind of data/problem this approach fits and when to reach for it>",
+  "planning": "<the model form and fitting strategy in general terms; parameter init/bounds heuristics; why the originally-planned model was insufficient>",
+  "analysis": "<the generalized, parameterized recipe: how to set up and run the fit, abstracted from this dataset's specifics>",
+  "interpretation": "<how to read the resulting parameters and judge physical plausibility>",
+  "validation": "<quality criteria, sanity checks, and failure indicators for this approach>"
+}}
+
+Output ONLY the JSON object. Do not wrap in code blocks. Do not include any prose outside the JSON."""
 
 # Backwards compatibility
 FITTING_RESULTS_INTERPRETATION_INSTRUCTIONS = FITTING_INTERPRETATION_INSTRUCTIONS

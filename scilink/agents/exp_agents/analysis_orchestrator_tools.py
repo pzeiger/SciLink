@@ -122,6 +122,11 @@ def _build_skill_description(agent_registry: dict = None,
             try:
                 parsed = load_skill(name, domain=domain)
                 meta = parsed.get("meta") or {}
+                # Provisional (auto-distilled) skills are kept out of the
+                # auto-routing menu — they stay loadable via an explicit
+                # `skill=` until reviewed/promoted (see scilink memory).
+                if meta.get("provisional") is True:
+                    continue
                 desc = meta.get("description")
                 if not desc:
                     desc = parsed.get("overview", "").split("\n")[0].strip()
@@ -138,7 +143,8 @@ def _build_skill_description(agent_registry: dict = None,
                 skill_descs.append(f"'{name}'{tech_tag}" + (f" — {body}" if body else ""))
             except Exception:
                 skill_descs.append(f"'{name}'")
-        parts.append(f"Built-in {domain} skills: {'; '.join(skill_descs)}.")
+        if skill_descs:
+            parts.append(f"Built-in {domain} skills: {'; '.join(skill_descs)}.")
 
     if custom_skills:
         parts.append(f"Custom skills: {sorted(custom_skills.keys())}.")
@@ -4119,7 +4125,11 @@ class AnalysisOrchestratorTools:
             Convert a knowledge entry into a reusable skill (.md file).
             The skill is automatically registered for use in subsequent analyses.
             """
-            from scilink.agents.exp_agents.instruct import KNOWLEDGE_TO_SKILL_INSTRUCTIONS
+            from scilink.agents.exp_agents.instruct import (
+                KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
+                SKILL_UPDATE_INSTRUCTIONS,
+            )
+            from scilink.skills._shared._graduation import graduate_to_skill_file
 
             print(f"  ⚡ Tool: Graduating knowledge '{knowledge_id}' to skill '{skill_name}'...")
 
@@ -4135,13 +4145,6 @@ class AnalysisOrchestratorTools:
                     "status": "error",
                     "message": f"Knowledge ID not found: {knowledge_id}"
                 })
-
-            # Build knowledge text
-            knowledge_text = f"**Focus:** {knowledge_entry.get('focus', '')}\n"
-            knowledge_text += f"**Summary:** {knowledge_entry.get('summary', '')}\n"
-            knowledge_text += "**Key Findings:**\n"
-            for finding in knowledge_entry.get("key_findings", []):
-                knowledge_text += f"- {finding}\n"
 
             # Collect source analysis details
             analysis_details_parts = []
@@ -4169,31 +4172,43 @@ class AnalysisOrchestratorTools:
 
             analysis_details = "\n\n".join(analysis_details_parts) if analysis_details_parts else "No source analysis details available."
 
-            # Call LLM to generate skill content
-            prompt = KNOWLEDGE_TO_SKILL_INSTRUCTIONS.format(
-                skill_name=skill_name,
-                domain=domain,
-                knowledge_text=knowledge_text,
-                analysis_details=analysis_details,
-            )
+            # Fold focus/summary/findings + source detail into a single
+            # knowledge_entry; the shared helper renders it into {knowledge_text}.
+            findings = knowledge_entry.get("key_findings", []) or []
+            distill_entry = {
+                "focus": knowledge_entry.get("focus", ""),
+                "summary": knowledge_entry.get("summary", ""),
+                "key_findings": "\n".join(f"- {f}" for f in findings),
+                "source_analysis_details": analysis_details,
+            }
 
-            try:
+            def _llm_call(prompt: str) -> str:
                 response = self.orch.model.generate_content(
                     contents=[prompt],
                     generation_config=None,
                     safety_settings=None,
                 )
-                skill_content = response.text if hasattr(response, "text") else str(response)
+                return response.text if hasattr(response, "text") else str(response)
+
+            # Write to the persistent store (~/.scilink/graduated_skills),
+            # via the shared structured-JSON helper, so the skill survives
+            # the session and a pip upgrade. The helper auto-detects
+            # create-vs-update by whether the bundle already exists.
+            try:
+                result = graduate_to_skill_file(
+                    knowledge_entry=distill_entry,
+                    skill_name=skill_name,
+                    domain=domain,
+                    llm_call=_llm_call,
+                    fresh_template=KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
+                    update_template=SKILL_UPDATE_INSTRUCTIONS,
+                )
             except Exception as e:
-                return json.dumps({"status": "error", "message": f"LLM call failed: {e}"})
+                return json.dumps({"status": "error", "message": f"Graduation failed: {e}"})
 
-            # Save skill file
-            skill_dir = self.orch.base_dir / "graduated_skills"
-            skill_dir.mkdir(parents=True, exist_ok=True)
-            skill_path = skill_dir / f"{skill_name}.md"
-            skill_path.write_text(skill_content)
+            skill_path = result["skill_path"]
 
-            # Register the skill
+            # Register the skill so the live session can use it immediately.
             self.orch.register_skill(str(skill_path))
 
             # Track the link
@@ -4203,8 +4218,9 @@ class AnalysisOrchestratorTools:
                 "status": "success",
                 "skill_name": skill_name,
                 "skill_path": str(skill_path),
+                "method": result.get("method"),
                 "source_knowledge_id": knowledge_id,
-                "note": f"Skill '{skill_name}' has been registered and will be available in run_analysis."
+                "note": f"Skill '{skill_name}' has been registered (persistent memory) and will be available in run_analysis."
             })
 
         self._register_tool(
@@ -4236,25 +4252,28 @@ class AnalysisOrchestratorTools:
         # =====================================================================
         # 17. UPDATE SKILL
         # =====================================================================
-        def update_skill(skill_name: str, knowledge_ids: list = None) -> str:
+        def update_skill(skill_name: str, knowledge_ids: list = None, domain: str = "curve_fitting") -> str:
             """
             Update a graduated skill with new knowledge entries.
-            Preserves the old version as {name}.prev.md.
+            Merges into the persistent skill bundle in place.
             """
-            from scilink.agents.exp_agents.instruct import SKILL_UPDATE_INSTRUCTIONS
+            from scilink.agents.exp_agents.instruct import (
+                KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
+                SKILL_UPDATE_INSTRUCTIONS,
+            )
+            from scilink.skills._shared._graduation import graduate_to_skill_file
+            from scilink.skills.loader import graduated_skills_dir
 
             print(f"  ⚡ Tool: Updating skill '{skill_name}'...")
 
-            # Find the existing skill file
-            skill_dir = self.orch.base_dir / "graduated_skills"
-            skill_path = skill_dir / f"{skill_name}.md"
+            # The skill must already exist in the persistent store so the
+            # helper takes its merge (update) branch.
+            skill_path = graduated_skills_dir() / domain / skill_name / f"{skill_name}.md"
             if not skill_path.exists():
                 return json.dumps({
                     "status": "error",
-                    "message": f"Graduated skill not found: {skill_name}"
+                    "message": f"Graduated skill not found: {domain}/{skill_name}"
                 })
-
-            existing_skill = skill_path.read_text()
 
             # Determine source knowledge IDs
             tracked_ids = self.orch._graduated_skill_sources.get(skill_name, [])
@@ -4293,45 +4312,43 @@ class AnalysisOrchestratorTools:
 
             new_knowledge = "\n\n".join(new_knowledge_parts)
 
-            # Call LLM to produce updated skill
-            prompt = SKILL_UPDATE_INSTRUCTIONS.format(
-                skill_name=skill_name,
-                existing_skill=existing_skill,
-                new_knowledge=new_knowledge,
-            )
-
-            try:
+            def _llm_call(prompt: str) -> str:
                 response = self.orch.model.generate_content(
                     contents=[prompt],
                     generation_config=None,
                     safety_settings=None,
                 )
-                updated_content = response.text if hasattr(response, "text") else str(response)
+                return response.text if hasattr(response, "text") else str(response)
+
+            # Delegate to the shared helper; since the bundle exists it
+            # takes the structured-JSON merge (update) branch.
+            try:
+                result = graduate_to_skill_file(
+                    knowledge_entry={"new_knowledge": new_knowledge},
+                    skill_name=skill_name,
+                    domain=domain,
+                    llm_call=_llm_call,
+                    fresh_template=KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
+                    update_template=SKILL_UPDATE_INSTRUCTIONS,
+                )
             except Exception as e:
-                return json.dumps({"status": "error", "message": f"LLM call failed: {e}"})
-
-            # Save previous version
-            prev_path = skill_dir / f"{skill_name}.prev.md"
-            prev_path.write_text(existing_skill)
-
-            # Write updated skill
-            skill_path.write_text(updated_content)
+                return json.dumps({"status": "error", "message": f"Update failed: {e}"})
 
             # Update source tracking
             all_ids = list(set(tracked_ids + new_ids))
             self.orch._graduated_skill_sources[skill_name] = all_ids
 
             # Re-register the skill
-            self.orch.register_skill(str(skill_path))
+            self.orch.register_skill(str(result["skill_path"]))
 
             return json.dumps({
                 "status": "success",
                 "skill_name": skill_name,
-                "skill_path": str(skill_path),
-                "previous_version": str(prev_path),
+                "skill_path": str(result["skill_path"]),
+                "method": result.get("method"),
                 "new_knowledge_ids": new_ids,
                 "total_source_ids": all_ids,
-                "note": f"Skill '{skill_name}' has been updated. Previous version saved as {prev_path.name}."
+                "note": f"Skill '{skill_name}' has been updated in persistent memory."
             })
 
         self._register_tool(
@@ -4351,6 +4368,10 @@ class AnalysisOrchestratorTools:
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Specific knowledge IDs to incorporate (omit to auto-detect from matching focus area)"
+                },
+                "domain": {
+                    "type": "string",
+                    "description": "Domain the skill was graduated under (e.g., 'curve_fitting', 'xps'). Default: 'curve_fitting'"
                 }
             },
             required=["skill_name"]

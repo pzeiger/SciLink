@@ -158,6 +158,11 @@ def main():
         sys.argv = [f"{sys.argv[0]} {command}"] + sys.argv[2:]
         return meta_main()
 
+    elif command == 'memory':
+        from scilink.cli.memory import main as memory_main
+        sys.argv = [sys.argv[0] + ' memory'] + sys.argv[2:]
+        return memory_main()
+
     elif command == 'ui':
         from scilink.cli.ui import main as ui_main
         sys.argv = [sys.argv[0] + ' ui'] + sys.argv[2:]
@@ -210,6 +215,9 @@ Available Commands:
 
   prepare-ff    Force field agent for generating LAMMPS force field and
                 data files with AMBER
+
+  memory        Manage persistent memory — list, review, promote, or prune
+                graduated and auto-distilled skills
 
   ui            Launch the Streamlit web interface for interactive
                 analysis (requires: pip install scilink[ui])

@@ -783,6 +783,13 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Save fitting scripts for reproducibility
         self._save_fitting_scripts(state)
 
+        # Auto-distill novel T=2 (hot-annealing) successes into persistent
+        # memory as provisional skills. Failure-isolated: never affects the
+        # returned fit. Surfaces any new skills on the result for review.
+        distilled = self._maybe_distill_t2_skills(state)
+        if distilled:
+            final_results["distilled_skills"] = distilled
+
         self.logger.info("")
         self.logger.info("✅ ANALYSIS COMPLETE")
         self.logger.info(f"   Results: {results_path}")
@@ -1034,6 +1041,128 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         if saved:
             self.logger.info(f"   Scripts: {scripts_dir} ({len(saved)} file(s))")
+
+    def _maybe_distill_t2_skills(self, state: dict) -> List[str]:
+        """Distill novel T=2 (hot-annealing) successes into persistent memory.
+
+        Gate (all must hold): the fit succeeded; verification reached the
+        hottest annealing level (the model was regenerated from scratch);
+        and the result is genuinely novel — it deviated from the locked plan
+        (``deviation_note``) or ran with no active skill. On trigger, an LLM
+        pass generalizes the working approach into a reusable recipe and the
+        exact working script is appended verbatim as a reference example. The
+        skill is written **provisional** (kept out of auto-routing until the
+        user/meta-agent promotes it — see ``scilink memory``).
+
+        Returns the list of skill-file paths written (empty if none). Fully
+        failure-isolated: any error is logged and swallowed so a distill
+        problem never affects the user's fit.
+        """
+        # Opt-out via env (default on). Provisional output is the safety net.
+        flag = os.environ.get("SCILINK_T2_AUTODISTILL", "").strip().lower()
+        if flag in ("0", "false", "off", "no"):
+            return []
+
+        distilled: List[str] = []
+        try:
+            import hashlib
+            import re
+
+            from .controllers.curve_fitting_controllers import (
+                UnifiedSeriesProcessingController,
+                _active_skill_names,
+            )
+            from .instruct import T2_DISTILL_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS
+            from scilink.skills._shared._graduation import graduate_to_skill_file
+
+            n_levels = len(UnifiedSeriesProcessingController._CONSTRAINT_ANNEALING_SCHEDULE)
+            hot_level = n_levels - 1
+            locked = state.get("locked_fitting_config") or {}
+            active_skills = _active_skill_names(state)
+            results = state.get("series_results", []) or []
+
+            def _llm_call(prompt: str) -> str:
+                response = self.model.generate_content(
+                    contents=[prompt],
+                    generation_config=self.generation_config,
+                    safety_settings=self.safety_settings,
+                )
+                return response.text if hasattr(response, "text") else str(response)
+
+            for r in results:
+                if not r.get("success"):
+                    continue
+                script = r.get("script")
+                if not script:
+                    continue
+
+                r2 = (r.get("fit_quality") or {}).get("r_squared") or 0
+                qh = r.get("quality_history") or {}
+                levels = [
+                    it.get("annealing_level", 0)
+                    for it in qh.get("verification_iterations", [])
+                ]
+                reached_hot = (max(levels) if levels else 0) >= hot_level
+
+                deviation = (r.get("deviation_note") or "").strip()
+                # "Novel" = deviated from the plan, or no skill covered the run.
+                novel = bool(deviation) or not active_skills
+
+                if not (reached_hot and novel):
+                    continue
+
+                model = r.get("model_type") or locked.get("physical_model") or "model"
+                slug = re.sub(r"[^a-z0-9]+", "_", str(model).lower()).strip("_")[:40] or "model"
+                digest = hashlib.sha1(
+                    (json.dumps(locked, sort_keys=True, default=str) + script).encode("utf-8")
+                ).hexdigest()[:8]
+                skill_name = f"auto_{slug}_{digest}"
+
+                knowledge_entry = {
+                    "planned_model": locked.get("physical_model"),
+                    "planned_analysis_approach": locked.get("analysis_approach"),
+                    "planned_fitting_strategy": locked.get("fitting_strategy"),
+                    "parameters_to_extract": locked.get("parameters_to_extract"),
+                    "final_model_type": r.get("model_type"),
+                    "deviation_from_plan": deviation or "(no explicit note; ran without an active skill)",
+                    "r_squared": r2,
+                    "working_script": script,
+                }
+                ref_block = (
+                    "### Reference implementation (verbatim fit that produced this skill)\n\n"
+                    "```python\n" + script.strip() + "\n```"
+                )
+
+                result = graduate_to_skill_file(
+                    knowledge_entry=knowledge_entry,
+                    skill_name=skill_name,
+                    domain="curve_fitting",
+                    llm_call=_llm_call,
+                    fresh_template=T2_DISTILL_INSTRUCTIONS,
+                    update_template=SKILL_UPDATE_INSTRUCTIONS,
+                    extra_meta={
+                        "provisional": True,
+                        "provenance": "t2_autodistill",
+                        "session": self.output_dir.name,
+                        "r_squared": round(float(r2), 4),
+                    },
+                    append_sections={"implementation": ref_block},
+                )
+                distilled.append(result["skill_path"])
+                self.logger.info(
+                    f"   🧠 Distilled provisional skill from T=2 fit: "
+                    f"{skill_name} (R²={r2:.4f}) → {result['skill_path']}"
+                )
+        except Exception as e:
+            self.logger.warning(f"T=2 auto-distillation skipped: {e}")
+            return distilled
+
+        if distilled:
+            self.logger.info(
+                f"   🧠 {len(distilled)} provisional skill(s) added to persistent "
+                f"memory; review with `scilink memory list --provisional-only`."
+            )
+        return distilled
 
     def _compile_results(self, state: dict) -> Dict[str, Any]:
         """Compile results into a consistent output structure."""
