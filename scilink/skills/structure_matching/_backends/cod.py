@@ -66,6 +66,25 @@ def _formula_elements(formula: Optional[str]) -> set[str]:
     return elements
 
 
+def _formula_natoms(formula: Optional[str]) -> float:
+    """Total atom count of a COD (reduced) formula string — a structural-
+    simplicity proxy: TiO2 -> 3, Ti9O17 -> 26. Used as a RETRIEVAL tiebreaker so
+    the simplest stoichiometry consistent with the requested chemistry (the most
+    common phase, by an Occam prior) is offered ahead of complex same-composition
+    phases — e.g. anatase/rutile (TiO2) before the Magnéli suboxides (TinO2n-1),
+    which COD's id order otherwise buries. The scorer + widen-on-failure recover
+    genuinely complex phases. Unknown/empty -> inf so it sorts last."""
+    if not formula:
+        return float("inf")
+    total = 0.0
+    for tok in formula.replace("-", " ").split():
+        m = _ELEMENT_TOKEN.match(tok)
+        if m:
+            cnt = tok[len(m.group(1)):]
+            total += float(cnt) if cnt else 1.0
+    return total if total > 0 else float("inf")
+
+
 class CODBackend:
     name = "cod"
 
@@ -151,10 +170,12 @@ class CODBackend:
             if not wanted.issubset(els):
                 continue
             extra = len(els - wanted)
-            scored.append((extra, cid, formula, sg, sg_number))
-        # Tightest composition first (exact match before supersets).
-        scored.sort(key=lambda t: (t[0], t[1]))
-        return [(cid, formula, sg, sg_number) for _, cid, formula, sg, sg_number in scored]
+            scored.append((extra, _formula_natoms(formula), cid, formula, sg, sg_number))
+        # Tightest composition first (exact match before supersets), then
+        # simplest stoichiometry (common phase before complex same-composition),
+        # then id for stability.
+        scored.sort(key=lambda t: (t[0], t[1], t[2]))
+        return [(cid, formula, sg, sg_number) for _, _, cid, formula, sg, sg_number in scored]
 
     def _search_web(self, wanted: set[str], spec: QuerySpec) -> list[tuple]:
         """COD REST element search (no local db). Same vetted domain; returns
@@ -189,11 +210,12 @@ class CODBackend:
                         continue
                 except (TypeError, ValueError):
                     continue
-            scored.append((len(els - wanted), cid, formula, row.get("sg"), sg_number))
+            scored.append((len(els - wanted), _formula_natoms(formula), cid, formula, row.get("sg"), sg_number))
             if len(scored) >= 2000:
                 break
-        scored.sort(key=lambda t: (t[0], t[1]))
-        return [(cid, formula, sg, sg_number) for _, cid, formula, sg, sg_number in scored]
+        # Tightest composition, then simplest stoichiometry, then id.
+        scored.sort(key=lambda t: (t[0], t[1], t[2]))
+        return [(cid, formula, sg, sg_number) for _, _, cid, formula, sg, sg_number in scored]
 
     def _load_structure(self, cid: int):
         cif = self._locate_cif(cid)
