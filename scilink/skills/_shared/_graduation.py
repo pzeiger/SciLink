@@ -63,6 +63,7 @@ _EXTRA_META_KEYS: tuple[str, ...] = (
     "provenance",
     "session",
     "r_squared",
+    "quality_score",
 )
 
 

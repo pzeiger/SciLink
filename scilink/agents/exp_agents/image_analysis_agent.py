@@ -593,6 +593,14 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         else:
             final_results = tier1_results
 
+        # Auto-distill novel T=2 (hot-annealing) successes into persistent
+        # memory as provisional skills. Failure-isolated: never affects the
+        # returned analysis. Keys off the Tier-1 state (which ran the
+        # verification/annealing loop). Surfaces any new skills on the result.
+        distilled = self._maybe_distill_t2_skills(tier1_state)
+        if distilled:
+            final_results["distilled_skills"] = distilled
+
         # Save final merged results
         results_path = self.output_dir / "analysis_results.json"
         with open(results_path, "w") as f:
@@ -770,6 +778,127 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         if saved:
             self.logger.info(f"   📝 Scripts: {scripts_dir} ({len(saved)} file(s))")
+
+    def _maybe_distill_t2_skills(self, state: dict) -> List[str]:
+        """Distill novel T=2 (hot-annealing) image-analysis successes into memory.
+
+        Image-side mirror of ``CurveFittingAgent._maybe_distill_t2_skills``.
+        Gate (all must hold): the analysis succeeded; verification reached the
+        hottest annealing level (the pipeline was regenerated from scratch);
+        and the result is novel — it deviated from the locked plan
+        (``plan_deviation_summary``, stamped on every hot success by the
+        controller) or ran with no active skill. On trigger, an LLM pass
+        generalizes the working approach into a reusable recipe and the exact
+        working script is appended verbatim. The skill is written
+        **provisional** (kept out of auto-routing until promoted).
+
+        Returns the list of skill-file paths written. Fully failure-isolated:
+        any error is logged and swallowed so a distill problem never affects
+        the user's analysis.
+        """
+        flag = os.environ.get("SCILINK_T2_AUTODISTILL", "").strip().lower()
+        if flag in ("0", "false", "off", "no"):
+            return []
+
+        distilled: List[str] = []
+        try:
+            import hashlib
+            import re
+
+            from .controllers.image_analysis_controllers import (
+                UnifiedImageProcessingController,
+                _active_skill_names,
+            )
+            from .instruct import IMAGE_T2_DISTILL_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS
+            from scilink.skills._shared._graduation import graduate_to_skill_file
+
+            n_levels = len(UnifiedImageProcessingController._CONSTRAINT_ANNEALING_SCHEDULE)
+            hot_level = n_levels - 1
+            approach = state.get("analysis_approach")
+            active_skills = _active_skill_names(state)
+            results = state.get("series_results", []) or []
+
+            def _llm_call(prompt: str) -> str:
+                response = self.model.generate_content(
+                    contents=[prompt],
+                    generation_config=self.generation_config,
+                    safety_settings=self.safety_settings,
+                )
+                return response.text if hasattr(response, "text") else str(response)
+
+            for r in results:
+                if not r.get("success"):
+                    continue
+                script = r.get("script")
+                if not script:
+                    continue
+
+                score = (r.get("quality_history") or {}).get("final_score")
+                qh = r.get("quality_history") or {}
+                levels = [
+                    it.get("annealing_level", 0)
+                    for it in qh.get("verification_iterations", [])
+                ]
+                reached_hot = (max(levels) if levels else 0) >= hot_level
+
+                deviation = (r.get("plan_deviation_summary") or "").strip()
+                novel = bool(deviation) or not active_skills
+
+                if not (reached_hot and novel):
+                    continue
+
+                kind = r.get("analysis_type") or approach or "image_analysis"
+                slug = re.sub(r"[^a-z0-9]+", "_", str(kind).lower()).strip("_")[:40] or "image"
+                digest = hashlib.sha1(
+                    (json.dumps(approach, sort_keys=True, default=str) + script).encode("utf-8")
+                ).hexdigest()[:8]
+                skill_name = f"auto_{slug}_{digest}"
+
+                knowledge_entry = {
+                    "planned_analysis_approach": approach,
+                    "final_analysis_type": r.get("analysis_type"),
+                    "deviation_from_plan": deviation or "(no explicit note; ran without an active skill)",
+                    "quality_score": score,
+                    "working_script": script,
+                }
+                ref_block = (
+                    "### Reference implementation (verbatim analysis that produced this skill)\n\n"
+                    "```python\n" + script.strip() + "\n```"
+                )
+
+                extra_meta = {
+                    "provisional": True,
+                    "provenance": "t2_autodistill",
+                    "session": self.output_dir.name,
+                }
+                if score is not None:
+                    extra_meta["quality_score"] = round(float(score), 4)
+
+                result = graduate_to_skill_file(
+                    knowledge_entry=knowledge_entry,
+                    skill_name=skill_name,
+                    domain="image_analysis",
+                    llm_call=_llm_call,
+                    fresh_template=IMAGE_T2_DISTILL_INSTRUCTIONS,
+                    update_template=SKILL_UPDATE_INSTRUCTIONS,
+                    extra_meta=extra_meta,
+                    append_sections={"implementation": ref_block},
+                )
+                distilled.append(result["skill_path"])
+                self.logger.info(
+                    f"   🧠 Distilled provisional skill from T=2 image fit: "
+                    f"{skill_name} → {result['skill_path']}"
+                )
+        except Exception as e:
+            self.logger.warning(f"T=2 auto-distillation skipped: {e}")
+            return distilled
+
+        if distilled:
+            self.logger.info(
+                f"   🧠 {len(distilled)} provisional skill(s) added to persistent "
+                f"memory; review with `scilink memory list --provisional-only`."
+            )
+        return distilled
 
     def _evaluate_tier2_needed(
         self, tier1_results: dict, objective: Optional[str]

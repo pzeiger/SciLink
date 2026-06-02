@@ -3654,6 +3654,14 @@ Return JSON with:
                             refine_from_r2=best_r2,
                             refine_from_issues=verification.get("issues_found", []),
                         )
+                        # Stamp the annealing level this refit was generated at,
+                        # so a downstream consumer can tell whether the WINNING
+                        # result came from a hot (fresh-generation) regeneration
+                        # vs. the original plan — used by T=2 auto-distillation
+                        # to decide a fit is a "novel pipeline". Travels with the
+                        # result dict through every promotion / judge path.
+                        if isinstance(verified_result, dict):
+                            verified_result["_produced_at_level"] = _annealing_level
                         # Record the level this refit ran at, so the next
                         # iteration can detect the escalation into hot. Updated
                         # only on an actual refit (not the no-config-change
@@ -3831,6 +3839,7 @@ Return JSON with:
                 quality_history["approved"] = True
                 quality_history["approved_by"] = "verifier"
                 best_result["quality_history"] = quality_history
+                self._stamp_hot_deviation(best_result)
                 return best_result
 
             # --- Check if we meet threshold ---
@@ -3846,6 +3855,7 @@ Return JSON with:
                     verification_history, None,
                     best_result.get("script_errors"),
                 )
+                self._stamp_hot_deviation(best_result)
                 return best_result
             elif best_r2 >= self.r2_threshold:
                 self.logger.info(
@@ -4652,6 +4662,32 @@ Return JSON with:
         
         return lines if lines else [""]
     
+    def _stamp_hot_deviation(self, best_result: dict | None) -> None:
+        """Ensure a successful, hot-produced fit carries a ``deviation_note``.
+
+        Reaching the hot (T = n-1) annealing level means the verification loop
+        dropped the prior script and let the LLM regenerate the model from
+        scratch (``_just_escalated_to_hot``). A fit whose WINNING result was
+        produced at that level is, by construction, a departure from the locked
+        plan — a "novel pipeline" — regardless of whether the LLM happened to
+        fill in a free-text ``deviation_note``. T=2 auto-distillation keys its
+        novelty gate on this note, so synthesize a deterministic one when it is
+        absent. No-op for non-hot or unsuccessful results, so the gate still
+        excludes fits that merely succeeded on the original plan.
+        """
+        if not isinstance(best_result, dict) or not best_result.get("success"):
+            return
+        hot = len(self._CONSTRAINT_ANNEALING_SCHEDULE) - 1
+        if (best_result.get("_produced_at_level") or 0) < hot:
+            return
+        if (best_result.get("deviation_note") or "").strip():
+            return
+        model = best_result.get("model_type") or "a regenerated model"
+        best_result["deviation_note"] = (
+            f"Abandoned the locked plan during hot annealing (T={hot}) and "
+            f"regenerated the fit from scratch, arriving at {model}."
+        )
+
     @staticmethod
     def _build_quality_history(
         best_r2: float,

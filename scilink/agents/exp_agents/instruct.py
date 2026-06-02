@@ -2852,6 +2852,42 @@ Output ONLY the JSON object. Do not wrap in code blocks. Do not include any pros
 FITTING_RESULTS_INTERPRETATION_INSTRUCTIONS = FITTING_INTERPRETATION_INSTRUCTIONS
 
 
+IMAGE_T2_DISTILL_INSTRUCTIONS = """You are an expert scientific image analyst. An image-analysis run had to \
+abandon its planned pipeline and the available domain skills, regenerate an analysis approach from scratch \
+(the "hot annealing" stage), and only then succeeded. Distill that successful, novel approach into a \
+*generalized*, reusable skill so a future run on a similar image/problem can apply it directly.
+
+**Skill Name:** {skill_name}
+**Domain:** {domain}
+
+**What happened (locked plan, final pipeline, deviation, quality, and the working script):**
+{knowledge_text}
+
+**Instructions:**
+Generalize — describe the *method*, not this one image. Abstract away dataset-specific file paths, \
+hard-coded sizes, and magic numbers; state the processing pipeline (preprocessing, detection/segmentation \
+strategy, feature extraction, parameter heuristics) in reusable terms. Explain WHY the original plan was \
+insufficient and what the successful approach changed.
+
+The exact working script will be appended verbatim to the implementation section by the system as a \
+reference example — do NOT paste the script back; write the generalized recipe instead.
+
+Return a JSON object with exactly the following keys. Use markdown formatting *within* values when \
+helpful (lists, inline code), but no section headings (`##`) or YAML frontmatter — those are added by \
+the caller.
+
+{{
+  "description": "<one self-contained sentence (no trailing period) naming the technique/imaging problem so a downstream agent can decide if this skill is relevant>",
+  "overview": "<what kind of image/problem this approach fits and when to reach for it>",
+  "planning": "<the pipeline shape and strategy in general terms; key parameter heuristics; why the originally-planned pipeline was insufficient>",
+  "analysis": "<the generalized, parameterized recipe: how to set up and run the analysis, abstracted from this image's specifics>",
+  "interpretation": "<how to read the extracted features / outputs and judge plausibility>",
+  "validation": "<quality criteria, sanity checks, and failure indicators for this approach>"
+}}
+
+Output ONLY the JSON object. Do not wrap in code blocks. Do not include any prose outside the JSON."""
+
+
 # ──────────────────────────────────────────────────────────────
 #  Image Analysis Agent Instructions
 # ──────────────────────────────────────────────────────────────

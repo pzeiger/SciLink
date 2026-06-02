@@ -359,3 +359,129 @@ class TestMetaReviewTool:
         """)
         p = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
         assert p.returncode == 0 and "OK" in p.stdout, p.stderr
+
+
+# ──────────────────────────────────────────────────────────────
+# Hot-deviation stamping (controllers) — makes a hot success "novel"
+# ──────────────────────────────────────────────────────────────
+
+class TestHotDeviationStamp:
+    def test_curve_fitting_stamp(self):
+        from scilink.agents.exp_agents.controllers.curve_fitting_controllers import (
+            UnifiedSeriesProcessingController as U,
+        )
+        c = U.__new__(U)
+        hot = len(U._CONSTRAINT_ANNEALING_SCHEDULE) - 1
+        # hot success, no note -> synthesized
+        r = {"success": True, "model_type": "2 Voigt", "_produced_at_level": hot}
+        c._stamp_hot_deviation(r)
+        assert r.get("deviation_note")
+        # existing note preserved
+        r2 = {"success": True, "_produced_at_level": hot, "deviation_note": "LLM note"}
+        c._stamp_hot_deviation(r2)
+        assert r2["deviation_note"] == "LLM note"
+        # T=0 best -> no false positive
+        r3 = {"success": True, "_produced_at_level": 0}
+        c._stamp_hot_deviation(r3)
+        assert not r3.get("deviation_note")
+        # no level recorded / failed -> no note
+        assert not _stamped(c, {"success": True})
+        assert not _stamped(c, {"success": False, "_produced_at_level": hot})
+
+    def test_image_stamp(self):
+        from scilink.agents.exp_agents.controllers.image_analysis_controllers import (
+            UnifiedImageProcessingController as U,
+        )
+        c = U.__new__(U)
+        hot = len(U._CONSTRAINT_ANNEALING_SCHEDULE) - 1
+        r = {"success": True, "analysis_type": "atom-finder", "_produced_at_level": hot}
+        c._stamp_hot_deviation(r)
+        assert r.get("plan_deviation_summary")
+        r0 = {"success": True, "_produced_at_level": 0}
+        c._stamp_hot_deviation(r0)
+        assert not r0.get("plan_deviation_summary")
+
+
+def _stamped(controller, result):
+    controller._stamp_hot_deviation(result)
+    return result.get("deviation_note")
+
+
+# ──────────────────────────────────────────────────────────────
+# Image-agent T=2 auto-distill (mirror of curve fitting)
+# ──────────────────────────────────────────────────────────────
+
+class TestImageT2Distill:
+    class _Model:
+        def generate_content(self, contents=None, generation_config=None, safety_settings=None):
+            import types
+            r = types.SimpleNamespace()
+            r.text = json.dumps({
+                "description": "generalized image recipe", "overview": "ov",
+                "planning": "pl", "analysis": "GENERALIZED_IMG_BODY",
+                "interpretation": "in", "validation": "va",
+            })
+            return r
+
+    def _fake_agent(self, home, model):
+        import logging
+        import types
+        from pathlib import Path
+        a = types.SimpleNamespace()
+        a.model = model
+        a.logger = logging.getLogger("imgt2")
+        a.output_dir = Path(home) / "imgsess"
+        a.output_dir.mkdir(parents=True, exist_ok=True)
+        a.generation_config = None
+        a.safety_settings = None
+        return a
+
+    def _hot_state(self):
+        return {
+            "analysis_approach": "threshold + watershed",
+            "skills_loaded": [],
+            "series_results": [{
+                "index": 0, "name": "img0", "success": True,
+                "analysis_type": "atom segmentation + RDF",
+                "plan_deviation_summary": "switched to watershed after threshold failed",
+                "script": "import numpy as np\n# IMG_VERBATIM_MARKER\nprint('seg')\n",
+                "quality_history": {"final_score": 0.93, "verification_iterations": [
+                    {"annealing_level": 0}, {"annealing_level": 2}]},
+            }],
+        }
+
+    def test_distills_provisional_with_generalized_and_verbatim(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCILINK_HOME", str(tmp_path))
+        from scilink.agents.exp_agents.image_analysis_agent import ImageAnalysisAgent
+        from scilink.skills._shared import _memory
+        agent = self._fake_agent(str(tmp_path), self._Model())
+        out = ImageAnalysisAgent._maybe_distill_t2_skills(agent, self._hot_state())
+        assert out
+        rows = _memory.list_memory(provisional=True)
+        assert len(rows) == 1 and rows[0]["domain"] == "image_analysis"
+        parsed = loader.load_skill(rows[0]["path"], domain="image_analysis")
+        assert "GENERALIZED_IMG_BODY" in parsed["analysis"]
+        impl = parsed["implementation"]
+        assert "IMG_VERBATIM_MARKER" in impl and "Reference implementation" in impl
+        assert parsed["meta"].get("provisional") is True
+        assert parsed["meta"].get("quality_score") == 0.93
+
+    def test_no_distill_when_not_hot(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCILINK_HOME", str(tmp_path))
+        from scilink.agents.exp_agents.image_analysis_agent import ImageAnalysisAgent
+        agent = self._fake_agent(str(tmp_path), self._Model())
+        state = self._hot_state()
+        state["series_results"][0]["quality_history"]["verification_iterations"] = [
+            {"annealing_level": 0}, {"annealing_level": 1}]
+        assert ImageAnalysisAgent._maybe_distill_t2_skills(agent, state) == []
+
+    def test_distill_failure_is_isolated(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCILINK_HOME", str(tmp_path))
+        from scilink.agents.exp_agents.image_analysis_agent import ImageAnalysisAgent
+
+        class Boom:
+            def generate_content(self, *a, **k):
+                raise RuntimeError("boom")
+
+        agent = self._fake_agent(str(tmp_path), Boom())
+        assert ImageAnalysisAgent._maybe_distill_t2_skills(agent, self._hot_state()) == []
