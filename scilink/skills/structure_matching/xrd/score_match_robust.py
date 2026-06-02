@@ -60,6 +60,20 @@ _MIP_MARGINAL_MAX = 0.55
 # real component.
 _MULTIPHASE_ACTIVATION_PENALTY = 3.0
 
+# Multi-phase MIP: predicted-but-absent penalty (BIDIRECTIONAL matching). The
+# bare "maximize matched exp peaks" objective rewards a peak-RICH phase for
+# covering experimental peaks while never charging it for its OWN strong
+# reflections that are absent from the data — so a Magnéli-type suboxide with
+# ~30 reflections can out-cover the true anatase+rutile by overlap. We add a
+# penalty: for each ACTIVE phase, every strong predicted peak (relative
+# intensity >= _STRONG_SIM_FRAC) that is NOT matched to an experimental peak
+# costs `_MULTIPHASE_ABSENT_PENALTY * (its relative intensity)`. A phase whose
+# strong predicted peaks are mostly missing then loses, even if it covers a few
+# experimental peaks. Weak predicted reflections (the long tail, often below
+# detection) are NOT penalised — only the strong ones a real phase must show.
+_MULTIPHASE_ABSENT_PENALTY = 3.0
+_STRONG_SIM_FRAC = 0.15
+
 
 TOOL_SPEC = ToolSpec(
     name="score_xrd_match_robust",
@@ -848,6 +862,7 @@ def score_xrd_match_multiphase(
             "id": cand.get("id", str(p_idx)),
             "formula": cand.get("formula", ""),
             "coverage": per_phase["coverage"],
+            "predicted_coverage": per_phase.get("predicted_coverage", 1.0),
             "matched_peaks": per_phase["matched_peaks"],
             "mean_residual_deg": per_phase["mean_residual_deg"],
             "lattice_scale": float(per_phase_scale[p_idx]),
@@ -886,6 +901,25 @@ def _empty_multiphase_result(candidates: list[dict], why: str) -> dict[str, Any]
         "n_phases_considered": len(candidates),
         "note": why,
     }
+
+
+def _strong_sim_weights(sim_pls: list["_PeakList"]) -> dict[int, list[tuple[int, float]]]:
+    """Per phase, the (sim peak index, relative-intensity weight) list for peaks
+    at >= _STRONG_SIM_FRAC of that phase's maximum intensity — the strong
+    reflections a real phase must show, used by the predicted-but-absent
+    penalty. Weak peaks (the long tail, often below detection) are excluded."""
+    out: dict[int, list[tuple[int, float]]] = {}
+    for p_idx, pl in enumerate(sim_pls):
+        items: list[tuple[int, float]] = []
+        if pl.n and pl.intensities:
+            imax = max(pl.intensities)
+            if imax > 0:
+                for j in range(pl.n):
+                    w = pl.intensities[j] / imax
+                    if w >= _STRONG_SIM_FRAC:
+                        items.append((j, float(w)))
+        out[p_idx] = items
+    return out
 
 
 def _solve_multiphase_mip(
@@ -959,13 +993,8 @@ def _solve_multiphase_mip(
     }
     shift = pulp.LpVariable("shift", lowBound=shift_lo, upBound=shift_hi)
 
-    # Objective: maximize matches, minus per-phase activation cost
-    prob += (
-        pulp.lpSum(x.values())
-        - _MULTIPHASE_ACTIVATION_PENALTY * pulp.lpSum(y.values())
-    )
-
-    # Constraint groupings
+    # Constraint groupings (built before the objective so the predicted-absent
+    # penalty can reference per-(sim-peak, phase) match sums).
     by_i: dict[int, list[tuple[int, int, int]]] = {i: [] for i in range(nE)}
     by_jp: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
     by_p: dict[int, list[tuple[int, int, int]]] = {p_idx: [] for p_idx in range(nP)}
@@ -974,6 +1003,26 @@ def _solve_multiphase_mip(
         by_i[i].append(t)
         by_jp.setdefault((j, p_idx), []).append(t)
         by_p[p_idx].append(t)
+
+    # Strong predicted peaks per phase (relative intensity >= _STRONG_SIM_FRAC),
+    # weighted by relative intensity — the reflections a real phase must show.
+    strong_sim = _strong_sim_weights(sim_pls)
+
+    # Objective: maximize matched exp peaks, minus per-phase activation cost,
+    # minus the predicted-but-absent penalty (BIDIRECTIONAL matching). For an
+    # active phase (y=1) a strong predicted peak j contributes its weight unless
+    # it is matched (Σ_i x[i,j,p] = 1); an inactive phase contributes nothing
+    # (y=0 forces every x[*,j,p]=0, so y - Σx = 0). This is linear in x, y.
+    absent_penalty = pulp.lpSum(
+        w * (y[p_idx] - pulp.lpSum(x[t] for t in by_jp.get((j, p_idx), [])))
+        for p_idx, js in strong_sim.items()
+        for j, w in js
+    )
+    prob += (
+        pulp.lpSum(x.values())
+        - _MULTIPHASE_ACTIVATION_PENALTY * pulp.lpSum(y.values())
+        - _MULTIPHASE_ABSENT_PENALTY * absent_penalty
+    )
 
     for i, triples in by_i.items():
         if triples:
@@ -1017,6 +1066,7 @@ def _solve_multiphase_mip(
         active = pulp.value(y[p_idx]) is not None and pulp.value(y[p_idx]) >= 0.5
         matched_for_phase: list[dict[str, Any]] = []
         phase_matched_exp: set[int] = set()
+        phase_matched_sim: set[int] = set()
         phase_residuals: list[float] = []
         for t in by_p[p_idx]:
             val = pulp.value(x[t])
@@ -1034,6 +1084,7 @@ def _solve_multiphase_mip(
                 "residual_deg": float(residual),
             })
             phase_matched_exp.add(i)
+            phase_matched_sim.add(j)
             phase_residuals.append(residual)
             matched_exp_set.add(i)
             total_residual += residual
@@ -1042,17 +1093,31 @@ def _solve_multiphase_mip(
             sum(exp_pl.intensities[i] for i in phase_matched_exp) / sum(exp_pl.intensities)
             if sum(exp_pl.intensities) > 0 else 0.0
         )
+        # Predicted-coverage: of this phase's STRONG predicted peaks, the
+        # intensity-weighted fraction actually observed. Low predicted-coverage
+        # flags an over-predicting (Magnéli-type) false match.
+        strong = strong_sim.get(p_idx, [])
+        strong_total = sum(w for _, w in strong)
+        absent_w = sum(w for j, w in strong if j not in phase_matched_sim)
+        predicted_coverage = (1.0 - absent_w / strong_total) if strong_total > 0 else 1.0
         per_phase.append({
             "active": bool(active and matched_for_phase),
             "coverage": float(coverage),
+            "predicted_coverage": float(predicted_coverage),
+            "absent_weight": float(absent_w),
             "matched_peaks": matched_for_phase,
             "mean_residual_deg": float(np.mean(phase_residuals)) if phase_residuals else 0.0,
         })
 
     unmatched_exp = [i for i in range(nE) if i not in matched_exp_set]
-    # Normalized joint cost: same shape as single-phase MIP — every
-    # unmatched peak costs a tolerance unit, every matched pair costs its
-    # residual.
+    # Joint cost: every unmatched EXPERIMENTAL peak costs a tolerance unit,
+    # every matched pair costs its residual. The predicted-but-absent penalty
+    # lives in the MILP OBJECTIVE (it governs SELECTION — which phases activate);
+    # it is deliberately NOT added here, so the reported cost/verdict stays on
+    # the experimental-coverage scale (folding it in over-penalises real
+    # mixtures whose weak reflections the extractor missed). `predicted_coverage`
+    # is surfaced per phase instead, so an over-predicting phase that slips
+    # through is still visible downstream.
     raw_cost = total_residual + tol_deg * len(unmatched_exp)
     cost = raw_cost / (tol_deg * max(nE, 1))
 
