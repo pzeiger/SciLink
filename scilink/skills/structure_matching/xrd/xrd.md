@@ -133,11 +133,21 @@ single-candidate list — it gracefully reduces to the single-phase MIP
 under that input (with one phase always active) and the joint solver's
 output format is the same.
 
-**Bounding the candidate count.** Always set `search_structures(query={
-"top_n": N, ...})` with N in [3, 10]. More than 10 candidates per
-spectrum bloats simulation cost without adding identification certainty
-— if the answer isn't in the top 5, the chemistry hypothesis is usually
-wrong, not the candidate count.
+**Candidate count — tight first pass, widen on failure.** The cost is the
+per-candidate *simulation*, so keep the FIRST pass cheap: `search_structures(
+query={"top_n": N, ...})` with N in [5, 10]. That already identifies common
+single-polymorph phases.
+
+But if that pass FAILS (best `figure_of_merit` below the accept threshold /
+all candidates marginal-or-reject), the answer is often a phase that the tight
+retrieval simply did not return — a *polymorph-rich* chemistry (e.g. Ti-O has
+many TiO2 polymorphs plus Magnéli suboxides; the right one can be candidate #20,
+not #5). On such a re-plan you SHOULD widen the retrieval — `top_n` up to ~30
+(and/or relax symmetry/lattice filters, or try an alternate chemistry
+hypothesis) — and re-run. This widening is *expected and allowed* on a failed
+pass; do not stay capped at 10 while re-planning a search that returned no
+confident match. (For an in-situ *series*, keep it tight per frame — the
+establishing frame can widen once, then lock the identified phase.)
 
 **Wavelength selection.** Default CuKa unless the experiment metadata
 says otherwise. MoKa is common for high-2θ work. A wavelength mismatch
@@ -195,7 +205,9 @@ fine positions and the scorers' defaults work.
 must follow this exact sequence:
 
 1. Load experimental 2-theta + intensity arrays.
-2. Call `search_structures` once with `top_n` between 3 and 10.
+2. Call `search_structures` with `top_n` 5-10 (first pass). If the run is a
+   re-plan after a failed/low-FoM pass, widen `top_n` up to ~30 and/or relax
+   filters (see "Candidate count — tight first pass, widen on failure").
 3. For each candidate, call `simulate_xrd_pattern` and `score_xrd_match_fast`.
 4. Filter to candidates with `verdict in {'accept', 'marginal'}`.
 5. Call `extract_peaks` once on the experimental pattern.
