@@ -53,6 +53,14 @@ _HANAWALT_MARGINAL_MIN = 0.40
 _MIP_ACCEPT_MAX = 0.25
 _MIP_MARGINAL_MAX = 0.55
 
+# MIP cost weights (intensity-weighted form). The cost penalises the UNEXPLAINED
+# INTENSITY fraction (weak noise peaks the extractor picked up barely count; a
+# missing STRONG reflection still drives cost up) plus the mean matched-peak
+# residual. Replaces the old count-based "each unmatched peak costs a tolerance
+# unit", which let ~10 noise peaks reject an otherwise-correct multi-phase match.
+_COST_UNCOVERED_W = 0.8
+_COST_RESIDUAL_W = 0.2
+
 # Multi-phase MIP: per-phase activation penalty in the MILP objective. Each
 # active phase costs this many "implicit unmatched peaks" — so a phase is
 # only kept when it accounts for more matches than that. Tuned to ~3 peaks:
@@ -378,6 +386,24 @@ def _fit_lattice_scale(exp_pl, sim_pl, tol_deg, scale_search, min_matches: int =
         ):
             best_score, best_scale = score, float(a)
     return best_scale
+
+
+def _weighted_cost(exp_pl: "_PeakList", unmatched_exp, total_residual: float, tol_deg: float) -> float:
+    """Intensity-weighted joint cost in [0, 1] (figure_of_merit = 1 - cost).
+    Penalises the UNEXPLAINED INTENSITY fraction (so weak noise peaks barely
+    count, while a missing strong reflection still drives cost up) plus the mean
+    matched-peak residual. Replaces the old count-based form where each unmatched
+    peak — noise or not — cost a full tolerance unit, which rejected otherwise-
+    correct matches whenever the extractor returned a handful of noise peaks."""
+    total_int = sum(exp_pl.intensities)
+    if total_int > 0:
+        unmatched_int = sum(exp_pl.intensities[i] for i in unmatched_exp)
+        uncovered = unmatched_int / total_int
+    else:
+        uncovered = len(unmatched_exp) / max(exp_pl.n, 1)
+    n_matched = exp_pl.n - len(unmatched_exp)
+    mean_res = (total_residual / n_matched) / tol_deg if n_matched > 0 else 1.0
+    return float(_COST_UNCOVERED_W * uncovered + _COST_RESIDUAL_W * min(mean_res, 1.0))
 
 
 def _score_hanawalt(
@@ -708,11 +734,9 @@ def _solve_mip_for_scale(
             "residual_deg": float(residual),
         })
     unmatched_exp = [i for i in range(nE) if i not in matched_exp_set]
-    # Normalized cost in [0, 1]: each unmatched peak costs tol, each matched
-    # pair costs its residual. Divide by tol * nE so a perfect identification
-    # gives ~0 and total mismatch gives 1.
-    raw_cost = total_residual + tol_deg * len(unmatched_exp)
-    cost = raw_cost / (tol_deg * max(nE, 1))
+    # Intensity-weighted cost (see _weighted_cost): unexplained INTENSITY plus
+    # mean residual, so noise peaks don't reject a correct match.
+    cost = _weighted_cost(exp_pl, unmatched_exp, total_residual, tol_deg)
 
     return {
         "cost": float(cost),
@@ -1143,16 +1167,13 @@ def _solve_multiphase_mip(
         })
 
     unmatched_exp = [i for i in range(nE) if i not in matched_exp_set]
-    # Joint cost: every unmatched EXPERIMENTAL peak costs a tolerance unit,
-    # every matched pair costs its residual. The predicted-but-absent penalty
-    # lives in the MILP OBJECTIVE (it governs SELECTION — which phases activate);
-    # it is deliberately NOT added here, so the reported cost/verdict stays on
-    # the experimental-coverage scale (folding it in over-penalises real
-    # mixtures whose weak reflections the extractor missed). `predicted_coverage`
-    # is surfaced per phase instead, so an over-predicting phase that slips
-    # through is still visible downstream.
-    raw_cost = total_residual + tol_deg * len(unmatched_exp)
-    cost = raw_cost / (tol_deg * max(nE, 1))
+    # Intensity-weighted cost (see _weighted_cost): unexplained INTENSITY plus
+    # mean residual, so the handful of weak noise peaks the extractor returns
+    # no longer rejects an otherwise-correct multi-phase match. The predicted-
+    # but-absent penalty governs SELECTION in the MILP OBJECTIVE (not the cost);
+    # `predicted_coverage` is surfaced per phase so an over-predicting phase that
+    # slips through is still visible downstream.
+    cost = _weighted_cost(exp_pl, unmatched_exp, total_residual, tol_deg)
 
     return {
         "cost": float(cost),
