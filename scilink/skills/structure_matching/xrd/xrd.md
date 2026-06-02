@@ -65,6 +65,14 @@ protocol and the registration helpers.
 
 ## planning
 
+**This is pattern-MATCHING, not fitting.** The deliverable is a ranked candidate
+match plus a `figure_of_merit` (the skill's quality gate) — *not* a fitted model.
+The plan must not list peak-shape fit parameters (pseudo-Voigt mixing `eta`,
+per-peak FWHM / amplitude as fit targets); the only quantitative outputs are the
+matched phase(s), the scorer's `figure_of_merit`, and its fitted zero-shift /
+lattice-scale. Every stage below chains search → simulate → score; no stage fits
+the experimental pattern.
+
 **Two-tier identification workflow** — both tiers usually run, never
 either-alone:
 
@@ -178,26 +186,18 @@ accepts three optional filters that often pay for themselves:
 All three are optional and respected by Materials Project and the
 local CIF backend; COD ignores them.
 
-**Pairing with `curve_fitting/xrd_profile`.** When both skills are
-active in the same run (`skill=["xrd", "xrd_profile"]`), the
-recommended flow is:
-
-1. `extract_peaks` seeds candidate peak centers on the experimental
-   pattern.
-2. `fit_profile` (from `xrd_profile`) fits each peak with a
-   pseudo-Voigt and returns refined center, FWHM, amplitude, and per-
-   peak R².
-3. The refined values are passed to `score_xrd_match_robust` as
-   `exp_peaks={'positions': [...], 'amplitudes': [...], 'fwhms': [...]}`
-   — the existing peak-list input format. No API change needed.
-4. The scorer then ranks candidates against peaks with calibrated
-   widths instead of the default uniform broadening, which matters
-   most for nanocrystalline samples where peaks are 5-10× broader
-   than the 0.15° default.
-
-For data without significant line broadening (well-crystallized,
-sharp peaks), the bridge is unnecessary — `extract_peaks` alone gives
-fine positions and the scorers' defaults work.
+**Profile fitting is a DOWNSTREAM follow-up, not part of identification.**
+Crystallite size / strain (per-peak pseudo-Voigt → Scherrer / Williamson-Hall)
+is the `curve_fitting/xrd_profile` skill's job, run as a **separate step after
+the phase is identified** — never an in-ID fit. Identification needs only peak
+*positions and relative intensities* (the light `extract_peaks`), which the
+scorers consume directly. Do **not** call `fit_profile`, fit pseudo-Voigt peaks,
+or compute per-peak R² inside the identification script: it adds nothing the
+match needs and pulls the run into the curve-fitting pipeline (an R²-shaped
+deliverable the `figure_of_merit` gate then rejects, triggering avoidable
+refinement iterations). When line broadening matters for the match on
+nanocrystalline data, **widen the scorer's `fwhm` (0.3-0.5°)** rather than
+fitting each peak.
 
 ## analysis
 
@@ -228,6 +228,11 @@ must follow this exact sequence:
   that is the `xrd_profile` skill's specialized job (crystallite size / strain)
   and is unnecessary for identification, which only needs positions + relative
   intensities. FWHMs from `extract_peaks` are optional refinement, not a goal.
+- **Emit `figure_of_merit`, never `r_squared`.** The ID gate scores by
+  `figure_of_merit`; there is no curve fit here, so there is no R² to report.
+  For the visualization, overlay the best-match **simulated** pattern (broadened
+  sticks) on the experimental data — do not `curve_fit` a profile for the plot
+  or compute an R² for it.
 
 **Complete two-tier template** — adapt for the active wavelength and
 chemistry hypothesis:
