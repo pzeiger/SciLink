@@ -219,6 +219,16 @@ must follow this exact sequence:
    `DB_MATCHES_JSON:` marker; the framework's stdout parser lifts it
    into `fit_results['db_matches']` automatically.
 
+**Don't profile-fit for identification.** Two common over-builds to avoid:
+- The **fast tier needs no peak extraction** — it cross-correlates the
+  *continuous* (background-subtracted) pattern directly. Subtract the background,
+  then correlate; do not extract or fit peaks before Step 3.
+- For the **robust tier**, use the **light** `extract_peaks` (positions +
+  relative intensities). Do **NOT** fit a pseudo-Voigt profile to every peak —
+  that is the `xrd_profile` skill's specialized job (crystallite size / strain)
+  and is unnecessary for identification, which only needs positions + relative
+  intensities. FWHMs from `extract_peaks` are optional refinement, not a goal.
+
 **Complete two-tier template** — adapt for the active wavelength and
 chemistry hypothesis:
 
