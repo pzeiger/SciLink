@@ -1,5 +1,5 @@
 ---
-description: XRD structure matching — query crystal-structure databases (Materials Project, local CIF), simulate kinematic patterns, score by cross-correlation (fast) and Hanawalt / MIP peak-matching (robust).
+description: XRD phase identification (search-match) — the default first-pass XRD analysis: "what phase(s) is this?". Queries crystal-structure databases (COD, Materials Project, local CIF), simulates kinematic patterns, and scores by cross-correlation (fast) and Hanawalt / MIP peak-matching (robust). Use this for routine phase ID; the xrd_profile skill is the specialized follow-up for line-broadening (crystallite size / strain) once the phase is known.
 quality_gate:
   metric: figure_of_merit
   accept_threshold: 0.70
@@ -11,11 +11,20 @@ quality_gate:
 ## overview
 
 Identify a crystalline phase from an experimental X-ray diffraction (XRD)
-pattern by matching against database structures. The skill ships five
-tools the analysis script chains together:
+pattern by matching against database structures. **This is the default,
+highest-frequency XRD question — "what phase(s) is my sample?" — and the usual
+first pass for any XRD pattern.** Profile fitting (the `xrd_profile` skill:
+per-peak pseudo-Voigt → Scherrer crystallite size / Williamson-Hall strain) is
+the *specialized follow-up* once the phase is known, not the starting point.
 
-- `search_structures` — query Materials Project and / or a local CIF
-  directory for candidate structures (chemistry + symmetry filters).
+The skill ships five tools the analysis script chains together:
+
+- `search_structures` — query the **COD** (Crystallography Open Database — the
+  recommended default: experimental structures, organic + inorganic, no API key),
+  **Materials Project** (computed inorganic; for stability ranking / predicted
+  phases), and / or a local CIF directory for candidate structures (chemistry +
+  symmetry filters). COD's experimental cells avoid the DFT lattice mismatch that
+  MP structures carry.
 - `simulate_xrd_pattern` — kinematic XRD pattern from a CIF via pymatgen
   (CuKa default; any wavelength supported).
 - `score_xrd_match_fast` — **fast tier**. Cross-correlation of the
