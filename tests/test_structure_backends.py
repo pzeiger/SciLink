@@ -264,12 +264,35 @@ def test_local_query_walks_subdirectories(tmp_path):
     assert len(out) == 1
 
 
-# --- CODBackend (stub) --------------------------------------------------------
+# --- CODBackend (implemented) -------------------------------------------------
 
-def test_cod_stub_not_available():
-    assert CODBackend().is_available() is False
+def test_cod_unavailable_without_db_or_web(monkeypatch):
+    """No local metadata db and web disabled -> not usable."""
+    monkeypatch.delenv("SCILINK_COD_DB", raising=False)
+    b = CODBackend(db_path=None, cif_dir=None, allow_web=False)
+    assert b.is_available() is False
 
 
-def test_cod_stub_query_raises():
-    with pytest.raises(NotImplementedError):
-        CODBackend().query(QuerySpec(chemistry=["Si"]))
+def test_cod_available_via_web(monkeypatch):
+    """No db but web enabled -> usable (REST element search fallback). pymatgen
+    is importorskip'd at module top, so the only remaining gate is allow_web."""
+    monkeypatch.delenv("SCILINK_COD_DB", raising=False)
+    b = CODBackend(db_path=None, cif_dir=None, allow_web=True)
+    assert b.is_available() is True
+
+
+def test_cod_query_returns_empty_when_unavailable(monkeypatch):
+    """An unavailable backend returns [] (no raise) — query is a no-op, not an
+    error, so search_structures can probe it harmlessly."""
+    monkeypatch.delenv("SCILINK_COD_DB", raising=False)
+    b = CODBackend(db_path=None, cif_dir=None, allow_web=False)
+    assert b.query(QuerySpec(chemistry=["Si"])) == []
+
+
+def test_cod_formula_elements_handles_fractional_counts():
+    """COD formula strings carry fractional occupancy/Z counts (e.g. 'H145.17',
+    'Na0.67'); the element parser must strip the numeric suffix including the
+    decimal. Regression for the parser fix."""
+    from scilink.skills.structure_matching._backends.cod import _formula_elements
+    assert _formula_elements("- C6 H145.17 Au Cl4 N3 -") == {"C", "H", "Au", "Cl", "N"}
+    assert _formula_elements("Na0.67 Mn O2") == {"Na", "Mn", "O"}
