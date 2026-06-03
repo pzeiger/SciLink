@@ -783,6 +783,13 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Save fitting scripts for reproducibility
         self._save_fitting_scripts(state)
 
+        # Stage novel T=2 (hot-annealing) successes for later, review-gated
+        # distillation (upgrade an existing skill, or consolidate N into a new
+        # one). Failure-isolated: never affects the returned fit.
+        staged = self._maybe_stage_t2_solutions(state)
+        if staged:
+            final_results["staged_solutions"] = staged
+
         self.logger.info("")
         self.logger.info("✅ ANALYSIS COMPLETE")
         self.logger.info(f"   Results: {results_path}")
@@ -1034,6 +1041,108 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         if saved:
             self.logger.info(f"   Scripts: {scripts_dir} ({len(saved)} file(s))")
+
+    def _maybe_stage_t2_solutions(self, state: dict) -> List[str]:
+        """Stage novel T=2 (hot-annealing) successes for later distillation.
+
+        Gate (all must hold): the fit succeeded; met the quality bar
+        (``approved``); verification reached the hottest annealing level (the
+        model was regenerated from scratch); and it is genuinely novel — it
+        deviated from the locked plan (``deviation_note``) or ran with no active
+        skill. On trigger the raw solution (planned vs final model, deviation,
+        R², verbatim script) is filed in the staging buffer under an LLM-assigned
+        technique label. Skills are produced later, review-gated: a single staged
+        solution can UPGRADE an existing skill, or N accumulated solutions for a
+        technique are CONSOLIDATED into a new skill (see ``scilink memory``).
+
+        Returns the list of staged solution ids (empty if none). Fully
+        failure-isolated: any error is logged and swallowed so staging never
+        affects the user's fit. ``SCILINK_T2_AUTODISTILL=0`` disables staging.
+        """
+        flag = os.environ.get("SCILINK_T2_AUTODISTILL", "").strip().lower()
+        if flag in ("0", "false", "off", "no"):
+            return []
+
+        staged: List[str] = []
+        try:
+            from .controllers.curve_fitting_controllers import (
+                UnifiedSeriesProcessingController,
+                _active_skill_names,
+            )
+            from .instruct import T2_TECHNIQUE_LABEL_INSTRUCTIONS
+            from scilink.skills._shared import _staging
+
+            n_levels = len(UnifiedSeriesProcessingController._CONSTRAINT_ANNEALING_SCHEDULE)
+            hot_level = n_levels - 1
+            locked = state.get("locked_fitting_config") or {}
+            active_skills = _active_skill_names(state)
+            results = state.get("series_results", []) or []
+
+            def _llm_call(prompt: str) -> str:
+                response = self.model.generate_content(
+                    contents=[prompt],
+                    generation_config=self.generation_config,
+                    safety_settings=self.safety_settings,
+                )
+                return response.text if hasattr(response, "text") else str(response)
+
+            for r in results:
+                if not r.get("success"):
+                    continue
+                script = r.get("script")
+                if not script:
+                    continue
+
+                r2 = (r.get("fit_quality") or {}).get("r_squared") or 0
+                qh = r.get("quality_history") or {}
+                # Only stage fits that actually met the quality bar — a
+                # below-threshold "best available" fit is still success=True.
+                if not qh.get("approved"):
+                    continue
+                levels = [
+                    it.get("annealing_level", 0)
+                    for it in qh.get("verification_iterations", [])
+                ]
+                reached_hot = (max(levels) if levels else 0) >= hot_level
+
+                deviation = (r.get("deviation_note") or "").strip()
+                novel = bool(deviation) or not active_skills
+                if not (reached_hot and novel):
+                    continue
+
+                model = r.get("model_type") or locked.get("physical_model") or "model"
+                # Assign a normalized technique label (reuse-or-create).
+                technique = _staging.assign_technique_label(
+                    "curve_fitting", model, deviation, _llm_call,
+                    T2_TECHNIQUE_LABEL_INSTRUCTIONS,
+                )
+
+                record = {
+                    "planned_model": locked.get("physical_model"),
+                    "planned_analysis_approach": locked.get("analysis_approach"),
+                    "planned_fitting_strategy": locked.get("fitting_strategy"),
+                    "parameters_to_extract": locked.get("parameters_to_extract"),
+                    "final_model_type": r.get("model_type"),
+                    "deviation_from_plan": deviation or "(no explicit note; ran without an active skill)",
+                    "r_squared": round(float(r2), 4),
+                    "working_script": script,
+                    "session": self.output_dir.name,
+                }
+                sid = _staging.stage_solution("curve_fitting", technique, record)
+                staged.append(sid)
+                self.logger.info(
+                    f"   🧠 Staged T=2 solution [{technique}] id={sid} (R²={r2:.4f})"
+                )
+        except Exception as e:
+            self.logger.warning(f"T=2 staging skipped: {e}")
+            return staged
+
+        if staged:
+            self.logger.info(
+                f"   🧠 {len(staged)} T=2 solution(s) staged; review with "
+                f"`scilink memory staged` (upgrade an existing skill or consolidate)."
+            )
+        return staged
 
     def _compile_results(self, state: dict) -> Dict[str, Any]:
         """Compile results into a consistent output structure."""

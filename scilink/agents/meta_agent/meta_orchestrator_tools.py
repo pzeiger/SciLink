@@ -441,6 +441,124 @@ class MetaOrchestratorTools:
             required=[],
         )
 
+        # -- review_distilled_skills ----------------------------------------
+        def review_distilled_skills(action: str = "list", skill: str = None,
+                                    to_domain: str = None, staged: str = None,
+                                    into: str = None, technique: str = None) -> str:
+            from ...skills._shared import _memory, _staging
+
+            def _llm_call(prompt: str) -> str:
+                r = self.orch.model.generate_content(contents=[prompt])
+                return r.text if hasattr(r, "text") else str(r)
+
+            act = (action or "list").lower()
+
+            # --- skills (graduated_skills) ---
+            if act == "list":
+                rows = _memory.list_memory(provisional=True)
+                print(f"  🧠 {len(rows)} provisional skill(s) in memory.")
+                return json.dumps({"status": "success", "action": "list",
+                                   "provisional_skills": rows}, default=str)
+
+            if act == "list_staged":
+                rows = _staging.list_staged()
+                print(f"  🧠 {len(rows)} staged T=2 solution(s) awaiting distillation.")
+                return json.dumps({"status": "success", "action": "list_staged",
+                                   "staged_solutions": rows}, default=str)
+
+            try:
+                if act in ("show", "promote", "discard", "prune"):
+                    if not skill or "/" not in skill:
+                        return json.dumps({"status": "error",
+                            "message": "Pass skill as '<domain>/<name>'."})
+                    domain, name = skill.split("/", 1)
+                    if act == "show":
+                        return json.dumps({"status": "success", "action": "show", "skill": skill,
+                            "markdown": _memory.show_memory(domain, name)}, default=str)
+                    if act == "promote":
+                        res = _memory.promote_memory(domain, name, to_domain=to_domain)
+                        print(f"  ✅ Promoted '{skill}' (now auto-routable).")
+                        return json.dumps({"status": "success", "action": "promote", **res}, default=str)
+                    res = _memory.prune_memory(domain, name)
+                    print(f"  🗑️  Discarded '{skill}'.")
+                    return json.dumps({"status": "success", "action": "discard", **res}, default=str)
+
+                if act == "upgrade":
+                    # Merge a staged solution INTO an existing skill.
+                    from ..exp_agents.instruct import (
+                        KNOWLEDGE_TO_SKILL_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS,
+                    )
+                    if not staged or "/" not in staged or not into or "/" not in into:
+                        return json.dumps({"status": "error",
+                            "message": "Pass staged='<domain>/<id>' and into='<domain>/<name>'."})
+                    sdomain, sid = staged.split("/", 1)
+                    tdomain, tname = into.split("/", 1)
+                    res = _staging.upgrade_skill_from_staged(
+                        sdomain, [sid], target_domain=tdomain, target_name=tname,
+                        llm_call=_llm_call,
+                        fresh_template=KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
+                        update_template=SKILL_UPDATE_INSTRUCTIONS)
+                    if res.get("status") == "success":
+                        print(f"  ✅ Upgraded '{into}' from staged {sid}.")
+                    return json.dumps({"action": "upgrade", **res}, default=str)
+
+                if act == "consolidate":
+                    from ..exp_agents.instruct import (
+                        T2_CONSOLIDATION_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS,
+                    )
+                    if not technique or "/" not in technique:
+                        return json.dumps({"status": "error",
+                            "message": "Pass technique='<domain>/<technique>'."})
+                    cdomain, ctech = technique.split("/", 1)
+                    res = _staging.consolidate_technique(
+                        cdomain, ctech, llm_call=_llm_call,
+                        consolidation_template=T2_CONSOLIDATION_INSTRUCTIONS,
+                        update_template=SKILL_UPDATE_INSTRUCTIONS)
+                    if res.get("status") == "success":
+                        print(f"  ✅ Consolidated {res.get('n_examples')} staged → '{cdomain}/auto_{ctech}'.")
+                    return json.dumps({"action": "consolidate", **res}, default=str)
+            except FileNotFoundError as e:
+                return json.dumps({"status": "error", "message": str(e)})
+            return json.dumps({"status": "error", "message": f"Unknown action: {action}"})
+
+        self._register_tool(
+            func=review_distilled_skills,
+            name="review_distilled_skills",
+            description=(
+                "Review and act on learned knowledge from hard (T=2 hot-annealing) "
+                "runs. Such runs STAGE a raw solution (delegate_to_analysis reports "
+                "`staged_solutions`); skills are produced from staged solutions two "
+                "ways, both review-gated: `upgrade` merges ONE staged solution into an "
+                "EXISTING skill, or `consolidate` distills all staged solutions of a "
+                "technique into a NEW (provisional) skill. Also manages already-"
+                "distilled provisional skills. Actions: `list` (provisional skills), "
+                "`list_staged` (staged solutions, by technique), `show` a skill, "
+                "`promote`/`discard` a skill, `upgrade` (needs `staged` + `into`), "
+                "`consolidate` (needs `technique`). In autopilot, ASK the user before "
+                "upgrading/consolidating/promoting/discarding; in autonomous mode, "
+                "leave things staged and just note them."
+            ),
+            parameters={
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "list_staged", "show", "promote", "discard",
+                             "upgrade", "consolidate"],
+                    "description": "What to do (default: list).",
+                },
+                "skill": {"type": "string",
+                          "description": "Skill ref '<domain>/<name>' (show/promote/discard)."},
+                "to_domain": {"type": "string",
+                              "description": "Optional: on promote, move the skill into a curated domain."},
+                "staged": {"type": "string",
+                           "description": "Staged solution ref '<domain>/<id>' (for upgrade)."},
+                "into": {"type": "string",
+                         "description": "Target skill '<domain>/<name>' to upgrade into (for upgrade)."},
+                "technique": {"type": "string",
+                              "description": "Technique ref '<domain>/<technique>' (for consolidate)."},
+            },
+            required=[],
+        )
+
         # -- inspect_uploads ------------------------------------------------
         def inspect_uploads(path: str = None) -> str:
             base = Path(path) if path else (self.orch.base_dir / "uploads")

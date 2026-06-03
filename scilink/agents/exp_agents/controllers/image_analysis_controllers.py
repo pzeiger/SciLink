@@ -3408,6 +3408,13 @@ Return JSON with:
                             image_idx=image_idx, base_script=None,
                             refine_from_script=_refine_from_script,
                         )
+                        # Stamp the annealing level this re-analysis was generated
+                        # at, so a downstream consumer can tell whether the WINNING
+                        # result came from a hot (fresh-generation) regeneration.
+                        # Mirrors the curve-fitting controller; used by T=2
+                        # auto-distillation to flag a "novel pipeline".
+                        if isinstance(verified_result, dict):
+                            verified_result["_produced_at_level"] = _annealing_level
                         _previous_annealing_level = _annealing_level
 
                         if verified_result["success"]:
@@ -3503,6 +3510,7 @@ Return JSON with:
                     verification_history, judge_result,
                     best_result.get("script_errors"),
                 )
+                self._stamp_hot_deviation(best_result)
                 return best_result
             else:
                 self.logger.warning(
@@ -3708,6 +3716,32 @@ Return JSON with:
                 self.logger.info(f"      {line}")
 
         self.logger.info("")
+
+    def _stamp_hot_deviation(self, best_result: dict | None) -> None:
+        """Ensure a successful, hot-produced analysis carries a deviation note.
+
+        Reaching the hot (T = n-1) annealing level means the verification loop
+        dropped the prior script and let the LLM regenerate the pipeline from
+        scratch. A result whose WINNING attempt was produced at that level is a
+        departure from the locked plan — a "novel pipeline" — so synthesize a
+        deterministic ``plan_deviation_summary`` (the image analog of curve
+        fitting's ``deviation_note``) when one is absent. No-op for non-hot or
+        unsuccessful results, so T=2 auto-distillation still excludes analyses
+        that merely succeeded on the original plan. Mirrors the curve-fitting
+        controller's ``_stamp_hot_deviation``.
+        """
+        if not isinstance(best_result, dict) or not best_result.get("success"):
+            return
+        hot = len(self._CONSTRAINT_ANNEALING_SCHEDULE) - 1
+        if (best_result.get("_produced_at_level") or 0) < hot:
+            return
+        if (best_result.get("plan_deviation_summary") or "").strip():
+            return
+        pipeline = best_result.get("analysis_type") or "a regenerated pipeline"
+        best_result["plan_deviation_summary"] = (
+            f"Abandoned the locked plan during hot annealing (T={hot}) and "
+            f"regenerated the analysis from scratch, arriving at {pipeline}."
+        )
 
     @staticmethod
     def _build_quality_history(

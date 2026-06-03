@@ -1346,7 +1346,7 @@ class GenerateCurveFittingReportController:
         html += "</div>"
         
         if quality_warning:
-            html += f'<div class="quality-warning-box">⚠️ <strong>Note:</strong> {quality_warning}. Alternative models were attempted but could not improve fit quality significantly.</div>'
+            html += f'<div class="quality-warning-box">⚠️ <strong>Note:</strong> {quality_warning}.</div>'
         
         return html
 
@@ -2756,6 +2756,12 @@ configured acceptance target:
   `overall_assessment` rather than just citing the R² number, so the
   trace is interpretable.
 
+**Never claim R² is "below the threshold" unless the number truly is below
+{accept_threshold:.2f}** — when you reject a fit whose R² is at or above the
+accept floor, give only the physics reason for rejection (the systematic
+residual, missed feature, or unphysical parameter), never the R² value, so the
+report stays factually correct.
+
 **Do NOT reject for:**
 - Ambiguous or subtle features — but distinguish "subtle" (small, noise-level,
   non-repeating) from "under-resolved" (localized, RMS ≫ noise, oscillating);
@@ -3654,6 +3660,14 @@ Return JSON with:
                             refine_from_r2=best_r2,
                             refine_from_issues=verification.get("issues_found", []),
                         )
+                        # Stamp the annealing level this refit was generated at,
+                        # so a downstream consumer can tell whether the WINNING
+                        # result came from a hot (fresh-generation) regeneration
+                        # vs. the original plan — used by T=2 auto-distillation
+                        # to decide a fit is a "novel pipeline". Travels with the
+                        # result dict through every promotion / judge path.
+                        if isinstance(verified_result, dict):
+                            verified_result["_produced_at_level"] = _annealing_level
                         # Record the level this refit ran at, so the next
                         # iteration can detect the escalation into hot. Updated
                         # only on an actual refit (not the no-config-change
@@ -3831,6 +3845,7 @@ Return JSON with:
                 quality_history["approved"] = True
                 quality_history["approved_by"] = "verifier"
                 best_result["quality_history"] = quality_history
+                self._stamp_hot_deviation(best_result)
                 return best_result
 
             # --- Check if we meet threshold ---
@@ -3846,6 +3861,7 @@ Return JSON with:
                     verification_history, None,
                     best_result.get("script_errors"),
                 )
+                self._stamp_hot_deviation(best_result)
                 return best_result
             elif best_r2 >= self.r2_threshold:
                 self.logger.info(
@@ -3946,7 +3962,20 @@ Return JSON with:
 
         # --- Return best available result ---
         if best_result:
-            best_result["quality_warning"] = f"R² = {best_r2:.4f} below threshold {self.r2_threshold}"
+            # This is the "best available" fallback (the accept/threshold paths
+            # return earlier). A fit can land here two ways: (a) R² genuinely
+            # below threshold, or (b) R² meets threshold but the verifier kept
+            # rejecting on PHYSICS grounds. Word the warning to match reality —
+            # never claim "below threshold" when the number is at/above it.
+            if best_r2 >= self.r2_threshold:
+                best_result["quality_warning"] = (
+                    f"R² = {best_r2:.4f} meets the threshold {self.r2_threshold} but the "
+                    f"fit was not accepted on physical grounds (see verifier notes)"
+                )
+            else:
+                best_result["quality_warning"] = (
+                    f"R² = {best_r2:.4f} below threshold {self.r2_threshold}"
+                )
             best_result["attempted_models"] = [a["model"] for a in all_attempts]
             best_result["quality_history"] = self._build_quality_history(
                 best_r2, self.r2_threshold, all_attempts,
@@ -4652,6 +4681,32 @@ Return JSON with:
         
         return lines if lines else [""]
     
+    def _stamp_hot_deviation(self, best_result: dict | None) -> None:
+        """Ensure a successful, hot-produced fit carries a ``deviation_note``.
+
+        Reaching the hot (T = n-1) annealing level means the verification loop
+        dropped the prior script and let the LLM regenerate the model from
+        scratch (``_just_escalated_to_hot``). A fit whose WINNING result was
+        produced at that level is, by construction, a departure from the locked
+        plan — a "novel pipeline" — regardless of whether the LLM happened to
+        fill in a free-text ``deviation_note``. T=2 auto-distillation keys its
+        novelty gate on this note, so synthesize a deterministic one when it is
+        absent. No-op for non-hot or unsuccessful results, so the gate still
+        excludes fits that merely succeeded on the original plan.
+        """
+        if not isinstance(best_result, dict) or not best_result.get("success"):
+            return
+        hot = len(self._CONSTRAINT_ANNEALING_SCHEDULE) - 1
+        if (best_result.get("_produced_at_level") or 0) < hot:
+            return
+        if (best_result.get("deviation_note") or "").strip():
+            return
+        model = best_result.get("model_type") or "a regenerated model"
+        best_result["deviation_note"] = (
+            f"Abandoned the locked plan during hot annealing (T={hot}) and "
+            f"regenerated the fit from scratch, arriving at {model}."
+        )
+
     @staticmethod
     def _build_quality_history(
         best_r2: float,
@@ -4674,6 +4729,10 @@ Return JSON with:
                 {
                     "r_squared": entry.get("r_squared"),
                     "annealing_level": entry.get("annealing_level", 0),
+                    # The model in force at this iteration — lets a consumer
+                    # (e.g. the self-evolution figure) show the per-attempt
+                    # model alongside its R² and issues.
+                    "model": (entry.get("config_used") or {}).get("physical_model", ""),
                     "issues": [
                         {
                             "location": iss.get("location", ""),

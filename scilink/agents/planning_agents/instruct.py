@@ -733,7 +733,7 @@ OR
 """
 
 PLANNING_KNOWLEDGE_TO_SKILL_INSTRUCTIONS = """You are an expert scientific research strategist. \
-You need to convert accumulated knowledge into a structured, reusable skill document for experimental planning.
+Convert accumulated planning knowledge into a structured, reusable skill description for downstream agents.
 
 **Skill Name:** {skill_name}
 **Domain:** {domain}
@@ -741,49 +741,28 @@ You need to convert accumulated knowledge into a structured, reusable skill docu
 **Source Knowledge:**
 {knowledge_text}
 
-**Source Planning Details:**
-{planning_details}
-
 **Instructions:**
-Begin the document with a YAML frontmatter block containing a single one-line `description:` \
-field — a self-contained sentence that lets a downstream agent decide whether this skill is \
-relevant. Do not end the description with a period. Then organize the knowledge into exactly \
-five sections, each containing actionable, specific guidance derived from the source knowledge. \
-Use markdown formatting.
+Return a JSON object with exactly the following keys. Each value contains actionable, specific guidance \
+derived from the source knowledge. Use markdown formatting *within* section values when helpful (lists, \
+inline code), but do not include section headings (`##`) or YAML frontmatter — those are added by the caller.
 
----
-description: <one-line, self-contained, no trailing period>
----
+{{
+  "description": "<one self-contained sentence (no trailing period) that lets a downstream agent decide if this skill is relevant>",
+  "overview": "<what domain/technique this skill covers, what experiments it applies to, and when to use it>",
+  "planning": "<strategy constraints, recommended parameter ranges, protocols, safety rules, setup considerations, and any user-specified corrections or preferences>",
+  "implementation": "<experimental protocols, equipment configurations, code patterns, or processing steps that have proven effective; include specific parameter values that worked>",
+  "interpretation": "<reference values, expected ranges, success criteria, and how to read experimental outcomes; include quantitative benchmarks from the findings>",
+  "validation": "<quality criteria, acceptable tolerances, failure indicators, sanity checks, and any corrections from user feedback>"
+}}
 
-## overview
-Describe what domain/technique this skill covers, what types of experiments it applies to, \
-and when to use it.
-
-## planning
-List strategy constraints, recommended parameter ranges, protocols, safety rules, \
-and setup considerations. Include any user-specified corrections or preferences.
-
-## implementation
-Describe experimental protocols, equipment configurations, code patterns, or processing \
-steps that have proven effective. Include specific parameter values that worked.
-
-## interpretation
-Provide reference values, expected ranges, success criteria, and how to interpret \
-experimental outcomes. Include quantitative benchmarks from the key findings.
-
-## validation
-Define quality criteria, acceptable tolerance ranges, failure indicators, and sanity checks. \
-Include any corrections from user feedback.
-
-Output ONLY the skill document content in markdown, starting with the `---` frontmatter block \
-followed by `## overview`. Do not wrap in code blocks."""
+Output ONLY the JSON object. Do not wrap in code blocks. Do not include any prose outside the JSON."""
 
 PLANNING_SKILL_UPDATE_INSTRUCTIONS = """You are an expert scientific research strategist. \
-You need to update an existing skill document with new knowledge while preserving what is already correct.
+Update an existing skill with new knowledge while preserving what is already correct.
 
 **Skill Name:** {skill_name}
 
-**Existing Skill Content:**
+**Existing Skill (as JSON):**
 {existing_skill}
 
 **New Knowledge to Incorporate:**
@@ -791,18 +770,18 @@ You need to update an existing skill document with new knowledge while preservin
 
 **Instructions:**
 1. Review the existing skill content carefully.
-2. Integrate the new findings into the appropriate sections.
+2. Integrate the new findings into the appropriate section. Consolidate related guidance — \
+   prefer merging into existing content over restating.
 3. Do NOT remove existing content unless the new knowledge explicitly contradicts it.
-4. When there is a conflict, prefer the newer knowledge but note the discrepancy.
-5. Maintain the five-section structure (overview, planning, implementation, interpretation, validation).
-6. Add new quantitative details, parameter ranges, or heuristics from the new knowledge.
-7. Preserve the YAML frontmatter at the top (the `---`-delimited block). If the new knowledge \
-materially changes the skill's purpose, update the `description:` field; otherwise leave it intact. \
-If the existing skill has no frontmatter, add one with a one-line `description:` synthesized from \
-the overview.
+4. When there is a conflict, prefer the newer knowledge but note the discrepancy briefly.
+5. If the new knowledge materially changes the skill's purpose, update the description; \
+   otherwise leave it intact.
+6. Keep prose tight. The skill is read into LLM context every time.
 
-Output ONLY the updated skill document content in markdown, starting with the `---` frontmatter \
-block followed by `## overview`. Do not wrap in code blocks."""
+Return a JSON object with the SAME keys as the existing skill (description, overview, planning, \
+implementation, interpretation, validation) reflecting the merged skill content.
+
+Output ONLY the JSON object. Do not wrap in code blocks. Do not include any prose outside the JSON."""
 
 
 KNOWLEDGE_QUERY_CODEGEN_PROMPT = """Complete the Python script below to answer a question about a data file.

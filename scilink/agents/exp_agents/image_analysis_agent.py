@@ -593,6 +593,13 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         else:
             final_results = tier1_results
 
+        # Stage novel T=2 (hot-annealing) successes for later, review-gated
+        # distillation. Failure-isolated; keys off Tier-1 state (which ran the
+        # verification/annealing loop). Surfaces staged ids on the result.
+        staged = self._maybe_stage_t2_solutions(tier1_state)
+        if staged:
+            final_results["staged_solutions"] = staged
+
         # Save final merged results
         results_path = self.output_dir / "analysis_results.json"
         with open(results_path, "w") as f:
@@ -770,6 +777,101 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         if saved:
             self.logger.info(f"   📝 Scripts: {scripts_dir} ({len(saved)} file(s))")
+
+    def _maybe_stage_t2_solutions(self, state: dict) -> List[str]:
+        """Stage novel T=2 (hot-annealing) image-analysis successes for later distillation.
+
+        Image-side mirror of ``CurveFittingAgent._maybe_stage_t2_solutions``.
+        Gate (all must hold): the analysis succeeded; met the quality bar
+        (``approved``); verification reached the hottest annealing level (the
+        pipeline was regenerated from scratch); and it is novel — it deviated
+        from the locked plan (``plan_deviation_summary``) or ran with no active
+        skill. On trigger the raw solution (approach, deviation, quality score,
+        verbatim script) is filed in the staging buffer under an LLM-assigned
+        technique label; skills are produced later, review-gated (upgrade an
+        existing skill, or consolidate N into a new one — see ``scilink memory``).
+
+        Returns the list of staged solution ids. Fully failure-isolated.
+        ``SCILINK_T2_AUTODISTILL=0`` disables staging.
+        """
+        flag = os.environ.get("SCILINK_T2_AUTODISTILL", "").strip().lower()
+        if flag in ("0", "false", "off", "no"):
+            return []
+
+        staged: List[str] = []
+        try:
+            from .controllers.image_analysis_controllers import (
+                UnifiedImageProcessingController,
+                _active_skill_names,
+            )
+            from .instruct import T2_TECHNIQUE_LABEL_INSTRUCTIONS
+            from scilink.skills._shared import _staging
+
+            n_levels = len(UnifiedImageProcessingController._CONSTRAINT_ANNEALING_SCHEDULE)
+            hot_level = n_levels - 1
+            approach = state.get("analysis_approach")
+            active_skills = _active_skill_names(state)
+            results = state.get("series_results", []) or []
+
+            def _llm_call(prompt: str) -> str:
+                response = self.model.generate_content(
+                    contents=[prompt],
+                    generation_config=self.generation_config,
+                    safety_settings=self.safety_settings,
+                )
+                return response.text if hasattr(response, "text") else str(response)
+
+            for r in results:
+                if not r.get("success"):
+                    continue
+                script = r.get("script")
+                if not script:
+                    continue
+
+                qh = r.get("quality_history") or {}
+                # Only stage analyses that actually met the quality bar.
+                if not qh.get("approved"):
+                    continue
+                score = qh.get("final_score")
+                levels = [
+                    it.get("annealing_level", 0)
+                    for it in qh.get("verification_iterations", [])
+                ]
+                reached_hot = (max(levels) if levels else 0) >= hot_level
+
+                deviation = (r.get("plan_deviation_summary") or "").strip()
+                novel = bool(deviation) or not active_skills
+                if not (reached_hot and novel):
+                    continue
+
+                kind = r.get("analysis_type") or approach or "image_analysis"
+                technique = _staging.assign_technique_label(
+                    "image_analysis", kind, deviation, _llm_call,
+                    T2_TECHNIQUE_LABEL_INSTRUCTIONS,
+                )
+                record = {
+                    "planned_analysis_approach": approach,
+                    "final_analysis_type": r.get("analysis_type"),
+                    "deviation_from_plan": deviation or "(no explicit note; ran without an active skill)",
+                    "quality_score": round(float(score), 4) if isinstance(score, (int, float)) else score,
+                    "working_script": script,
+                    "session": self.output_dir.name,
+                }
+                sid = _staging.stage_solution("image_analysis", technique, record)
+                staged.append(sid)
+                self.logger.info(
+                    f"   🧠 Staged T=2 image solution [{technique}] id={sid}"
+                )
+        except Exception as e:
+            self.logger.warning(f"T=2 staging skipped: {e}")
+            return staged
+
+        if staged:
+            self.logger.info(
+                f"   🧠 {len(staged)} T=2 solution(s) staged; review with "
+                f"`scilink memory staged`."
+            )
+        return staged
 
     def _evaluate_tier2_needed(
         self, tier1_results: dict, objective: Optional[str]

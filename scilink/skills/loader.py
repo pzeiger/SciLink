@@ -46,6 +46,31 @@ _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _logger = logging.getLogger(__name__)
 
 
+# ─── Persistent memory store ───────────────────────────────────────
+# Skills graduated/distilled at runtime are written under the user's
+# home (default ``~/.scilink/graduated_skills``) so they survive a
+# ``pip`` upgrade — they live outside the installed package tree.
+# ``SCILINK_HOME`` relocates the whole ``.scilink`` store. This dir is
+# auto-included in the skill search path (see ``_skill_roots``), so
+# graduated skills are recalled in later sessions with no env-var setup.
+
+def scilink_home() -> Path:
+    """Return the persistent SciLink home dir (``~/.scilink`` by default).
+
+    Honors the ``SCILINK_HOME`` env var. Re-read on each call so the
+    location can change mid-process (mainly for tests)."""
+    return Path(os.environ.get("SCILINK_HOME") or (Path.home() / ".scilink")).expanduser()
+
+
+def graduated_skills_dir() -> Path:
+    """Return the persistent graduated-skills root.
+
+    Single source of truth for where runtime-graduated and auto-distilled
+    skills are stored and recalled from. Not created here — creation
+    happens at write time in the graduation helper."""
+    return scilink_home() / "graduated_skills"
+
+
 # ─── User-provided skill roots ─────────────────────────────────────
 # Users can add their own skill bundles without modifying SciLink source
 # by pointing the ``SCILINK_SKILLS_PATH`` env var at one (or several,
@@ -61,12 +86,17 @@ _logger = logging.getLogger(__name__)
 def _skill_roots() -> List[Path]:
     """Return ordered list of directories to search for skill bundles.
 
-    User-provided roots from ``$SCILINK_SKILLS_PATH`` come first
-    (highest precedence), then the built-in ``scilink/skills/`` tree.
-    Re-evaluated on each call so adding to the env var mid-process is
-    visible without a reload.
+    Precedence (highest first): user roots from ``$SCILINK_SKILLS_PATH``,
+    then the persistent graduated-skills store (``~/.scilink/...``), then
+    the built-in ``scilink/skills/`` tree. So an upgraded/graduated skill
+    overrides the shipped one of the same name, while a power user's env
+    roots still win over both. Re-evaluated on each call so changes to the
+    env var or the store mid-process are visible without a reload. The
+    list is de-duplicated by resolved path (order preserved) so a user who
+    also lists the home dir in ``$SCILINK_SKILLS_PATH`` doesn't get a
+    double-counted root.
     """
-    roots: List[Path] = []
+    candidates: List[Path] = []
     extra = os.environ.get("SCILINK_SKILLS_PATH", "").strip()
     if extra:
         for raw in extra.split(os.pathsep):
@@ -74,12 +104,24 @@ def _skill_roots() -> List[Path]:
                 continue
             p = Path(raw).expanduser().resolve()
             if p.is_dir():
-                roots.append(p)
+                candidates.append(p)
             else:
                 _logger.warning(
                     "SCILINK_SKILLS_PATH entry not found or not a directory: %s", p
                 )
-    roots.append(_SKILLS_DIR)
+    graduated = graduated_skills_dir()
+    if graduated.is_dir():
+        candidates.append(graduated.resolve())
+    candidates.append(_SKILLS_DIR)
+
+    roots: List[Path] = []
+    seen: set = set()
+    for p in candidates:
+        key = str(p.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(p)
     return roots
 
 

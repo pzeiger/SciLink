@@ -4655,7 +4655,11 @@ class OrchestratorTools:
             Convert a knowledge entry into a reusable planning skill (.md file).
             The skill is automatically registered for use in subsequent plan generation.
             """
-            from .instruct import PLANNING_KNOWLEDGE_TO_SKILL_INSTRUCTIONS
+            from .instruct import (
+                PLANNING_KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
+                PLANNING_SKILL_UPDATE_INSTRUCTIONS,
+            )
+            from scilink.skills._shared._graduation import graduate_to_skill_file
 
             print(f"  ⚡ Tool: Graduating knowledge '{knowledge_id}' to skill '{skill_name}'...")
 
@@ -4671,13 +4675,6 @@ class OrchestratorTools:
                     "status": "error",
                     "message": f"Knowledge ID not found: {knowledge_id}"
                 })
-
-            # Build knowledge text
-            knowledge_text = f"**Focus:** {knowledge_entry.get('focus', '')}\n"
-            knowledge_text += f"**Summary:** {knowledge_entry.get('summary', '')}\n"
-            knowledge_text += "**Key Findings:**\n"
-            for finding in knowledge_entry.get("key_findings", []):
-                knowledge_text += f"- {finding}\n"
 
             # Collect source planning details
             planning_details_parts = []
@@ -4707,31 +4704,43 @@ class OrchestratorTools:
 
             planning_details = "\n\n".join(planning_details_parts) if planning_details_parts else "No source planning details available."
 
-            # Call LLM to generate skill content
-            prompt = PLANNING_KNOWLEDGE_TO_SKILL_INSTRUCTIONS.format(
-                skill_name=skill_name,
-                domain=domain,
-                knowledge_text=knowledge_text,
-                planning_details=planning_details,
-            )
+            # Fold focus/summary/findings + source detail into a single
+            # knowledge_entry; the shared helper renders it into {knowledge_text}.
+            findings = knowledge_entry.get("key_findings", []) or []
+            distill_entry = {
+                "focus": knowledge_entry.get("focus", ""),
+                "summary": knowledge_entry.get("summary", ""),
+                "key_findings": "\n".join(f"- {f}" for f in findings),
+                "source_planning_details": planning_details,
+            }
 
-            try:
+            def _llm_call(prompt: str) -> str:
                 response = self.orch.planner.model.generate_content(
                     contents=[prompt],
                     generation_config=None,
                     safety_settings=None,
                 )
-                skill_content = response.text if hasattr(response, "text") else str(response)
+                return response.text if hasattr(response, "text") else str(response)
+
+            # Write to the persistent store (~/.scilink/graduated_skills) via
+            # the shared structured-JSON helper so the skill survives the
+            # session and a pip upgrade. The helper auto-detects
+            # create-vs-update by whether the bundle already exists.
+            try:
+                result = graduate_to_skill_file(
+                    knowledge_entry=distill_entry,
+                    skill_name=skill_name,
+                    domain=domain,
+                    llm_call=_llm_call,
+                    fresh_template=PLANNING_KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
+                    update_template=PLANNING_SKILL_UPDATE_INSTRUCTIONS,
+                )
             except Exception as e:
-                return json.dumps({"status": "error", "message": f"LLM call failed: {e}"})
+                return json.dumps({"status": "error", "message": f"Graduation failed: {e}"})
 
-            # Save skill file
-            skill_dir = self.orch.base_dir / "graduated_skills"
-            skill_dir.mkdir(parents=True, exist_ok=True)
-            skill_path = skill_dir / f"{skill_name}.md"
-            skill_path.write_text(skill_content)
+            skill_path = result["skill_path"]
 
-            # Register the skill
+            # Register the skill so the live session can use it immediately.
             self.orch.register_skill(str(skill_path))
 
             # Track the link
@@ -4741,8 +4750,9 @@ class OrchestratorTools:
                 "status": "success",
                 "skill_name": skill_name,
                 "skill_path": str(skill_path),
+                "method": result.get("method"),
                 "source_knowledge_id": knowledge_id,
-                "note": f"Skill '{skill_name}' has been registered and will be applied to future plan generation."
+                "note": f"Skill '{skill_name}' has been registered (persistent memory) and will be applied to future plan generation."
             })
 
         self._register_tool(
@@ -4772,25 +4782,28 @@ class OrchestratorTools:
         )
 
         # 16. UPDATE SKILL
-        def update_skill(skill_name: str, knowledge_ids: list = None) -> str:
+        def update_skill(skill_name: str, knowledge_ids: list = None, domain: str = "planning") -> str:
             """
             Update a graduated skill with new knowledge entries.
-            Preserves the old version as {name}.prev.md.
+            Merges into the persistent skill bundle in place.
             """
-            from .instruct import PLANNING_SKILL_UPDATE_INSTRUCTIONS
+            from .instruct import (
+                PLANNING_KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
+                PLANNING_SKILL_UPDATE_INSTRUCTIONS,
+            )
+            from scilink.skills._shared._graduation import graduate_to_skill_file
+            from scilink.skills.loader import graduated_skills_dir
 
             print(f"  ⚡ Tool: Updating skill '{skill_name}'...")
 
-            # Find the existing skill file
-            skill_dir = self.orch.base_dir / "graduated_skills"
-            skill_path = skill_dir / f"{skill_name}.md"
+            # The skill must already exist in the persistent store so the
+            # helper takes its merge (update) branch.
+            skill_path = graduated_skills_dir() / domain / skill_name / f"{skill_name}.md"
             if not skill_path.exists():
                 return json.dumps({
                     "status": "error",
-                    "message": f"Graduated skill not found: {skill_name}"
+                    "message": f"Graduated skill not found: {domain}/{skill_name}"
                 })
-
-            existing_skill = skill_path.read_text()
 
             # Determine source knowledge IDs
             tracked_ids = self.orch._graduated_skill_sources.get(skill_name, [])
@@ -4829,45 +4842,43 @@ class OrchestratorTools:
 
             new_knowledge = "\n\n".join(new_knowledge_parts)
 
-            # Call LLM to produce updated skill
-            prompt = PLANNING_SKILL_UPDATE_INSTRUCTIONS.format(
-                skill_name=skill_name,
-                existing_skill=existing_skill,
-                new_knowledge=new_knowledge,
-            )
-
-            try:
+            def _llm_call(prompt: str) -> str:
                 response = self.orch.planner.model.generate_content(
                     contents=[prompt],
                     generation_config=None,
                     safety_settings=None,
                 )
-                updated_content = response.text if hasattr(response, "text") else str(response)
+                return response.text if hasattr(response, "text") else str(response)
+
+            # Delegate to the shared helper; since the bundle exists it
+            # takes the structured-JSON merge (update) branch.
+            try:
+                result = graduate_to_skill_file(
+                    knowledge_entry={"new_knowledge": new_knowledge},
+                    skill_name=skill_name,
+                    domain=domain,
+                    llm_call=_llm_call,
+                    fresh_template=PLANNING_KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
+                    update_template=PLANNING_SKILL_UPDATE_INSTRUCTIONS,
+                )
             except Exception as e:
-                return json.dumps({"status": "error", "message": f"LLM call failed: {e}"})
-
-            # Save previous version
-            prev_path = skill_dir / f"{skill_name}.prev.md"
-            prev_path.write_text(existing_skill)
-
-            # Write updated skill
-            skill_path.write_text(updated_content)
+                return json.dumps({"status": "error", "message": f"Update failed: {e}"})
 
             # Update source tracking
             all_ids = list(set(tracked_ids + new_ids))
             self.orch._graduated_skill_sources[skill_name] = all_ids
 
             # Re-register the skill
-            self.orch.register_skill(str(skill_path))
+            self.orch.register_skill(str(result["skill_path"]))
 
             return json.dumps({
                 "status": "success",
                 "skill_name": skill_name,
-                "skill_path": str(skill_path),
-                "previous_version": str(prev_path),
+                "skill_path": str(result["skill_path"]),
+                "method": result.get("method"),
                 "new_knowledge_ids": new_ids,
                 "total_source_ids": all_ids,
-                "note": f"Skill '{skill_name}' has been updated. Previous version saved as {prev_path.name}."
+                "note": f"Skill '{skill_name}' has been updated in persistent memory."
             })
 
         self._register_tool(
@@ -4887,6 +4898,10 @@ class OrchestratorTools:
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Specific knowledge IDs to incorporate (omit to auto-detect from matching focus area)"
+                },
+                "domain": {
+                    "type": "string",
+                    "description": "Domain the skill was graduated under (default: 'planning')"
                 }
             },
             required=["skill_name"]
