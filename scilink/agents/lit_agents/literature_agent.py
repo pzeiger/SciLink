@@ -139,43 +139,75 @@ class IncarLiteratureAgent:
         self.max_wait_time = max_wait_time
         self.logger = logging.getLogger(__name__)
 
-    def validate_incar(self, incar_content: str, system_description: str) -> dict:
-        """Validate INCAR parameters against literature."""
-        
-        # Clean system description - remove additional instructions
+    def validate_inputs(self, input_files_text: str, system_description: str,
+                        engine_label: str = "DFT") -> dict:
+        """Validate engine input parameters against literature.
+
+        Engine-neutral entry point: ``engine_label`` names the engine in
+        the query (e.g. "VASP INCAR", "Quantum ESPRESSO", "LAMMPS") so the
+        same literature mechanism grounds parameter review for any engine.
+
+        Args:
+            input_files_text: The input file contents to review.
+            system_description: What system the inputs are for.
+            engine_label: Human-readable engine name for the query.
+
+        Returns:
+            ``{status, response, task_id}`` on success, or an error /
+            timeout status dict.
+        """
         clean_description = self._clean_system_description(system_description)
-        
-        query = f"""Are these VASP INCAR parameters appropriate for {clean_description}?
+        query = (
+            f"Are these {engine_label} input parameters appropriate for "
+            f"{clean_description}?\n\n{input_files_text}"
+        )
+        return self._run_literature_query(query)
 
-{incar_content}"""
+    def validate_incar(self, incar_content: str, system_description: str) -> dict:
+        """Validate VASP INCAR parameters against literature.
 
+        Thin VASP-specific wrapper over :meth:`validate_inputs`.
+        """
+        return self.validate_inputs(
+            input_files_text=incar_content,
+            system_description=system_description,
+            engine_label="VASP INCAR",
+        )
+
+    def _run_literature_query(self, query: str) -> dict:
+        """Submit a literature query to CROW and poll until it resolves.
+
+        Args:
+            query: The fully-built natural-language query.
+
+        Returns:
+            ``{status, response, task_id}`` on success; an error or
+            timeout status dict otherwise.
+        """
         try:
-            # Submit to CROW
             task_data = {"name": JobNames.LITERATURE, "query": query}
             task_id = self.client.create_task(task_data)
-            
-            # Wait for completion
+
             import time
             start_time = time.time()
-            
+
             while time.time() - start_time < self.max_wait_time:
                 task_status = self.client.get_task(task_id)
-                
+
                 if task_status.status == "success":
-                    # Clean response to remove repeated question
                     clean_response = self._clean_response(task_status.formatted_answer, query)
                     return {
-                        "status": "success", 
+                        "status": "success",
                         "response": clean_response,
-                        "task_id": task_id
+                        "task_id": task_id,
                     }
                 elif task_status.status in ["FAILED", "ERROR", "error"]:
                     return {"status": "error", "message": f"CROW failed: {task_status.status}"}
-                
+
                 sleep(10)
-            
+
             return {"status": "timeout", "message": f"Timed out after {self.max_wait_time}s"}
-            
+
         except Exception as e:
             return {"status": "error", "message": str(e)}
 

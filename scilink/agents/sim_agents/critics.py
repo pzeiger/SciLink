@@ -71,6 +71,7 @@ class _CriticBase:
         api_key: Optional[str] = None,
         model_name: str = "claude-opus-4-6",
         base_url: Optional[str] = None,
+        futurehouse_api_key: Optional[str] = None,
         google_api_key: Optional[str] = None,
         local_model: Optional[str] = None,
     ):
@@ -88,6 +89,11 @@ class _CriticBase:
             base_url: Base URL for an OpenAI-compatible internal proxy.
                 When provided, requests are routed through the proxy
                 client; when ``None``, requests go through LiteLLM.
+            futurehouse_api_key: Optional FutureHouse (Edison) API key
+                enabling literature-grounded review. Falls back to the
+                ``FUTUREHOUSE_API_KEY`` environment variable. When no key
+                is available, literature grounding is skipped and the
+                critic runs on baseline guidance and engine tools only.
             google_api_key: Deprecated. Use ``api_key`` instead.
             local_model: Deprecated. Use ``base_url`` instead.
 
@@ -97,6 +103,11 @@ class _CriticBase:
         """
         self.logger = logging.getLogger(
             f"{__name__}.{self.__class__.__name__}"
+        )
+
+        import os as _os
+        self.futurehouse_api_key = (
+            futurehouse_api_key or _os.environ.get("FUTUREHOUSE_API_KEY")
         )
 
         api_key, base_url = normalize_params(
@@ -370,6 +381,8 @@ is.
 
 {syntax_block}
 
+{literature_block}
+
 === Proposed input files ===
 {input_files}
 
@@ -418,6 +431,50 @@ class InputValidator(_CriticBase):
 
     SKILL_SECTION = "validation"
     BASELINE_PROMPT_TEMPLATE = _INPUT_VALIDATOR_PROMPT
+
+    def _literature_review(
+        self,
+        input_files: Dict[str, str],
+        system_description: str,
+        skill: Optional[str],
+    ) -> str:
+        """Return a literature-grounded review of the inputs, or ``""``.
+
+        Runs only when a FutureHouse key is configured. Builds an
+        engine-neutral query (the engine name is the active skill name)
+        and returns the literature answer text for folding into the
+        prompt and report. Failure-isolated: any error returns an empty
+        string so literature trouble never blocks the review.
+
+        Args:
+            input_files: Mapping of input filename to contents.
+            system_description: What the inputs are for.
+            skill: Active engine skill name, used as the engine label.
+
+        Returns:
+            The literature review text, or an empty string when no key is
+            configured or the search did not succeed.
+        """
+        if not self.futurehouse_api_key:
+            return ""
+        engine_label = (skill or "the engine").upper()
+        try:
+            from ..lit_agents.literature_agent import IncarLiteratureAgent
+            agent = IncarLiteratureAgent(api_key=self.futurehouse_api_key)
+            result = agent.validate_inputs(
+                input_files_text=_format_input_files(input_files),
+                system_description=system_description,
+                engine_label=engine_label,
+            )
+        except Exception as e:
+            self.logger.warning(f"Literature review skipped: {e}")
+            return ""
+        if result.get("status") != "success":
+            self.logger.info(
+                f"Literature review unavailable: {result.get('message', result.get('status'))}"
+            )
+            return ""
+        return (result.get("response") or "").strip()
 
     def validate(
         self,
@@ -480,17 +537,30 @@ class InputValidator(_CriticBase):
         # reasons about physics rather than re-checking tag spellings.
         syntax_issues = _run_deterministic_syntax_check(input_files, skill)
 
+        # Ground the review in literature when a FutureHouse key is
+        # configured; otherwise this is an empty string and the review
+        # proceeds on baseline guidance + the syntax check.
+        literature = self._literature_review(input_files, system_description, skill)
+        literature_block = (
+            f"=== Literature review (for grounding parameter choices) ===\n{literature}"
+            if literature else ""
+        )
+
         prompt = self.BASELINE_PROMPT_TEMPLATE.format(
             skill_context=skill_context or "(no engine skill loaded)",
             syntax_block=_format_syntax_issues(syntax_issues),
+            literature_block=literature_block,
             input_files=_format_input_files(input_files),
             system_description=system_description,
         )
         report = self._generate_json(prompt)
         report.setdefault("status", "success")
-        # Surface the deterministic findings on the report regardless of
-        # what the LLM did with them, so callers have the ground truth.
+        # Surface the deterministic findings + literature on the report
+        # regardless of what the LLM did with them, so callers have the
+        # ground truth and the source material.
         report["syntax_check"] = syntax_issues
+        if literature:
+            report["literature_review"] = literature
         return report
 
 

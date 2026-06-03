@@ -80,6 +80,74 @@ class SimulationOrchestratorTools:
         return so.structure_generator
 
     # ------------------------------------------------------------------
+    # Engine-neutral critic helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_engine(self, software: Optional[str]) -> "tuple[Optional[str], Optional[str]]":
+        """Resolve ``(skill, domain)`` for a critic call.
+
+        An explicit ``software`` argument names the engine skill directly
+        (domain inferred from the active routing decision when available,
+        else defaulted to periodic_dft). When ``software`` is omitted, both
+        are taken from the orchestrator's routing decision.
+        """
+        if software:
+            _engine, scale = self.orch.active_skill_and_domain()
+            return software, (scale or "periodic_dft")
+        return self.orch.active_skill_and_domain()
+
+    def _get_input_validator(self):
+        """Construct an InputValidator with the session's credentials.
+
+        Forwards the orchestrator's FutureHouse key so literature-grounded
+        review is available when one is configured (degrades gracefully
+        when absent)."""
+        from .critics import InputValidator
+        return InputValidator(
+            api_key=self.orch.api_key,
+            base_url=self.orch.base_url,
+            model_name=self.orch.model_name,
+            futurehouse_api_key=getattr(self.orch, "futurehouse_api_key", None),
+        )
+
+    def _get_run_critic(self):
+        """Construct a RunCritic with the session's LLM credentials."""
+        from .critics import RunCritic
+        return RunCritic(
+            api_key=self.orch.api_key,
+            base_url=self.orch.base_url,
+            model_name=self.orch.model_name,
+        )
+
+    def _record_input_files(self, record: Optional[Dict[str, Any]]) -> Dict[str, str]:
+        """Return ``{filename: contents}`` for a structure record's inputs.
+
+        Reads from the record's generic ``input_files`` map (filename →
+        path) when present, falling back to the legacy ``incar_path`` /
+        ``kpoints_path`` fields so records created before the generic map
+        still resolve. Missing or unreadable files are skipped.
+        """
+        if not record:
+            return {}
+        paths: Dict[str, str] = {}
+        generic = record.get("input_files")
+        if isinstance(generic, dict) and generic:
+            paths = dict(generic)
+        else:
+            for fname, key in (("INCAR", "incar_path"), ("KPOINTS", "kpoints_path")):
+                p = record.get(key)
+                if p:
+                    paths[fname] = p
+        contents: Dict[str, str] = {}
+        for fname, p in paths.items():
+            try:
+                if p and Path(p).exists():
+                    contents[fname] = Path(p).read_text()
+            except Exception:
+                continue
+        return contents
+
+    # ------------------------------------------------------------------
     # Tool registration
     # ------------------------------------------------------------------
 
@@ -962,88 +1030,89 @@ class SimulationOrchestratorTools:
         )
 
         # =====================================================================
-        # 6. VALIDATE INCAR (literature-grounded)
+        # 6. VALIDATE INPUTS (engine-neutral, pre-run)
         # =====================================================================
-        def validate_incar(incar_path: str, system_description: str) -> str:
-            if not Path(incar_path).exists():
+        def validate_inputs(poscar_path: str, system_description: str,
+                            software: str = None) -> str:
+            skill, domain = self._resolve_engine(software)
+            if not skill:
                 return json.dumps({
                     "status": "error",
-                    "message": f"INCAR not found: {incar_path}",
+                    "message": (
+                        "No engine selected. Call route_simulation first, or "
+                        "pass `software` explicitly (e.g. 'vasp')."
+                    ),
                 })
 
-            if not self.orch.futurehouse_api_key:
+            record = self._find_structure_record(poscar_path)
+            input_files = self._record_input_files(record)
+            if not input_files:
                 return json.dumps({
-                    "status": "skipped",
+                    "status": "error",
                     "message": (
-                        "Literature validation requires a FutureHouse API "
-                        "key. Set FUTUREHOUSE_API_KEY in the environment "
-                        "or pass futurehouse_api_key when constructing the "
-                        "orchestrator."
+                        "No input files found for this structure. Run "
+                        "generate_dft_inputs (or generate_md_inputs) first."
                     ),
                 })
 
             try:
-                from .val_agent import IncarValidatorAgent
-                validator = IncarValidatorAgent(
-                    api_key=self.orch.api_key,
-                    base_url=self.orch.base_url,
-                    model_name=self.orch.model_name,
-                    futurehouse_api_key=self.orch.futurehouse_api_key,
+                validator = self._get_input_validator()
+                report = validator.validate(
+                    input_files=input_files,
+                    system_description=system_description,
+                    skill=skill,
+                    domain=domain,
                 )
             except Exception as e:
                 return json.dumps({
                     "status": "error",
-                    "message": f"Failed to construct IncarValidatorAgent: {e}",
+                    "message": f"Input validation failed: {e}",
                 })
 
-            incar_content = Path(incar_path).read_text()
-            result = validator.validate_and_improve_incar(
-                incar_content=incar_content,
-                system_description=system_description,
-            )
-
-            if result.get("status") != "success":
-                return json.dumps({
-                    "status": "error",
-                    "message": result.get("message") or "Literature validation failed",
-                })
-
-            return json.dumps({
-                "status": "success",
-                "validation_status": result.get("validation_status"),
-                "overall_assessment": result.get("overall_assessment"),
-                "suggested_adjustments": result.get("suggested_adjustments", []),
-                "literature_review": result.get("literature_review", "")[:2000],
-                "incar_path": incar_path,
-            })
+            if record is not None:
+                record["input_validation"] = report
+            report.setdefault("status", "success")
+            report["engine"] = skill
+            return json.dumps(report, default=str)
 
         self._register_tool(
-            func=validate_incar,
-            name="validate_incar",
+            func=validate_inputs,
+            name="validate_inputs",
             description=(
-                "Run a literature-grounded review of an INCAR file: pulls "
-                "papers via FutureHouse, asks an LLM whether the chosen "
-                "parameters are consistent with established practice for "
-                "the system in question, returns suggested adjustments. "
-                "Returns 'skipped' status when no FutureHouse API key is "
-                "configured. Pair with apply_incar_improvements to write "
-                "the suggested INCAR to disk."
+                "Pre-run review of the generated input files for a structure, "
+                "engine-neutral. Routes to the InputValidator critic, which "
+                "combines the active engine skill's validation guidance, the "
+                "engine's deterministic syntax check, and — when a FutureHouse "
+                "key is configured — a literature-grounded review, returning "
+                "suggested adjustments. The engine is taken from the active "
+                "routing decision unless `software` is given. Use after "
+                "generating inputs and before submitting a run."
             ),
             parameters={
-                "incar_path": {
+                "poscar_path": {
                     "type": "string",
-                    "description": "Absolute path to the INCAR to validate.",
+                    "description": (
+                        "Absolute path to the structure's POSCAR, used to "
+                        "locate its generated input files in the session."
+                    ),
                 },
                 "system_description": {
                     "type": "string",
                     "description": (
-                        "What system the INCAR is for and what the calculation "
-                        "is supposed to compute (used as context for the "
-                        "literature review)."
+                        "What system the inputs are for and what the "
+                        "calculation should compute — context for judging "
+                        "whether the parameter choices are appropriate."
+                    ),
+                },
+                "software": {
+                    "type": "string",
+                    "description": (
+                        "Optional engine override (e.g. 'vasp'). Defaults to "
+                        "the engine chosen by route_simulation."
                     ),
                 },
             },
-            required=["incar_path", "system_description"],
+            required=["poscar_path", "system_description"],
         )
 
         # =====================================================================
