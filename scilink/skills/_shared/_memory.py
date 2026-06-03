@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..loader import graduated_skills_dir, load_skill
+from ._graduation import safe_path_component
 
 # Captures the frontmatter body with EXACTLY one trailing newline after the
 # closing fence, so ``text[match.end():]`` preserves the rest of the file
@@ -31,6 +32,9 @@ _FRONTMATTER_BLOCK_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 
 def _bundle_path(domain: str, name: str, *, root: Optional[Path] = None) -> Path:
     root = root or graduated_skills_dir()
+    # domain/name are filesystem components — sanitize against path traversal.
+    domain = safe_path_component(domain, fallback="unknown_domain")
+    name = safe_path_component(name, fallback="unnamed_skill")
     return root / domain / name / f"{name}.md"
 
 

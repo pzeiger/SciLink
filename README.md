@@ -229,6 +229,32 @@ Register additional `BaseAnalysisAgent` subclasses:
 scilink analyze --agents ./my_xrd_agent.py
 ```
 
+### Persistent Memory
+
+SciLink agents learn from hard problems and keep that knowledge across sessions.
+Graduated and auto-distilled skills are stored under **`~/.scilink/`** (override
+with `$SCILINK_HOME`) — outside the installed package, so they survive a `pip`
+upgrade and are auto-discovered on every future run. Manage them with:
+
+```bash
+scilink memory list                 # graduated/auto-distilled skills
+scilink memory staged               # raw T=2 solutions awaiting distillation
+scilink memory upgrade <domain>/<id> --into <domain>/<name>   # enrich an existing skill
+scilink memory consolidate <domain>/<technique>              # distill N into a new skill
+scilink memory promote <domain>/<name>                       # make a provisional skill auto-routable
+```
+
+> **Docker:** the store lives in the container's home (`~/.scilink`), which is
+> **ephemeral** — learned skills are lost when the container exits unless you
+> mount a volume. The image declares it as a `VOLUME`; persist it with, e.g.:
+>
+> ```bash
+> docker run -v ~/.scilink:/home/scilinkuser/.scilink scilink ...
+> # or: docker run -e SCILINK_HOME=/data -v scilink-mem:/data scilink ...
+> ```
+>
+> Without a mount, SciLink logs a one-time warning that memory won't persist.
+
 ---
 
 # Planning Agents

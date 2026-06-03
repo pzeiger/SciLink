@@ -22,8 +22,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from ..loader import scilink_home, load_skill, list_skills
-from ._graduation import graduate_to_skill_file
+from ..loader import scilink_home, load_skill, list_skills, graduated_skills_dir
+from ._graduation import graduate_to_skill_file, safe_path_component, warn_if_ephemeral_store
 
 
 def staging_dir() -> Path:
@@ -32,7 +32,8 @@ def staging_dir() -> Path:
 
 
 def _domain_dir(domain: str, *, root: Optional[Path] = None) -> Path:
-    return (root or staging_dir()) / domain
+    # domain is a filesystem component — sanitize to prevent path traversal.
+    return (root or staging_dir()) / safe_path_component(domain, fallback="unknown_domain")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -52,6 +53,7 @@ def stage_solution(
     etc.); ``technique`` is the normalized grouping label. The stored JSON adds
     ``id``, ``domain``, ``technique``.
     """
+    warn_if_ephemeral_store()
     d = _domain_dir(domain, root=root)
     d.mkdir(parents=True, exist_ok=True)
     sid = uuid.uuid4().hex[:8]
@@ -169,21 +171,26 @@ def _script_of(rec: Dict[str, Any]) -> str:
     return (rec.get("working_script") or rec.get("script") or "").strip()
 
 
-def _ref_block(rec: Dict[str, Any], *, label: str = "fit") -> str:
-    script = _script_of(rec)
-    if not script:
-        return ""
-    return (
-        f"### Reference implementation (verbatim {label} that produced this skill)\n\n"
-        "```python\n" + script + "\n```"
-    )
+# How much of the working script to show the LLM as *input* (so it can extract
+# the reusable recipe from real code). The script is NOT copied verbatim into the
+# saved skill — doing so bloated reused skills (a ~1500-word one-shot script) and
+# empirically degraded the next run by over-constraining it. Distill, don't dump.
+_SCRIPT_PROMPT_CHARS = 4000
 
 
 def _record_for_prompt(rec: Dict[str, Any]) -> Dict[str, Any]:
-    """A record trimmed for the LLM prompt — drop bookkeeping + the (large)
-    script, which is appended verbatim separately."""
+    """A record trimmed for the LLM prompt — drop bookkeeping; include a
+    length-capped working script so the LLM can generalize from real code without
+    the full script being echoed into the saved skill."""
     drop = {"id", "domain", "technique", "working_script", "script", "created_at"}
-    return {k: v for k, v in rec.items() if k not in drop}
+    out = {k: v for k, v in rec.items() if k not in drop}
+    script = _script_of(rec)
+    if script:
+        out["working_script_excerpt"] = (
+            script if len(script) <= _SCRIPT_PROMPT_CHARS
+            else script[:_SCRIPT_PROMPT_CHARS] + "\n# … (truncated; full script in the staging record)"
+        )
+    return out
 
 
 # ──────────────────────────────────────────────────────────────
@@ -205,15 +212,28 @@ def upgrade_skill_from_staged(
     """Enrich an existing skill from one (or a few) staged solution(s).
 
     The target skill must already exist, so ``graduate_to_skill_file`` takes its
-    update/merge branch — the same path the demo exercises (EELS v1→v2). The
-    verbatim script of the first staged record is appended as a reference. On
-    success the consumed staged records are removed.
+    update/merge branch — the same path the demo exercises (EELS v1→v2). The LLM
+    sees the staged solution's (capped) script as input and distills a reusable
+    recipe; the full verbatim script is deliberately NOT copied into the skill
+    (that bloated reused skills and degraded the next run). On success the
+    consumed staged records are removed.
     """
     recs = [r for r in (get_staged(domain, sid, root=root) for sid in staged_ids) if r]
     if not recs:
         return {"status": "error", "message": "No staged records found for the given ids."}
 
-    primary = recs[0]
+    # "Upgrade" means enrich an EXISTING skill. Require the target to exist so a
+    # typo'd --into doesn't silently create a brand-new skill (and waste an LLM
+    # call). Use consolidate / a fresh graduation to make a new skill instead.
+    target_md = ((skills_root or graduated_skills_dir())
+                 / safe_path_component(target_domain) / safe_path_component(target_name)
+                 / f"{safe_path_component(target_name)}.md")
+    if not target_md.exists():
+        return {"status": "error",
+                "message": (f"Target skill '{target_domain}/{target_name}' does not exist — "
+                            f"upgrade enriches an existing skill. Check the name, or use "
+                            f"consolidate to create a new skill.")}
+
     knowledge_entry = {
         "new_t2_solutions": [_record_for_prompt(r) for r in recs],
     }
@@ -225,7 +245,6 @@ def upgrade_skill_from_staged(
         fresh_template=fresh_template,
         update_template=update_template,
         skills_root=skills_root,
-        append_sections={"implementation": _ref_block(primary)},
     )
     if result.get("status") == "success":
         remove_staged(domain, [r["id"] for r in recs if r.get("id")], root=root)
@@ -236,17 +255,6 @@ def upgrade_skill_from_staged(
 # ──────────────────────────────────────────────────────────────
 # new-skill@N — consolidate N staged solutions into a NEW skill
 # ──────────────────────────────────────────────────────────────
-
-def _best_record(recs: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Pick the highest-quality staged record (r_squared or quality_score)."""
-    def _metric(r: Dict[str, Any]) -> float:
-        for k in ("r_squared", "quality_score", "metric"):
-            v = r.get(k)
-            if isinstance(v, (int, float)):
-                return float(v)
-        return 0.0
-    return max(recs, key=_metric)
-
 
 def consolidate_technique(
     domain: str,
@@ -260,16 +268,17 @@ def consolidate_technique(
 ) -> Dict[str, Any]:
     """Distill all staged solutions for one technique into a single new skill.
 
-    Builds a multi-example knowledge entry, calls ``graduate_to_skill_file`` with
-    the consolidation template (skill name ``auto_<technique>``), appends the best
-    example's script verbatim, tags ``provenance=t2_consolidated`` + ``n_examples``,
-    and removes the consumed staged records.
+    Builds a multi-example knowledge entry (each example's capped script included
+    as input so the LLM generalizes from real code), calls ``graduate_to_skill_file``
+    with the consolidation template (skill name ``auto_<technique>``), tags
+    ``provenance=t2_consolidated`` + ``n_examples``, and removes the consumed staged
+    records. The full verbatim scripts are NOT copied into the skill (kept concise
+    and reusable; scripts remain in the staging records).
     """
     recs = list_staged(domain, technique, root=root)
     if not recs:
         return {"status": "error", "message": f"No staged solutions for {domain}/{technique}."}
 
-    best = _best_record(recs)
     knowledge_entry = {
         "technique": technique,
         "n_examples": len(recs),
@@ -289,7 +298,6 @@ def consolidate_technique(
             "provenance": "t2_consolidated",
             "n_examples": len(recs),
         },
-        append_sections={"implementation": _ref_block(best)},
     )
     if result.get("status") == "success":
         remove_staged(domain, [r["id"] for r in recs if r.get("id")], root=root)

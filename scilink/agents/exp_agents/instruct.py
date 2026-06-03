@@ -2885,8 +2885,9 @@ dataset's specific paths and magic numbers. Where the examples differ, note what
 when to choose each option (this is the value of having several examples). Explain why the \
 naive/default plan was insufficient.
 
-The best example's working script is appended verbatim to the implementation section by the \
-system as a reference — do NOT paste scripts back; write the generalized recipe.
+Each example includes a `working_script_excerpt` so you can extract the reusable procedure \
+from real code. Do NOT paste any script back verbatim — write a CONCISE, generalized recipe \
+(the skill is read into the prompt every run, so keep it tight; no one-off dataset code).
 
 Return a JSON object with exactly the following keys. Use markdown within values when helpful \
 (lists, inline code), but no section headings (`##`) or YAML frontmatter — the caller adds those.

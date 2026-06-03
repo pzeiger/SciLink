@@ -29,12 +29,60 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from ..loader import graduated_skills_dir
+
+
+def safe_path_component(value: str, *, fallback: str = "unknown") -> str:
+    """Sanitize a string used as a single filesystem path component.
+
+    `domain` / `skill_name` / `technique` are joined into paths under the
+    persistent store. A value like ``"../../evil"`` would escape the store, so
+    strip directory separators and parent refs, keeping only a flat, safe token.
+    """
+    base = Path(str(value)).name              # drops any dir part, incl. ".."
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", base).strip("._-")
+    return cleaned or fallback
+
+
+_EPHEMERAL_WARNED = False
+
+
+def warn_if_ephemeral_store() -> None:
+    """Warn ONCE if the persistent store likely won't persist.
+
+    SciLink is commonly run in Docker; inside a container the default home
+    (``~/.scilink``) lives on the ephemeral container filesystem, so graduated/
+    staged skills vanish when the container exits — silently defeating the whole
+    "persistent memory" promise. We can't reliably detect a bind-mount, so we use
+    a conservative heuristic: in a container AND ``$SCILINK_HOME`` is unset →
+    advise mounting a volume. Advisory only; never blocks or relocates.
+    """
+    global _EPHEMERAL_WARNED
+    if _EPHEMERAL_WARNED or os.environ.get("SCILINK_HOME"):
+        return
+    in_container = os.path.exists("/.dockerenv")
+    if not in_container:
+        try:
+            with open("/proc/1/cgroup") as fh:
+                in_container = "docker" in fh.read() or "kubepods" in fh.read()
+        except OSError:
+            in_container = False
+    if in_container:
+        _EPHEMERAL_WARNED = True
+        from ..loader import scilink_home
+        logging.warning(
+            "Persistent memory at %s is on the container filesystem and will NOT "
+            "survive container restarts. Mount a volume (e.g. "
+            "`-v ~/.scilink:/home/scilinkuser/.scilink`) or set $SCILINK_HOME to a "
+            "mounted path to keep graduated/distilled skills.",
+            scilink_home(),
+        )
 
 # Backward-compatible module constant. Prefer calling
 # ``graduated_skills_dir()`` (honors $SCILINK_HOME dynamically); this is
@@ -271,6 +319,10 @@ def graduate_to_skill_file(
         word_count, and a soft warning if the file is getting long.
     """
     skills_root = skills_root or graduated_skills_dir()
+    warn_if_ephemeral_store()
+    # Guard against path-traversal: domain/skill_name are filesystem components.
+    domain = safe_path_component(domain, fallback="unknown_domain")
+    skill_name = safe_path_component(skill_name, fallback="unnamed_skill")
     domain_dir = skills_root / domain
     skill_dir = domain_dir / skill_name
     skill_dir.mkdir(parents=True, exist_ok=True)
