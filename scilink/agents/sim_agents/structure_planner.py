@@ -17,7 +17,7 @@ classical MD handles larger boxes with EXPLICIT solvent, MLIPs run smaller cells
 classical FF, molecular DFT prefers IMPLICIT solvent — so neither axis alone is enough.
 
 It emits a :class:`StructureSpec` (typed, serializable, overridable), which
-:meth:`StructureOrchestrator.build_structure` consumes (``structure_class`` today;
+:meth:`StructurePipeline.build_structure` consumes (``structure_class`` today;
 constraint injection is a follow-up).
 
 Relationship to ``SimulationRouter``: the router picks ``(scale, engine)`` from the

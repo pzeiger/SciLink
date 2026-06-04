@@ -42,7 +42,7 @@ class SimulationOrchestratorTools:
         self.functions_map: Dict[str, Callable] = {}
         self.openai_schemas: list = []
 
-        # Lazily-initialized StructureOrchestrator reused across
+        # Lazily-initialized StructurePipeline reused across
         # generate_structure / refine_structure calls. It owns the shared
         # StructureGenerator (so the MaterialsProjectHelper cache survives
         # between calls), the validator, and the generate→validate→refine loop —
@@ -51,16 +51,16 @@ class SimulationOrchestratorTools:
 
         self._register_all_tools()
 
-    def _get_structure_orchestrator(self, workdir: str):
-        """Return a session-shared StructureOrchestrator, lazy-initialized on
+    def _get_structure_pipeline(self, workdir: str):
+        """Return a session-shared StructurePipeline, lazy-initialized on
         first call. Reuses the same instance — its StructureGenerator (and the
         MP-helper cache), validator, model wrapper, and script executor — across
         all generate_structure / refine_structure calls in the session. The
         per-call output directory is passed through generate_and_validate.
         """
-        from .structure_orchestrator import StructureOrchestrator
+        from .structure_pipeline import StructurePipeline
         if self._so is None:
-            self._so = StructureOrchestrator(
+            self._so = StructurePipeline(
                 api_key=self.orch.api_key,
                 base_url=self.orch.base_url,
                 generator_model=self.orch.model_name,
@@ -72,10 +72,10 @@ class SimulationOrchestratorTools:
 
     def _get_structure_generator(self, workdir: str):
         """Return the session-shared StructureGenerator (owned by the shared
-        StructureOrchestrator), with its ``generated_script_dir`` set to the
+        StructurePipeline), with its ``generated_script_dir`` set to the
         per-call workdir. Used by refine_structure's single-step rewrite.
         """
-        so = self._get_structure_orchestrator(str(workdir))
+        so = self._get_structure_pipeline(str(workdir))
         so.structure_generator.generated_script_dir = str(workdir)
         return so.structure_generator
 
@@ -372,15 +372,15 @@ class SimulationOrchestratorTools:
                     )
 
             try:
-                so = self._get_structure_orchestrator(str(workdir))
+                so = self._get_structure_pipeline(str(workdir))
             except Exception as e:
                 return json.dumps({
                     "status": "error",
-                    "message": f"Failed to construct StructureOrchestrator: {e}",
+                    "message": f"Failed to construct StructurePipeline: {e}",
                 })
 
             # Delegate the whole generate → validate → refine loop to the
-            # StructureOrchestrator (single source of truth). structure_class
+            # StructurePipeline (single source of truth). structure_class
             # defaults to "crystal": simulate mode is periodic-DFT-centric today,
             # so crystal is the sensible default *class* (it supplies the
             # class-specific validation rubric). A user-supplied `skill` (rendered

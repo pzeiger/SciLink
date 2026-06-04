@@ -1,4 +1,4 @@
-# scilink/agents/sim_agents/structure_orchestrator.py
+# scilink/agents/sim_agents/structure_pipeline.py
 
 import os
 import sys
@@ -15,7 +15,7 @@ from .structure_agent import StructureGenerator
 from .val_agent import StructureValidatorAgent
 
 
-class StructureOrchestrator:
+class StructurePipeline:
     """
     Engine-agnostic, structure-class-aware orchestrator for atomic-structure
     generation.
