@@ -365,11 +365,15 @@ def _render_configure() -> None:
             )
             return
 
-        # Stash files + draft SLURM script in session state.
+        # Stash files + draft SLURM script in session state. The backend
+        # record stores a generic input_files map; this VASP wizard reads
+        # its engine's files (INCAR/KPOINTS) from it by name. (Engine-agnostic
+        # UI rework is a separate PR — see task list.)
         try:
-            poscar_text = Path(structure["poscar_path"]).read_text()
-            incar_text = Path(structure["incar_path"]).read_text()
-            kpoints_text = Path(structure["kpoints_path"]).read_text()
+            files = structure.get("input_files") or {}
+            poscar_text = Path(structure["structure_path"]).read_text()
+            incar_text = Path(files["INCAR"]).read_text() if files.get("INCAR") else ""
+            kpoints_text = Path(files["KPOINTS"]).read_text() if files.get("KPOINTS") else ""
         except Exception as exc:
             err_slot.error(f"Could not read generated files: {exc}")
             return
@@ -492,10 +496,11 @@ def _run_generation(
     # Use the most recent record (the call may have produced multiple if the
     # agent decided to refine; the wizard always uses the latest).
     candidate = new[-1]
+    files = candidate.get("input_files") or {}
     if not (
-        candidate.get("poscar_path")
-        and candidate.get("incar_path")
-        and candidate.get("kpoints_path")
+        candidate.get("structure_path")
+        and files.get("INCAR")
+        and files.get("KPOINTS")
     ):
         return None
     return candidate

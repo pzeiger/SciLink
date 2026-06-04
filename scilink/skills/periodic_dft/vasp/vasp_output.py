@@ -1,24 +1,14 @@
-"""
-BENCHMARK BASELINE — legacy VASP output parser.
-
-Retained as a support module for the baseline ``VaspQualityAgent`` in the
-old-vs-new critic benchmark; NOT on the live path. The live post-run
-snapshot lives in the VASP skill bundle as ``snapshot_run``
-(``scilink.skills.periodic_dft.vasp.vasp_output``), discovered via the
-skill registry. The two share the same parsing logic by design (the bundle
-version is the relocation); this copy stays to keep the baseline agent
-self-contained.
-
-Post-run VASP output analysis.
+"""VASP output snapshot parser.
 
 Reads OUTCAR / vasprun.xml from a completed (or failed) VASP run and
-produces a structured summary. Originally the simulate orchestrator's
-post-run close-the-loop step; that role is now the engine-neutral
-``RunCritic`` + the skill-bundle ``snapshot_run`` tool.
+produces a structured summary that simulate-mode critics hand to the LLM
+when assessing the run. Discovered via the skill registry when the
+``vasp`` skill is active and called through
+:func:`scilink.skills._shared._registry.get_tool_function`.
 
-Designed to be defensive: VASP runs fail in many ways and pymatgen's
-parser can raise on partial / corrupt outputs. Every code path returns
-a dict with a `status` key; failures are reported, not raised.
+All code paths return a dict with a ``status`` key; failures are reported
+in the returned structure rather than raised, so callers can hand the
+result to the LLM uniformly.
 """
 
 from __future__ import annotations
@@ -26,6 +16,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from ..._shared._spec import ToolSpec
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +40,15 @@ _VASP_ERROR_HINTS = [
 
 
 def _classify_log_errors(log_text: str) -> List[str]:
-    """Return human-readable hints matching known VASP error patterns."""
+    """Return human-readable hints matching known VASP error patterns.
+
+    Args:
+        log_text: Tail-read text of stdout / stderr / OUTCAR.
+
+    Returns:
+        List of ``"<pattern>: <hint>"`` strings for each pattern matched
+        case-insensitively in ``log_text``.
+    """
     hits: List[str] = []
     for pattern, hint in _VASP_ERROR_HINTS:
         if pattern.lower() in log_text.lower():
@@ -57,10 +57,19 @@ def _classify_log_errors(log_text: str) -> List[str]:
 
 
 def _read_first_existing(*paths: Path, max_chars: int = 80_000) -> Optional[str]:
-    """Read the first path that exists, truncated to max_chars.
+    """Read the first existing path, returning at most ``max_chars`` of its tail.
 
-    Used for stdout/stderr style logs where we just want the tail of a
-    text file. Returns None if none exist or all fail to read.
+    Used for stdout / stderr style logs where only the trailing region
+    typically contains the failure signature.
+
+    Args:
+        *paths: Candidate file paths, tried in order.
+        max_chars: Maximum number of characters to return; the tail of
+            the file is preferred when the file exceeds this size.
+
+    Returns:
+        The file's text (tail-trimmed) for the first readable path, or
+        ``None`` if none exist or all reads fail.
     """
     for p in paths:
         if not p.exists() or not p.is_file():
@@ -77,12 +86,19 @@ def _read_first_existing(*paths: Path, max_chars: int = 80_000) -> Optional[str]
 
 
 def _summarize_vasprun(vasprun_path: Path) -> Dict[str, Any]:
-    """Parse vasprun.xml via pymatgen and pull out convergence + energetics.
+    """Parse ``vasprun.xml`` and extract convergence + energetics.
 
-    Returns a dict with:
-        converged_electronic, converged_ionic, converged (overall),
-        final_energy, n_ionic_steps, n_electronic_steps_last,
-        max_force, parameter notes — or an `error` key on parse failure.
+    Args:
+        vasprun_path: Path to a vasprun.xml file.
+
+    Returns:
+        A dict containing some subset of: ``converged_electronic``,
+        ``converged_ionic``, ``converged``, ``final_energy``,
+        ``n_ionic_steps``, ``n_electronic_steps_last_ionic``,
+        ``max_force_eV_per_A``, ``incar_snapshot``. On parse failure
+        returns ``{"error": "..."}``. Partial parse failures populate
+        the available fields and surface the missing ones under
+        per-field ``*_error`` keys.
     """
     try:
         from pymatgen.io.vasp.outputs import Vasprun
@@ -90,7 +106,6 @@ def _summarize_vasprun(vasprun_path: Path) -> Dict[str, Any]:
         return {"error": f"pymatgen not available: {e}"}
 
     try:
-        # parse_dos=False, parse_eigen=False for speed; we only need scalars.
         vr = Vasprun(
             str(vasprun_path),
             parse_dos=False,
@@ -125,8 +140,6 @@ def _summarize_vasprun(vasprun_path: Path) -> Dict[str, Any]:
     except Exception as e:
         out["ionic_step_error"] = str(e)
 
-    # Max force on last ionic step — needs forces from the last step's
-    # output; pymatgen surfaces this on Vasprun.ionic_steps[-1]["forces"]
     try:
         if vr.ionic_steps:
             forces = vr.ionic_steps[-1].get("forces")
@@ -137,12 +150,8 @@ def _summarize_vasprun(vasprun_path: Path) -> Dict[str, Any]:
     except Exception as e:
         out["force_check_error"] = str(e)
 
-    # Parameter snapshot — the run's actual INCAR settings as VASP saw
-    # them (after defaults), useful when the user wants to reconcile
-    # what they asked for vs what ran.
     try:
         params = vr.incar.as_dict() if vr.incar else {}
-        # Trim huge auto-filled keys; surface a stable subset
         keys = ["IBRION", "NSW", "ISIF", "EDIFF", "EDIFFG", "ENCUT",
                 "ISMEAR", "SIGMA", "ALGO", "PREC", "NELM", "ISYM",
                 "LREAL", "ISPIN"]
@@ -153,19 +162,33 @@ def _summarize_vasprun(vasprun_path: Path) -> Dict[str, Any]:
     return out
 
 
-def analyze_run_directory(output_dir: str) -> Dict[str, Any]:
-    """Top-level entry: summarize a VASP run directory.
+def snapshot_run(output_dir: str) -> Dict[str, Any]:
+    """Summarize a VASP run directory into a structured snapshot.
 
-    Returns a structured dict with status + diagnostics. Always returns
-    something parseable; never raises out of expected failure modes.
-
-    Looks for (in order):
-        - vasprun.xml  → parsed via pymatgen for convergence/energetics
-        - OUTCAR / OSZICAR / vasp.out / stdout / stderr → tail-read for
-          error pattern matching when the structured output is missing
+    Inspects the directory for ``vasprun.xml`` (preferred, structured
+    parse via pymatgen) and falls back to OUTCAR / OSZICAR / stdout /
+    stderr tail-matching for known VASP error patterns when the
+    structured output is missing or unparseable.
 
     Args:
-        output_dir: directory containing the VASP run's outputs.
+        output_dir: Path to the directory containing the VASP run's
+            output files.
+
+    Returns:
+        A dict with fields:
+
+            status              ``"ok"`` or ``"error"``
+            output_directory    The directory inspected
+            files_found         List of recognized output files present
+            vasprun             Dict from :func:`_summarize_vasprun`
+                                when ``vasprun.xml`` was parseable;
+                                ``None`` otherwise
+            log_error_hints     List of ``"<pattern>: <hint>"`` strings
+                                matched in log files
+            convergence_status  One of ``"converged"``, ``"not_converged"``,
+                                ``"failed"``, ``"unknown"``
+            headline            One-sentence top-line assessment for
+                                quick LLM consumption
     """
     out_dir = Path(output_dir)
     if not out_dir.exists():
@@ -182,7 +205,6 @@ def analyze_run_directory(output_dir: str) -> Dict[str, Any]:
         "convergence_status": "unknown",
     }
 
-    # Inventory key files
     candidates = ["vasprun.xml", "OUTCAR", "OSZICAR", "CONTCAR",
                   "vasp.out", "stdout", "stdout.log", "stderr",
                   "stderr.log"]
@@ -190,7 +212,6 @@ def analyze_run_directory(output_dir: str) -> Dict[str, Any]:
         if (out_dir / name).exists():
             summary["files_found"].append(name)
 
-    # Structured parse via vasprun.xml
     vasprun_path = out_dir / "vasprun.xml"
     if vasprun_path.exists():
         vr_summary = _summarize_vasprun(vasprun_path)
@@ -202,7 +223,6 @@ def analyze_run_directory(output_dir: str) -> Dict[str, Any]:
             elif converged is False:
                 summary["convergence_status"] = "not_converged"
 
-    # Pattern-match the stdout / stderr / OUTCAR for known failure modes
     log_text = _read_first_existing(
         out_dir / "vasp.out",
         out_dir / "stdout",
@@ -213,11 +233,9 @@ def analyze_run_directory(output_dir: str) -> Dict[str, Any]:
     )
     if log_text:
         summary["log_error_hints"] = _classify_log_errors(log_text)
-        # If vasprun told us nothing and the log looks fatal, flag that
         if summary["convergence_status"] == "unknown" and summary["log_error_hints"]:
             summary["convergence_status"] = "failed"
 
-    # Coarse top-line judgment for the LLM to read at a glance
     if summary["convergence_status"] == "converged":
         summary["headline"] = "Run converged successfully."
     elif summary["convergence_status"] == "not_converged":
@@ -239,3 +257,32 @@ def analyze_run_directory(output_dir: str) -> Dict[str, Any]:
         )
 
     return summary
+
+
+TOOL_SPEC = ToolSpec(
+    name="snapshot_run",
+    description=(
+        "Read a VASP run directory and return a structured snapshot of "
+        "convergence status, energetics, and any matched error patterns. "
+        "Discovered and dispatched when the ``vasp`` skill is active."
+    ),
+    parameters={
+        "output_dir": {
+            "type": "string",
+            "description": (
+                "Absolute path to the directory containing the VASP run's "
+                "output files (vasprun.xml, OUTCAR, OSZICAR, stdout, "
+                "stderr)."
+            ),
+        },
+    },
+    required=["output_dir"],
+    signature="snapshot_run(output_dir: str) -> dict",
+    import_line="from scilink.skills.periodic_dft.vasp.vasp_output import snapshot_run",
+    agents=["simulation"],
+    returns=(
+        "dict with status, files_found, vasprun (convergence + energetics), "
+        "log_error_hints (matched VASP failure patterns), "
+        "convergence_status, and a one-line headline."
+    ),
+)

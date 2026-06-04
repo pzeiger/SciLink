@@ -195,7 +195,72 @@ wrong magnetic ground states, and unreliable forces.
   NCORE = 1
   KPAR = 1
 
+## interpretation
+
+Read a finished run against the calculation's intent, not just its exit
+status — a run can exit cleanly and still be physically wrong.
+
+**Convergence has two levels.** Electronic convergence (SCF reaches EDIFF)
+must hold for any result; ionic convergence (forces below EDIFFG) must
+also hold for a relaxation. Electronic non-convergence is disqualifying —
+the energy is meaningless. Ionic non-convergence means the geometry is
+still moving, so the energy is an upper bound, not the minimum.
+
+**Distinguish "stopped" from "converged."** The most common false success
+is a run that hit a ceiling and reported its last value: if the final
+ionic step's SCF count sits at NELM, the SCF was truncated; if the ionic
+step count equals NSW with forces still above |EDIFFG|, the relaxation ran
+out of budget. Check forces against the intended threshold, not zero —
+energy plateaus well before forces do, so a small energy change does not
+imply a stationary point.
+
+**Sanity-check the physics, not only the numerics.** The hardest failure
+to catch is a converged run with the wrong setup: spin disabled on a
+magnetic system, smearing wrong for the system class (metallic smearing
+broadens an insulator's gap; tetrahedron smearing gives wrong relaxation
+forces), or a final magnetic moment far from chemical expectation. When
+the result contradicts what the system should physically do, distrust the
+inputs before trusting the number.
+
+**Error-pattern triage.** When a run fails, the log usually names the mode.
+Map the symptom to the smallest input change and resubmit one change at a
+time so the next failure stays diagnostic:
+
+- *No pseudopotential / wrong POTCAR directory* — `GGA` tag missing or
+  inconsistent with the potentials. Set `GGA = PE` (or the intended functional's tag).
+- *`ZBRENT: fatal error`* — ionic step too large. Reduce `POTIM` (~0.1),
+  switch to `IBRION = 1`, restart from CONTCAR.
+- *`Sub-Space-Matrix is not hermitian`* — minimization instability. Use `ALGO = Normal`.
+- *`BRMIX: very serious problems`* — charge mixing diverging. Reduce mixing
+  (`AMIX = 0.1`, `BMIX = 0.01`) and raise `NELM`.
+- *`ERROR RSPHER`* — real-space projection unstable. Set `LREAL = .FALSE.`.
+- *`EDDDAV did not converge` / `EDDRMM`* — Davidson struggling. Use `ALGO = All`, raise `NELM`.
+- *Highest band occupied / no empty bands* — too few bands. Increase `NBANDS` (~+50%).
+- *SCF not achieved within NELM* — raise `NELM`, switch to `ALGO = All`; if it
+  recurs, revisit smearing and mixing.
+
+Escalate (looser mixing, more bands, different algorithm) only when the
+first targeted fix does not resolve the named failure.
+
 ## validation
+
+**Pre-submit syntax check (engine-native, no LLM):**
+
+VASP accepts unknown INCAR keys silently — a one-letter typo such as
+`ISPN = 2` instead of `ISPIN = 2` disables spin polarisation and
+produces a physics-wrong result that converges by every other metric.
+Before submission, `PeriodicDFTAgent` runs the generated INCAR through
+`scilink.agents.sim_agents.vasp_input_validator.check_incar_syntax`
+(pymatgen's `Incar.check_params()`). High-confidence typos are
+auto-renamed to the closest valid tag; low-confidence matches are
+returned for downstream LLM review. The fix payload is recorded under
+`result["syntax_check"]` so the caller can log what was changed.
+
+This is the VASP instance of an engine-neutral contract:
+`<engine>_input_validator.check_syntax(content) -> List[issue]`. Don't
+add tag-spelling guidance to LLM prompts — the pymatgen check is the
+canonical authority, and the LLM should reason about physics, not
+syntax.
 
 **Quality checks for generated INCAR files:**
 
@@ -220,12 +285,6 @@ wrong magnetic ground states, and unreliable forces.
 - Check for contradictory settings: for example ISMEAR = -5 with NSW > 0,
   or ISIF = 3 with a slab geometry.
 
-**Common errors and their INCAR fixes:**
-
-- "No pseudopotential for X": Missing or wrong GGA tag. Fix: add GGA = PE.
-- "ZBRENT: fatal error": POTIM too large. Fix: reduce POTIM to 0.1, use IBRION = 1.
-- "Sub-Space-Matrix not hermitian": ALGO incompatibility. Fix: use ALGO = Normal.
-- "BRMIX: very serious problems": SCF not converging. Fix: add AMIX=0.1, BMIX=0.01.
-- "RSPHER": Real-space projection overlap. Fix: set LREAL = .FALSE.
-- "Highest band is occupied": Not enough bands. Fix: increase NBANDS.
-- "EDDDAV did not converge": Electronic convergence failure. Fix: ALGO = All, increase NELM.
+Post-run error diagnosis and the corresponding INCAR fixes live in the
+`interpretation` section — those apply after a run has failed, whereas
+the checks here apply to inputs before submission.

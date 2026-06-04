@@ -1,14 +1,16 @@
 """
-Simulation Orchestrator Agent for VASP DFT input preparation.
+Simulation Orchestrator Agent for computational simulation.
 
-Coordinates structure generation, VASP input creation, and post-run analysis
-through tools wrapping the existing sim_agents stack (StructureGenerator,
-StructureValidatorAgent, VaspInputAgent, VaspUpdater, IncarValidatorAgent,
-DFTOrchestrator).
+Coordinates structure generation, input creation, validation, and post-run
+analysis through an engine-neutral tool surface: structure generation
+(StructureOrchestrator), the scale-agnostic simulation pipeline, and the
+engine-neutral critics (InputValidator / RunCritic), with engine specifics
+supplied by skill bundles. The routing decision selects scale + engine.
 
-Mirrors the shape of AnalysisOrchestratorAgent for consistent UX. VASP DFT
-only for now; LAMMPS support and HPC submission tools are follow-up work
-(see CLAUDE.md for the full sequencing plan).
+Mirrors the shape of AnalysisOrchestratorAgent for consistent UX. Periodic
+DFT (VASP, QE) is fully dispatched; MD and MLIP scales route and run the
+one-shot pipeline, with granular per-step tools as follow-up work (see
+CLAUDE.md for the full sequencing plan).
 
 The duplication with AnalysisOrchestratorAgent is intentional and acceptable
 at this development stage — see CLAUDE.md "Why no BaseChatOrchestrator
@@ -92,20 +94,26 @@ goal, the system, and what's actually available. Once a routing
 decision exists in the session, plan subsequent tool calls around
 that engine (don't re-route on every turn unless the user pivots).
 
+**Engine-neutral tool surface:**
+The granular tools are engine-neutral and take the engine from the active
+routing decision (or an explicit `software` argument): generate_structure,
+generate_dft_inputs, validate_inputs, apply_input_adjustments,
+analyze_output, and (when an HPC connection is active)
+submit_simulation_job / get_job_status / download_job_results. The engine's
+specifics come from its skill bundle, so the same tools serve any engine
+within a scale.
+
 **Dispatch maturity (as of this build):**
-- `periodic_dft` + `vasp` -> fully dispatched here: generate_structure,
-  generate_vasp_inputs, validate_incar, apply_incar_improvements,
-  submit_vasp_job (when HPC connection active), and the post-run
-  analysis chain are all available.
-- `molecular_dynamics` + `lammps` / `gromacs` / `openmm` -> routing
-  works; concrete dispatch tools are the next-step follow-up.
-  When the router picks one of these, tell the user the routing
-  matched and point them at `MDSimulationAgent` directly for now.
-- `machine_learning_potentials` + `mace` / others -> same situation.
-  Point at `MLIPAgent` directly until the dispatch tools land.
+- `periodic_dft` (`vasp`, `qe`) -> fully dispatched via the tools above.
+- `molecular_dynamics` (`lammps` / …) -> structure + the one-shot pipeline
+  work; the granular per-step generate tool is the next-step follow-up.
+  When the router picks one of these, you can still run the complete
+  workflow; point the user at `MDSimulationAgent` for granular control.
+- `machine_learning_potentials` (`mace` / …) -> point at `MLIPAgent`
+  directly until the dispatch tools land.
 
 **HPC integration:**
-When an HPC connection is active (`submit_vasp_job` is available), you
+When an HPC connection is active (`submit_simulation_job` is available), you
 can submit jobs to the cluster, monitor their status, download
 results, and generate a final report — all without leaving the
 session. Without an HPC connection, prep is local only; the user
@@ -324,7 +332,7 @@ class SimulationOrchestratorAgent:
         self.structures_dir.mkdir(parents=True, exist_ok=True)
 
         # Session state — structure-centric (vs analysis-centric in analyze mode)
-        # generated_structures: list of {slug, poscar_path, description,
+        # generated_structures: list of {slug, structure_path, description,
         #     created_at, vasp_inputs_path?, vasp_output_dir?}
         self.generated_structures: List[Dict[str, Any]] = []
 
@@ -404,6 +412,33 @@ class SimulationOrchestratorAgent:
             self.messages.extend(recent_history)
 
         logging.info(f"✅ SimulationOrchestratorAgent initialized. Session: {self.base_dir}")
+
+    # ------------------------------------------------------------------
+    # Routing helpers
+    # ------------------------------------------------------------------
+
+    def active_skill_and_domain(self) -> tuple[Optional[str], Optional[str]]:
+        """Return ``(skill, domain)`` derived from the current routing decision.
+
+        Maps the router's ``(engine, scale)`` vocabulary onto the skill
+        infrastructure's ``(skill, domain)`` vocabulary so downstream tools
+        — in particular the engine-neutral critic agents — can derive their
+        ``skill=`` and ``domain=`` parameters from session state instead of
+        requiring the LLM to pass them on every call.
+
+        Returns:
+            ``(engine, scale)`` from ``routing_decision`` when it has been
+            populated by a successful ``route_simulation`` call. Returns
+            ``(None, None)`` when the orchestrator has not routed yet or
+            the prior routing call failed (the LLM should call
+            ``route_simulation`` before invoking tools that need this).
+        """
+        decision = self.routing_decision or {}
+        scale = decision.get("scale")
+        engine = decision.get("engine")
+        if not scale or not engine:
+            return None, None
+        return engine, scale
 
     # ------------------------------------------------------------------
     # Public API
@@ -528,8 +563,11 @@ class SimulationOrchestratorAgent:
         files_produced: List[str] = []
         key_findings: List[str] = []
         for s in new_structures:
-            for key in ("poscar_path", "incar_path", "kpoints_path", "script_path"):
+            for key in ("structure_path", "script_path"):
                 p = s.get(key)
+                if p:
+                    files_produced.append(p)
+            for p in (s.get("input_files") or {}).values():
                 if p:
                     files_produced.append(p)
             val = s.get("validation") or {}
@@ -547,15 +585,14 @@ class SimulationOrchestratorAgent:
                     f"Structure {s.get('slug')} has unresolved validation issues."
                 )
 
-        # Heuristic: a "follow-up" is a structure that has a POSCAR but no
-        # INCAR/KPOINTS yet — natural next step for the caller is to
-        # generate VASP inputs for it.
+        # Heuristic: a "follow-up" is a structure that has been built but has
+        # no generated inputs yet — natural next step is to generate inputs.
         suggested_followups: List[str] = []
         for s in new_structures:
-            if s.get("poscar_path") and not s.get("incar_path"):
+            if s.get("structure_path") and not s.get("input_files"):
                 suggested_followups.append(
-                    f"Generate VASP inputs for {s.get('slug')} "
-                    f"(POSCAR at {s.get('poscar_path')})."
+                    f"Generate inputs for {s.get('slug')} "
+                    f"(structure at {s.get('structure_path')})."
                 )
 
         result = {
@@ -569,9 +606,8 @@ class SimulationOrchestratorAgent:
                 {
                     "slug": s.get("slug"),
                     "description": s.get("description"),
-                    "poscar_path": s.get("poscar_path"),
-                    "incar_path": s.get("incar_path"),
-                    "kpoints_path": s.get("kpoints_path"),
+                    "structure_path": s.get("structure_path"),
+                    "input_files": s.get("input_files") or {},
                 } for s in new_structures
             ],
             "warnings": warnings,

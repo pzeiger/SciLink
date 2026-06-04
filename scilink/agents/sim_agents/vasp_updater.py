@@ -1,4 +1,13 @@
 # scilink/agents/sim_agents/vasp_updater.py
+"""BENCHMARK BASELINE — legacy VASP-specific runtime updater.
+
+Retained only as a baseline for the old-vs-new critic comparison in the
+benchmark suite; NOT on the live path. The live runtime-fix capability is
+the engine-neutral ``RunCritic`` (``scilink.agents.sim_agents.critics``),
+which reads the engine skill's ``interpretation`` section. Nothing in the
+live orchestrator/pipeline imports this module — only the benchmark
+harness does.
+"""
 
 import re
 import logging

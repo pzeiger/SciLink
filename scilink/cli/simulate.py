@@ -402,9 +402,10 @@ planned follow-up work; see CLAUDE.md.
             print(f"\n🏗️  Structures generated this session: {len(structures)}")
             for s in structures:
                 print(f"  • {s.get('slug')}: {s.get('description')}")
-                print(f"      POSCAR: {s.get('poscar_path')}")
-                if s.get('incar_path'):
-                    print(f"      INCAR/KPOINTS: ✓")
+                print(f"      structure: {s.get('structure_path')}")
+                files = s.get('input_files') or {}
+                if files:
+                    print(f"      inputs: {', '.join(sorted(files))}")
             return True
 
         if cmd == "/status":

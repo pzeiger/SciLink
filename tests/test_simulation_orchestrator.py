@@ -89,21 +89,21 @@ def _make_orch(model_name: str, base_dir: str, autonomy: str = "co-pilot"):
 EXPECTED_TOOLS = {
     "session_status",
     "generate_structure",
+    "plan_structure",
     "validate_structure",
-    "generate_vasp_inputs",
+    "generate_dft_inputs",
     "run_complete_dft_workflow",
     "refine_structure",
     "view_structure",
-    "validate_incar",
-    "apply_incar_improvements",
+    "validate_inputs",
+    "apply_input_adjustments",
     "list_generated_structures",
-    "analyze_vasp_output",
-    "suggest_incar_fixes",
+    "analyze_output",
     "route_simulation",
     # HPC tools
-    "submit_vasp_job",
+    "submit_simulation_job",
     "get_job_status",
-    "download_vasp_results",
+    "download_job_results",
     "generate_final_report",
 }
 
@@ -128,18 +128,29 @@ def test_2_tool_error_paths(model_name: str):
         # validate_structure on missing file
         r = json.loads(orch.tools.execute_tool(
             "validate_structure",
-            poscar_path="/nonexistent/POSCAR",
+            structure_path="/nonexistent/POSCAR",
             original_request="test",
         ))
         assert r["status"] == "error" and "not found" in r["message"]
 
-        # generate_vasp_inputs with bad method
         fake = Path(td) / "POSCAR"
         fake.write_text("Si\n1.0\n3 0 0\n0 3 0\n0 0 3\nSi\n1\nDirect\n0 0 0\n")
+
+        # generate_dft_inputs with no engine selected (no routing, no software)
         r = json.loads(orch.tools.execute_tool(
-            "generate_vasp_inputs",
-            poscar_path=str(fake),
+            "generate_dft_inputs",
+            structure_path=str(fake),
             request="test",
+        ))
+        assert r["status"] == "error" and "engine" in r["message"].lower()
+
+        # generate_dft_inputs with an explicit engine but an unknown method
+        # → the named-backend lookup misses in the skill bundle.
+        r = json.loads(orch.tools.execute_tool(
+            "generate_dft_inputs",
+            structure_path=str(fake),
+            request="test",
+            software="vasp",
             method="banana",
         ))
         assert r["status"] == "error" and "banana" in r["message"]
@@ -147,7 +158,7 @@ def test_2_tool_error_paths(model_name: str):
         # refine_structure on a path with no session record
         r = json.loads(orch.tools.execute_tool(
             "refine_structure",
-            poscar_path=str(fake),
+            structure_path=str(fake),
             original_request="test",
         ))
         assert r["status"] == "error" and "No record found" in r["message"]
@@ -155,35 +166,34 @@ def test_2_tool_error_paths(model_name: str):
         # view_structure on missing file
         r = json.loads(orch.tools.execute_tool(
             "view_structure",
-            poscar_path="/nope/POSCAR",
+            structure_path="/nope/POSCAR",
         ))
         assert r["status"] == "error"
 
-        # validate_incar without FH key returns 'skipped', not 'error'
-        fake_incar = Path(td) / "INCAR"
-        fake_incar.write_text("ENCUT = 400\n")
+        # validate_inputs with an engine but no generated inputs for the structure
         r = json.loads(orch.tools.execute_tool(
-            "validate_incar",
-            incar_path=str(fake_incar),
+            "validate_inputs",
+            structure_path=str(fake),
             system_description="test",
+            software="vasp",
         ))
-        assert r["status"] in ("skipped", "error")
+        assert r["status"] == "error" and "input files" in r["message"].lower()
 
-        # apply_incar_improvements with no adjustments
+        # apply_input_adjustments with no adjustments → no_changes (before engine work)
         r = json.loads(orch.tools.execute_tool(
-            "apply_incar_improvements",
-            incar_path=str(fake_incar),
-            poscar_path=str(fake),
+            "apply_input_adjustments",
+            structure_path=str(fake),
             original_request="test",
             suggested_adjustments=[],
         ))
         assert r["status"] == "no_changes"
 
-        # suggest_incar_fixes on missing log
+        # analyze_output on a nonexistent run directory
         r = json.loads(orch.tools.execute_tool(
-            "suggest_incar_fixes",
-            log_path="/nope/log",
-            original_request="test",
+            "analyze_output",
+            output_dir="/nope/run",
+            research_goal="test",
+            software="vasp",
         ))
         assert r["status"] == "error"
 
@@ -195,12 +205,17 @@ def test_2_tool_error_paths(model_name: str):
 
 
 def test_3_post_run_analysis_synthetic(model_name: str):
-    """post_run_analysis works on synthetic log dirs without pymatgen-parseable files."""
-    from scilink.agents.sim_agents.post_run_analysis import analyze_run_directory
+    """The live VASP snapshot tool (skill bundle) handles synthetic run dirs.
+
+    Tests the engine-neutral live path: the vasp skill bundle's snapshot_run
+    tool, resolved via the registry (what RunCritic dispatches to).
+    """
+    from scilink.skills._shared._registry import get_tool_function
+    snapshot_run = get_tool_function("snapshot_run", active_skills=["vasp"])
 
     # Empty dir → status=ok, convergence=unknown
     with tempfile.TemporaryDirectory() as td:
-        r = analyze_run_directory(td)
+        r = snapshot_run(td)
         assert r["status"] == "ok"
         assert r["convergence_status"] == "unknown"
 
@@ -209,15 +224,15 @@ def test_3_post_run_analysis_synthetic(model_name: str):
         Path(td, "stdout").write_text(
             "running on 32 cores\nVERY BAD NEWS! internal error in subroutine SGRCON\n"
         )
-        r = analyze_run_directory(td)
+        r = snapshot_run(td)
         assert r["convergence_status"] == "failed"
         assert any("VERY BAD NEWS" in h for h in r["log_error_hints"])
 
     # Nonexistent dir → status=error
-    r = analyze_run_directory("/path/does/not/exist")
+    r = snapshot_run("/path/does/not/exist")
     assert r["status"] == "error"
 
-    print("   ✅ Post-run analysis: empty / failed / nonexistent dirs all handled")
+    print("   ✅ Live snapshot tool: empty / failed / nonexistent dirs all handled")
 
 
 def test_4_mode_switching(model_name: str):
@@ -250,9 +265,8 @@ def test_5_run_task_without_llm(model_name: str):
             orch.generated_structures.append({
                 "slug": "fake_001",
                 "description": "test structure",
-                "poscar_path": "/tmp/POSCAR",
-                "incar_path": None,
-                "kpoints_path": None,
+                "structure_path": "/tmp/POSCAR",
+                "input_files": {},
                 "script_path": "/tmp/script.py",
                 "validation": {
                     "status": "needs_correction",
@@ -270,7 +284,7 @@ def test_5_run_task_without_llm(model_name: str):
         assert orch.simulation_mode == SimulationMode.CO_PILOT  # restored
         assert "/tmp/POSCAR" in result["files_produced"]
         assert any("Vacuum" in f for f in result["key_findings"])
-        assert any("VASP inputs" in f for f in result["suggested_followups"])
+        assert any("Generate inputs" in f for f in result["suggested_followups"])
         assert any("unresolved" in w for w in result["warnings"])
 
         # Error path: chat raises → mode still restored, status=error
@@ -292,7 +306,7 @@ def test_6_session_persistence(model_name: str):
         orch.generated_structures.append({
             "slug": "persist_001",
             "description": "survival test",
-            "poscar_path": "/tmp/POSCAR",
+            "structure_path": "/tmp/POSCAR",
         })
         orch.default_calc_params = {"ENCUT": 520, "kpoint_density": 30}
         # Force a checkpoint write
@@ -320,9 +334,10 @@ def test_7_hpc_tools_no_connection(model_name: str):
         orch = _make_orch(model_name, td + "/sim")
 
         for tool, kwargs in [
-            ("submit_vasp_job",       {"structure_slug": "x", "remote_dir": "/tmp"}),
+            ("submit_simulation_job", {"structure_slug": "x", "remote_dir": "/tmp",
+                                       "run_command": "srun vasp_std"}),
             ("get_job_status",        {"job_id": "12345"}),
-            ("download_vasp_results", {"job_id": "12345"}),
+            ("download_job_results",  {"job_id": "12345"}),
             ("generate_final_report", {"structure_slug": "x"}),
         ]:
             r = json.loads(orch.tools.execute_tool(tool, **kwargs))
@@ -379,23 +394,23 @@ def test_8_hpc_tools_mock_connection(model_name: str):
             "slug": slug,
             "description": "bulk silicon",
             "structure_dir": str(struct_dir),
-            "poscar_path": str(poscar),
-            "incar_path": str(incar),
-            "kpoints_path": str(kpoints),
+            "structure_path": str(poscar),
+            "input_files": {"INCAR": str(incar), "KPOINTS": str(kpoints)},
             "hpc_job_id": None,
             "hpc_remote_dir": None,
             "hpc_results_dir": None,
             "validation": {"status": "success", "overall_assessment": "Looks good.",
                            "all_identified_issues": []},
-            "vasp_summary": "Static SCF, ENCUT=400",
+            "summary": "Static SCF, ENCUT=400",
             "created_at": datetime.now().isoformat(),
         })
 
-        # 1. submit_vasp_job
+        # 1. submit_simulation_job
         r = json.loads(orch.tools.execute_tool(
-            "submit_vasp_job",
+            "submit_simulation_job",
             structure_slug=slug,
             remote_dir="/scratch/test",
+            run_command="srun vasp_std",
             job_name="si_test",
             n_nodes=1,
             n_tasks=8,
@@ -405,7 +420,7 @@ def test_8_hpc_tools_mock_connection(model_name: str):
         assert r["job_id"] == "99999"
         mock_conn.upload.assert_called()
         mock_sched.submit.assert_called_once()
-        print("   ✅ submit_vasp_job: uploaded files, submitted job, got job_id=99999")
+        print("   ✅ submit_simulation_job: uploaded files, submitted job, got job_id=99999")
 
         # 2. get_job_status
         r = json.loads(orch.tools.execute_tool("get_job_status", job_id="99999"))
@@ -422,10 +437,10 @@ def test_8_hpc_tools_mock_connection(model_name: str):
                 Path(local).write_text(f"fake {fname} content")
         mock_conn.download = MagicMock(side_effect=fake_download)
 
-        r = json.loads(orch.tools.execute_tool("download_vasp_results", job_id="99999"))
+        r = json.loads(orch.tools.execute_tool("download_job_results", job_id="99999"))
         assert r["status"] == "success", f"download failed: {r}"
         assert "OUTCAR" in r["downloaded"] or "vasp.stdout" in r["downloaded"]
-        print(f"   ✅ download_vasp_results: got {r['downloaded']}")
+        print(f"   ✅ download_job_results: got {r['downloaded']}")
 
         # 4. generate_final_report
         r = json.loads(orch.tools.execute_tool(
@@ -436,7 +451,7 @@ def test_8_hpc_tools_mock_connection(model_name: str):
         report = r["report"]
         assert "bulk silicon" in report
         assert "99999" in report  # job ID in report
-        assert "VASP DFT Simulation Report" in report
+        assert "Simulation Report" in report
         print(f"   ✅ generate_final_report: written to {r['report_path']}")
 
     print("   ✅ Full offline HPC flow: submit → status → download → report")
@@ -457,7 +472,7 @@ def stress_1_generate_then_inputs(model_name: str):
     response = orch.chat(
         "Build a 2x2x1 supercell of bulk silicon (mp-149) and then generate "
         "static VASP inputs for a single-point calculation. Use the granular "
-        "tools (generate_structure, then generate_vasp_inputs)."
+        "tools (generate_structure, then generate_dft_inputs)."
     )
     print("   --- agent response (last 400 chars) ---")
     print("   " + response[-400:].replace("\n", "\n   "))
@@ -465,12 +480,13 @@ def stress_1_generate_then_inputs(model_name: str):
     structures = orch.generated_structures
     assert structures, "Agent did not record any generated structures"
     s = structures[-1]
-    assert Path(s["poscar_path"]).exists(), f"POSCAR missing: {s['poscar_path']}"
-    print(f"   ✅ POSCAR produced: {s['poscar_path']}")
+    assert Path(s["structure_path"]).exists(), f"POSCAR missing: {s['structure_path']}"
+    print(f"   ✅ POSCAR produced: {s['structure_path']}")
 
-    if s.get("incar_path"):
-        assert Path(s["incar_path"]).exists()
-        print(f"   ✅ INCAR produced: {s['incar_path']}")
+    incar_path = (s.get("input_files") or {}).get("INCAR")
+    if incar_path:
+        assert Path(incar_path).exists()
+        print(f"   ✅ INCAR produced: {incar_path}")
     else:
         print("   ⚠️  Agent built the structure but didn't generate INCAR — "
               "may have stopped to ask. Acceptable for a stress test.")
@@ -496,7 +512,7 @@ def stress_2_post_run_analysis_failure(model_name: str):
     orch = _make_orch(model_name, str(workdir / "sim"), autonomy="autonomous")
     response = orch.chat(
         f"I ran VASP and the calculation failed. Output files are in "
-        f"{fake_run_dir}. Use analyze_vasp_output to read the run, summarize "
+        f"{fake_run_dir}. Use analyze_output to read the run, summarize "
         f"what happened, and recommend INCAR adjustments."
     )
     print("   --- agent response (last 600 chars) ---")
@@ -569,7 +585,7 @@ def stress_4_aimsgb_skill_loaded(model_name: str):
     assert "GrainBoundary" in script_text, "Script should use GrainBoundary"
     assert "build_gb" in script_text, "Script should call .build_gb()"
 
-    poscar = Path(s["poscar_path"])
+    poscar = Path(s["structure_path"])
     assert poscar.exists(), f"POSCAR missing: {poscar}"
 
     from ase.io import read as ase_read
@@ -632,13 +648,12 @@ def stress_5_hpc_workflow_mocked(model_name: str):
         "slug": "si_bulk_001",
         "description": "2x2x2 bulk silicon supercell",
         "structure_dir": str(struct_dir),
-        "poscar_path": str(poscar),
-        "incar_path": str(incar),
-        "kpoints_path": str(kpoints),
+        "structure_path": str(poscar),
+        "input_files": {"INCAR": str(incar), "KPOINTS": str(kpoints)},
         "hpc_job_id": None,
         "hpc_remote_dir": None,
         "hpc_results_dir": None,
-        "vasp_summary": "Static SCF, ENCUT=520",
+        "summary": "Static SCF, ENCUT=520",
         "validation": {"status": "success", "overall_assessment": "Structure looks correct.",
                        "all_identified_issues": []},
         "created_at": datetime.now().isoformat(),
@@ -683,7 +698,7 @@ def e2e_1_run_task_minimal_structure(model_name: str):
     result = orch.run_task(
         "Build a 2x2x2 supercell of bulk silicon (mp-149, Fd-3m) and "
         "generate VASP inputs for a static SCF calculation. Use the "
-        "granular tools (generate_structure, then generate_vasp_inputs)."
+        "granular tools (generate_structure, then generate_dft_inputs)."
     )
 
     print(f"   status: {result['status']}")
@@ -694,8 +709,8 @@ def e2e_1_run_task_minimal_structure(model_name: str):
     assert result["status"] == "success", f"run_task failed: {result.get('error')}"
     assert result["structures"], "No structures recorded"
     s = result["structures"][0]
-    assert Path(s["poscar_path"]).exists(), "POSCAR not on disk"
-    print(f"   ✅ run_task produced a structure at {s['poscar_path']}")
+    assert Path(s["structure_path"]).exists(), "POSCAR not on disk"
+    print(f"   ✅ run_task produced a structure at {s['structure_path']}")
 
 
 # ---------------------------------------------------------------------------
@@ -777,13 +792,12 @@ def integration_1_hpc_slurm(model_name: str):
         "slug": slug,
         "description": "bulk silicon integration test",
         "structure_dir": str(struct_dir),
-        "poscar_path": str(poscar),
-        "incar_path": str(incar),
-        "kpoints_path": str(kpoints),
+        "structure_path": str(poscar),
+        "input_files": {"INCAR": str(incar), "KPOINTS": str(kpoints)},
         "hpc_job_id": None,
         "hpc_remote_dir": None,
         "hpc_results_dir": None,
-        "vasp_summary": "Static SCF, ENCUT=520",
+        "summary": "Static SCF, ENCUT=520",
         "validation": None,
         "created_at": datetime.now().isoformat(),
     })
@@ -798,14 +812,14 @@ def integration_1_hpc_slurm(model_name: str):
         "echo '  1 F= -.100E+03 E0= -.100E+03 d E =0.000' > OSZICAR"
     )
     r = json.loads(orch.tools.execute_tool(
-        "submit_vasp_job",
+        "submit_simulation_job",
         structure_slug=slug,
         remote_dir=remote_dir,
+        run_command=fake_vasp,
         job_name="scilink_test",
         n_nodes=1,
         n_tasks=1,
         time_limit="00:05:00",
-        vasp_command=fake_vasp,
     ))
     assert r["status"] == "success", f"submit failed: {r}"
     job_id = r["job_id"]
@@ -827,7 +841,7 @@ def integration_1_hpc_slurm(model_name: str):
     print(f"   ✅ Job {job_id} completed")
 
     # Download
-    r = json.loads(orch.tools.execute_tool("download_vasp_results", job_id=job_id))
+    r = json.loads(orch.tools.execute_tool("download_job_results", job_id=job_id))
     assert r["status"] == "success", f"download failed: {r}"
     assert r["downloaded"], "No files downloaded"
     print(f"   ✅ Downloaded: {r['downloaded']}")
