@@ -171,14 +171,22 @@ def _render_staged_section() -> None:
         with st.expander(f"`{domain}/{technique}` — {len(recs)} staged", expanded=False):
             for r in recs:
                 metric = r.get("r_squared") or r.get("quality_score")
-                st.caption(f"id={r['id']} · session={r.get('session','?')}"
-                           + (f" · metric={metric}" if metric is not None else ""))
+                meta_col, view_col = st.columns([3, 1])
+                meta_col.caption(
+                    f"id={r['id']} · session={r.get('session','?')}"
+                    + (f" · metric={metric}" if metric is not None else "")
+                )
+                with view_col.popover("View", use_container_width=True):
+                    _render_staged_record(r)
             if model is None:
                 st.info("Start a session to enable upgrade/consolidate (needs a model).")
                 continue
-            # candidate existing skills to upgrade into (same domain)
+            # candidate existing skills to upgrade into (same domain).
+            # Keep the action buttons in narrow columns + a trailing spacer so
+            # they land at a modest size (like the sidebar's Reset/Quit) rather
+            # than stretching across the full-width memory panel.
             targets = [f"{s['domain']}/{s['name']}" for s in _memory.list_memory(domain=domain)]
-            c1, c2 = st.columns(2)
+            c1, c2, _ = st.columns([2, 2, 4])
             with c1:
                 if targets:
                     tgt = st.selectbox("Upgrade into", targets, key=f"tgt::{domain}/{technique}")
@@ -197,7 +205,20 @@ def _render_staged_section() -> None:
                 else:
                     st.caption("No existing skills in this domain to upgrade into.")
             with c2:
-                if st.button("Consolidate → new skill", key=f"con::{domain}/{technique}"):
+                # New-skill consolidation accumulates first: only suggest it once
+                # enough examples of this technique are staged. Below the threshold
+                # the agent is still gathering evidence (one fit is too idiosyncratic
+                # to generalize into a standalone skill). Upgrading an existing skill
+                # is exempt — that's the upgrade@1 path on the left.
+                need = _staging.consolidate_min_n()
+                ready = len(recs) >= need
+                if st.button("Consolidate → new skill", key=f"con::{domain}/{technique}",
+                             disabled=not ready,
+                             help=(None if ready else
+                                   f"Accumulating {len(recs)}/{need} — consolidation into a "
+                                   f"new skill unlocks once {need} solutions of this technique "
+                                   f"are staged (set SCILINK_CONSOLIDATE_N to change; "
+                                   f"`scilink memory consolidate` can force it).")):
                     from scilink.agents.exp_agents.instruct import (
                         T2_CONSOLIDATION_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS)
                     res = _staging.consolidate_technique(
@@ -206,6 +227,26 @@ def _render_staged_section() -> None:
                         update_template=SKILL_UPDATE_INSTRUCTIONS)
                     st.success(f"Consolidated {res.get('n_examples')} → auto_{technique} (provisional).")
                     st.rerun()
+                if not ready:
+                    st.caption(f"Accumulating {len(recs)}/{need} examples before a new skill.")
+
+
+# Bookkeeping keys not worth showing in the per-record viewer.
+_STAGED_HIDDEN_KEYS = {"id", "domain", "technique", "session", "working_script", "script"}
+
+
+def _render_staged_record(r: dict) -> None:
+    """Show one staged T=2 solution's actual content (planned vs final model,
+    deviation, metric, and the working script) so it can be inspected before
+    upgrading/consolidating."""
+    for k, v in r.items():
+        if k in _STAGED_HIDDEN_KEYS or v in (None, "", [], {}):
+            continue
+        st.markdown(f"**{k.replace('_', ' ')}:** {v}")
+    script = (r.get("working_script") or r.get("script") or "").strip()
+    if script:
+        st.markdown("**working script:**")
+        st.code(script, language="python")
 
 
 def _render_memory_row(_memory, r, *, provisional: bool) -> None:
@@ -223,7 +264,7 @@ def _render_memory_row(_memory, r, *, provisional: bool) -> None:
         except Exception as e:
             st.warning(f"Could not render skill: {e}")
 
-        c1, c2 = st.columns(2)
+        c1, c2, _ = st.columns([2, 2, 4])
         if provisional:
             if c1.button("Promote", key=f"promote::{ref}", type="primary"):
                 _memory.promote_memory(r["domain"], r["name"])

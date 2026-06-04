@@ -31,6 +31,26 @@ def staging_dir() -> Path:
     return scilink_home() / "distill_staging"
 
 
+# Advisory minimum number of staged solutions of a technique before consolidating
+# them into a NEW skill. Below this, review surfaces accumulate rather than suggest
+# graduation (a single example is usually too idiosyncratic to generalize). Upgrading
+# an EXISTING skill is exempt — that is upgrade@1 by design. The function itself
+# still consolidates whatever is present when explicitly called.
+_DEFAULT_CONSOLIDATE_N = 3
+
+
+def consolidate_min_n() -> int:
+    """Readiness threshold for new-skill consolidation (``$SCILINK_CONSOLIDATE_N``)."""
+    import os
+    raw = os.environ.get("SCILINK_CONSOLIDATE_N", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return _DEFAULT_CONSOLIDATE_N
+
+
 def _domain_dir(domain: str, *, root: Optional[Path] = None) -> Path:
     # domain is a filesystem component — sanitize to prevent path traversal.
     return (root or staging_dir()) / safe_path_component(domain, fallback="unknown_domain")

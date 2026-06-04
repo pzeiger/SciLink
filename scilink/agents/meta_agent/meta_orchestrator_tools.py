@@ -462,8 +462,25 @@ class MetaOrchestratorTools:
 
             if act == "list_staged":
                 rows = _staging.list_staged()
-                print(f"  🧠 {len(rows)} staged T=2 solution(s) awaiting distillation.")
+                # Per-technique readiness so the LLM accumulates before suggesting a
+                # NEW skill: consolidation needs >= consolidate_min_n() examples of a
+                # technique; a single staged solution is too idiosyncratic to graduate
+                # (upgrading an EXISTING skill via `upgrade` is exempt).
+                need = _staging.consolidate_min_n()
+                by_tech: dict = {}
+                for r in rows:
+                    key = f"{r.get('domain')}/{r.get('technique') or 'unlabeled'}"
+                    by_tech[key] = by_tech.get(key, 0) + 1
+                techniques = [
+                    {"technique": k, "n_staged": n, "ready_to_consolidate": n >= need}
+                    for k, n in sorted(by_tech.items())
+                ]
+                print(f"  🧠 {len(rows)} staged T=2 solution(s) awaiting distillation "
+                      f"({sum(1 for t in techniques if t['ready_to_consolidate'])} "
+                      f"technique(s) ready to consolidate; threshold {need}).")
                 return json.dumps({"status": "success", "action": "list_staged",
+                                   "consolidate_threshold": need,
+                                   "techniques": techniques,
                                    "staged_solutions": rows}, default=str)
 
             try:
@@ -530,7 +547,11 @@ class MetaOrchestratorTools:
                 "`staged_solutions`); skills are produced from staged solutions two "
                 "ways, both review-gated: `upgrade` merges ONE staged solution into an "
                 "EXISTING skill, or `consolidate` distills all staged solutions of a "
-                "technique into a NEW (provisional) skill. Also manages already-"
+                "technique into a NEW (provisional) skill. Prefer `upgrade` when a "
+                "matching skill exists. Do NOT `consolidate` a technique into a new "
+                "skill until it has accumulated enough examples — `list_staged` reports "
+                "`ready_to_consolidate` per technique against `consolidate_threshold`; "
+                "if not ready, leave it staged to accumulate. Also manages already-"
                 "distilled provisional skills. Actions: `list` (provisional skills), "
                 "`list_staged` (staged solutions, by technique), `show` a skill, "
                 "`promote`/`discard` a skill, `upgrade` (needs `staged` + `into`), "

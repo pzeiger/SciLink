@@ -135,11 +135,7 @@ def _cmd_prune(args) -> int:
 
 
 def _consolidate_n() -> int:
-    import os
-    try:
-        return int(os.environ.get("SCILINK_CONSOLIDATE_N", "3"))
-    except ValueError:
-        return 3
+    return _staging.consolidate_min_n()
 
 
 def _cmd_staged(args) -> int:
@@ -154,11 +150,16 @@ def _cmd_staged(args) -> int:
                 rec.get("technique") or "unlabeled", []).append(rec)
     total = 0
     threshold = _consolidate_n()
+    any_ready = False
     for dom, by_tech in sorted(domains.items()):
         for tech, recs in sorted(by_tech.items()):
             total += len(recs)
-            ready = " — ready to consolidate" if len(recs) >= threshold else ""
-            print(f"{dom}/{tech}: {len(recs)} staged{ready}")
+            if len(recs) >= threshold:
+                any_ready = True
+                status = " — ready to consolidate"
+            else:
+                status = f" — accumulating {len(recs)}/{threshold} for a new skill"
+            print(f"{dom}/{tech}: {len(recs)} staged{status}")
             for r in recs:
                 metric = r.get("r_squared") or r.get("quality_score")
                 mtxt = f"  metric={metric}" if metric is not None else ""
@@ -166,9 +167,12 @@ def _cmd_staged(args) -> int:
     if not total:
         print("No staged T=2 solutions.")
     else:
-        print(f"\n{total} staged solution(s). "
-              f"Upgrade an existing skill (`upgrade <domain>/<id> --into ...`) "
-              f"or consolidate (`consolidate <domain>/<technique>`).")
+        # New-skill consolidation accumulates first (>= N of a technique). Upgrading an
+        # existing skill from a single solution is always available.
+        tip = "`upgrade <domain>/<id> --into <domain>/<name>` (enrich an existing skill)"
+        if any_ready:
+            tip += " or `consolidate <domain>/<technique>` (techniques marked ready)"
+        print(f"\n{total} staged solution(s). {tip}.")
     return 0
 
 
