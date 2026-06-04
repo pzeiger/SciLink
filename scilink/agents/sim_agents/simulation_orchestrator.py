@@ -1,14 +1,16 @@
 """
-Simulation Orchestrator Agent for VASP DFT input preparation.
+Simulation Orchestrator Agent for computational simulation.
 
-Coordinates structure generation, VASP input creation, and post-run analysis
-through tools wrapping the existing sim_agents stack (StructureGenerator,
-StructureValidatorAgent, VaspInputAgent, VaspUpdater, IncarValidatorAgent,
-DFTOrchestrator).
+Coordinates structure generation, input creation, validation, and post-run
+analysis through an engine-neutral tool surface: structure generation
+(StructureOrchestrator), the scale-agnostic simulation pipeline, and the
+engine-neutral critics (InputValidator / RunCritic), with engine specifics
+supplied by skill bundles. The routing decision selects scale + engine.
 
-Mirrors the shape of AnalysisOrchestratorAgent for consistent UX. VASP DFT
-only for now; LAMMPS support and HPC submission tools are follow-up work
-(see CLAUDE.md for the full sequencing plan).
+Mirrors the shape of AnalysisOrchestratorAgent for consistent UX. Periodic
+DFT (VASP, QE) is fully dispatched; MD and MLIP scales route and run the
+one-shot pipeline, with granular per-step tools as follow-up work (see
+CLAUDE.md for the full sequencing plan).
 
 The duplication with AnalysisOrchestratorAgent is intentional and acceptable
 at this development stage — see CLAUDE.md "Why no BaseChatOrchestrator

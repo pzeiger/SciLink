@@ -1,10 +1,20 @@
 """
+BENCHMARK BASELINE — legacy VASP output parser.
+
+Retained as a support module for the baseline ``VaspQualityAgent`` in the
+old-vs-new critic benchmark; NOT on the live path. The live post-run
+snapshot lives in the VASP skill bundle as ``snapshot_run``
+(``scilink.skills.periodic_dft.vasp.vasp_output``), discovered via the
+skill registry. The two share the same parsing logic by design (the bundle
+version is the relocation); this copy stays to keep the baseline agent
+self-contained.
+
 Post-run VASP output analysis.
 
 Reads OUTCAR / vasprun.xml from a completed (or failed) VASP run and
-produces a structured summary the simulate orchestrator can hand back
-to the user. This is the part of the orchestrator that closes the loop
-after the user runs VASP elsewhere — analyze mode never does this.
+produces a structured summary. Originally the simulate orchestrator's
+post-run close-the-loop step; that role is now the engine-neutral
+``RunCritic`` + the skill-bundle ``snapshot_run`` tool.
 
 Designed to be defensive: VASP runs fail in many ways and pymatgen's
 parser can raise on partial / corrupt outputs. Every code path returns

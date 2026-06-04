@@ -1,4 +1,12 @@
-"""Post-run quality / critic agent for VASP calculations.
+"""BENCHMARK BASELINE — legacy VASP-specific post-run quality critic.
+
+Retained only as a baseline for the old-vs-new critic comparison in the
+benchmark suite; NOT on the live path. The live post-run capability is the
+engine-neutral ``RunCritic`` (``scilink.agents.sim_agents.critics``).
+Nothing in the live orchestrator/pipeline imports this module — only the
+benchmark harness does.
+
+Post-run quality / critic agent for VASP calculations.
 
 Wraps `post_run_analysis.analyze_run_directory` (the deterministic
 data layer that parses vasprun.xml + logs) with an LLM layer that
