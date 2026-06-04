@@ -31,6 +31,26 @@ def staging_dir() -> Path:
     return scilink_home() / "distill_staging"
 
 
+# Advisory minimum number of staged solutions of a technique before consolidating
+# them into a NEW skill. Below this, review surfaces accumulate rather than suggest
+# graduation (a single example is usually too idiosyncratic to generalize). Upgrading
+# an EXISTING skill is exempt — that is upgrade@1 by design. The function itself
+# still consolidates whatever is present when explicitly called.
+_DEFAULT_CONSOLIDATE_N = 3
+
+
+def consolidate_min_n() -> int:
+    """Readiness threshold for new-skill consolidation (``$SCILINK_CONSOLIDATE_N``)."""
+    import os
+    raw = os.environ.get("SCILINK_CONSOLIDATE_N", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return _DEFAULT_CONSOLIDATE_N
+
+
 def _domain_dir(domain: str, *, root: Optional[Path] = None) -> Path:
     # domain is a filesystem component — sanitize to prevent path traversal.
     return (root or staging_dir()) / safe_path_component(domain, fallback="unknown_domain")
@@ -195,7 +215,119 @@ def _record_for_prompt(rec: Dict[str, Any]) -> Dict[str, Any]:
 
 # ──────────────────────────────────────────────────────────────
 # upgrade@1 — merge staged solution(s) into an EXISTING skill
+#
+# Upgrade mutates an existing (often already-active) skill in place, so it is
+# split into propose → apply for a human-in-the-loop review of the merged
+# content: ``propose_skill_upgrade`` builds the merged skill WITHOUT writing it
+# (returns the proposed text + the current text for a diff); ``apply_skill_upgrade``
+# backs up the current file and writes the approved content. ``upgrade_skill_from_staged``
+# remains as the one-shot (propose+apply) for non-interactive callers.
 # ──────────────────────────────────────────────────────────────
+
+def _skill_md_path(target_domain: str, target_name: str,
+                   skills_root: Optional[Path] = None) -> Path:
+    n = safe_path_component(target_name)
+    return ((skills_root or graduated_skills_dir())
+            / safe_path_component(target_domain) / n / f"{n}.md")
+
+
+def _missing_target_error(target_domain: str, target_name: str) -> Dict[str, Any]:
+    return {"status": "error",
+            "message": (f"Target skill '{target_domain}/{target_name}' does not exist — "
+                        f"upgrade enriches an existing skill. Check the name, or use "
+                        f"consolidate to create a new skill.")}
+
+
+def propose_skill_upgrade(
+    domain: str,
+    staged_ids: List[str],
+    *,
+    target_domain: str,
+    target_name: str,
+    llm_call: Callable[[str], str],
+    fresh_template: str,
+    update_template: str,
+    root: Optional[Path] = None,
+    skills_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Build the merged skill for review WITHOUT writing it.
+
+    Returns ``proposed_content`` (the new skill text) and ``existing_content``
+    (the current file) so a caller can show a diff and confirm. Nothing is
+    written and no staged records are consumed until ``apply_skill_upgrade``.
+    """
+    recs = [r for r in (get_staged(domain, sid, root=root) for sid in staged_ids) if r]
+    if not recs:
+        return {"status": "error", "message": "No staged records found for the given ids."}
+
+    target_md = _skill_md_path(target_domain, target_name, skills_root)
+    if not target_md.exists():
+        return _missing_target_error(target_domain, target_name)
+
+    knowledge_entry = {"new_t2_solutions": [_record_for_prompt(r) for r in recs]}
+    result = graduate_to_skill_file(
+        knowledge_entry=knowledge_entry,
+        skill_name=target_name,
+        domain=target_domain,
+        llm_call=llm_call,
+        fresh_template=fresh_template,
+        update_template=update_template,
+        skills_root=skills_root,
+        write=False,
+    )
+    if result.get("status") != "success":
+        return result
+    return {
+        "status": "success",
+        "action": "proposed",
+        "proposed_content": result["content"],
+        "existing_content": target_md.read_text(),
+        "skill_path": str(target_md),
+        "target_domain": target_domain,
+        "target_name": target_name,
+        "staged_ids": [r["id"] for r in recs if r.get("id")],
+        "word_count": result.get("word_count"),
+    }
+
+
+def apply_skill_upgrade(
+    domain: str,
+    staged_ids: List[str],
+    *,
+    target_domain: str,
+    target_name: str,
+    proposed_content: str,
+    root: Optional[Path] = None,
+    skills_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Write a previously-proposed upgrade, backing up the current file first.
+
+    The pre-upgrade skill is copied to ``<name>.md.bak`` (so an upgrade can be
+    reverted), the approved ``proposed_content`` is written, and the consumed
+    staged records are removed.
+    """
+    target_md = _skill_md_path(target_domain, target_name, skills_root)
+    if not target_md.exists():
+        return _missing_target_error(target_domain, target_name)
+    # Back up the current version (single last-version undo; .bak is ignored by
+    # the loader, which only discovers <name>.md).
+    backup = target_md.with_name(target_md.name + ".bak")
+    backup.write_text(target_md.read_text())
+    (target_md.parent / "__init__.py").touch()
+    target_md.write_text(proposed_content)
+    removed = remove_staged(domain, staged_ids, root=root)
+    return {
+        "status": "success",
+        "method": "updated",
+        "skill_name": target_name,
+        "domain": target_domain,
+        "skill_path": str(target_md),
+        "backup_path": str(backup),
+        "consumed_staged": list(staged_ids),
+        "n_consumed": removed,
+        "word_count": len(proposed_content.split()),
+    }
+
 
 def upgrade_skill_from_staged(
     domain: str,
@@ -209,47 +341,22 @@ def upgrade_skill_from_staged(
     root: Optional[Path] = None,
     skills_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Enrich an existing skill from one (or a few) staged solution(s).
+    """One-shot upgrade (propose + apply) for non-interactive callers.
 
-    The target skill must already exist, so ``graduate_to_skill_file`` takes its
-    update/merge branch — the same path the demo exercises (EELS v1→v2). The LLM
-    sees the staged solution's (capped) script as input and distills a reusable
-    recipe; the full verbatim script is deliberately NOT copied into the skill
-    (that bloated reused skills and degraded the next run). On success the
-    consumed staged records are removed.
+    Interactive surfaces should call ``propose_skill_upgrade`` → show the diff →
+    ``apply_skill_upgrade`` so a human reviews the merged content. This wrapper
+    still backs up the pre-upgrade file (via ``apply_skill_upgrade``).
     """
-    recs = [r for r in (get_staged(domain, sid, root=root) for sid in staged_ids) if r]
-    if not recs:
-        return {"status": "error", "message": "No staged records found for the given ids."}
-
-    # "Upgrade" means enrich an EXISTING skill. Require the target to exist so a
-    # typo'd --into doesn't silently create a brand-new skill (and waste an LLM
-    # call). Use consolidate / a fresh graduation to make a new skill instead.
-    target_md = ((skills_root or graduated_skills_dir())
-                 / safe_path_component(target_domain) / safe_path_component(target_name)
-                 / f"{safe_path_component(target_name)}.md")
-    if not target_md.exists():
-        return {"status": "error",
-                "message": (f"Target skill '{target_domain}/{target_name}' does not exist — "
-                            f"upgrade enriches an existing skill. Check the name, or use "
-                            f"consolidate to create a new skill.")}
-
-    knowledge_entry = {
-        "new_t2_solutions": [_record_for_prompt(r) for r in recs],
-    }
-    result = graduate_to_skill_file(
-        knowledge_entry=knowledge_entry,
-        skill_name=target_name,
-        domain=target_domain,
-        llm_call=llm_call,
-        fresh_template=fresh_template,
-        update_template=update_template,
-        skills_root=skills_root,
-    )
-    if result.get("status") == "success":
-        remove_staged(domain, [r["id"] for r in recs if r.get("id")], root=root)
-        result["consumed_staged"] = [r.get("id") for r in recs]
-    return result
+    prop = propose_skill_upgrade(
+        domain, staged_ids, target_domain=target_domain, target_name=target_name,
+        llm_call=llm_call, fresh_template=fresh_template,
+        update_template=update_template, root=root, skills_root=skills_root)
+    if prop.get("status") != "success":
+        return prop
+    return apply_skill_upgrade(
+        domain, prop["staged_ids"], target_domain=target_domain,
+        target_name=target_name, proposed_content=prop["proposed_content"],
+        root=root, skills_root=skills_root)
 
 
 # ──────────────────────────────────────────────────────────────

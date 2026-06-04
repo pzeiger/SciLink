@@ -135,11 +135,7 @@ def _cmd_prune(args) -> int:
 
 
 def _consolidate_n() -> int:
-    import os
-    try:
-        return int(os.environ.get("SCILINK_CONSOLIDATE_N", "3"))
-    except ValueError:
-        return 3
+    return _staging.consolidate_min_n()
 
 
 def _cmd_staged(args) -> int:
@@ -154,11 +150,16 @@ def _cmd_staged(args) -> int:
                 rec.get("technique") or "unlabeled", []).append(rec)
     total = 0
     threshold = _consolidate_n()
+    any_ready = False
     for dom, by_tech in sorted(domains.items()):
         for tech, recs in sorted(by_tech.items()):
             total += len(recs)
-            ready = " — ready to consolidate" if len(recs) >= threshold else ""
-            print(f"{dom}/{tech}: {len(recs)} staged{ready}")
+            if len(recs) >= threshold:
+                any_ready = True
+                status = " — ready to consolidate"
+            else:
+                status = f" — accumulating {len(recs)}/{threshold} for a new skill"
+            print(f"{dom}/{tech}: {len(recs)} staged{status}")
             for r in recs:
                 metric = r.get("r_squared") or r.get("quality_score")
                 mtxt = f"  metric={metric}" if metric is not None else ""
@@ -166,29 +167,69 @@ def _cmd_staged(args) -> int:
     if not total:
         print("No staged T=2 solutions.")
     else:
-        print(f"\n{total} staged solution(s). "
-              f"Upgrade an existing skill (`upgrade <domain>/<id> --into ...`) "
-              f"or consolidate (`consolidate <domain>/<technique>`).")
+        # New-skill consolidation accumulates first (>= N of a technique). Upgrading an
+        # existing skill from a single solution is always available.
+        tip = "`upgrade <domain>/<id> --into <domain>/<name>` (enrich an existing skill)"
+        if any_ready:
+            tip += " or `consolidate <domain>/<technique>` (techniques marked ready)"
+        print(f"\n{total} staged solution(s). {tip}.")
     return 0
 
 
 def _cmd_upgrade(args) -> int:
+    import difflib
     from scilink.agents.exp_agents.instruct import (
         KNOWLEDGE_TO_SKILL_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS,
     )
     domain, sid = _split_ref(args.ref)  # staged ref = <domain>/<id>
     tdomain, tname = _split_ref(args.into)
-    res = _staging.upgrade_skill_from_staged(
+
+    # 1) propose (build the merged skill without writing it)
+    prop = _staging.propose_skill_upgrade(
         domain, [sid], target_domain=tdomain, target_name=tname,
         llm_call=_make_llm_call(args),
         fresh_template=KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
         update_template=SKILL_UPDATE_INSTRUCTIONS,
     )
+    if prop.get("status") != "success":
+        print(f"❌ {prop.get('message', prop)}")
+        return 1
+
+    # 2) show the diff for review (upgrade mutates an existing skill in place)
+    if not args.yes:
+        diff = difflib.unified_diff(
+            prop["existing_content"].splitlines(),
+            prop["proposed_content"].splitlines(),
+            fromfile=f"{tdomain}/{tname} (current)",
+            tofile=f"{tdomain}/{tname} (after upgrade)", lineterm="")
+        print(f"\nProposed upgrade of {tdomain}/{tname} from staged {sid}:\n")
+        printed = False
+        for line in diff:
+            printed = True
+            if line.startswith("+") and not line.startswith("+++"):
+                print(f"\033[32m{line}\033[0m")
+            elif line.startswith("-") and not line.startswith("---"):
+                print(f"\033[31m{line}\033[0m")
+            else:
+                print(line)
+        if not printed:
+            print("(no textual change)")
+        resp = input("\nApply this upgrade? [y/N] ").strip().lower()
+        if resp not in ("y", "yes"):
+            print("Aborted — nothing written, staged solution kept.")
+            return 1
+
+    # 3) apply the approved content (backs up the current file)
+    res = _staging.apply_skill_upgrade(
+        domain, prop["staged_ids"], target_domain=tdomain, target_name=tname,
+        proposed_content=prop["proposed_content"],
+    )
     if res.get("status") != "success":
         print(f"❌ {res.get('message', res)}")
         return 1
-    print(f"✅ Upgraded {tdomain}/{tname} ({res.get('method')}) from staged {sid}.")
+    print(f"✅ Upgraded {tdomain}/{tname} from staged {sid}.")
     print(f"   {res.get('skill_path')}")
+    print(f"   backup: {res.get('backup_path')}")
     return 0
 
 
@@ -263,6 +304,8 @@ def main():
     p_up = sub.add_parser("upgrade", help="Merge a staged solution INTO an existing skill")
     p_up.add_argument("ref", help="Staged solution ref '<domain>/<id>'")
     p_up.add_argument("--into", required=True, help="Target skill '<domain>/<name>'")
+    p_up.add_argument("--yes", action="store_true",
+                      help="Apply without showing the diff / prompting")
     _add_model_args(p_up)
     p_up.set_defaults(func=_cmd_upgrade)
 

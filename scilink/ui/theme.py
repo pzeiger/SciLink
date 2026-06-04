@@ -172,7 +172,8 @@ div:has(> [data-testid="stMarkdown"] .theme-toggle-anchor) + div button:hover {
     box-shadow: none !important;
 }
 /* File explorer tree buttons — soft gray, blue on selection */
-[data-testid="stExpander"] .stButton > button {
+[data-testid="stExpander"] .stButton > button,
+[data-testid="stExpander"] .stButton button {
     background-color: #2A3340;
     color: #B0BEC5;
     border: 1px solid #3A4556;
@@ -182,13 +183,15 @@ div:has(> [data-testid="stMarkdown"] .theme-toggle-anchor) + div button:hover {
     font-size: 0.85em;
     padding: 0.25rem 0.5rem;
 }
-[data-testid="stExpander"] .stButton > button:hover {
+[data-testid="stExpander"] .stButton > button:hover,
+[data-testid="stExpander"] .stButton button:hover {
     background-color: #344155;
     border-color: #5B8DEF;
     color: #E0E0E0;
     box-shadow: none;
 }
-[data-testid="stExpander"] .stButton > button[kind="primary"] {
+[data-testid="stExpander"] .stButton > button[kind="primary"],
+[data-testid="stExpander"] .stButton button[kind="primary"] {
     background-color: #1A3A5C;
     border-color: #5B8DEF;
     color: #82B1FF;
@@ -383,6 +386,27 @@ h2, h3 {
     background-color: #D32F2F !important;
     border-color: #D32F2F !important;
     color: #FFFFFF !important;
+}
+/* The big 58px steel-blue rule above is for the chat-tab action buttons.
+   Inside expanders (Skills / Persistent Memory panels) secondary buttons
+   should stay compact like the file-explorer ones — higher specificity +
+   !important to beat the rule above (light mode has no such override, which
+   is why it already looked right). */
+.stTabs [data-testid="stExpander"] .stButton > button[kind="secondary"] {
+    width: auto !important;
+    height: auto !important;
+    min-height: 0 !important;
+    font-size: 0.85em !important;
+    padding: 0.25rem 0.5rem !important;
+    border-radius: 4px !important;
+    background-color: #2A3340 !important;
+    color: #B0BEC5 !important;
+    border: 1px solid #3A4556 !important;
+}
+.stTabs [data-testid="stExpander"] .stButton > button[kind="secondary"]:hover {
+    background-color: #344155 !important;
+    border-color: #5B8DEF !important;
+    color: #E0E0E0 !important;
 }
 
 /* ── Live log viewer ────────────────────────────────── */
@@ -724,6 +748,42 @@ div:has(> [data-testid="stMarkdown"] .theme-toggle-anchor) + div button:hover {
     border-color: #5B8DEF;
     color: #1565C0;
 }
+/* Popover triggers (e.g. the staged-solution "View" button) are NOT .stButton,
+   so the rule above misses them and they fall through to the launch-time dark
+   native theme. Style them to match the compact light expander buttons. */
+[data-testid="stExpander"] [data-testid="stPopover"] button {
+    background-color: #EEEEEE !important;
+    color: #212121 !important;
+    border: 1px solid #E0E0E0 !important;
+    font-weight: 400;
+    letter-spacing: 0;
+    font-size: 0.85em;
+    padding: 0.25rem 0.5rem;
+}
+[data-testid="stExpander"] [data-testid="stPopover"] button:hover {
+    background-color: #E3F2FD !important;
+    border-color: #5B8DEF !important;
+    color: #212121 !important;
+    box-shadow: none !important;
+}
+/* The popover panel is portaled to the document root (not inside the expander),
+   so style it globally for light mode. baseweb gives the body (and a nested
+   content wrapper) a dark inline background, so whiten the body AND its block
+   containers — otherwise the dark markdown text below sits on a dark wrapper and
+   is barely visible. The code block keeps its own dark bg via its own !important. */
+[data-testid="stPopoverBody"],
+[data-testid="stPopoverBody"] [data-testid="stVerticalBlock"],
+[data-testid="stPopoverBody"] [data-testid="stVerticalBlockBorderWrapper"],
+[data-testid="stPopoverBody"] [data-testid="stElementContainer"] {
+    background-color: #FFFFFF !important;
+}
+[data-testid="stPopoverBody"] {
+    border: 1px solid #E0E0E0 !important;
+}
+[data-testid="stPopoverBody"] [data-testid="stMarkdown"],
+[data-testid="stPopoverBody"] [data-testid="stMarkdown"] * {
+    color: #212121 !important;
+}
 
 /* ── Success-style button ──────────────────────────── */
 .success-btn > button {
@@ -945,20 +1005,25 @@ section[data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stExpa
     border-radius: 4px;
     background-color: #1E1E1E !important;
 }
+/* Keep the dark code-block background, but DON'T force a single color on
+   every span — that would flatten Prism's syntax highlighting to one gray.
+   Set a base color only for un-tokenized text (code/pre); token spans keep
+   their own colors (the native theme is dark, so they suit #1E1E1E). */
 .stCodeBlock code,
 .stCodeBlock pre,
 [data-testid="stCode"] code,
-[data-testid="stCode"] pre,
+[data-testid="stCode"] pre {
+    color: #E0E0E0 !important;
+    background-color: #1E1E1E !important;
+}
 .stCodeBlock *,
 [data-testid="stCode"] * {
-    color: #E0E0E0 !important;
     background-color: #1E1E1E !important;
 }
 .stCodeBlock:hover,
 .stCodeBlock:hover *,
 [data-testid="stCode"]:hover,
 [data-testid="stCode"]:hover * {
-    color: #E0E0E0 !important;
     background-color: #1E1E1E !important;
 }
 

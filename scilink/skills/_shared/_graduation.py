@@ -275,6 +275,7 @@ def graduate_to_skill_file(
     skills_root: Optional[Path] = None,
     extra_meta: Optional[Dict[str, Any]] = None,
     append_sections: Optional[Dict[str, str]] = None,
+    write: bool = True,
 ) -> Dict[str, Any]:
     """Graduate a knowledge entry into a skill .md file.
 
@@ -359,6 +360,19 @@ def graduate_to_skill_file(
             existing = (str(parsed.get(key) or "")).strip()
             parsed[key] = f"{existing}\n\n{text}".strip() if existing else text
     skill_content = format_skill_as_markdown(parsed)
+
+    # Build-only mode: return the proposed content WITHOUT writing it, so a
+    # caller can show it for review (used by the upgrade propose/apply flow).
+    if not write:
+        return {
+            "status": "success",
+            "method": "updated" if is_update else "created",
+            "skill_name": skill_name,
+            "domain": domain,
+            "skill_path": str(skill_path),
+            "content": skill_content,
+            "word_count": len(skill_content.split()),
+        }
 
     # Loader-style bundles include __init__.py; harmless for path-loaded
     # skills, but keeps the layout consistent with built-ins.

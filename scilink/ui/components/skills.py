@@ -171,33 +171,60 @@ def _render_staged_section() -> None:
         with st.expander(f"`{domain}/{technique}` — {len(recs)} staged", expanded=False):
             for r in recs:
                 metric = r.get("r_squared") or r.get("quality_score")
-                st.caption(f"id={r['id']} · session={r.get('session','?')}"
-                           + (f" · metric={metric}" if metric is not None else ""))
+                meta_col, view_col = st.columns([3, 1])
+                meta_col.caption(
+                    f"id={r['id']} · session={r.get('session','?')}"
+                    + (f" · metric={metric}" if metric is not None else "")
+                )
+                with view_col.popover("View", use_container_width=True):
+                    _render_staged_record(r)
             if model is None:
                 st.info("Start a session to enable upgrade/consolidate (needs a model).")
                 continue
-            # candidate existing skills to upgrade into (same domain)
+            # candidate existing skills to upgrade into (same domain).
+            # Keep the action buttons in narrow columns + a trailing spacer so
+            # they land at a modest size (like the sidebar's Reset/Quit) rather
+            # than stretching across the full-width memory panel.
             targets = [f"{s['domain']}/{s['name']}" for s in _memory.list_memory(domain=domain)]
-            c1, c2 = st.columns(2)
+            c1, c2, _ = st.columns([2, 2, 4])
+            prop_key = f"upgprop::{domain}/{technique}"
             with c1:
                 if targets:
                     tgt = st.selectbox("Upgrade into", targets, key=f"tgt::{domain}/{technique}")
                     sid = recs[0]["id"]
-                    if st.button("Upgrade (use newest)", key=f"up::{domain}/{technique}"):
+                    # Upgrade mutates an existing skill in place, so preview first:
+                    # build the merged skill, show a diff, and apply only on confirm.
+                    if st.button("Preview upgrade", key=f"up::{domain}/{technique}"):
                         from scilink.agents.exp_agents.instruct import (
                             KNOWLEDGE_TO_SKILL_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS)
                         td, tn = tgt.split("/", 1)
-                        res = _staging.upgrade_skill_from_staged(
+                        prop = _staging.propose_skill_upgrade(
                             domain, [sid], target_domain=td, target_name=tn,
                             llm_call=_llm_call,
                             fresh_template=KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
                             update_template=SKILL_UPDATE_INSTRUCTIONS)
-                        st.success(f"Upgraded {tgt} ({res.get('method')}).")
+                        if prop.get("status") == "success":
+                            st.session_state[prop_key] = prop
+                        else:
+                            st.error(prop.get("message", "Could not build upgrade."))
                         st.rerun()
                 else:
                     st.caption("No existing skills in this domain to upgrade into.")
             with c2:
-                if st.button("Consolidate → new skill", key=f"con::{domain}/{technique}"):
+                # New-skill consolidation accumulates first: only suggest it once
+                # enough examples of this technique are staged. Below the threshold
+                # the agent is still gathering evidence (one fit is too idiosyncratic
+                # to generalize into a standalone skill). Upgrading an existing skill
+                # is exempt — that's the upgrade@1 path on the left.
+                need = _staging.consolidate_min_n()
+                ready = len(recs) >= need
+                if st.button("Consolidate → new skill", key=f"con::{domain}/{technique}",
+                             disabled=not ready,
+                             help=(None if ready else
+                                   f"Accumulating {len(recs)}/{need} — consolidation into a "
+                                   f"new skill unlocks once {need} solutions of this technique "
+                                   f"are staged (set SCILINK_CONSOLIDATE_N to change; "
+                                   f"`scilink memory consolidate` can force it).")):
                     from scilink.agents.exp_agents.instruct import (
                         T2_CONSOLIDATION_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS)
                     res = _staging.consolidate_technique(
@@ -206,6 +233,58 @@ def _render_staged_section() -> None:
                         update_template=SKILL_UPDATE_INSTRUCTIONS)
                     st.success(f"Consolidated {res.get('n_examples')} → auto_{technique} (provisional).")
                     st.rerun()
+
+            # Pending upgrade preview — review the merged content before applying.
+            prop = st.session_state.get(prop_key)
+            if prop:
+                import difflib
+                st.markdown(
+                    f"**Review upgrade → `{prop['target_domain']}/{prop['target_name']}`** "
+                    "— applies in place; the current version is backed up to `.md.bak`."
+                )
+                diff = "\n".join(difflib.unified_diff(
+                    prop["existing_content"].splitlines(),
+                    prop["proposed_content"].splitlines(),
+                    fromfile="current", tofile="after upgrade", lineterm=""))
+                st.code(diff or "(no textual change)", language="diff")
+                a1, a2, _ = st.columns([2, 2, 4])
+                if a1.button("Apply upgrade", key=f"upapply::{domain}/{technique}",
+                             type="primary"):
+                    res = _staging.apply_skill_upgrade(
+                        domain, prop["staged_ids"],
+                        target_domain=prop["target_domain"],
+                        target_name=prop["target_name"],
+                        proposed_content=prop["proposed_content"])
+                    st.session_state.pop(prop_key, None)
+                    if res.get("status") == "success":
+                        st.success(f"Upgraded {prop['target_domain']}/{prop['target_name']} "
+                                   f"(backup saved).")
+                    else:
+                        st.error(res.get("message", "Apply failed."))
+                    st.rerun()
+                if a2.button("Cancel", key=f"upcancel::{domain}/{technique}"):
+                    st.session_state.pop(prop_key, None)
+                    st.rerun()
+                if not ready:
+                    st.caption(f"Accumulating {len(recs)}/{need} examples before a new skill.")
+
+
+# Bookkeeping keys not worth showing in the per-record viewer.
+_STAGED_HIDDEN_KEYS = {"id", "domain", "technique", "session", "working_script", "script"}
+
+
+def _render_staged_record(r: dict) -> None:
+    """Show one staged T=2 solution's actual content (planned vs final model,
+    deviation, metric, and the working script) so it can be inspected before
+    upgrading/consolidating."""
+    for k, v in r.items():
+        if k in _STAGED_HIDDEN_KEYS or v in (None, "", [], {}):
+            continue
+        st.markdown(f"**{k.replace('_', ' ')}:** {v}")
+    script = (r.get("working_script") or r.get("script") or "").strip()
+    if script:
+        st.markdown("**working script:**")
+        st.code(script, language="python")
 
 
 def _render_memory_row(_memory, r, *, provisional: bool) -> None:
@@ -223,7 +302,7 @@ def _render_memory_row(_memory, r, *, provisional: bool) -> None:
         except Exception as e:
             st.warning(f"Could not render skill: {e}")
 
-        c1, c2 = st.columns(2)
+        c1, c2, _ = st.columns([2, 2, 4])
         if provisional:
             if c1.button("Promote", key=f"promote::{ref}", type="primary"):
                 _memory.promote_memory(r["domain"], r["name"])
