@@ -2,9 +2,9 @@
 
 A single one-shot pipeline that turns a natural-language request into a
 validated structure plus ready-to-run inputs, for any simulation scale.
-It replaces the per-scale orchestrator classes (the former
-``DFTOrchestrator`` and ``LAMMPSOrchestrator``), which are retained only
-as thin deprecated shims that delegate here.
+One scale-agnostic entry point (``run_complete_workflow``) serves every
+engine; the scale selects the foundation agent and the engine selects the
+skill bundle.
 
 The pipeline is deterministic — it runs a fixed step sequence rather than
 letting an orchestration LLM choose steps — which is what makes its output
@@ -13,7 +13,7 @@ reproducible for benchmarking. The chat / LLM-driven path lives on
 headless sequence both that orchestrator and analyze-mode call.
 
 Steps:
-    1. Structure   — StructureOrchestrator (scale-agnostic) builds and
+    1. Structure   — StructurePipeline (scale-agnostic) builds and
                      validates the atomic structure.
     2. Inputs      — the routed scale's foundation agent generates inputs,
                      returning a normalized ``input_files`` map (engine
@@ -191,8 +191,8 @@ def run_complete_workflow(
     }
 
     # ── Step 1: structure generation + validation (scale-agnostic) ──
-    from .structure_orchestrator import StructureOrchestrator
-    structure = StructureOrchestrator(
+    from .structure_pipeline import StructurePipeline
+    structure = StructurePipeline(
         api_key=api_key, base_url=base_url, mp_api_key=mp_api_key,
         generator_model=model_name, validator_model=model_name,
         output_dir=output_dir, max_refinement_cycles=max_refinement_cycles,

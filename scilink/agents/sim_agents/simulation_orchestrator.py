@@ -3,7 +3,7 @@ Simulation Orchestrator Agent for computational simulation.
 
 Coordinates structure generation, input creation, validation, and post-run
 analysis through an engine-neutral tool surface: structure generation
-(StructureOrchestrator), the scale-agnostic simulation pipeline, and the
+(StructurePipeline), the scale-agnostic simulation pipeline, and the
 engine-neutral critics (InputValidator / RunCritic), with engine specifics
 supplied by skill bundles. The routing decision selects scale + engine.
 

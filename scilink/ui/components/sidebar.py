@@ -688,7 +688,7 @@ def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key
         st.sidebar.error(spec.cred_error)
         return
 
-    # Optional MP key: register so DFTOrchestrator's auto-discovery picks it up
+    # Optional MP key: register so the DFT pipeline's auto-discovery picks it up
     # later when the analysis orchestrator dispatches to structure generation.
     if mp_api_key:
         scilink.set_api_key('materials_project', mp_api_key)

@@ -1,4 +1,4 @@
-# scilink/agents/sim_agents/structure_orchestrator.py
+# scilink/agents/sim_agents/structure_pipeline.py
 
 import os
 import sys
@@ -15,7 +15,7 @@ from .structure_agent import StructureGenerator
 from .val_agent import StructureValidatorAgent
 
 
-class StructureOrchestrator:
+class StructurePipeline:
     """
     Engine-agnostic, structure-class-aware orchestrator for atomic-structure
     generation.
@@ -25,8 +25,8 @@ class StructureOrchestrator:
     ``structure_generation/<structure_class>`` skill bundle to steer the build,
     and iterates on validator feedback until the structure passes (or a
     circuit-breaker fires). It does NOT generate any engine inputs — that is the
-    job of a downstream simulation orchestrator (e.g. ``DFTOrchestrator``), which
-    composes this class for its structure step. The chat
+    job of a downstream simulation pipeline (e.g. ``run_complete_workflow``),
+    which composes this class for its structure step. The chat
     ``SimulationOrchestratorAgent`` tools delegate here too, so the loop lives in
     exactly one place.
 
@@ -125,7 +125,7 @@ class StructureOrchestrator:
             ``condensed`` / ``biomolecular``). No default on this standalone entry point,
             so a caller building e.g. a molecule must say so rather than silently getting
             the crystal rubric. (The DFT path keeps a ``"crystal"`` default in
-            ``DFTOrchestrator.run_complete_workflow``, where it's contextually correct.)
+            ``run_complete_workflow``, where it's contextually correct.)
         **kwargs
             Forwarded to :meth:`generate_and_validate` (``skill_content``,
             ``prior_script``, ``validate``, ``max_cycles``, ``output_dir``).
@@ -246,8 +246,9 @@ class StructureOrchestrator:
         """Generate and validate an atomic structure (the core refine loop).
 
         This is the single home for the structure generate → validate → refine
-        loop; both ``DFTOrchestrator`` and the chat ``SimulationOrchestratorAgent``
-        tools delegate here rather than reimplementing it.
+        loop; both the ``run_complete_workflow`` pipeline and the chat
+        ``SimulationOrchestratorAgent`` tools delegate here rather than
+        reimplementing it.
 
         Parameters
         ----------
