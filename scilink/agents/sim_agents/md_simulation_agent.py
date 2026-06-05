@@ -219,6 +219,14 @@ class MDSimulationAgent(SimulationAgent):
                 **kwargs,
             )
 
+        # Select the engine skill by runner name first — the runner names the
+        # engine directly, so skill selection must not hinge on the structure
+        # file's extension (an extensionless POSCAR from structure generation
+        # would otherwise match no skill and degrade generation). Extension-
+        # based detection stays as the fallback. "ase" is the universal runner
+        # and carries no skill bundle.
+        if runner and runner != "ase" and runner in self._available_skills:
+            self._load_skill(runner)
         self._auto_select_skill(structure_file)
 
         system_info = self.analyze_system(structure_file)
