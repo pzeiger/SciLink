@@ -110,7 +110,8 @@ def _cmd_list(args) -> int:
         return 0
     for r in rows:
         tag = "  [provisional]" if r["provisional"] else ""
-        r2 = f"  R²={r['r_squared']}" if r.get("r_squared") is not None else ""
+        _m = _staging.metric_label(r)
+        r2 = f"  {_m}" if _m else ""
         prov = f"  ({r['provenance']})" if r.get("provenance") else ""
         print(f"{r['domain']}/{r['name']}{tag}{r2}{prov}")
         if r.get("description"):
@@ -340,7 +341,7 @@ def main():
     p_prune.set_defaults(func=_cmd_prune)
 
     # --- staged T=2 solutions ---
-    p_staged = sub.add_parser("staged", help="List staged knowledge (solved-from-scratch fits, feedback, error fixes) by technique")
+    p_staged = sub.add_parser("staged", help="List staged knowledge (solved-from-scratch solutions, feedback, error fixes) by technique")
     p_staged.add_argument("--domain", help="Restrict to one domain")
     p_staged.set_defaults(func=_cmd_staged)
 

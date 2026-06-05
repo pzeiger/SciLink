@@ -35,6 +35,15 @@ PROVENANCE_LABELS = {
 }
 
 
+def metric_label(rec: Dict[str, Any]) -> str:
+    """Agent-agnostic metric label for display: R² for fits, 'score' otherwise."""
+    if rec.get("r_squared") is not None:
+        return f"R² {rec['r_squared']}"
+    if rec.get("quality_score") is not None:
+        return f"score {rec['quality_score']}"
+    return ""
+
+
 def staging_dir() -> Path:
     """Root of the raw-solution staging buffer (honors ``$SCILINK_HOME``)."""
     return scilink_home() / "distill_staging"

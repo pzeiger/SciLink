@@ -116,7 +116,7 @@ def _render_memory_section() -> None:
     st.caption(
         "Graduated and auto-distilled skills stored under `~/.scilink` — they "
         "survive sessions and upgrades. Provisional skills (auto-distilled from "
-        "hard fits the agent had to solve from scratch — currently curve fitting) "
+        "hard problems the agent had to solve from scratch) "
         "are held out of auto-routing until you promote them."
     )
 
@@ -170,7 +170,7 @@ def _render_staged_section() -> None:
     mem_on = loader.memory_enabled()
 
     st.markdown("---")
-    st.markdown("**Staged knowledge** — solved-from-scratch fits, your feedback & error fixes")
+    st.markdown("**Staged knowledge** — solved-from-scratch solutions, your feedback & error fixes")
     st.caption(
         "Hard problems the agent solved only after rebuilding its approach from "
         "scratch — plus your feedback and recurring error fixes. Upgrade an "
@@ -200,7 +200,7 @@ def _render_staged_section() -> None:
                 meta_col, view_col = st.columns([3, 1])
                 meta_col.caption(
                     f"id={r['id']} · {prov} · session={r.get('session','?')}"
-                    + (f" · metric={metric}" if metric is not None else "")
+                    + (f" · {_staging.metric_label(r)}" if _staging.metric_label(r) else "")
                 )
                 with view_col.popover("View", use_container_width=True):
                     _render_staged_record(r)
@@ -323,9 +323,11 @@ def _render_staged_record(r: dict) -> None:
 
 
 def _render_memory_row(_memory, r, *, provisional: bool) -> None:
+    from scilink.skills._shared import _staging
     ref = f"{r['domain']}/{r['name']}"
     badge = "🟡 provisional" if provisional else "✅ promoted"
-    r2 = f" · R²={r['r_squared']}" if r.get("r_squared") is not None else ""
+    _m = _staging.metric_label(r)
+    r2 = f" · {_m}" if _m else ""
     with st.expander(f"{badge} · `{ref}`{r2}", expanded=False):
         if r.get("description"):
             st.markdown(f"_{r['description']}_")
