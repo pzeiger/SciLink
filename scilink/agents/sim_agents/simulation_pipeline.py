@@ -2,9 +2,9 @@
 
 A single one-shot pipeline that turns a natural-language request into a
 validated structure plus ready-to-run inputs, for any simulation scale.
-It replaces the per-scale orchestrator classes (the former
-``DFTOrchestrator`` and ``LAMMPSOrchestrator``), which are retained only
-as thin deprecated shims that delegate here.
+One scale-agnostic entry point (``run_complete_workflow``) serves every
+engine; the scale selects the foundation agent and the engine selects the
+skill bundle.
 
 The pipeline is deterministic — it runs a fixed step sequence rather than
 letting an orchestration LLM choose steps — which is what makes its output

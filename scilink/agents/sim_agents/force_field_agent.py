@@ -8,8 +8,8 @@ import subprocess
 from typing import Dict, Any, List, Optional, Tuple, Union
 import numpy as np
 # MDAnalysis is imported lazily inside _analyze_system_composition so that
-# loading scilink.agents.sim_agents (e.g., via DFTOrchestrator) doesn't
-# require the LAMMPS-side optional dep.
+# loading scilink.agents.sim_agents doesn't require the LAMMPS-side optional
+# dep.
 from ...auth import (
     APIKeyNotFoundError, get_api_key, get_internal_proxy_key, infer_provider,
     require_vendor_credentials,

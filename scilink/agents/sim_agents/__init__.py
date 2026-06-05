@@ -13,7 +13,7 @@ from .lammps_analysis import LAMMPSAnalysisAgent
 from .lammps_analysis_updater import LAMMPSAnalysisUpdater
 from .lammps_orchestrator import LAMMPSOrchestrator
 from .structure_pipeline import StructurePipeline
-from .dft_orchestrator import DFTOrchestrator
+from .simulation_pipeline import run_complete_workflow
 from .simulation_orchestrator import SimulationOrchestratorAgent, SimulationMode
 from .simulation_router import SimulationRouter, discover_scale_agents
 from .structure_planner import StructurePlanner, StructureSpec

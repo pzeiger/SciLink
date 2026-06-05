@@ -1,8 +1,8 @@
 """Benchmark suite for the VASP agentic workflow.
 
 Generates VASP inputs (POSCAR / INCAR / KPOINTS) for each registered
-case via DFTOrchestrator.run_complete_workflow, writes a per-case
-SLURM submit script, and emits a top-level submit_all.sh + manifest.
+case via run_complete_workflow, writes a per-case SLURM submit
+script, and emits a top-level submit_all.sh + manifest.
 
 Each case lives in its own subdirectory under --output. The agent
 calls happen locally (LLM); VASP runs on the cluster after you rsync
@@ -209,25 +209,25 @@ def main() -> int:
     parser.add_argument(
         "--model",
         default="claude-opus-4-6",
-        help="LLM model for DFTOrchestrator. Default matches the wizard.",
+        help="LLM model for the DFT pipeline. Default matches the wizard.",
     )
     parser.add_argument(
         "--api-key",
         default=None,
-        help="Explicit LLM API key. If unset, DFTOrchestrator auto-discovers "
+        help="Explicit LLM API key. If unset, the pipeline auto-discovers "
              "based on --model.",
     )
     parser.add_argument(
         "--method",
         choices=["llm", "atomate2"],
         default="llm",
-        help="vasp_generator_method for DFTOrchestrator.",
+        help="Input-generation method for the DFT pipeline.",
     )
     parser.add_argument(
         "--max-cycles",
         type=int,
         default=4,
-        help="DFTOrchestrator.max_refinement_cycles.",
+        help="Structure-refinement cycle cap for the DFT pipeline.",
     )
     parser.add_argument(
         "--pseudo-dir",
@@ -246,7 +246,7 @@ def main() -> int:
     print()
 
     # Lazy import so --help works without dependencies
-    from scilink.agents.sim_agents.dft_orchestrator import DFTOrchestrator
+    from scilink.agents.sim_agents.simulation_pipeline import run_complete_workflow
 
     manifest: dict = {
         "started_at": datetime.now().isoformat(),
@@ -271,27 +271,26 @@ def main() -> int:
         }
 
         try:
-            orchestrator = DFTOrchestrator(
+            result = run_complete_workflow(
+                case.description,
+                scale="periodic_dft",
+                software="vasp",
+                method=args.method,
                 api_key=args.api_key,
-                generator_model=args.model,
-                validator_model=args.model,
+                model_name=args.model,
                 output_dir=str(case_dir),
-                vasp_generator_method=args.method,
                 max_refinement_cycles=args.max_cycles,
             )
-            result = orchestrator.run_complete_workflow(case.description)
-            # DFTOrchestrator returns workflow status under "final_status"
+            # run_complete_workflow reports status under "final_status"
             # ("success" / "failed_structure_generation" /
-            # "failed_vasp_generation"). Generated input filenames live
-            # in result["final_manifest"]["final_files"] (relative names).
+            # "failed_input_generation"). Generated input filenames are the
+            # keys of result["input_generation"]["input_files"].
             case_record["status"] = result.get("final_status", "unknown")
             case_record["steps_completed"] = result.get("steps_completed", [])
-            case_manifest = result.get("final_manifest", {})
-            if case_manifest.get("final_files"):
-                case_record["final_files"] = case_manifest["final_files"]
-                case_record["ready_for_vasp"] = bool(
-                    case_manifest.get("ready_for_vasp")
-                )
+            input_files = (result.get("input_generation") or {}).get("input_files") or {}
+            if input_files:
+                case_record["final_files"] = sorted(input_files.keys())
+                case_record["ready_for_vasp"] = result.get("final_status") == "success"
 
             # Per-case submit.sh
             pseudo_dir = args.pseudo_dir or SLURM_DEFAULT_PSEUDO_DIR
