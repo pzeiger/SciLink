@@ -340,7 +340,7 @@ def main():
     p_prune.set_defaults(func=_cmd_prune)
 
     # --- staged T=2 solutions ---
-    p_staged = sub.add_parser("staged", help="List staged solutions (solved from scratch) by technique")
+    p_staged = sub.add_parser("staged", help="List staged knowledge (solved-from-scratch fits, feedback, error fixes) by technique")
     p_staged.add_argument("--domain", help="Restrict to one domain")
     p_staged.set_defaults(func=_cmd_staged)
 

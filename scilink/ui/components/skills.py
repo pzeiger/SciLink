@@ -170,7 +170,7 @@ def _render_staged_section() -> None:
     mem_on = loader.memory_enabled()
 
     st.markdown("---")
-    st.markdown("**Staged solutions** (solved from scratch)")
+    st.markdown("**Staged knowledge** — solved-from-scratch fits, your feedback & error fixes")
     st.caption(
         "Hard problems the agent solved only after rebuilding its approach from "
         "scratch — plus your feedback and recurring error fixes. Upgrade an "
