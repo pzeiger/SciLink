@@ -26,6 +26,15 @@ from ..loader import scilink_home, load_skill, list_skills, graduated_skills_dir
 from ._graduation import graduate_to_skill_file, safe_path_component, warn_if_ephemeral_store
 
 
+# Friendly, jargon-free labels for record provenance (the stored values stay as
+# t2_solution/error_fix/user_correction; these are for user-facing display only).
+PROVENANCE_LABELS = {
+    "t2_solution": "solved from scratch",
+    "error_fix": "error fix",
+    "user_correction": "your feedback",
+}
+
+
 def staging_dir() -> Path:
     """Root of the raw-solution staging buffer (honors ``$SCILINK_HOME``)."""
     return scilink_home() / "distill_staging"

@@ -475,7 +475,7 @@ class MetaOrchestratorTools:
                     {"technique": k, "n_staged": n, "ready_to_consolidate": n >= need}
                     for k, n in sorted(by_tech.items())
                 ]
-                print(f"  🧠 {len(rows)} staged T=2 solution(s) awaiting distillation "
+                print(f"  🧠 {len(rows)} staged solution(s) awaiting distillation "
                       f"({sum(1 for t in techniques if t['ready_to_consolidate'])} "
                       f"technique(s) ready to consolidate; threshold {need}).")
                 return json.dumps({"status": "success", "action": "list_staged",
@@ -542,7 +542,8 @@ class MetaOrchestratorTools:
             func=review_distilled_skills,
             name="review_distilled_skills",
             description=(
-                "Review and act on learned knowledge from hard (T=2 hot-annealing) "
+                "Review and act on learned knowledge from hard runs the agent solved "
+                "from scratch (constraint-annealing hot stage). "
                 "runs. Such runs STAGE a raw solution (delegate_to_analysis reports "
                 "`staged_solutions`); skills are produced from staged solutions two "
                 "ways, both review-gated: `upgrade` merges ONE staged solution into an "

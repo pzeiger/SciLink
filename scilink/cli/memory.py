@@ -186,10 +186,11 @@ def _cmd_staged(args) -> int:
             for r in recs:
                 metric = r.get("r_squared") or r.get("quality_score")
                 mtxt = f"  metric={metric}" if metric is not None else ""
-                prov = r.get("provenance", "t2_solution")
+                prov = _staging.PROVENANCE_LABELS.get(r.get("provenance", "t2_solution"),
+                                                      r.get("provenance", ""))
                 print(f"    · id={r['id']}  [{prov}]  session={r.get('session','?')}{mtxt}")
     if not total:
-        print("No staged T=2 solutions.")
+        print("No staged solutions.")
     else:
         # New-skill consolidation accumulates first (>= N of a technique). Upgrading an
         # existing skill from a single solution is always available.
@@ -328,7 +329,7 @@ def main():
     p_prune.set_defaults(func=_cmd_prune)
 
     # --- staged T=2 solutions ---
-    p_staged = sub.add_parser("staged", help="List staged raw T=2 solutions by technique")
+    p_staged = sub.add_parser("staged", help="List staged solutions (solved from scratch) by technique")
     p_staged.add_argument("--domain", help="Restrict to one domain")
     p_staged.set_defaults(func=_cmd_staged)
 

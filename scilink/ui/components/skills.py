@@ -134,9 +134,10 @@ def _render_memory_section() -> None:
     if os.environ.get("SCILINK_MEMORY", "").strip():
         st.caption("⚠️ `SCILINK_MEMORY` env var is set and overrides this toggle.")
     if not new:
-        st.info("Persistent memory is **OFF** (inert). Turn it on to stage T=2 / "
-                "feedback / error knowledge and load promoted skills into runs. "
-                "Existing items below are kept and can still be reviewed.")
+        st.info("Persistent memory is **OFF** (inert). Turn it on to capture "
+                "hard-won solutions, your feedback, and error fixes — and to load "
+                "promoted skills into runs. Existing items below are kept and can "
+                "still be reviewed.")
 
     try:
         rows = _memory.list_memory()
@@ -167,11 +168,12 @@ def _render_staged_section() -> None:
     from scilink.skills._shared import _staging, _memory
 
     st.markdown("---")
-    st.markdown("**Staged T=2 solutions**")
+    st.markdown("**Staged solutions** (solved from scratch)")
     st.caption(
-        "Hard problems the agent solved from scratch (T=2). Upgrade an existing "
-        "skill from one, or consolidate several of the same technique into a new "
-        "skill. Both use the active session's model."
+        "Hard problems the agent solved only after rebuilding its approach from "
+        "scratch — plus your feedback and recurring error fixes. Upgrade an "
+        "existing skill from one, or consolidate several of the same technique "
+        "into a new skill. Both use the active session's model."
     )
 
     groups = {}
@@ -192,7 +194,7 @@ def _render_staged_section() -> None:
         with st.expander(f"`{domain}/{technique}` — {len(recs)} staged", expanded=False):
             for r in recs:
                 metric = r.get("r_squared") or r.get("quality_score")
-                prov = r.get("provenance", "t2_solution")
+                prov = _staging.PROVENANCE_LABELS.get(r.get("provenance", "t2_solution"), r.get("provenance", ""))
                 meta_col, view_col = st.columns([3, 1])
                 meta_col.caption(
                     f"id={r['id']} · {prov} · session={r.get('session','?')}"
