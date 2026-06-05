@@ -72,6 +72,15 @@ def _load_skill_file(agent, uploaded_file) -> None:
         st.error(f"Failed to register {uploaded_file.name}: {e}")
 
 
+def _render_skill_markdown(domain: str, name: str) -> None:
+    """Render a discoverable skill's markdown (built-in / user / graduated)."""
+    from scilink.skills.loader import _resolve_skill_path
+    try:
+        st.markdown(_resolve_skill_path(name, domain).read_text())
+    except Exception as e:
+        st.warning(f"Could not load skill: {e}")
+
+
 def _render_available_skills(agent) -> None:
     """Show built-in and custom skills."""
     st.subheader("Available Skills")
@@ -85,7 +94,10 @@ def _render_available_skills(agent) -> None:
             label = domain.replace("_", " ").title()
             with st.expander(f"{label} ({len(names)})", expanded=False):
                 for name in names:
-                    st.markdown(f"- `{name}`")
+                    nc, vc = st.columns([3, 1])
+                    nc.markdown(f"`{name}`")
+                    with vc.popover("view", use_container_width=True):
+                        _render_skill_markdown(domain, name)
     else:
         st.caption("No built-in skills found.")
 
