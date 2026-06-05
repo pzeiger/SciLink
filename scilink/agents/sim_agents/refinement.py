@@ -330,18 +330,29 @@ class RefinementPolicy(ABC):
 class AutonomousPolicy(RefinementPolicy):
     """Run end to end without consulting a human.
 
-    Applies the critic's proposed fixes as-is and refines until the verdict
-    is acceptable or the cycle budget is spent. Never calls ``interact``.
+    Refines toward a ``good`` verdict, applying the critic's proposed fixes
+    as-is, and never calls ``interact``. The decision to keep refining is
+    driven by the critic, not by a fixed verdict threshold: any verdict below
+    ``good`` is refined *only* when the critic proposed an actionable fix (its
+    ``suggested_fixes`` is its "re-running with this would help" signal) and
+    the loop is still making progress. So a fixable warning gets a correction
+    attempt, while a benign warning the critic offers no fix for — or a
+    stalled loop — stops. Bounded by fixes-available, the stall check, and the
+    cycle budget.
     """
 
     def approve_change(self, proposed_inputs, verdict, ctx):
         return proposed_inputs
 
     def after_run(self, result, verdict, ctx):
-        if _is_acceptable(verdict):
+        # Already good — nothing left to improve.
+        if _verdict_rank(verdict) >= _VERDICT_RANK["good"]:
             return CycleDecision.STOP
+        # Below good: refine only if the critic flagged something actionable.
         if not verdict.get("suggested_fixes"):
-            # Nothing actionable to apply — stop rather than spin.
+            return CycleDecision.STOP
+        # ...and only while the verdict is still improving.
+        if _stalled(ctx):
             return CycleDecision.STOP
         return CycleDecision.REFINE
 
@@ -555,9 +566,12 @@ def run_refinement(
             "run_status": last_verdict.get("run_status"),
         })
 
-        # A phase that aborted or could not reach an acceptable verdict stops
-        # the chain — later phases depend on this one's output (restart files).
-        if phase_status in ("aborted", "exhausted", "failed"):
+        # A phase that did not reach an acceptable verdict stops the chain —
+        # later phases depend on this one's output (restart files). Only a
+        # phase that ended acceptable ("success") lets the run proceed; a
+        # "stopped" phase (refining halted below acceptable — a benign-but-poor
+        # result, or a stalled loop) is not a success and ends the run.
+        if phase_status != "success":
             return {
                 "status": "aborted" if phase_status == "aborted" else "failed",
                 "phases": phase_results,

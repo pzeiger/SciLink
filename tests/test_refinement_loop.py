@@ -76,6 +76,12 @@ def _poor(files=None):
             "suggested_fixes": files or {"in.sim": "patched"}}
 
 
+def _warning(files=None):
+    # files=None → benign warning (critic offers no fix); files set → fixable.
+    return {"status": "success", "run_status": "succeeded", "verdict": "warning",
+            "suggested_fixes": files}
+
+
 def _phase(name="production", run_dir="/tmp/rf_test_phase"):
     return Phase(name=name, input_files={"in.sim": "original"},
                  run_command="true", run_dir=run_dir)
@@ -113,14 +119,37 @@ class TestLoopFlow:
         assert ex.calls[0]["input_files"] == {"in.sim": "original"}
         assert ex.calls[1]["input_files"] == {"in.sim": "fixed"}
 
-    def test_stall_exhausts_budget(self):
+    def test_stall_stops_when_not_improving(self):
+        # A verdict that never improves stops on the stall check (after one
+        # non-improving cycle), not by burning the whole cycle budget.
         ex = FakeExecutor()
         critic = ScriptedCritic([_needs_fixes()])  # never improves
         result = run_refinement([_phase()], ex, critic, AutonomousPolicy(),
-                                _ctx(max_cycles=3))
+                                _ctx(max_cycles=5))
         assert result["status"] == "failed"
-        assert len(ex.calls) == 3  # bounded by max_cycles
-        assert result["phases"][0]["status"] == "exhausted"
+        assert len(ex.calls) == 2  # cycle 0 refines, cycle 1 stalls → stop
+        assert result["phases"][0]["status"] == "stopped"
+
+    def test_fixable_warning_is_refined(self):
+        # A warning the critic offers a fix for is pursued toward good, not
+        # accepted as-is.
+        ex = FakeExecutor()
+        critic = ScriptedCritic([_warning({"in.sim": "smaller timestep"}), _good()])
+        result = run_refinement([_phase()], ex, critic, AutonomousPolicy(), _ctx())
+        assert result["status"] == "success"
+        assert len(ex.calls) == 2  # warning → fix → good
+        assert ex.calls[1]["input_files"] == {"in.sim": "smaller timestep"}
+
+    def test_benign_warning_stops_as_success(self):
+        # A warning with no proposed fix is benign — stop immediately, and it
+        # counts as success (acceptable terminal state).
+        ex = FakeExecutor()
+        critic = ScriptedCritic([_warning(None)])
+        result = run_refinement([_phase()], ex, critic, AutonomousPolicy(), _ctx())
+        assert result["status"] == "success"
+        assert len(ex.calls) == 1
+        assert result["phases"][0]["status"] == "success"
+        assert result["phases"][0]["verdict"] == "warning"
 
     def test_no_fixes_stops_even_if_not_good(self):
         # A poor verdict with no actionable fixes should stop, not spin.
