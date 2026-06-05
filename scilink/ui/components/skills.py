@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import os
 import streamlit as st
 
 from scilink.skills.loader import list_all_skills
@@ -109,6 +110,8 @@ def _render_memory_section() -> None:
     """
     from scilink.skills._shared import _memory
 
+    from scilink.skills import loader
+
     st.subheader("Persistent Memory")
     st.caption(
         "Graduated and auto-distilled skills stored under `~/.scilink` — they "
@@ -116,6 +119,24 @@ def _render_memory_section() -> None:
         "hard fits the agent had to solve from scratch — currently curve fitting) "
         "are held out of auto-routing until you promote them."
     )
+
+    # Master on/off switch (opt-in; off by default). When off, persistent memory
+    # is inert: nothing is staged and graduated skills are not loaded into runs.
+    cur = loader.memory_enabled()
+    new = st.toggle(
+        "Enable persistent memory", value=cur, key="mem_enabled_toggle",
+        help=("Off (default): inert — nothing is staged and graduated skills are "
+              "not loaded into runs. On: auto-staging + reuse of promoted skills."),
+    )
+    if new != cur:
+        loader.set_memory_enabled(new)
+        st.rerun()
+    if os.environ.get("SCILINK_MEMORY", "").strip():
+        st.caption("⚠️ `SCILINK_MEMORY` env var is set and overrides this toggle.")
+    if not new:
+        st.info("Persistent memory is **OFF** (inert). Turn it on to stage T=2 / "
+                "feedback / error knowledge and load promoted skills into runs. "
+                "Existing items below are kept and can still be reviewed.")
 
     try:
         rows = _memory.list_memory()

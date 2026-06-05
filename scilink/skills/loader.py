@@ -21,6 +21,7 @@ skill. Sections whose heading isn't in the canonical vocabulary are preserved
 under the ``extras`` key (lowercased heading → body) and a warning is logged.
 """
 
+import json
 import logging
 import os
 import re
@@ -71,6 +72,56 @@ def graduated_skills_dir() -> Path:
     return scilink_home() / "graduated_skills"
 
 
+# ─── Persistent-memory master switch ───────────────────────────────
+# Persistent memory (auto-staging T=2/feedback/error knowledge AND loading the
+# graduated-skills store into runs) is OFF by default — opt-in. When off it is
+# fully inert: nothing is staged and the graduated store is not loaded, so runs
+# behave exactly as if the store did not exist. The review surfaces
+# (``scilink memory`` / UI panel) still work so a user can inspect/manage it.
+#
+# Resolution order: the ``SCILINK_MEMORY`` env var overrides (truthy → on,
+# falsy → off); otherwise the persisted setting in ``scilink_home()/config.json``;
+# otherwise the default (off).
+
+_TRUTHY = {"1", "true", "on", "yes"}
+_FALSY = {"0", "false", "off", "no"}
+
+
+def _config_path() -> Path:
+    return scilink_home() / "config.json"
+
+
+def _read_config() -> dict:
+    p = _config_path()
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def memory_enabled() -> bool:
+    """Whether persistent memory is active (default False — opt-in)."""
+    env = os.environ.get("SCILINK_MEMORY", "").strip().lower()
+    if env in _TRUTHY:
+        return True
+    if env in _FALSY:
+        return False
+    return bool(_read_config().get("memory_enabled", False))
+
+
+def set_memory_enabled(enabled: bool) -> Path:
+    """Persist the memory on/off setting to ``config.json``; return its path."""
+    home = scilink_home()
+    home.mkdir(parents=True, exist_ok=True)
+    cfg = _read_config()
+    cfg["memory_enabled"] = bool(enabled)
+    p = _config_path()
+    p.write_text(json.dumps(cfg, indent=2))
+    return p
+
+
 # ─── User-provided skill roots ─────────────────────────────────────
 # Users can add their own skill bundles without modifying SciLink source
 # by pointing the ``SCILINK_SKILLS_PATH`` env var at one (or several,
@@ -109,9 +160,12 @@ def _skill_roots() -> List[Path]:
                 _logger.warning(
                     "SCILINK_SKILLS_PATH entry not found or not a directory: %s", p
                 )
-    graduated = graduated_skills_dir()
-    if graduated.is_dir():
-        candidates.append(graduated.resolve())
+    # The persistent graduated store is only consulted when memory is enabled
+    # (opt-in). Off ⇒ the store is not loaded, so runs ignore promoted skills.
+    if memory_enabled():
+        graduated = graduated_skills_dir()
+        if graduated.is_dir():
+            candidates.append(graduated.resolve())
     candidates.append(_SKILLS_DIR)
 
     roots: List[Path] = []

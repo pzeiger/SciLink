@@ -800,6 +800,9 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         Returns the list of staged solution ids. Fully failure-isolated.
         ``SCILINK_T2_AUTODISTILL=0`` disables staging.
         """
+        from scilink.skills.loader import memory_enabled
+        if not memory_enabled():
+            return []
         flag = os.environ.get("SCILINK_T2_AUTODISTILL", "").strip().lower()
         if flag in ("0", "false", "off", "no"):
             return []
@@ -884,6 +887,9 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         fitting agent). Persists human feedback + resolved-error lessons into the
         same staging buffer. Failure-isolated; ``SCILINK_FEEDBACK_AUTODISTILL=0``
         disables it."""
+        from scilink.skills.loader import memory_enabled
+        if not memory_enabled():
+            return []
         flag = os.environ.get("SCILINK_FEEDBACK_AUTODISTILL", "").strip().lower()
         if flag in ("0", "false", "off", "no"):
             return []

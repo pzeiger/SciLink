@@ -1066,6 +1066,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         failure-isolated: any error is logged and swallowed so staging never
         affects the user's fit. ``SCILINK_T2_AUTODISTILL=0`` disables staging.
         """
+        from scilink.skills.loader import memory_enabled
+        if not memory_enabled():
+            return []
         flag = os.environ.get("SCILINK_T2_AUTODISTILL", "").strip().lower()
         if flag in ("0", "false", "off", "no"):
             return []
@@ -1160,6 +1163,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         through the review-gated upgrade/consolidate path. Fully failure-isolated;
         ``SCILINK_FEEDBACK_AUTODISTILL=0`` disables it.
         """
+        from scilink.skills.loader import memory_enabled
+        if not memory_enabled():
+            return []
         flag = os.environ.get("SCILINK_FEEDBACK_AUTODISTILL", "").strip().lower()
         if flag in ("0", "false", "off", "no"):
             return []

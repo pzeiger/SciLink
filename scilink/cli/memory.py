@@ -26,6 +26,7 @@ Staged T=2 solutions (distill_staging) subcommands:
 """
 
 import argparse
+import os
 import sys
 
 from scilink.skills._shared._memory import (
@@ -75,7 +76,29 @@ def _add_model_args(p):
                    help="API key (else taken from the conventional vendor env var)")
 
 
+def _cmd_memory_toggle(args) -> int:
+    """`scilink memory enable|disable|status` — the persistent-memory master switch."""
+    from scilink.skills import loader
+    if args.action == "status":
+        on = loader.memory_enabled()
+        env = os.environ.get("SCILINK_MEMORY", "").strip()
+        src = f"env SCILINK_MEMORY={env!r}" if env else f"config ({loader._config_path()})"
+        print(f"Persistent memory: {'ON' if on else 'OFF'}   [{src}]")
+        return 0
+    enabled = (args.action == "enable")
+    p = loader.set_memory_enabled(enabled)
+    print(f"Persistent memory {'ENABLED' if enabled else 'DISABLED'}  (saved to {p})")
+    print("  → staging + graduated-skill loading are now ACTIVE."
+          if enabled else
+          "  → inert: nothing is staged and graduated skills are not loaded into runs.")
+    if os.environ.get("SCILINK_MEMORY", "").strip():
+        print("  ⚠️  SCILINK_MEMORY env var is set and overrides this saved setting.")
+    return 0
+
+
 def _cmd_list(args) -> int:
+    from scilink.skills import loader
+    print(f"[persistent memory: {'ON' if loader.memory_enabled() else 'OFF — inert; `scilink memory enable` to use'}]\n")
     provisional = None
     if args.provisional_only:
         provisional = True
@@ -274,6 +297,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="action")
+
+    p_en = sub.add_parser("enable", help="Turn persistent memory ON (opt-in)")
+    p_en.set_defaults(func=_cmd_memory_toggle)
+    p_dis = sub.add_parser("disable", help="Turn persistent memory OFF (the default)")
+    p_dis.set_defaults(func=_cmd_memory_toggle)
+    p_status = sub.add_parser("status", help="Show whether persistent memory is on or off")
+    p_status.set_defaults(func=_cmd_memory_toggle)
 
     p_list = sub.add_parser("list", help="List persisted skills")
     p_list.add_argument("--domain", help="Restrict to one domain (e.g. curve_fitting)")
