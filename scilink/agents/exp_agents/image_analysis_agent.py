@@ -600,6 +600,12 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         if staged:
             final_results["staged_solutions"] = staged
 
+        # Also stage human-feedback + resolved-error knowledge (persistent
+        # complement to the old in-session distillation). Failure-isolated.
+        fb_staged = self._maybe_stage_feedback_errors(tier1_state, final_results)
+        if fb_staged:
+            final_results.setdefault("staged_solutions", []).extend(fb_staged)
+
         # Save final merged results
         results_path = self.output_dir / "analysis_results.json"
         with open(results_path, "w") as f:
@@ -872,6 +878,50 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 f"`scilink memory staged`."
             )
         return staged
+
+    def _maybe_stage_feedback_errors(self, state: dict, final_results: dict) -> List[str]:
+        """Image-side mirror of the feedback/error staging hook (see the curve-
+        fitting agent). Persists human feedback + resolved-error lessons into the
+        same staging buffer. Failure-isolated; ``SCILINK_FEEDBACK_AUTODISTILL=0``
+        disables it."""
+        flag = os.environ.get("SCILINK_FEEDBACK_AUTODISTILL", "").strip().lower()
+        if flag in ("0", "false", "off", "no"):
+            return []
+        try:
+            from .instruct import T2_TECHNIQUE_LABEL_INSTRUCTIONS
+            from scilink.skills._shared import _staging
+
+            def _llm_call(prompt: str) -> str:
+                response = self.model.generate_content(
+                    contents=[prompt],
+                    generation_config=self.generation_config,
+                    safety_settings=self.safety_settings,
+                )
+                return response.text if hasattr(response, "text") else str(response)
+
+            # Image feedback is attached to the result by the feedback mixin
+            # (refined_result["human_feedback"]); also honor a state log if present.
+            hf = (final_results or {}).get("human_feedback")
+            fb_texts = list(state.get("human_feedback_log") or [])
+            if isinstance(hf, dict) and (hf.get("user_feedback") or "").strip():
+                fb_texts.append(hf["user_feedback"])
+            staged = _staging.stage_feedback_and_errors(
+                "image_analysis",
+                results=state.get("series_results", []) or [],
+                feedback_texts=fb_texts,
+                session=self.output_dir.name,
+                llm_call=_llm_call,
+                label_template=T2_TECHNIQUE_LABEL_INSTRUCTIONS,
+            )
+            if staged:
+                self.logger.info(
+                    f"   🧠 {len(staged)} feedback/error solution(s) staged; review "
+                    f"with `scilink memory staged`."
+                )
+            return staged
+        except Exception as e:
+            self.logger.warning(f"Feedback/error staging skipped: {e}")
+            return []
 
     def _evaluate_tier2_needed(
         self, tier1_results: dict, objective: Optional[str]

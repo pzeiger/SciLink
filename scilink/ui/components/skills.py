@@ -171,9 +171,10 @@ def _render_staged_section() -> None:
         with st.expander(f"`{domain}/{technique}` — {len(recs)} staged", expanded=False):
             for r in recs:
                 metric = r.get("r_squared") or r.get("quality_score")
+                prov = r.get("provenance", "t2_solution")
                 meta_col, view_col = st.columns([3, 1])
                 meta_col.caption(
-                    f"id={r['id']} · session={r.get('session','?')}"
+                    f"id={r['id']} · {prov} · session={r.get('session','?')}"
                     + (f" · metric={metric}" if metric is not None else "")
                 )
                 with view_col.popover("View", use_container_width=True):

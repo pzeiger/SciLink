@@ -1673,6 +1673,8 @@ class ImagePlanningController:
                     state = self._get_human_feedback(state)
                     if state.pop("_refine_requested", False):
                         feedback = state.pop("_refine_feedback", "")
+                        if feedback:
+                            state.setdefault("human_feedback_log", []).append(str(feedback))
                         self.logger.info(f"  Refining with feedback: {feedback}")
                         print("\nRefining plan...\n")
                         state = self._refine_plan(state, feedback)
@@ -3499,6 +3501,7 @@ Return JSON with:
                         state, best_result, best_score
                     )
                     if user_feedback:
+                        state.setdefault("human_feedback_log", []).append(str(user_feedback))
                         best_result, best_score = self._apply_user_feedback(
                             state, user_feedback, best_result, best_score,
                             image_data, data_path, image_name,

@@ -2802,11 +2802,17 @@ Update an existing skill with new knowledge while preserving what is already cor
 1. Review the existing skill content carefully.
 2. Integrate the new findings into the appropriate section. Consolidate related guidance — \
    prefer merging into existing content over restating.
-3. Do NOT remove existing content unless the new knowledge explicitly contradicts it.
-4. When there is a conflict, prefer the newer knowledge but note the discrepancy briefly.
-5. If the new knowledge materially changes the skill's purpose, update the description; \
+3. The new knowledge may be a list of records, each with a `provenance`. Place each kind in \
+   the right section: `t2_solution` (working recipe, has `working_script_excerpt`) → \
+   overview/planning/analysis (generalize; never paste the script verbatim); `error_fix` \
+   (`error_lessons` error→fix pairs) → validation pitfalls/sanity-checks and analysis cautions; \
+   `user_correction` (`user_feedback`) → planning constraints/preferences and validation \
+   acceptance criteria (treat human corrections as high-priority ground truth).
+4. Do NOT remove existing content unless the new knowledge explicitly contradicts it.
+5. When there is a conflict, prefer the newer knowledge but note the discrepancy briefly.
+6. If the new knowledge materially changes the skill's purpose, update the description; \
    otherwise leave it intact.
-6. Keep prose tight. The skill is read into LLM context every time.
+7. Keep prose tight. The skill is read into LLM context every time.
 
 Return a JSON object with the SAME keys as the existing skill (description, overview, planning, \
 analysis, interpretation, validation) reflecting the merged skill content.
@@ -2885,9 +2891,16 @@ dataset's specific paths and magic numbers. Where the examples differ, note what
 when to choose each option (this is the value of having several examples). Explain why the \
 naive/default plan was insufficient.
 
-Each example includes a `working_script_excerpt` so you can extract the reusable procedure \
-from real code. Do NOT paste any script back verbatim — write a CONCISE, generalized recipe \
-(the skill is read into the prompt every run, so keep it tight; no one-off dataset code).
+Each record carries a `provenance` field — incorporate each kind into the right section:
+- `t2_solution`: a from-scratch working recipe (has a `working_script_excerpt`). Distill the \
+  generalized method into **overview/planning/analysis**. Do NOT paste the script back verbatim.
+- `error_fix`: errors that were hit and how they were resolved (`error_lessons`: error→fix \
+  pairs). Turn these into concrete pitfalls and sanity checks in **validation**, and cautions \
+  in **analysis** ("avoid X; if you see Y, do Z").
+- `user_correction`: a human's domain correction/preference (`user_feedback`). Treat this as \
+  high-priority ground truth — fold it into **planning** (constraints/preferences) and \
+  **validation** (acceptance criteria).
+Keep the skill CONCISE (it is read into the prompt every run); no one-off dataset code.
 
 Return a JSON object with exactly the following keys. Use markdown within values when helpful \
 (lists, inline code), but no section headings (`##`) or YAML frontmatter — the caller adds those.

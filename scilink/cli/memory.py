@@ -163,7 +163,8 @@ def _cmd_staged(args) -> int:
             for r in recs:
                 metric = r.get("r_squared") or r.get("quality_score")
                 mtxt = f"  metric={metric}" if metric is not None else ""
-                print(f"    · id={r['id']}  session={r.get('session','?')}{mtxt}")
+                prov = r.get("provenance", "t2_solution")
+                print(f"    · id={r['id']}  [{prov}]  session={r.get('session','?')}{mtxt}")
     if not total:
         print("No staged T=2 solutions.")
     else:

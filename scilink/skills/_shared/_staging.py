@@ -214,6 +214,89 @@ def _record_for_prompt(rec: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ──────────────────────────────────────────────────────────────
+# Feedback / error capture — the second staging source.
+#
+# Besides T=2 hot-annealing wins (``t2_solution`` provenance), the buffer also
+# captures the two signals the old in-session distillation used — human feedback
+# and recurring errors that were resolved during a run — so they persist across
+# sessions and flow through the same review/upgrade/consolidate path. These are
+# staged as records with provenance ``user_correction`` / ``error_fix``.
+# ──────────────────────────────────────────────────────────────
+
+def resolved_error_lessons(quality_history: Optional[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Extract ``{error, fix}`` lessons from a result's quality history.
+
+    Pulls script errors that were diagnosed/fixed (curve-fitting stores the fix
+    under ``diagnosis``, image analysis under ``fix``) and verification
+    iterations where a fix was applied to named issues. Unresolved errors (no
+    fix) are skipped — a lesson needs the resolution to be reusable.
+    """
+    qh = quality_history or {}
+    lessons: List[Dict[str, str]] = []
+    for se in qh.get("script_errors", []) or []:
+        err = (se.get("error") or "").strip()
+        fix = (se.get("fix") or se.get("diagnosis") or "").strip()
+        if err and fix:
+            lessons.append({"error": err[:400], "fix": fix[:400]})
+    for it in qh.get("verification_iterations", []) or []:
+        fix = (it.get("fix_applied") or "").strip()
+        issues = [x.get("problem", "") for x in (it.get("issues") or []) if x.get("problem")]
+        if fix and issues:
+            lessons.append({"error": "; ".join(issues)[:400], "fix": fix[:400]})
+    return lessons
+
+
+def stage_feedback_and_errors(
+    domain: str,
+    *,
+    results: List[Dict[str, Any]],
+    feedback_texts: Optional[List[str]] = None,
+    session: str,
+    llm_call: Callable[[str], str],
+    label_template: str,
+    root: Optional[Path] = None,
+) -> List[str]:
+    """Stage human-feedback + resolved-error knowledge from a finished run.
+
+    For each successful result that resolved errors along the way, stages an
+    ``error_fix`` record; if the run gathered any human feedback (``feedback_texts``),
+    stages one combined ``user_correction`` record. Each gets an LLM-assigned
+    technique label so it accumulates alongside (and consolidates with) T=2
+    solutions of the same technique. Returns the list of staged ids.
+    """
+    staged: List[str] = []
+    for r in results or []:
+        if not r.get("success"):
+            continue
+        lessons = resolved_error_lessons(r.get("quality_history"))
+        if not lessons:
+            continue
+        model = r.get("model_type") or r.get("analysis_type") or "model"
+        technique = assign_technique_label(
+            domain, model, "recurring errors resolved during the run",
+            llm_call, label_template, root=root)
+        rec: Dict[str, Any] = {"provenance": "error_fix", "model": model,
+                               "error_lessons": lessons, "session": session}
+        r2 = (r.get("fit_quality") or {}).get("r_squared")
+        if r2 is not None:
+            rec["r_squared"] = round(float(r2), 4)
+        staged.append(stage_solution(domain, technique, rec, root=root))
+
+    texts = [str(t).strip() for t in (feedback_texts or []) if str(t).strip()]
+    if texts:
+        fb = "\n".join(dict.fromkeys(texts))  # dedupe, preserve order
+        model = next((r.get("model_type") or r.get("analysis_type")
+                      for r in (results or []) if r.get("model_type") or r.get("analysis_type")), "model")
+        technique = assign_technique_label(
+            domain, model, "user correction / domain expertise",
+            llm_call, label_template, root=root)
+        staged.append(stage_solution(domain, technique, {
+            "provenance": "user_correction", "model": model,
+            "user_feedback": fb, "session": session}, root=root))
+    return staged
+
+
+# ──────────────────────────────────────────────────────────────
 # upgrade@1 — merge staged solution(s) into an EXISTING skill
 #
 # Upgrade mutates an existing (often already-active) skill in place, so it is

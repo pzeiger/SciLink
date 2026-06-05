@@ -1886,6 +1886,8 @@ class HumanFeedbackRefinementController:
                     state = self._get_human_feedback(state)
                     if state.pop("_refine_requested", False):
                         feedback = state.pop("_refine_feedback", "")
+                        if feedback:
+                            state.setdefault("human_feedback_log", []).append(str(feedback))
                         self.logger.info(f"  Refining with feedback: {feedback}")
                         print("\n🔄 Refining plan...\n")
                         state = self._refine_plan(state, feedback)
@@ -3271,6 +3273,11 @@ Return JSON with the refined fitting approach:
             return False
 
     def _refine_model_from_feedback(self, state: dict, feedback: str) -> dict:
+        # Persist the applied feedback so it survives to end-of-run (the staging
+        # hook distills human corrections into skills). Feedback is otherwise
+        # consumed transiently in-flight.
+        if feedback:
+            state.setdefault("human_feedback_log", []).append(str(feedback))
         config = state.get("locked_fitting_config", {})
         prompt = f"""Refine the fitting approach based on user feedback.
 

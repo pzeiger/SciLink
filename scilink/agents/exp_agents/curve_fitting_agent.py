@@ -790,6 +790,13 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         if staged:
             final_results["staged_solutions"] = staged
 
+        # Also stage human-feedback + resolved-error knowledge (the signals the
+        # old in-session distillation used), so they persist and flow through the
+        # same review/upgrade/consolidate path. Failure-isolated.
+        fb_staged = self._maybe_stage_feedback_errors(state, final_results)
+        if fb_staged:
+            final_results.setdefault("staged_solutions", []).extend(fb_staged)
+
         self.logger.info("")
         self.logger.info("✅ ANALYSIS COMPLETE")
         self.logger.info(f"   Results: {results_path}")
@@ -1143,6 +1150,51 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 f"`scilink memory staged` (upgrade an existing skill or consolidate)."
             )
         return staged
+
+    def _maybe_stage_feedback_errors(self, state: dict, final_results: dict) -> List[str]:
+        """Stage human-feedback + resolved-error knowledge for later distillation.
+
+        Complements the T=2 hook: captures the two signals the old in-session
+        distillation used (user feedback, recurring errors that were fixed) into
+        the same persistent staging buffer so they survive the session and flow
+        through the review-gated upgrade/consolidate path. Fully failure-isolated;
+        ``SCILINK_FEEDBACK_AUTODISTILL=0`` disables it.
+        """
+        flag = os.environ.get("SCILINK_FEEDBACK_AUTODISTILL", "").strip().lower()
+        if flag in ("0", "false", "off", "no"):
+            return []
+        try:
+            from .instruct import T2_TECHNIQUE_LABEL_INSTRUCTIONS
+            from scilink.skills._shared import _staging
+
+            def _llm_call(prompt: str) -> str:
+                response = self.model.generate_content(
+                    contents=[prompt],
+                    generation_config=self.generation_config,
+                    safety_settings=self.safety_settings,
+                )
+                return response.text if hasattr(response, "text") else str(response)
+
+            # Curve-fit feedback is captured durably in state["human_feedback_log"]
+            # (the controller persists it as it is applied — see
+            # curve_fitting_controllers); the top-level result does not carry it.
+            staged = _staging.stage_feedback_and_errors(
+                "curve_fitting",
+                results=state.get("series_results", []) or [],
+                feedback_texts=state.get("human_feedback_log") or [],
+                session=self.output_dir.name,
+                llm_call=_llm_call,
+                label_template=T2_TECHNIQUE_LABEL_INSTRUCTIONS,
+            )
+            if staged:
+                self.logger.info(
+                    f"   🧠 {len(staged)} feedback/error solution(s) staged; review "
+                    f"with `scilink memory staged`."
+                )
+            return staged
+        except Exception as e:
+            self.logger.warning(f"Feedback/error staging skipped: {e}")
+            return []
 
     def _compile_results(self, state: dict) -> Dict[str, Any]:
         """Compile results into a consistent output structure."""
