@@ -37,9 +37,9 @@ from ..lit_agents.optimize_query_for_analysis import optimize_query_for_analysis
 from .recommendation_agent import RecommendationAgent
 from .feature_table import write_feature_table
 from ...skills.loader import list_skills, list_all_skills, load_skill
-# Note: DFTOrchestrator is imported lazily inside `run_dft_workflow` to avoid
-# pulling in the optional [sim] extras (ase, atomate2, pymatgen) on every
-# AnalysisOrchestratorAgent instantiation.
+# Note: the simulation pipeline (`run_complete_workflow`) is imported lazily
+# inside `run_dft_workflow` to avoid pulling in the optional [sim] extras
+# (ase, atomate2, pymatgen) on every AnalysisOrchestratorAgent instantiation.
 
 
 # Full-text extraction for the read_document tool — a few documents read
@@ -3608,7 +3608,7 @@ class AnalysisOrchestratorTools:
         )
 
         # =====================================================================
-        # 11c. RUN DFT WORKFLOW (DFTOrchestrator)
+        # 11c. RUN DFT WORKFLOW (run_complete_workflow, scale="periodic_dft")
         # =====================================================================
         def run_dft_workflow(structure_description: str = None,
                              analysis_id: str = None,
@@ -3659,9 +3659,9 @@ class AnalysisOrchestratorTools:
             out_dir = base_dir / "dft" / slug
             out_dir.mkdir(parents=True, exist_ok=True)
 
-            # 4. Run the orchestrator (lazy import — keeps [sim] extras optional)
+            # 4. Run the pipeline (lazy import — keeps [sim] extras optional)
             try:
-                from ..sim_agents.dft_orchestrator import DFTOrchestrator
+                from ..sim_agents.simulation_pipeline import run_complete_workflow
             except ImportError as e:
                 # vasp_generator_method='llm' only needs ase; 'atomate2' also
                 # needs pymatgen + atomate2. Both paths require ase for
@@ -3678,18 +3678,19 @@ class AnalysisOrchestratorTools:
                     ),
                 })
             try:
-                wf = DFTOrchestrator(
+                result = run_complete_workflow(
+                    structure_description,
+                    scale="periodic_dft",
+                    software="vasp",
+                    method=vasp_generator_method,
+                    output_dir=str(out_dir),
                     api_key=self.orch.api_key,
                     base_url=self.orch.base_url,
+                    model_name=self.orch.model_name,
                     futurehouse_api_key=self.orch.futurehouse_api_key,
-                    mp_api_key=None,  # DFTOrchestrator auto-discovers via get_api_key
-                    generator_model=self.orch.model_name,
-                    validator_model=self.orch.model_name,
-                    output_dir=str(out_dir),
+                    mp_api_key=None,  # auto-discovered via get_api_key downstream
                     max_refinement_cycles=max_refinement_cycles,
-                    vasp_generator_method=vasp_generator_method,
                 )
-                result = wf.run_complete_workflow(structure_description)
             except Exception as e:
                 return json.dumps({"status": "error", "message": f"DFT workflow failed: {e}"})
 

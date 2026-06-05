@@ -240,7 +240,7 @@ Metadata Options:
             api_key = args.google_api_key
 
     # Register the MP key (if provided via flag) into the in-memory keystore so
-    # auto-discovery picks it up when run_dft_workflow constructs DFTOrchestrator.
+    # auto-discovery picks it up when run_dft_workflow runs the DFT pipeline.
     if args.mp_api_key:
         import scilink
         scilink.set_api_key('materials_project', args.mp_api_key)

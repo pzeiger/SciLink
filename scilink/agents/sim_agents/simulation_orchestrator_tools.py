@@ -747,25 +747,26 @@ class SimulationOrchestratorTools:
         def run_complete_dft_workflow(description: str,
                                       max_refinement_cycles: int = 4,
                                       vasp_generator_method: str = "llm") -> str:
-            from .dft_orchestrator import DFTOrchestrator
+            from .simulation_pipeline import run_complete_workflow
 
             slug = self._make_slug(description)
             workdir = self.orch.structures_dir / slug
             workdir.mkdir(parents=True, exist_ok=True)
 
             try:
-                wf = DFTOrchestrator(
+                result = run_complete_workflow(
+                    description,
+                    scale="periodic_dft",
+                    software="vasp",
+                    method=vasp_generator_method,
+                    output_dir=str(workdir),
                     api_key=self.orch.api_key,
                     base_url=self.orch.base_url,
+                    model_name=self.orch.model_name,
                     futurehouse_api_key=self.orch.futurehouse_api_key,
                     mp_api_key=self.orch.mp_api_key,
-                    generator_model=self.orch.model_name,
-                    validator_model=self.orch.model_name,
-                    output_dir=str(workdir),
                     max_refinement_cycles=max_refinement_cycles,
-                    vasp_generator_method=vasp_generator_method,
                 )
-                result = wf.run_complete_workflow(description)
             except Exception as e:
                 return json.dumps({
                     "status": "error",
