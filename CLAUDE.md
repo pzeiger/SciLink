@@ -497,6 +497,26 @@ not assuming it is the only active skill.
 The orchestrator can still pass an explicit multi-skill list to any agent;
 the `exclusive` policy governs only the agent's *own* auto-selection.
 
+**The agent-side selectors share one brain but differ in the signal they
+feed it.** All three call `select_relevant_skills` and route through
+`_load_skills_to_state`, but the *context* each supplies differs in
+richness:
+
+- **Image** — the actual pixels (scout montage / image bytes) + metadata;
+  runs as a pipeline controller (`SkillSuggestionController`).
+- **Curve** — metadata + data statistics + the rendered plot; pipeline
+  controller (`CurveFittingSkillSuggestionController`).
+- **Hyperspectral** — **metadata only** (`_auto_select_skills` in
+  `analyze()`, not a controller; it does *not* inspect the datacube).
+
+So hyperspectral is the weakest selection path and partly redundant with
+the orchestrator (no signal the orchestrator lacks) — moot today with a
+single `eels` skill, but when a second hyperspectral skill lands the fix is
+to give its selector a real data signal (e.g. the datacube's mean
+spectrum), making it data-aware like image/curve. The non-redundancy rule:
+an agent-side selector earns its keep only where it reads data the
+orchestrator can't.
+
 **Authoritative `skill` vs non-binding `skill_hint`.** The orchestrator
 defers skill choice to the agents by default, but can influence it two ways
 via `run_analysis`:
