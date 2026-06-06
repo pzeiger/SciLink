@@ -22,6 +22,8 @@ from scilink.agents.sim_agents.refinement import (  # noqa: E402
     Executor,
     Phase,
     RefinementContext,
+    Stage,
+    run_campaign,
     run_refinement,
     policy_for,
 )
@@ -256,6 +258,101 @@ class TestPolicies:
         # Unknown label defaults to autonomous (safe for headless callers).
         assert isinstance(policy_for("nonsense"), AutonomousPolicy)
         assert isinstance(policy_for(""), AutonomousPolicy)
+
+
+class TestStages:
+    """Staged + parallel campaigns via run_campaign (Stage model)."""
+
+    def _member(self, name):
+        return Phase(name=name, input_files={"in.sim": "original"},
+                     run_command="true", run_dir=f"/tmp/rf_{name}")
+
+    def test_single_sequential_stage_matches_run_refinement(self):
+        # A campaign of one sequential stage behaves like the flat chain.
+        ex = FakeExecutor()
+        critic = ScriptedCritic([_good(), _needs_fixes({"in.sim": "f"}), _good()])
+        stages = [Stage(name="run",
+                        phases=[self._member("equil"), self._member("prod")])]
+        result = run_campaign(stages, ex, critic, AutonomousPolicy(), _ctx())
+        assert result["status"] == "success"
+        assert [p["phase"] for p in result["phases"]] == ["equil", "prod"]
+        assert len(result["stages"]) == 1
+
+    def test_fanout_members_are_independent(self):
+        # 3 independent members: A good, B needs a fix then good, C poor with no
+        # fix (stops). B's refinement and C's failure must not disturb A.
+        ex = FakeExecutor()
+        critic = ScriptedCritic([
+            _good(),                                # A: T300
+            _needs_fixes({"in.sim": "fixed"}), _good(),  # B: T400 (fix→good)
+            {"verdict": "poor", "run_status": "succeeded",
+             "suggested_fixes": None},              # C: T500 (stopped)
+        ])
+        fanout = Stage(name="tsweep", parallel=True, phases=[
+            self._member("T300"), self._member("T400"), self._member("T500")])
+        result = run_campaign([fanout], ex, critic, AutonomousPolicy(), _ctx())
+
+        # Every member ran in its own dir; the fan-out did not short-circuit.
+        assert {c["run_dir"] for c in ex.calls} == {
+            "/tmp/rf_T300", "/tmp/rf_T400", "/tmp/rf_T500"}
+        members = {m["phase"]: m for m in result["stages"][0]["members"]}
+        assert members["T300"]["status"] == "success"
+        assert members["T400"]["status"] == "success"   # recovered
+        assert members["T500"]["status"] == "stopped"
+        # All-required by default → one stopped member fails the stage.
+        assert result["stages"][0]["n_success"] == 2
+        assert result["status"] == "failed"
+
+    def test_fanout_min_success_quorum(self):
+        # Same 2-of-3, but a quorum of 2 lets the stage (and campaign) succeed.
+        ex = FakeExecutor()
+        critic = ScriptedCritic([
+            _good(), _good(),
+            {"verdict": "poor", "run_status": "succeeded", "suggested_fixes": None},
+        ])
+        fanout = Stage(name="tsweep", parallel=True, min_success=2, phases=[
+            self._member("T300"), self._member("T400"), self._member("T500")])
+        result = run_campaign([fanout], ex, critic, AutonomousPolicy(), _ctx())
+        assert result["stages"][0]["n_success"] == 2
+        assert result["status"] == "success"
+
+    def test_combine_runs_once_after_fanout(self):
+        # optim → fan-out(2, both good) → combine. Combine runs exactly once.
+        ex = FakeExecutor()
+        critic = ScriptedCritic([_good(), _good(), _good(), _good()])
+        stages = [
+            Stage(name="optim", phases=[self._member("optim")]),
+            Stage(name="windows", parallel=True,
+                  phases=[self._member("w0"), self._member("w1")]),
+            Stage(name="wham", kind="combine", phases=[self._member("wham")]),
+        ]
+        result = run_campaign(stages, ex, critic, AutonomousPolicy(), _ctx())
+        assert result["status"] == "success"
+        assert result["stages"][-1]["kind"] == "combine"
+        # Combine executed once, and last.
+        assert ex.calls[-1]["run_dir"] == "/tmp/rf_wham"
+        assert sum(c["run_dir"] == "/tmp/rf_wham" for c in ex.calls) == 1
+
+    def test_combine_skipped_when_fanout_fails(self):
+        # A failing fan-out stops the campaign before the combine stage runs.
+        ex = FakeExecutor()
+        critic = ScriptedCritic([
+            {"verdict": "poor", "run_status": "succeeded", "suggested_fixes": None},
+        ])
+        stages = [
+            Stage(name="windows", parallel=True, phases=[self._member("w0")]),
+            Stage(name="wham", kind="combine", phases=[self._member("wham")]),
+        ]
+        result = run_campaign(stages, ex, critic, AutonomousPolicy(), _ctx())
+        assert result["status"] == "failed"
+        # The combine never ran.
+        assert all(c["run_dir"] != "/tmp/rf_wham" for c in ex.calls)
+        assert [s["name"] for s in result["stages"]] == ["windows"]
+
+    def test_empty_campaign_fails_cleanly(self):
+        result = run_campaign([Stage(name="x", phases=[])], FakeExecutor(),
+                              ScriptedCritic([_good()]), AutonomousPolicy(), _ctx())
+        assert result["status"] == "failed"
 
 
 class TestCollectPhases:

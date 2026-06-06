@@ -98,6 +98,44 @@ class Phase:
     run_dir: str
 
 
+@dataclass
+class Stage:
+    """One stage of a simulation campaign: a group of phases run together.
+
+    A campaign is an ordered list of stages. A stage is one of three shapes,
+    all engine-neutral — what a fan-out's members differ by (temperature,
+    restraint center, …) lives in each member's ``input_files``, authored by
+    the generator, never here:
+
+    * **sequential step** (``parallel=False``): its phases run in order and
+      chain through restart files (e.g. optimization → equilibration →
+      production). Typically one phase per stage.
+    * **parallel fan-out** (``parallel=True``): independent member phases that
+      differ only in their inputs — a temperature sweep, or the windows of an
+      umbrella-sampling run. Members are refined independently; one member's
+      failure does not abort its siblings.
+    * **combine** (``kind="combine"``): a single post-processing phase that
+      consumes a prior fan-out's outputs (e.g. assembling a free-energy
+      profile). Run once and judged, never iterated.
+
+    Attributes:
+        name: Short stage label for logging and the result record.
+        phases: The phases this stage runs.
+        parallel: Whether the phases are independent (fan-out) rather than a
+            chained sequence.
+        kind: ``"run"`` for a normal stage, ``"combine"`` for a run-once
+            post-processing stage.
+        min_success: For a fan-out, the minimum number of members that must
+            succeed for the stage to succeed. ``None`` requires all of them.
+    """
+
+    name: str
+    phases: List[Phase]
+    parallel: bool = False
+    kind: str = "run"
+    min_success: Optional[int] = None
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Critic protocol (duck-typed against RunCritic.assess)
 # ──────────────────────────────────────────────────────────────────────────
@@ -468,6 +506,232 @@ def _stalled(ctx: RefinementContext) -> bool:
 # The loop
 # ──────────────────────────────────────────────────────────────────────────
 
+def _refine_phase(
+    phase: Phase,
+    executor: Executor,
+    run_critic: _RunCriticLike,
+    policy: RefinementPolicy,
+    ctx: RefinementContext,
+) -> Dict[str, Any]:
+    """Run one phase to convergence: run → assess → fix → re-run.
+
+    The per-phase primitive shared by sequential steps and fan-out members:
+    runs the executor, assesses the output, and — when the policy says to
+    refine — applies the critic's whole-file fixes and re-runs, up to the
+    context's cycle budget. The pre-run gate is *not* applied here; the caller
+    gates the campaign's first phase once. Appends one history entry per cycle.
+
+    Returns:
+        A phase record: ``phase``, ``status`` (``"success"``, ``"stopped"``,
+        ``"aborted"``, or ``"exhausted"``), ``cycles``, ``verdict``, and
+        ``run_status``.
+    """
+    inputs = phase.input_files
+    ctx.cycle = 0
+    last_verdict: Dict[str, Any] = {}
+    phase_status = "failed"
+
+    while ctx.cycle < ctx.max_cycles:
+        result = executor.run(inputs, phase.run_command, phase.run_dir)
+
+        if result.get("status") == "error":
+            # Could not launch — still assess (the critic reads the persisted
+            # stderr) so a fix can be proposed.
+            logger.warning(
+                "Executor could not launch phase %s: %s",
+                phase.name, result.get("error"),
+            )
+
+        verdict = run_critic.assess(
+            output_dir=result.get("output_dir", phase.run_dir),
+            research_goal=ctx.research_goal,
+            skill=ctx.skill,
+            domain=ctx.domain,
+        )
+        last_verdict = verdict
+        ctx.record(phase, result, verdict)
+
+        decision = policy.after_run(result, verdict, ctx)
+        if decision == CycleDecision.STOP:
+            phase_status = "success" if _is_acceptable(verdict) else "stopped"
+            break
+
+        fixes = verdict.get("suggested_fixes")
+        if not fixes:
+            phase_status = "success" if _is_acceptable(verdict) else "stopped"
+            break
+
+        approved = policy.approve_change(fixes, verdict, ctx)
+        if approved is None:
+            phase_status = "aborted"
+            break
+        inputs = approved
+        ctx.cycle += 1
+    else:
+        # Budget exhausted without an acceptable verdict.
+        phase_status = "exhausted"
+
+    return {
+        "phase": phase.name,
+        "status": phase_status,
+        "cycles": ctx.cycle + 1,
+        "verdict": last_verdict.get("verdict"),
+        "run_status": last_verdict.get("run_status"),
+    }
+
+
+def _run_once_phase(
+    phase: Phase,
+    executor: Executor,
+    run_critic: _RunCriticLike,
+    ctx: RefinementContext,
+) -> Dict[str, Any]:
+    """Run a phase exactly once and assess it, with no refine loop.
+
+    Used for a combine stage: it consumes a prior fan-out's outputs (e.g.
+    assembling a free-energy profile from umbrella windows), so re-running it
+    with a fix is not the right recovery — it is judged once, not iterated.
+    """
+    result = executor.run(phase.input_files, phase.run_command, phase.run_dir)
+    if result.get("status") == "error":
+        logger.warning(
+            "Executor could not launch combine phase %s: %s",
+            phase.name, result.get("error"),
+        )
+    verdict = run_critic.assess(
+        output_dir=result.get("output_dir", phase.run_dir),
+        research_goal=ctx.research_goal,
+        skill=ctx.skill,
+        domain=ctx.domain,
+    )
+    ctx.record(phase, result, verdict)
+    return {
+        "phase": phase.name,
+        "status": "success" if _is_acceptable(verdict) else "stopped",
+        "cycles": 1,
+        "verdict": verdict.get("verdict"),
+        "run_status": verdict.get("run_status"),
+    }
+
+
+def run_campaign(
+    stages: List[Stage],
+    executor: Executor,
+    run_critic: _RunCriticLike,
+    policy: RefinementPolicy,
+    ctx: RefinementContext,
+    pre_run_verdict: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Drive a staged MD campaign of sequential and parallel phases.
+
+    Generalizes the single-chain refinement loop to the shapes a real MD study
+    needs: sequential steps (optimization → equilibration → production, chained
+    through restart files), a parallel fan-out (independent runs differing only
+    in their inputs — a temperature sweep or umbrella-sampling windows), and an
+    optional combine step that post-processes a fan-out's outputs. Each phase
+    is still refined by the same run → assess → fix loop; fan-out members are
+    refined independently, so one member's failure does not abort its siblings.
+
+    Stages run in order; a stage that does not succeed stops the campaign
+    (later stages depend on its output). Whether a fan-out's members actually
+    run concurrently is the executor's concern — the campaign only expresses
+    that they are independent. The pre-run gate runs once on the first phase's
+    inputs, reusing ``pre_run_verdict`` so no second validation call is made.
+
+    Args:
+        stages: Ordered stages to execute.
+        executor: How to run a phase's inputs.
+        run_critic: Post-run critic exposing ``assess(...)``.
+        policy: Autonomy policy gating changes and continuation.
+        ctx: Shared refinement state (goal, routing, budget, history).
+        pre_run_verdict: Optional input-validator report for the pre-run gate.
+
+    Returns:
+        A dict with ``status`` (``"success"``, ``"aborted"``, or ``"failed"``),
+        ``stages`` (per-stage status + member records), ``phases`` (every phase
+        record, flattened in execution order — back-compatible with the
+        single-chain result), and the full ``history``.
+    """
+    runnable = [s for s in stages if s.phases]
+    if not runnable:
+        return {"status": "failed", "error": "no phases to run",
+                "stages": [], "phases": [], "history": ctx.history}
+
+    # ── Pre-run gate (1): accept the first phase's inputs before any run ──
+    first_phase = runnable[0].phases[0]
+    gated = policy.approve_change(first_phase.input_files, pre_run_verdict, ctx)
+    if gated is None:
+        return {"status": "aborted", "reason": "pre-run inputs rejected",
+                "stages": [], "phases": [], "history": ctx.history}
+    first_phase.input_files = gated
+
+    flat: List[Dict[str, Any]] = []
+    stage_records: List[Dict[str, Any]] = []
+    overall = "success"
+
+    for stage in runnable:
+        if stage.kind == "combine":
+            rec = _run_once_phase(stage.phases[0], executor, run_critic, ctx)
+            flat.append(rec)
+            status = "success" if rec["status"] == "success" else "failed"
+            stage_records.append({
+                "name": stage.name, "parallel": False, "kind": "combine",
+                "status": status, "members": [rec],
+            })
+
+        elif not stage.parallel:
+            members: List[Dict[str, Any]] = []
+            status = "success"
+            for ph in stage.phases:
+                rec = _refine_phase(ph, executor, run_critic, policy, ctx)
+                flat.append(rec)
+                members.append(rec)
+                if rec["status"] != "success":
+                    status = ("aborted" if rec["status"] == "aborted"
+                              else "failed")
+                    break
+            stage_records.append({
+                "name": stage.name, "parallel": False, "kind": "run",
+                "status": status, "members": members,
+            })
+
+        else:
+            # Fan-out: every member is refined independently. A failing member
+            # does not abort its siblings — collect them all, then judge the
+            # stage against its success quorum.
+            members = []
+            n_success = 0
+            any_aborted = False
+            for ph in stage.phases:
+                rec = _refine_phase(ph, executor, run_critic, policy, ctx)
+                flat.append(rec)
+                members.append(rec)
+                if rec["status"] == "success":
+                    n_success += 1
+                elif rec["status"] == "aborted":
+                    any_aborted = True
+            required = (stage.min_success if stage.min_success is not None
+                        else len(stage.phases))
+            if n_success >= required:
+                status = "success"
+            elif any_aborted and n_success == 0:
+                status = "aborted"
+            else:
+                status = "failed"
+            stage_records.append({
+                "name": stage.name, "parallel": True, "kind": "run",
+                "status": status, "members": members,
+                "n_success": n_success, "required": required,
+            })
+
+        if status != "success":
+            overall = "aborted" if status == "aborted" else "failed"
+            break
+
+    return {"status": overall, "stages": stage_records, "phases": flat,
+            "history": ctx.history}
+
+
 def run_refinement(
     phases: List[Phase],
     executor: Executor,
@@ -476,14 +740,12 @@ def run_refinement(
     ctx: RefinementContext,
     pre_run_verdict: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Drive a simulation to convergence: run → assess → fix → re-run.
+    """Drive a single sequential phase chain to convergence.
 
-    Iterates the phases in order; within each phase, runs the executor,
-    assesses the output with the critic, and — when the policy says to refine
-    — applies the critic's whole-file fixes and re-runs, up to the context's
-    cycle budget. The pre-run gate runs once on the first phase's inputs,
-    reusing ``pre_run_verdict`` (the input validator's report) so no second
-    validation call is made.
+    A thin wrapper over :func:`run_campaign` for the common single-chain case
+    (one phase for DFT, a restart-chained optimization → equilibration →
+    production for MD). Equivalent to one sequential stage; the result keeps
+    the same ``status`` / ``phases`` / ``history`` shape it has always had.
 
     Args:
         phases: Ordered phases to execute (one for DFT, several for staged MD).
@@ -494,92 +756,9 @@ def run_refinement(
         pre_run_verdict: Optional input-validator report for the pre-run gate.
 
     Returns:
-        A dict with ``status`` (``"success"``, ``"aborted"``, or
-        ``"failed"``), ``phases`` (per-phase final verdict + cycles), and the
-        full ``history``.
+        A dict with ``status``, ``phases`` (per-phase final verdict + cycles),
+        and the full ``history``.
     """
-    if not phases:
-        return {"status": "failed", "error": "no phases to run", "phases": [],
-                "history": ctx.history}
-
-    # ── Pre-run gate (1): accept the generated inputs before the first run ──
-    gated = policy.approve_change(phases[0].input_files, pre_run_verdict, ctx)
-    if gated is None:
-        return {"status": "aborted", "reason": "pre-run inputs rejected",
-                "phases": [], "history": ctx.history}
-    phases[0].input_files = gated
-
-    phase_results: List[Dict[str, Any]] = []
-
-    for phase in phases:
-        ctx.cycle = 0
-        inputs = phase.input_files
-        last_verdict: Dict[str, Any] = {}
-        phase_status = "failed"
-
-        while ctx.cycle < ctx.max_cycles:
-            result = executor.run(inputs, phase.run_command, phase.run_dir)
-
-            if result.get("status") == "error":
-                # Could not launch — still assess (the critic reads the
-                # persisted stderr) so a fix can be proposed, but treat a
-                # launch failure as a needs_fixes verdict if the critic errors.
-                logger.warning(
-                    "Executor could not launch phase %s: %s",
-                    phase.name, result.get("error"),
-                )
-
-            verdict = run_critic.assess(
-                output_dir=result.get("output_dir", phase.run_dir),
-                research_goal=ctx.research_goal,
-                skill=ctx.skill,
-                domain=ctx.domain,
-            )
-            last_verdict = verdict
-            ctx.record(phase, result, verdict)
-
-            decision = policy.after_run(result, verdict, ctx)
-            if decision == CycleDecision.STOP:
-                phase_status = "success" if _is_acceptable(verdict) else "stopped"
-                break
-
-            fixes = verdict.get("suggested_fixes")
-            if not fixes:
-                phase_status = "success" if _is_acceptable(verdict) else "stopped"
-                break
-
-            approved = policy.approve_change(fixes, verdict, ctx)
-            if approved is None:
-                phase_status = "aborted"
-                break
-            inputs = approved
-            ctx.cycle += 1
-        else:
-            # Budget exhausted without an acceptable verdict.
-            phase_status = "exhausted"
-
-        phase_results.append({
-            "phase": phase.name,
-            "status": phase_status,
-            "cycles": ctx.cycle + 1,
-            "verdict": last_verdict.get("verdict"),
-            "run_status": last_verdict.get("run_status"),
-        })
-
-        # A phase that did not reach an acceptable verdict stops the chain —
-        # later phases depend on this one's output (restart files). Only a
-        # phase that ended acceptable ("success") lets the run proceed; a
-        # "stopped" phase (refining halted below acceptable — a benign-but-poor
-        # result, or a stalled loop) is not a success and ends the run.
-        if phase_status != "success":
-            return {
-                "status": "aborted" if phase_status == "aborted" else "failed",
-                "phases": phase_results,
-                "history": ctx.history,
-            }
-
-    return {
-        "status": "success",
-        "phases": phase_results,
-        "history": ctx.history,
-    }
+    stage = Stage(name="run", phases=list(phases), parallel=False)
+    return run_campaign([stage], executor, run_critic, policy, ctx,
+                        pre_run_verdict)
