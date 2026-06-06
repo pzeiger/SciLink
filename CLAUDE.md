@@ -429,6 +429,113 @@ Domain scientists who write markdown only can ship a skill as a single
 `<name>.md` and never touch Python; the engineer-maintained helpers
 co-locate as siblings.
 
+This yields a three-rung reliability ladder for a skill's
+`implementation` recipe — prose → code-in-markdown → `TOOL_SPEC` helper:
+
+- **Prose recipe.** Narrative guidance; the codegen LLM improvises the
+  code. Lowest fidelity, zero packaging.
+- **Code-in-markdown.** A concrete snippet in the `implementation`
+  section, injected verbatim into the codegen prompt as the recipe to
+  follow; the LLM transcribes/adapts it into the generated script (it is
+  *not* imported or run directly). **Use when** you want to pin the exact
+  algorithm / params / library (much stronger than prose), the op is
+  short-to-medium, and you're fine with the LLM adapting it to the data.
+  This is the right default for most scientist-authored skills —
+  concrete, no Python packaging, composes automatically. The agent's
+  verification loop (sandbox run + compile-check + quality gate)
+  backstops transcription errors, so a mangled snippet is corrected, not
+  silently wrong.
+- **`TOOL_SPEC` helper.** A sibling `.py` callable surfaced in the
+  codegen tool inventory and *called* by the generated script (byte-exact,
+  deterministic, testable, reusable). **Promote to this when** the code
+  must run verbatim/deterministically, it's long or numerically
+  sensitive, or it's a reusable stage you want tested and called
+  identically every time (and you can contribute it to the package).
+
+Note the packaging boundary: `TOOL_SPEC` tools are discovered only from
+skills *inside the installed package* (`_registry` walks `_SKILLS_DIR`
+and imports them as `scilink.skills.…` modules). Skills added via the UI
+uploader or dropped in the persistent `~/.scilink` store are markdown-only
+by construction — they compose via the prose / code-in-markdown rungs, not
+`TOOL_SPEC`. So code-in-markdown is the highest reliability rung a custom
+skill can reach without a package contribution.
+
+A user-registered custom skill (UI uploader / `--skills` → `register_skill`,
+held in the orchestrator's `_custom_skills` as `{name: path}`) is still
+**auto-selectable by the agent**: `run_analysis` forwards `_custom_skills`
+to `analyze(custom_skills=…)`, and `build_skill_catalog` folds them into the
+per-domain catalog (skipping a custom skill that explicitly declares a
+*different* analysis modality), so the agent's selector treats them like
+built-ins. A selected custom name is resolved back to its path before
+loading (customs aren't on the loader's search roots). This means the
+orchestrator does NOT need to pass an uploaded skill authoritatively just to
+make it usable — it pre-loads `skill` only for an explicit user request.
+
+**Multi-skill composition.** When several skills are co-active, each may
+own a different pipeline stage (e.g. one skill's preprocessing recipe and
+another's analysis recipe), so codegen injects the `implementation`
+sections of *all* co-active skills — labeled per skill, applied in the
+plan's order — rather than only the top-ranked one. The technique-aware
+selector keeps co-activation conservative (complementary skills only), so
+this composes stages rather than fusing competing recipes. Authors should
+write each `implementation` section as self-contained for *its* stage,
+not assuming it is the only active skill.
+
+**Selection policy differs by how authoritative a domain's skills are**
+(an `exclusive` flag on `_shared/_skill_selector.select_relevant_skills`):
+
+- **Curve fitting is *exclusive*.** Its skills encode AUTHORITATIVE,
+  mutually-exclusive *technique* rules (injected as "MANDATORY Domain
+  Skill Rules") — a 1D spectrum is XPS *or* EPR, never a blend, and two
+  technique skills would inject contradictory mandates. The agent-side
+  selector therefore picks the single best technique match (or none); the
+  result is capped to one.
+- **Image / hyperspectral are *composable*.** Their skills are advisory
+  ("Domain Expertise … use it to inform your approach") and often map to
+  distinct pipeline stages (flatten → segment), so multiple may load.
+
+The orchestrator can still pass an explicit multi-skill list to any agent;
+the `exclusive` policy governs only the agent's *own* auto-selection.
+
+**The agent-side selectors share one brain but differ in the signal they
+feed it.** All three call `select_relevant_skills` and route through
+`_load_skills_to_state`, but the *context* each supplies differs in
+richness:
+
+- **Image** — the actual pixels (scout montage / image bytes) + metadata;
+  runs as a pipeline controller (`SkillSuggestionController`).
+- **Curve** — metadata + data statistics + the rendered plot; pipeline
+  controller (`CurveFittingSkillSuggestionController`).
+- **Hyperspectral** — **metadata only** (`_auto_select_skills` in
+  `analyze()`, not a controller; it does *not* inspect the datacube).
+
+So hyperspectral is the weakest selection path and partly redundant with
+the orchestrator (no signal the orchestrator lacks) — moot today with a
+single `eels` skill, but when a second hyperspectral skill lands the fix is
+to give its selector a real data signal (e.g. the datacube's mean
+spectrum), making it data-aware like image/curve. The non-redundancy rule:
+an agent-side selector earns its keep only where it reads data the
+orchestrator can't.
+
+**Authoritative `skill` vs non-binding `skill_hint`.** The orchestrator
+defers skill choice to the agents by default, but can influence it two ways
+via `run_analysis`:
+
+- `skill` (authoritative) — for an *explicit user request* or a custom
+  skill. Pre-loaded into `skills_loaded`; the agent's auto-selector is
+  skipped (its skip guard checks `skills_loaded`/`skill_sections`). Honored
+  as-is.
+- `skill_hint` (non-binding) — for the orchestrator's *own* autonomous guess
+  (from the `preview_image`/conversation context the agent can't see). NOT
+  pre-loaded; passed into the agent's selector as a prior. The agent
+  inspects the data and decides — confirm, augment, or override. **The agent
+  has final authority.** Forwarded only to agents whose `analyze()` accepts
+  it (signature-introspection, like `max_verification_iterations`).
+
+This resolves the preemption risk: an autonomous orchestrator guess no
+longer suppresses the agent's richer, data-level (and possibly multi-skill)
+selection, while a genuine user request still binds.
+
 ### Comparison with Anthropic Skills
 
 |  | Anthropic | SciLink |

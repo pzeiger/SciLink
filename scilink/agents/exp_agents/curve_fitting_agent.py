@@ -285,6 +285,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         auxiliary_label: Optional[Union[str, List[str]]] = None,
         # Domain skill
         skill: Optional[str] = None,
+        # Non-binding skill suggestion from the orchestrator (the agent's
+        # auto-selector treats it as a prior; agent has final authority).
+        skill_hint: Optional[Union[str, List[str]]] = None,
+        # User-registered custom skills ({name: path}) — folded into the
+        # agent-side selector's catalog so an uploaded skill is auto-selectable.
+        custom_skills: Optional[Dict[str, str]] = None,
         # Prior knowledge from reference analyses
         prior_knowledge: Optional[List[Dict[str, Any]]] = None,
         # Prior curve-fit runs whose saved artifacts (fitting script, fit
@@ -675,6 +681,11 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
             # Domain skill
             **skill_state,
+            # Non-binding skill suggestion from the orchestrator (agent's
+            # auto-selector uses it as a prior; agent has final authority).
+            "skill_hint": skill_hint,
+            # User-registered custom skills ({name: path}) for the selector.
+            "custom_skills": custom_skills or {},
 
             # Prior knowledge from reference analyses
             "prior_knowledge": prior_knowledge or [],
@@ -743,6 +754,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             outlier_sigma=effective_outlier_sigma,
             max_verification_iterations=effective_max_verification,
             parallel_workers=self.parallel_workers,
+            load_skills_fn=self._load_skills_to_state,
         )
         
         # Execute pipeline

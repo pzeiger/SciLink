@@ -269,11 +269,20 @@ examine_data returns data_type:
 2. `load_metadata` (can pass directory path) or `convert_metadata`
 3. Decide agent (ask user if disambiguation_needed=true)
 4. `select_agent`
-5. `run_analysis`. **Skill selection is technique-gated:** only pass a `skill`
-   whose declared technique matches the data's measurement technique (each
-   skill names its technique in the `skill` parameter's `[technique: …]` tag).
-   If no skill's technique matches the data, pass NO skill — the agent's
-   baseline fits it correctly. Never fall back to the nearest-sounding skill.
+5. `run_analysis`. **Skill selection defaults to the agent.** Each analysis
+   agent inspects the actual data and auto-selects the relevant skill(s)
+   itself, from a richer signal than you have. Two ways to influence it:
+   - `skill` (AUTHORITATIVE) — use only when the user explicitly named a
+     skill/technique (now or earlier in the conversation) or a registered
+     custom skill applies. The agent honors it as-is and does not re-select.
+   - `skill_hint` (NON-BINDING) — use for your OWN guess that a skill may
+     apply when the user did not ask. The agent treats it as a prior and
+     decides from the data: it may confirm, add complementary skills, or
+     override. The agent has final authority.
+   Default to passing NEITHER and letting the agent select. When you pass
+   `skill`, technique-match it (`[technique: …]` tag), never the
+   nearest-sounding one; curve-fitting techniques are mutually exclusive, so
+   pass at most one.
 6. Present results
 7. For deeper follow-up analysis on images, call `run_analysis` again with
    `prior_analysis_paths` set to the prior `output_directory`; the agent will

@@ -21,6 +21,7 @@ from typing import Callable, List, Any
 from ..controllers.curve_fitting_controllers import (
     # Original controllers
     AnalyzeDataController,
+    CurveFittingSkillSuggestionController,
     SeriesScoutController,
     LiteratureSearchController,
     GenerateCurveFittingReportController,
@@ -62,6 +63,7 @@ def create_unified_curve_fitting_pipeline(
     outlier_sigma: float = 2.0,
     max_verification_iterations: int = 7,
     parallel_workers: int | None = None,
+    load_skills_fn: Callable | None = None,
 ) -> List:
     """
     Factory function to create the unified curve fitting pipeline.
@@ -143,6 +145,22 @@ def create_unified_curve_fitting_pipeline(
             plot_fn=plot_fn,
         )
     )
+
+    # Step 1.7: Auto-suggest domain skill(s) if none were provided.
+    # Only wired when the agent supplies its skill loader (keeps the legacy
+    # backward-compat factory, which omits it, at the prior no-auto-select
+    # behavior).
+    if load_skills_fn is not None:
+        pipeline.append(
+            CurveFittingSkillSuggestionController(
+                model=model,
+                logger=logger,
+                generation_config=generation_config,
+                safety_settings=safety_settings,
+                parse_fn=parse_fn,
+                load_skills_fn=load_skills_fn,
+            )
+        )
 
     # Step 2: Human feedback refinement on fitting approach
     pipeline.append(

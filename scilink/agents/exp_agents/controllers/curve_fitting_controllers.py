@@ -521,37 +521,90 @@ def _append_fit_domain_guidance(prompt: list, state: dict) -> None:
 def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     """Append domain skill knowledge to an LLM prompt for the given stage.
 
+    With multiple skills loaded, each skill's section is appended in order
+    (most-relevant first) so the LLM can attribute guidance to its source.
+
     Args:
         prompt: Mutable list of prompt parts to extend.
-        state: Pipeline state dict containing ``skill_sections`` and ``skill_name``.
+        state: Pipeline state dict containing ``skills_loaded`` (or the legacy
+            ``skill_sections`` / ``skill_name`` for single-skill state dicts).
         stage: One of ``"planning"``, ``"analysis"``, ``"interpretation"``, ``"validation"``.
     """
-    sections = state.get("skill_sections")
-    if not sections:
-        return
-
-    skill_name = state.get("skill_name", "domain skill")
-    content = sections.get(stage, "")
-    if not content:
-        return
-
-    prompt.append(f"\n## MANDATORY Domain Skill Rules: {skill_name} ({stage})")
-    prompt.append(
-        "The following rules are MANDATORY. Your analysis plan and implementation "
-        "MUST conform to these domain-specific requirements. These rules encode "
-        "validated domain expertise and take precedence over general-purpose defaults. "
-        "Do NOT substitute your own preferences where these rules specify a method, "
-        "treatment, or constraint."
+    skills = state.get("skills_loaded") or (
+        [state["skill_sections"]] if state.get("skill_sections") else []
     )
-    prompt.append(content)
+    if not skills:
+        return
 
-    # Include validation rules during planning and interpretation
-    # so the LLM knows quality criteria upfront
-    if stage in ("planning", "interpretation"):
-        validation = sections.get("validation", "")
-        if validation:
-            prompt.append(f"\n## MANDATORY Domain Validation Rules ({skill_name})")
-            prompt.append(validation)
+    intro_appended = False
+    for sections in skills:
+        if not sections:
+            continue
+        content = sections.get(stage, "")
+        if not content:
+            continue
+        skill_name = sections.get("name", "domain skill")
+
+        prompt.append(f"\n## MANDATORY Domain Skill Rules: {skill_name} ({stage})")
+        if not intro_appended:
+            prompt.append(
+                "The following rules are MANDATORY. Your analysis plan and implementation "
+                "MUST conform to these domain-specific requirements. These rules encode "
+                "validated domain expertise and take precedence over general-purpose defaults. "
+                "Do NOT substitute your own preferences where these rules specify a method, "
+                "treatment, or constraint."
+            )
+            intro_appended = True
+        prompt.append(content)
+
+        # Include validation rules during planning and interpretation
+        # so the LLM knows quality criteria upfront
+        if stage in ("planning", "interpretation"):
+            validation = sections.get("validation", "")
+            if validation:
+                prompt.append(f"\n## MANDATORY Domain Validation Rules ({skill_name})")
+                prompt.append(validation)
+
+
+def _collect_codegen_recipe(state: dict) -> list:
+    """Per-skill codegen recipes for every co-active skill that authored one.
+
+    Returns ``[(skill_name, recipe_text), …]`` in ranked order (most-relevant
+    first), preferring each skill's ``implementation`` section over its
+    ``analysis`` synonym. When several skills are active each may own a
+    different pipeline stage (e.g. preprocessing vs fitting), so all their
+    recipes are returned and the generated script applies each to its stage in
+    the plan's order — the top-ranked skill is NOT the sole recipe. Falls back
+    to the legacy singular ``skill_sections`` field.
+    """
+    skills = state.get("skills_loaded") or (
+        [state["skill_sections"]] if state.get("skill_sections") else []
+    )
+    recipes = []
+    for s in skills:
+        if not s:
+            continue
+        recipe = s.get("implementation") or s.get("analysis")
+        if recipe:
+            recipes.append((s.get("name", "skill"), recipe))
+    return recipes
+
+
+def _render_codegen_recipe(recipes: list) -> str:
+    """Render collected recipes into one codegen block.
+
+    Single skill: the recipe verbatim (unchanged from the pre-multi-skill
+    behavior). Multiple: a short composition note plus each recipe labeled by
+    skill, so the codegen LLM maps each recipe to its pipeline stage.
+    """
+    if len(recipes) == 1:
+        return recipes[0][1]
+    note = (
+        " Multiple skills are active; each recipe below may cover a different "
+        "stage of the analysis (e.g. preprocessing vs fitting). Apply each to "
+        "its stage in the plan's order and produce ONE script.\n\n"
+    )
+    return note + "\n\n".join(f"### Recipe — {n}\n{r}" for n, r in recipes)
 
 
 def _append_prior_knowledge_context(prompt: list, state: dict) -> None:
@@ -776,6 +829,75 @@ class AnalyzeDataController:
         except Exception as e:
             self.logger.error(f"❌ Data analysis failed: {e}", exc_info=True)
             state["error_dict"] = {"error": "Data analysis failed", "details": str(e)}
+
+        return state
+
+
+class CurveFittingSkillSuggestionController:
+    """Auto-suggest domain skill(s) when none were explicitly provided.
+
+    Runs after data analysis and before planning. Shows the LLM the curve's
+    metadata, summary statistics, and the raw-data plot alongside a catalog
+    of available curve-fitting skills, and asks which (if any) match the
+    measurement technique. No-op when a skill was already loaded (e.g. by the
+    orchestrator or user). Selection is conservative and technique-aware
+    (see issue #251); it may return zero, one, or several skills.
+    """
+
+    def __init__(self, model, logger, generation_config, safety_settings,
+                 parse_fn, load_skills_fn, domain="curve_fitting"):
+        self.model = model
+        self.logger = logger
+        self.generation_config = generation_config
+        self.safety_settings = safety_settings
+        self._parse = parse_fn
+        self._load_skills = load_skills_fn
+        self.domain = domain
+
+    def execute(self, state: dict) -> dict:
+        if (state.get("error_dict") or state.get("skills_loaded")
+                or state.get("skill_sections")):
+            return state
+
+        from ....skills._shared._skill_selector import select_relevant_skills
+
+        context_parts = []
+        sysinfo = state.get("system_info")
+        if isinstance(sysinfo, dict) and sysinfo:
+            context_parts.append(f"Metadata: {str(sysinfo)[:1500]}")
+        elif isinstance(sysinfo, str) and sysinfo.strip():
+            context_parts.append(f"Metadata: {sysinfo.strip()[:1500]}")
+        stats = state.get("data_statistics")
+        if stats:
+            context_parts.append(f"Data statistics: {stats}")
+        plot_bytes = state.get("original_plot_bytes")
+        if plot_bytes:
+            context_parts.append({"mime_type": "image/jpeg", "data": plot_bytes})
+        if not context_parts:
+            return state
+
+        self.logger.info("\n--- Skill Suggestion ---\n")
+
+        # Curve-fitting skills are authoritative, mutually-exclusive techniques
+        # (a 1D spectrum is XPS *or* EPR, never a blend) and inject MANDATORY
+        # rules — so select at most one, the single best technique match.
+        custom_skills = state.get("custom_skills") or {}
+        selected = select_relevant_skills(
+            model=self.model,
+            parse_fn=self._parse,
+            domain=self.domain,
+            context_parts=context_parts,
+            generation_config=self.generation_config,
+            safety_settings=self.safety_settings,
+            exclusive=True,
+            hint=state.get("skill_hint"),
+            custom_skills=custom_skills,
+            logger=self.logger,
+        )
+        if selected:
+            # Resolve selected custom-skill name(s) to their registered path(s).
+            resolved = [custom_skills.get(n, n) for n in selected]
+            state.update(self._load_skills(resolved, domain=self.domain))
 
         return state
 
@@ -2219,18 +2341,17 @@ Your guidance: '''
         context_parts = []
         if state.get("literature_context"):
             context_parts.append(state["literature_context"])
-        skill_sections = state.get("skill_sections")
-        # Prefer the `implementation` section for codegen. CLAUDE.md: implementation
-        # is the going-forward name; the loader's analysis<->implementation synonym
-        # fold makes single-section skills populate both, while dual-section skills
-        # keep `implementation` as the runnable recipe (not `analysis`).
-        codegen_recipe = (skill_sections or {}).get("implementation") or (skill_sections or {}).get("analysis")
-        if codegen_recipe:
+        # Codegen recipe from ALL co-active skills (not just the top-ranked):
+        # with several skills active each may own a different pipeline stage,
+        # so none is dropped. Single-skill output is unchanged. Prefers each
+        # skill's `implementation` section over its `analysis` synonym.
+        recipes = _collect_codegen_recipe(state)
+        if recipes:
             level = state.get("_annealing_level", 0)
             preamble = self._SKILL_STRICTNESS_SCHEDULE[
                 min(level, len(self._SKILL_STRICTNESS_SCHEDULE) - 1)
-            ].format(name=state.get("skill_name", "skill"))
-            context_parts.append(preamble + codegen_recipe)
+            ].format(name=", ".join(n for n, _ in recipes))
+            context_parts.append(preamble + _render_codegen_recipe(recipes))
         prior_runs = _prior_curve_fit_block(state)
         if prior_runs:
             context_parts.append(prior_runs)
@@ -2360,15 +2481,14 @@ Your guidance: '''
             error_message=error_msg,
             tool_inventory=_tool_inventory_text(state),
         )
-        skill_sections = state.get("skill_sections")
-        # Prefer `implementation` for codegen (see _generate_fitting_script).
-        codegen_recipe = (skill_sections or {}).get("implementation") or (skill_sections or {}).get("analysis")
-        if codegen_recipe:
+        # Codegen recipe from ALL co-active skills (see _generate_fitting_script).
+        recipes = _collect_codegen_recipe(state)
+        if recipes:
             level = state.get("_annealing_level", 0)
             preamble = self._SKILL_STRICTNESS_SCHEDULE[
                 min(level, len(self._SKILL_STRICTNESS_SCHEDULE) - 1)
-            ].format(name=state.get("skill_name", "skill"))
-            prompt += "\n\n" + preamble + codegen_recipe
+            ].format(name=", ".join(n for n, _ in recipes))
+            prompt += "\n\n" + preamble + _render_codegen_recipe(recipes)
 
         response = self.model.generate_content(prompt)
         result, error = parse_codegen_response(response, field="script", logger=self.logger)

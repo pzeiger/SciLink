@@ -81,11 +81,17 @@ def _build_skill_description(agent_registry: dict = None,
     import inspect
 
     parts = [
-        "Domain skill name or path to a custom .md skill file. May be a "
-        "single string or a list of strings to load multiple skills at once "
-        "(useful for cross-domain tasks). For ImageAnalysisAgent, omit this "
-        "unless the user explicitly requests a specific skill — the agent "
-        "inspects the actual image and auto-selects a skill if one is relevant."
+        "Domain skill name(s) or path to a custom .md skill file — a single "
+        "string or a list of strings (to load several at once). DEFAULT: omit "
+        "this. Every analysis agent inspects the actual data (image pixels, the "
+        "fitted curve, the spectrum-image metadata) and auto-selects the "
+        "relevant skill(s) itself, from a richer signal than you have here. "
+        "Pass a skill ONLY when the user explicitly named a skill or technique "
+        "— in this request or earlier in the conversation (this includes a "
+        "user asking to use a specific custom skill they uploaded). Custom "
+        "skills are auto-selected by the agent just like built-ins, so you do "
+        "NOT need to pass one merely because it was uploaded. Otherwise leave "
+        "it unset and let the agent select."
     ]
 
     # Discover which agents support skills from their analyze() signature.
@@ -150,11 +156,12 @@ def _build_skill_description(agent_registry: dict = None,
         parts.append(f"Custom skills: {sorted(custom_skills.keys())}.")
 
     parts.append(
-        "Only select a skill whose measurement technique matches the data's "
-        "technique — compare the data's technique (from the metadata) against "
-        "each skill's `[technique: …]` tag above. If none matches, omit `skill` "
-        "and let the agent's baseline handle it; do not substitute the "
-        "nearest-sounding skill."
+        "When you DO pass a skill (user-requested or custom), choose only one "
+        "whose measurement technique matches the data's technique — compare "
+        "against each skill's `[technique: …]` tag above; do not substitute the "
+        "nearest-sounding skill. Curve-fitting techniques are mutually "
+        "exclusive — pass at most one. If unsure, omit `skill` and let the "
+        "agent decide."
     )
 
     return " ".join(parts)
@@ -2030,6 +2037,7 @@ class AnalysisOrchestratorTools:
             auxiliary_data = None,  # str | list[str] | None (#226 multi-aux)
             auxiliary_label = None,  # str | list[str] | None
             skill = None,  # str | list[str] | None (PR 3 multi-skill)
+            skill_hint = None,  # str | list[str] | None — non-binding suggestion
             series_metadata: str = None,
             task_mode: str = None,
             prior_analysis_paths: List[str] = None,
@@ -2506,6 +2514,23 @@ class AnalysisOrchestratorTools:
                         analyze_kwargs["skill"] = [_resolve_one(s) for s in skill]
                     else:
                         analyze_kwargs["skill"] = skill
+                if skill_hint is not None:
+                    # Non-binding suggestion: the agent's auto-selector uses it
+                    # as a prior but decides from the data (agent has final
+                    # authority). Only forward to agents whose analyze() accepts
+                    # it; others accept **kwargs and ignore it.
+                    import inspect as _inspect
+                    if "skill_hint" in _inspect.signature(agent.analyze).parameters:
+                        analyze_kwargs["skill_hint"] = skill_hint
+                # Make user-registered custom skills auto-selectable by the
+                # agent (not only passable as authoritative `skill`): forward
+                # the {name: path} registry so the agent-side selector folds
+                # them into its catalog (#256 fix #1).
+                _custom = getattr(self.orch, "_custom_skills", None)
+                if _custom:
+                    import inspect as _inspect
+                    if "custom_skills" in _inspect.signature(agent.analyze).parameters:
+                        analyze_kwargs["custom_skills"] = dict(_custom)
                 if task_mode is not None:
                     # Currently consumed by CurveFittingAgent; other agents
                     # accept **kwargs and silently ignore unknown parameters,
@@ -2727,6 +2752,22 @@ class AnalysisOrchestratorTools:
                     "description": _build_skill_description(
                         getattr(self.orch, "_agent_registry", None),
                         getattr(self.orch, "_custom_skills", None),
+                    ),
+                },
+                "skill_hint": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
+                    "description": (
+                        "Non-binding skill SUGGESTION — use this (instead of "
+                        "`skill`) for your OWN autonomous guess that a skill may "
+                        "apply, when the user did not explicitly request one. The "
+                        "agent inspects the actual data and decides: it may "
+                        "confirm your hint, add complementary skills, or override "
+                        "it. Use `skill` (authoritative) only for an explicit "
+                        "user request or a custom skill; use `skill_hint` for "
+                        "everything you infer yourself. Same name(s) as `skill`."
                     ),
                 },
                 "series_metadata": {

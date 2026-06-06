@@ -52,6 +52,7 @@ def create_unified_image_analysis_pipeline(
     safety_settings,
     parse_fn: Callable,
     store_fn: Callable,
+    load_skills_fn: Callable,
     image_to_bytes_fn: Callable,
     montage_fn: Callable,
     executor: Any,
@@ -145,6 +146,7 @@ def create_unified_image_analysis_pipeline(
             generation_config=generation_config,
             safety_settings=safety_settings,
             parse_fn=parse_fn,
+            load_skills_fn=load_skills_fn,
         )
     )
 

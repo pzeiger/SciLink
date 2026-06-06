@@ -286,6 +286,46 @@ def _append_tool_inventory(
     prompt.append(format_library_inventory())
 
 
+def _collect_codegen_recipe(state: dict) -> list:
+    """Per-skill codegen recipes for every co-active skill that authored one.
+
+    Returns ``[(skill_name, recipe_text), …]`` in ranked order, preferring each
+    skill's ``implementation`` section over its ``analysis`` synonym. When
+    several skills are active each may own a different pipeline stage (e.g.
+    flattening vs segmentation), so all their recipes are returned — the
+    top-ranked skill is NOT the sole recipe. Falls back to the legacy singular
+    ``skill_sections`` field.
+    """
+    skills = state.get("skills_loaded") or (
+        [state["skill_sections"]] if state.get("skill_sections") else []
+    )
+    recipes = []
+    for s in skills:
+        if not s:
+            continue
+        recipe = s.get("implementation") or s.get("analysis")
+        if recipe:
+            recipes.append((s.get("name", "skill"), recipe))
+    return recipes
+
+
+def _render_codegen_recipe(recipes: list) -> str:
+    """Render collected recipes into one codegen block.
+
+    Single skill: the recipe verbatim (unchanged from pre-multi-skill
+    behavior). Multiple: a short composition note plus each recipe labeled by
+    skill, so the codegen LLM maps each recipe to its pipeline stage.
+    """
+    if len(recipes) == 1:
+        return recipes[0][1]
+    note = (
+        " Multiple skills are active; each recipe below may cover a different "
+        "stage of the analysis (e.g. flattening vs segmentation). Apply each to "
+        "its stage in the plan's order and produce ONE script.\n\n"
+    )
+    return note + "\n\n".join(f"### Recipe — {n}\n{r}" for n, r in recipes)
+
+
 def _active_skill_names(state: dict) -> list[str]:
     """Return names of all currently-loaded skills from a pipeline state dict.
 
@@ -966,66 +1006,57 @@ class SkillSuggestionController:
     """
 
     def __init__(self, model, logger, generation_config, safety_settings,
-                 parse_fn, domain="image_analysis"):
+                 parse_fn, load_skills_fn, domain="image_analysis"):
         self.model = model
         self.logger = logger
         self.generation_config = generation_config
         self.safety_settings = safety_settings
         self._parse = parse_fn
+        self._load_skills = load_skills_fn
         self.domain = domain
 
     def execute(self, state: dict) -> dict:
-        if state.get("error_dict") or state.get("skill_sections"):
+        # Skip when a skill was already provided (orchestrator/user) — check
+        # both the multi-skill list and the legacy singular field.
+        if (state.get("error_dict") or state.get("skills_loaded")
+                or state.get("skill_sections")):
             return state
 
-        from ....skills.loader import list_skills, load_skill
+        from ....skills._shared._skill_selector import select_relevant_skills
 
-        available = list_skills(domain=self.domain)
-        if not available:
-            return state
-
-        catalog, cache = [], {}
-        for name in available:
-            try:
-                parsed = load_skill(name, domain=self.domain)
-                cache[name] = parsed
-                catalog.append(f"- **{name}**: {parsed.get('overview', '').strip()}")
-            except Exception:
-                continue
-        if not catalog:
+        image_bytes = (state.get("scout_montage_bytes")
+                       or state.get("original_image_bytes"))
+        context_parts = []
+        sysinfo = state.get("system_info")
+        if isinstance(sysinfo, dict) and sysinfo:
+            context_parts.append(f"Metadata: {str(sysinfo)[:1500]}")
+        elif isinstance(sysinfo, str) and sysinfo.strip():
+            context_parts.append(f"Metadata: {sysinfo.strip()[:1500]}")
+        if image_bytes:
+            context_parts.append({"mime_type": "image/jpeg", "data": image_bytes})
+        if not context_parts:
             return state
 
         self.logger.info("\n--- Skill Suggestion ---\n")
 
-        prompt = [
-            "Based on the image(s) below, decide whether any of these "
-            "domain skills is relevant.\n\n## Available Skills\n"
-            + "\n".join(catalog),
-        ]
-        image_bytes = (state.get("scout_montage_bytes")
-                       or state.get("original_image_bytes"))
-        if image_bytes:
-            prompt.append({"mime_type": "image/jpeg", "data": image_bytes})
-        prompt.append(
-            'Respond with JSON: {"skill": "<name>"} if clearly relevant, '
-            'or {"skill": null} if none applies.'
+        custom_skills = state.get("custom_skills") or {}
+        selected = select_relevant_skills(
+            model=self.model,
+            parse_fn=self._parse,
+            domain=self.domain,
+            context_parts=context_parts,
+            generation_config=self.generation_config,
+            safety_settings=self.safety_settings,
+            hint=state.get("skill_hint"),
+            custom_skills=custom_skills,
+            logger=self.logger,
         )
-
-        try:
-            resp = self.model.generate_content(
-                contents=prompt, generation_config=self.generation_config,
-                safety_settings=self.safety_settings,
-            )
-            result, _ = self._parse(resp)
-            suggested = (result or {}).get("skill")
-            if suggested and suggested in cache:
-                state["skill_name"] = cache[suggested]["name"]
-                state["skill_sections"] = cache[suggested]
-                print(f"  Auto-selected domain skill: {suggested}")
-            else:
-                self.logger.info("  No skill auto-selected")
-        except Exception as e:
-            self.logger.warning(f"  Skill suggestion failed: {e}")
+        if selected:
+            # Resolve any selected custom-skill name to its registered path
+            # (customs aren't on the loader's search roots), then route through
+            # the agent's loader so skills_loaded + legacy fields stay consistent.
+            resolved = [custom_skills.get(n, n) for n in selected]
+            state.update(self._load_skills(resolved, domain=self.domain))
 
         return state
 
@@ -2025,18 +2056,17 @@ Your guidance: '''
         context_parts = []
         if state.get("literature_context"):
             context_parts.append(state["literature_context"])
-        skill_sections = state.get("skill_sections")
-        # Prefer the `implementation` section for codegen. CLAUDE.md: implementation
-        # is the going-forward name; the loader's analysis<->implementation synonym
-        # fold makes single-section skills populate both, while dual-section skills
-        # keep `implementation` as the runnable recipe (not `analysis`).
-        codegen_recipe = (skill_sections or {}).get("implementation") or (skill_sections or {}).get("analysis")
-        if codegen_recipe:
+        # Codegen recipe from ALL co-active skills (not just the top-ranked):
+        # with several skills active each may own a different pipeline stage
+        # (e.g. flattening vs segmentation), so none is dropped. Single-skill
+        # output is unchanged. Prefers `implementation` over `analysis`.
+        recipes = _collect_codegen_recipe(state)
+        if recipes:
             level = state.get("_annealing_level", 0)
             preamble = self._SKILL_STRICTNESS_SCHEDULE[
                 min(level, len(self._SKILL_STRICTNESS_SCHEDULE) - 1)
-            ].format(name=state.get("skill_name", "skill"))
-            context_parts.append(preamble + codegen_recipe)
+            ].format(name=", ".join(n for n, _ in recipes))
+            context_parts.append(preamble + _render_codegen_recipe(recipes))
 
         # Add sub-agent preprocessing array paths
         for key in ("fft_preprocessing", "sam_preprocessing"):
@@ -2219,15 +2249,14 @@ Your guidance: '''
             error_message=error_msg,
             tool_inventory=format_tool_inventory("image_analysis", active_skills=active_skills),
         )
-        skill_sections = state.get("skill_sections")
-        # Prefer `implementation` for codegen (see the generate-script path).
-        codegen_recipe = (skill_sections or {}).get("implementation") or (skill_sections or {}).get("analysis")
-        if codegen_recipe:
+        # Codegen recipe from ALL co-active skills (see the generate-script path).
+        recipes = _collect_codegen_recipe(state)
+        if recipes:
             level = state.get("_annealing_level", 0)
             preamble = self._SKILL_STRICTNESS_SCHEDULE[
                 min(level, len(self._SKILL_STRICTNESS_SCHEDULE) - 1)
-            ].format(name=state.get("skill_name", "skill"))
-            prompt += "\n\n" + preamble + codegen_recipe
+            ].format(name=", ".join(n for n, _ in recipes))
+            prompt += "\n\n" + preamble + _render_codegen_recipe(recipes)
 
         response = self.model.generate_content(prompt)
         result, error = parse_codegen_response(response, field="script", logger=self.logger)

@@ -32,42 +32,53 @@ from ....utils.codegen_parse import parse_codegen_response
 
 
 def _render_skill_block(state: dict, stage: str) -> str:
-    """Render the active domain skill's block for ``stage`` as a single string.
+    """Render the active domain skill(s) block for ``stage`` as a single string.
 
-    Returns ``""`` when no skill is active or no content exists for the
-    requested stage. Use this from prompt builders that assemble a single
-    string (e.g. ``build_code_generation_prompt``); the list-mode wrapper
-    ``_append_skill_context`` below uses this internally.
+    With multiple skills loaded, each skill's block is rendered in order
+    (most-relevant first) — including at the ``implementation`` (codegen)
+    stage, where co-active skills may each own a different pipeline stage, so
+    none is dropped. Returns ``""`` when no skill is active or no content
+    exists for the requested stage. Use this from prompt builders that
+    assemble a single string (e.g. ``build_code_generation_prompt``); the
+    list-mode wrapper ``_append_skill_context`` below uses this internally.
     """
-    sections = state.get("skill_sections")
-    if not sections:
-        return ""
-    content = sections.get(stage, "")
-    if not content:
+    skills = state.get("skills_loaded") or (
+        [state["skill_sections"]] if state.get("skill_sections") else []
+    )
+    if not skills:
         return ""
 
-    skill_name = state.get("skill_name", "domain skill")
-    parts = [
-        f"\n## MANDATORY Domain Skill Rules: {skill_name} ({stage})",
-        (
-            "The following rules are MANDATORY. Your analysis plan and implementation "
-            "MUST conform to these domain-specific requirements. These rules encode "
-            "validated domain expertise and take precedence over general-purpose defaults. "
-            "Do NOT substitute your own preferences where these rules specify a method, "
-            "treatment, or constraint."
-        ),
-        content,
-    ]
+    parts: list = []
+    intro_appended = False
+    for sections in skills:
+        if not sections:
+            continue
+        content = sections.get(stage, "")
+        if not content:
+            continue
+        skill_name = sections.get("name", "domain skill")
 
-    # Include validation rules during planning, interpretation, and
-    # implementation so the LLM knows quality criteria upfront — at planning
-    # to shape the approach, at interpretation/implementation to shape the
-    # output and the generated code.
-    if stage in ("planning", "interpretation", "implementation"):
-        validation = sections.get("validation", "")
-        if validation:
-            parts.append(f"\n## MANDATORY Domain Validation Rules ({skill_name})")
-            parts.append(validation)
+        parts.append(f"\n## MANDATORY Domain Skill Rules: {skill_name} ({stage})")
+        if not intro_appended:
+            parts.append(
+                "The following rules are MANDATORY. Your analysis plan and implementation "
+                "MUST conform to these domain-specific requirements. These rules encode "
+                "validated domain expertise and take precedence over general-purpose defaults. "
+                "Do NOT substitute your own preferences where these rules specify a method, "
+                "treatment, or constraint."
+            )
+            intro_appended = True
+        parts.append(content)
+
+        # Include validation rules during planning, interpretation, and
+        # implementation so the LLM knows quality criteria upfront — at planning
+        # to shape the approach, at interpretation/implementation to shape the
+        # output and the generated code.
+        if stage in ("planning", "interpretation", "implementation"):
+            validation = sections.get("validation", "")
+            if validation:
+                parts.append(f"\n## MANDATORY Domain Validation Rules ({skill_name})")
+                parts.append(validation)
 
     return "\n".join(parts)
 
