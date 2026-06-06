@@ -182,6 +182,11 @@ class MDSimulationAgent(SimulationAgent):
             f"{planning}\n\n"
             "Use the tables above to select the correct unit system, timestep, and\n"
             "damping constants for this system type.\n\n"
+            "If the goal calls for a parameter sweep — several independent runs that\n"
+            "vary one quantity (e.g. a set of temperatures, pressures, strain rates,\n"
+            "or restraint positions) — set requires_multiple_simulations true, set\n"
+            "variable_parameter to that quantity's name, and set variable_values to\n"
+            "the list of values. Otherwise leave them false/null.\n\n"
             "Return JSON:\n"
             "{\n"
             '    "simulation_technique": "standard_md",\n'
@@ -193,6 +198,8 @@ class MDSimulationAgent(SimulationAgent):
             '    "production_time": 1.5,\n'
             '    "requires_multiple_simulations": false,\n'
             '    "number_of_simulations": 1,\n'
+            '    "variable_parameter": null,\n'
+            '    "variable_values": null,\n'
             '    "required_outputs": ["energy", "trajectory"],\n'
             '    "methodology_description": "brief explanation"\n'
             "}"
@@ -212,6 +219,8 @@ class MDSimulationAgent(SimulationAgent):
         params.setdefault("production_time", 1.5)
         params.setdefault("requires_multiple_simulations", False)
         params.setdefault("number_of_simulations", 1)
+        params.setdefault("variable_parameter", None)
+        params.setdefault("variable_values", None)
         params.setdefault("required_outputs", ["energy", "trajectory"])
 
         for k, v in kwargs.items():
