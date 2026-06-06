@@ -1039,6 +1039,7 @@ class SkillSuggestionController:
 
         self.logger.info("\n--- Skill Suggestion ---\n")
 
+        custom_skills = state.get("custom_skills") or {}
         selected = select_relevant_skills(
             model=self.model,
             parse_fn=self._parse,
@@ -1047,12 +1048,15 @@ class SkillSuggestionController:
             generation_config=self.generation_config,
             safety_settings=self.safety_settings,
             hint=state.get("skill_hint"),
+            custom_skills=custom_skills,
             logger=self.logger,
         )
         if selected:
-            # Route through the agent's loader so skills_loaded AND the legacy
-            # singular fields are populated consistently (top-ranked = first).
-            state.update(self._load_skills(selected, domain=self.domain))
+            # Resolve any selected custom-skill name to its registered path
+            # (customs aren't on the loader's search roots), then route through
+            # the agent's loader so skills_loaded + legacy fields stay consistent.
+            resolved = [custom_skills.get(n, n) for n in selected]
+            state.update(self._load_skills(resolved, domain=self.domain))
 
         return state
 

@@ -82,6 +82,57 @@ class TestHintInjection:
         assert "Orchestrator suggestion" not in _prompt_text(m)
 
 
+def _write_custom_skill(tmp_path, name, *, technique=None, domain=None, body="Overview text."):
+    fm = []
+    if technique:
+        fm.append(f"technique: {technique}")
+    if domain:
+        fm.append(f"domain: {domain}")
+    front = ("---\n" + "\n".join(fm) + "\n---\n") if fm else ""
+    p = tmp_path / f"{name}.md"
+    p.write_text(f"{front}## overview\n{body}\n")
+    return str(p)
+
+
+class TestCustomSkills:
+    """#256 fix #1 — registered custom skills are visible to the agent selector."""
+
+    def test_custom_skill_folded_into_catalog(self, tmp_path):
+        path = _write_custom_skill(tmp_path, "myraman", technique="Raman")
+        cat, names = build_skill_catalog("curve_fitting", custom_skills={"myraman": path})
+        assert "myraman" in names
+        assert any("myraman" in line for line in cat)
+
+    def test_custom_skill_with_foreign_modality_is_skipped(self, tmp_path):
+        # A custom skill that explicitly declares a DIFFERENT modality domain
+        # must not leak into this agent's catalog.
+        path = _write_custom_skill(tmp_path, "imgthing", domain="image_analysis")
+        _, names = build_skill_catalog("curve_fitting", custom_skills={"imgthing": path})
+        assert "imgthing" not in names
+
+    def test_custom_skill_without_domain_is_included(self, tmp_path):
+        path = _write_custom_skill(tmp_path, "plainskill")
+        _, names = build_skill_catalog("curve_fitting", custom_skills={"plainskill": path})
+        assert "plainskill" in names
+
+    def test_selector_can_return_a_custom_skill(self, tmp_path):
+        path = _write_custom_skill(tmp_path, "myraman", technique="Raman")
+        out = select_relevant_skills(
+            model=_MockModel(json.dumps({"skills": ["myraman"]})),
+            parse_fn=_parse, domain="curve_fitting", context_parts=["Raman data"],
+            custom_skills={"myraman": path},
+        )
+        assert out == ["myraman"]
+
+    def test_custom_name_invalid_without_registration(self, tmp_path):
+        # Same name but NOT registered -> not in catalog -> dropped.
+        out = select_relevant_skills(
+            model=_MockModel(json.dumps({"skills": ["myraman"]})),
+            parse_fn=_parse, domain="curve_fitting", context_parts=["x"],
+        )
+        assert out == []
+
+
 class TestCatalog:
     def test_curve_fitting_catalog_has_known_skills(self):
         _, names = build_skill_catalog("curve_fitting")

@@ -182,6 +182,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         hints: str | None = None,
         skill: str | None = None,
         skill_hint: str | list[str] | None = None,
+        custom_skills: dict | None = None,
         prior_knowledge: list | None = None,
         auxiliary_data: str | list[str] | None = None,
         auxiliary_label: str | list[str] | None = None,
@@ -284,10 +285,15 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # the image/curve agents. Conservative, technique-aware (issue #251);
         # may pick zero, one, or several skills from the metadata.
         if not skill_state.get("skills_loaded"):
-            selected = self._auto_select_skills(system_info, hint=skill_hint)
+            selected = self._auto_select_skills(
+                system_info, hint=skill_hint, custom_skills=custom_skills
+            )
             if selected:
+                # Resolve any selected custom-skill name to its registered path.
+                cs = custom_skills or {}
+                resolved = [cs.get(n, n) for n in selected]
                 skill_state = self._load_skills_to_state(
-                    selected, domain="hyperspectral"
+                    resolved, domain="hyperspectral"
                 )
 
         # Load auxiliary data if provided (one or several companion datasets).
@@ -366,11 +372,12 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         
         return response
 
-    def _auto_select_skills(self, system_info, hint=None) -> list:
+    def _auto_select_skills(self, system_info, hint=None, custom_skills=None) -> list:
         """Pick relevant hyperspectral skill(s) from the metadata.
 
         Uses the shared technique-aware selector. ``hint`` is the orchestrator's
-        non-binding suggestion (the agent has final authority). Returns a
+        non-binding suggestion (the agent has final authority). ``custom_skills``
+        ({name: path}) folds user-registered skills into the catalog. Returns a
         possibly-empty, ranked list of skill names; never raises.
         """
         from ...skills._shared._skill_selector import select_relevant_skills
@@ -391,6 +398,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             generation_config=self.generation_config,
             safety_settings=self.safety_settings,
             hint=hint,
+            custom_skills=custom_skills,
             logger=self.logger,
         )
 

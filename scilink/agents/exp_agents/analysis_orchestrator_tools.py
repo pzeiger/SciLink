@@ -86,10 +86,12 @@ def _build_skill_description(agent_registry: dict = None,
         "this. Every analysis agent inspects the actual data (image pixels, the "
         "fitted curve, the spectrum-image metadata) and auto-selects the "
         "relevant skill(s) itself, from a richer signal than you have here. "
-        "Pass a skill ONLY when (a) the user explicitly named a skill or "
-        "technique — in this request or earlier in the conversation — or "
-        "(b) a custom skill listed below applies; that is context the agents "
-        "cannot see. Otherwise leave it unset and let the agent select."
+        "Pass a skill ONLY when the user explicitly named a skill or technique "
+        "— in this request or earlier in the conversation (this includes a "
+        "user asking to use a specific custom skill they uploaded). Custom "
+        "skills are auto-selected by the agent just like built-ins, so you do "
+        "NOT need to pass one merely because it was uploaded. Otherwise leave "
+        "it unset and let the agent select."
     ]
 
     # Discover which agents support skills from their analyze() signature.
@@ -2520,6 +2522,15 @@ class AnalysisOrchestratorTools:
                     import inspect as _inspect
                     if "skill_hint" in _inspect.signature(agent.analyze).parameters:
                         analyze_kwargs["skill_hint"] = skill_hint
+                # Make user-registered custom skills auto-selectable by the
+                # agent (not only passable as authoritative `skill`): forward
+                # the {name: path} registry so the agent-side selector folds
+                # them into its catalog (#256 fix #1).
+                _custom = getattr(self.orch, "_custom_skills", None)
+                if _custom:
+                    import inspect as _inspect
+                    if "custom_skills" in _inspect.signature(agent.analyze).parameters:
+                        analyze_kwargs["custom_skills"] = dict(_custom)
                 if task_mode is not None:
                     # Currently consumed by CurveFittingAgent; other agents
                     # accept **kwargs and silently ignore unknown parameters,

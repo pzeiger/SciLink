@@ -236,6 +236,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         auxiliary_label: Optional[Union[str, List[str]]] = None,
         skill: Optional[str] = None,
         skill_hint: Optional[Union[str, List[str]]] = None,
+        custom_skills: Optional[Dict[str, str]] = None,
         prior_knowledge: Optional[List[Dict[str, Any]]] = None,
         prior_analysis_paths: Optional[List[str]] = None,
         # Opt-in: force verbatim reuse of the prior locked analysis script
@@ -433,6 +434,10 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # Non-binding skill suggestion from the orchestrator (the agent's
             # auto-selector treats it as a prior; agent has final authority).
             "skill_hint": skill_hint,
+            # User-registered custom skills ({name: path}) — folded into the
+            # agent-side selector's catalog so an uploaded skill is
+            # auto-selectable, not only orchestrator-passable (#256 fix #1).
+            "custom_skills": custom_skills or {},
             # Prior knowledge
             "prior_knowledge": prior_knowledge or [],
             "prior_analysis_paths": prior_analysis_paths or [],

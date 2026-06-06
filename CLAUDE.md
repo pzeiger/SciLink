@@ -460,6 +460,17 @@ by construction — they compose via the prose / code-in-markdown rungs, not
 `TOOL_SPEC`. So code-in-markdown is the highest reliability rung a custom
 skill can reach without a package contribution.
 
+A user-registered custom skill (UI uploader / `--skills` → `register_skill`,
+held in the orchestrator's `_custom_skills` as `{name: path}`) is still
+**auto-selectable by the agent**: `run_analysis` forwards `_custom_skills`
+to `analyze(custom_skills=…)`, and `build_skill_catalog` folds them into the
+per-domain catalog (skipping a custom skill that explicitly declares a
+*different* analysis modality), so the agent's selector treats them like
+built-ins. A selected custom name is resolved back to its path before
+loading (customs aren't on the loader's search roots). This means the
+orchestrator does NOT need to pass an uploaded skill authoritatively just to
+make it usable — it pre-loads `skill` only for an explicit user request.
+
 **Multi-skill composition.** When several skills are co-active, each may
 own a different pipeline stage (e.g. one skill's preprocessing recipe and
 another's analysis recipe), so codegen injects the `implementation`

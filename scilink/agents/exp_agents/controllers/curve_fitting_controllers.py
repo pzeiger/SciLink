@@ -881,6 +881,7 @@ class CurveFittingSkillSuggestionController:
         # Curve-fitting skills are authoritative, mutually-exclusive techniques
         # (a 1D spectrum is XPS *or* EPR, never a blend) and inject MANDATORY
         # rules — so select at most one, the single best technique match.
+        custom_skills = state.get("custom_skills") or {}
         selected = select_relevant_skills(
             model=self.model,
             parse_fn=self._parse,
@@ -890,10 +891,13 @@ class CurveFittingSkillSuggestionController:
             safety_settings=self.safety_settings,
             exclusive=True,
             hint=state.get("skill_hint"),
+            custom_skills=custom_skills,
             logger=self.logger,
         )
         if selected:
-            state.update(self._load_skills(selected, domain=self.domain))
+            # Resolve selected custom-skill name(s) to their registered path(s).
+            resolved = [custom_skills.get(n, n) for n in selected]
+            state.update(self._load_skills(resolved, domain=self.domain))
 
         return state
 

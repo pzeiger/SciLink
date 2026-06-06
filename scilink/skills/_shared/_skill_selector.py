@@ -23,28 +23,33 @@ from __future__ import annotations
 from typing import Any, Callable, List, Optional
 
 
-def build_skill_catalog(domain: str, *, include_provisional: bool = False):
+def build_skill_catalog(domain: str, *, include_provisional: bool = False,
+                        custom_skills: Optional[dict] = None):
     """Build the selectable-skill catalog for ``domain``.
 
     Returns ``(catalog_lines, names)`` where ``catalog_lines`` is a list of
     human-/LLM-readable bullet strings and ``names`` is the set of valid skill
     names the selector is allowed to return. Mirrors the orchestrator's
     description convention (``analysis_orchestrator_tools._build_skill_description``).
+
+    ``custom_skills`` is an optional ``{name: path}`` map of user-registered
+    skills (UI upload / ``--skills``). They are folded into the catalog so the
+    agent-side selector can auto-select them like built-ins (issue #256 fix #1),
+    EXCEPT when a custom skill's frontmatter declares a *different* analysis
+    modality — that explicit cross-modality skill is skipped (mirrors the
+    loader's ``_MODALITY_DOMAINS`` guard). A custom skill with no declared
+    domain is included; the selector's technique/modality reasoning rejects it
+    if the data does not fit.
     """
-    from ..loader import list_skills, load_skill
+    from ..loader import list_skills, load_skill, _MODALITY_DOMAINS
 
     catalog: List[str] = []
     names: set[str] = set()
-    for name in list_skills(domain=domain):
-        try:
-            parsed = load_skill(name, domain=domain)
-        except Exception:
-            continue
+
+    def _entry(parsed, name):
         meta = parsed.get("meta") or {}
-        # Provisional skills stay loadable via an explicit skill= but are kept
-        # out of auto-routing until reviewed/promoted (see scilink memory).
         if meta.get("provisional") is True and not include_provisional:
-            continue
+            return False
         desc = meta.get("description")
         if not desc:
             desc = parsed.get("overview", "").split("\n")[0].strip()
@@ -58,6 +63,30 @@ def build_skill_catalog(domain: str, *, include_provisional: bool = False):
         body = f" — {desc}" if desc else ""
         catalog.append(f"- **{name}**{tech_tag}{body}")
         names.add(name)
+        return True
+
+    for name in list_skills(domain=domain):
+        try:
+            parsed = load_skill(name, domain=domain)
+        except Exception:
+            continue
+        _entry(parsed, name)
+
+    # User-registered custom skills (session-scoped) — fold them in so the
+    # agent can auto-select an uploaded skill, not just have the orchestrator
+    # pass it authoritatively.
+    for name, path in (custom_skills or {}).items():
+        if name in names:
+            continue
+        try:
+            parsed = load_skill(path, domain=domain)
+        except Exception:
+            continue
+        declared = (parsed.get("meta") or {}).get("domain")
+        if declared in _MODALITY_DOMAINS and declared != domain:
+            continue  # explicitly authored for a different modality
+        _entry(parsed, name)
+
     return catalog, names
 
 
@@ -100,6 +129,7 @@ def select_relevant_skills(
     max_skills: int = 3,
     exclusive: bool = False,
     hint: Any = None,
+    custom_skills: Optional[dict] = None,
     logger: Optional[Any] = None,
 ) -> List[str]:
     """Ask the model which domain skills (zero or more) fit the data.
@@ -120,12 +150,16 @@ def select_relevant_skills(
             (from conversation/preview context the data may not show). A
             NON-BINDING prior — the agent confirms from the data, augments, or
             overrides. The agent has final authority.
+        custom_skills: optional ``{name: path}`` of user-registered skills to
+            fold into the catalog so they are auto-selectable. A returned
+            custom name must be resolved to its path (via this same map) before
+            loading, since it is not on the loader's search roots.
 
     Returns:
         A ranked (most-relevant-first), de-duplicated list of valid skill
         names, possibly empty. Never raises — failures log and return ``[]``.
     """
-    catalog, valid = build_skill_catalog(domain)
+    catalog, valid = build_skill_catalog(domain, custom_skills=custom_skills)
     if not catalog:
         return []
 
