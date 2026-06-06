@@ -388,5 +388,60 @@ class TestCollectPhases:
         assert _collect_phases(gr, "/tmp/y", "run_md.sh")[0].run_command == "run_md.sh"
 
 
+class TestCollectStages:
+    """Generation-result → Stage normalization (engine-neutral, offline)."""
+
+    def test_legacy_shape_wraps_as_one_sequential_stage(self):
+        from scilink.agents.sim_agents.simulation_pipeline import _collect_stages
+        gr = {"input_files": {"run.lammps": "x"}, "entry_file": "run.lammps"}
+        stages = _collect_stages(gr, "/tmp/base", "lmp -in {script}")
+        assert len(stages) == 1
+        assert stages[0].parallel is False and stages[0].kind == "run"
+        assert stages[0].phases[0].run_command == "lmp -in run.lammps"
+        assert stages[0].phases[0].run_dir == "/tmp/base"
+
+    def test_sequential_steps_share_base_run_dir(self):
+        from scilink.agents.sim_agents.simulation_pipeline import _collect_stages
+        gr = {"stages": [
+            {"name": "optim", "input_files": {"o.lmp": "a"}, "entry_file": "o.lmp"},
+            {"name": "prod", "input_files": {"p.lmp": "b"}, "entry_file": "p.lmp"},
+        ]}
+        stages = _collect_stages(gr, "/tmp/base", "lmp -in {script}")
+        assert [s.name for s in stages] == ["optim", "prod"]
+        # Sequential steps chain in the shared base dir.
+        assert all(s.phases[0].run_dir == "/tmp/base" for s in stages)
+
+    def test_fanout_members_get_isolated_run_dirs(self):
+        from scilink.agents.sim_agents.simulation_pipeline import _collect_stages
+        gr = {"stages": [
+            {"name": "tsweep", "parallel": True, "min_success": 2, "members": [
+                {"name": "T300", "input_files": {"p.lmp": "a"}, "entry_file": "p.lmp"},
+                {"name": "T400", "input_files": {"p.lmp": "b"}, "entry_file": "p.lmp"},
+            ]},
+        ]}
+        stages = _collect_stages(gr, "/tmp/base", "lmp -in {script}")
+        st = stages[0]
+        assert st.parallel is True and st.min_success == 2
+        assert {p.run_dir for p in st.phases} == {
+            "/tmp/base/tsweep/T300", "/tmp/base/tsweep/T400"}
+        assert all(p.run_command == "lmp -in p.lmp" for p in st.phases)
+
+    def test_combine_stage_dir_and_command_override(self):
+        from scilink.agents.sim_agents.simulation_pipeline import _collect_stages
+        gr = {"stages": [
+            {"name": "windows", "parallel": True, "members": [
+                {"name": "w0", "input_files": {"w.lmp": "a"}, "entry_file": "w.lmp"},
+            ]},
+            {"name": "wham", "kind": "combine", "entry_file": "wham.py",
+             "input_files": {"wham.py": "..."}, "run_command": "python {script}"},
+        ]}
+        stages = _collect_stages(gr, "/tmp/base", "lmp -in {script}")
+        combine = stages[-1]
+        assert combine.kind == "combine"
+        assert combine.phases[0].run_dir == "/tmp/base/wham"
+        # The combine declares its own interpreter, overriding the engine template.
+        assert combine.phases[0].run_command == "python wham.py"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

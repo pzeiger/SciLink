@@ -302,10 +302,10 @@ def run_complete_workflow(
         result["final_status"] = "success"
         return result
 
-    from .refinement import RefinementContext, policy_for, run_refinement
+    from .refinement import RefinementContext, policy_for, run_campaign
     from .critics import RunCritic
 
-    phases = _collect_phases(gen_result, output_dir, run_command)
+    stages = _collect_stages(gen_result, output_dir, run_command)
     ctx = RefinementContext(
         research_goal=user_request, scale=scale, engine=software,
         skill=software, domain=scale, autonomy=autonomy,
@@ -314,8 +314,8 @@ def run_complete_workflow(
     run_critic = RunCritic(
         api_key=api_key, base_url=base_url, model_name=model_name,
     )
-    refinement = run_refinement(
-        phases, executor, run_critic, policy_for(autonomy), ctx,
+    refinement = run_campaign(
+        stages, executor, run_critic, policy_for(autonomy), ctx,
         pre_run_verdict=result.get("input_validation"),
     )
     result["refinement"] = refinement
@@ -377,6 +377,87 @@ def _collect_phases(
             run_dir=str(run_dir),
         ))
     return phases
+
+
+def _collect_stages(
+    gen_result: Dict[str, Any], run_dir: str, run_command_template: str
+) -> list:
+    """Build refinement ``Stage`` objects from a generation result.
+
+    Reads only normalized, engine-neutral campaign fields. A generation result
+    may carry a ``stages`` list describing a staged/parallel campaign; each
+    entry is one of:
+
+    * a **sequential step** — ``{name, input_files, entry_file}``. Steps share
+      ``run_dir`` so restart files chain.
+    * a **parallel fan-out** — ``{name, parallel: true, members: [...],
+      min_success?}`` where each member is ``{name, input_files, entry_file}``.
+      Members run in their own ``run_dir/<stage>/<member>`` directory.
+    * a **combine** step — ``{name, kind: "combine", input_files, entry_file,
+      run_command?}`` in ``run_dir/<stage>``; ``run_command`` may override the
+      template (e.g. a Python post-processing script).
+
+    When no ``stages`` field is present, the legacy single-chain shape is read
+    via :func:`_collect_phases` and wrapped as one sequential stage, so older
+    generation results behave exactly as before.
+
+    Args:
+        gen_result: The input-generation result.
+        run_dir: Base directory the campaign executes in.
+        run_command_template: Command template with an optional ``{script}``
+            placeholder for a phase's entry file.
+
+    Returns:
+        A list of ``Stage`` objects in execution order.
+    """
+    import os
+
+    from .refinement import Phase, Stage
+
+    stages_spec = gen_result.get("stages")
+    if not stages_spec:
+        phases = _collect_phases(gen_result, run_dir, run_command_template)
+        return [Stage(name="run", phases=phases, parallel=False)]
+
+    def _command(entry: str, override) -> str:
+        template = override or run_command_template
+        if "{script}" in template:
+            return template.format(script=entry or "")
+        return template
+
+    def _phase(spec: Dict[str, Any], rdir: str) -> "Phase":
+        entry = spec.get("entry_file") or ""
+        return Phase(
+            name=spec.get("name", "run"),
+            input_files=spec.get("input_files") or {},
+            run_command=_command(entry, spec.get("run_command")),
+            run_dir=str(rdir),
+        )
+
+    stages = []
+    for spec in stages_spec:
+        name = spec.get("name", "run")
+        if spec.get("kind") == "combine":
+            stages.append(Stage(
+                name=name, kind="combine", parallel=False,
+                phases=[_phase(spec, os.path.join(str(run_dir), name))],
+            ))
+        elif spec.get("parallel") or spec.get("members"):
+            members = [
+                _phase(m, os.path.join(str(run_dir), name,
+                                       m.get("name", "member")))
+                for m in (spec.get("members") or [])
+            ]
+            stages.append(Stage(
+                name=name, parallel=True, phases=members,
+                min_success=spec.get("min_success"),
+            ))
+        else:
+            # Sequential step: share the base run_dir so restart files chain.
+            stages.append(Stage(
+                name=name, parallel=False, phases=[_phase(spec, run_dir)],
+            ))
+    return stages
 
 
 def _collect_input_files(gen_result: Dict[str, Any]) -> Dict[str, str]:
