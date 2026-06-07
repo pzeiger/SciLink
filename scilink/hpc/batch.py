@@ -46,6 +46,12 @@ def build_batch_script(
     lines: List[str] = ["#!/bin/bash"]
     lines.extend(scheduler.batch_directives(resources or {}))
     lines.append("")
+    # Move to the submit directory before anything writes relative paths —
+    # a no-op for SLURM/LSF, a `cd $PBS_O_WORKDIR` for PBS/Torque.
+    prelude = scheduler.workdir_prelude()
+    if prelude:
+        lines.extend(prelude)
+        lines.append("")
     for line in setup or []:
         lines.append(line)
     if setup:

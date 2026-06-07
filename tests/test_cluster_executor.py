@@ -15,6 +15,10 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+# scilink.hpc.* imports paramiko (an optional dependency) via hpc/__init__, so
+# skip the whole module cleanly where it isn't installed rather than erroring.
+pytest.importorskip("paramiko")
+
 from scilink.agents.sim_agents.cluster_executor import (  # noqa: E402
     ClusterExecutor, _RC, _STDOUT, _STDERR,
 )
@@ -87,6 +91,9 @@ class FakeScheduler:
 
     def batch_directives(self, resources):
         return [f"#FAKE job={resources.get('job_name', 'scilink')}"]
+
+    def workdir_prelude(self):
+        return []
 
     def submit(self, script, work_dir=""):
         if self.submit_raises:
@@ -174,6 +181,20 @@ class TestClusterExecutorRun:
         assert result["status"] == "error"
         assert result["returncode"] is None
         assert (run_dir / _RC).read_text() == "submit_error"
+
+    def test_dead_session_that_cant_recover_raises_clear_error(self, tmp_path):
+        class DeadConn(FakeConn):
+            @property
+            def is_connected(self):
+                return False
+
+            def connect(self, *a, **k):
+                raise RuntimeError("password required")
+
+        ex = ClusterExecutor(DeadConn(), scheduler=FakeScheduler(FakeConn()),
+                             poll_interval=0)
+        with pytest.raises(ConnectionError, match="could not be re-established"):
+            ex.run({"in.lj": "S"}, "lmp -in in.lj", str(tmp_path / "run"))
 
     def test_timeout_cancels_and_errors(self, tmp_path):
         conn = FakeConn()
@@ -286,6 +307,19 @@ class TestBatchBuilder:
         assert "#BSUB -n 4" in d
         assert "#BSUB -W 01:00" in d
         assert "#BSUB -q q" in d
+
+    def test_pbs_prelude_cds_to_workdir_others_dont(self):
+        # PBS/Torque starts in $HOME → the wrapper must cd to the submit dir;
+        # SLURM/LSF start there already, so no cd.
+        assert PBSScheduler(conn=None).workdir_prelude() == ["cd $PBS_O_WORKDIR"]
+        assert SlurmScheduler(conn=None).workdir_prelude() == []
+        assert LSFScheduler(conn=None).workdir_prelude() == []
+        pbs = build_batch_script(PBSScheduler(conn=None), "nwchem in.nw")
+        slurm = build_batch_script(SlurmScheduler(conn=None), "nwchem in.nw")
+        assert "cd $PBS_O_WORKDIR" in pbs
+        # And it lands before the command, so relative output paths resolve.
+        assert pbs.index("cd $PBS_O_WORKDIR") < pbs.index("nwchem in.nw")
+        assert "$PBS_O_WORKDIR" not in slurm
 
     def test_build_batch_script_assembles_header_setup_wrapper(self):
         sched = SlurmScheduler(conn=None)

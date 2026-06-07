@@ -104,6 +104,17 @@ class Scheduler(ABC):
         be one subclass with zero changes elsewhere.
         """
 
+    def workdir_prelude(self) -> list[str]:
+        """Shell lines that move the job to its submit directory.
+
+        Schedulers differ on a job's starting directory: SLURM and LSF begin
+        in the submit directory, but PBS/Torque starts in ``$HOME``. A batch
+        script that writes relative output paths therefore needs a scheduler-
+        specific ``cd`` first. The default is empty (submit dir is already the
+        CWD); a scheduler that needs otherwise overrides this.
+        """
+        return []
+
     def tail_output(
         self,
         job: HPCJob,
@@ -417,6 +428,10 @@ class PBSScheduler(Scheduler):
             d.append(f"#PBS -A {r['account']}")
         d.extend(r.get("extra_directives", []))
         return d
+
+    def workdir_prelude(self) -> list[str]:
+        # PBS/Torque starts the job in $HOME, not the submit directory.
+        return ["cd $PBS_O_WORKDIR"]
 
 
 # ══════════════════════════════════════════════════════════════

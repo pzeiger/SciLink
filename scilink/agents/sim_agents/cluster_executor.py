@@ -127,8 +127,20 @@ class ClusterExecutor(Executor):
     # ── internals ─────────────────────────────────────────────
 
     def _ensure_connected(self) -> None:
-        if not self.conn.is_connected:
+        if self.conn.is_connected:
+            return
+        # A key/agent session can re-establish from an arg-less connect(); a
+        # password session cannot (the password is intentionally not stored).
+        # Surface that as a clear error rather than a bare paramiko auth failure.
+        try:
             self.conn.connect()
+        except Exception as exc:  # noqa: BLE001 — re-raise with guidance
+            raise ConnectionError(
+                "HPC connection is down and could not be re-established "
+                "non-interactively (password sessions cannot self-recover). "
+                "Pass an already-connected HPCConnection, e.g. via "
+                "ClusterExecutor.connect(...)."
+            ) from exc
 
     def _resolve_scheduler(self) -> "Scheduler":
         if self._scheduler is None:
