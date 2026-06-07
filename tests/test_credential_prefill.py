@@ -26,6 +26,7 @@ _RELEVANT_VARS = [
     "SCILINK_API_KEY", "SCILINK_BASE_URL",
     "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
     "GEMINI_API_KEY", "GOOGLE_API_KEY",
+    "AWS_BEARER_TOKEN_BEDROCK",
     "FUTUREHOUSE_API_KEY", "MP_API_KEY", "MATERIALS_PROJECT_API_KEY",
 ]
 
@@ -254,3 +255,37 @@ def test_resolve_embedding_prefill_unknown_model_returns_empty(clean_env):
     clean_env.setenv("OPENAI_API_KEY", "sk-oai")
     clean_env.setenv("ANTHROPIC_API_KEY", "sk-ant")
     assert resolve_embedding_prefill("some-local-embedder") == ("", None)
+
+
+# ─── AWS Bedrock model-name pattern ────────────────────────────────
+
+
+def test_infer_provider_recognises_bedrock_prefix():
+    """bedrock/<vendor>.<model> is the LiteLLM convention for AWS Bedrock."""
+    assert auth.infer_provider("bedrock/anthropic.claude-3-sonnet-20240229-v1:0") == "bedrock"
+    assert auth.infer_provider("bedrock/amazon.titan-text-express-v1") == "bedrock"
+    assert auth.infer_provider("bedrock/meta.llama3-70b-instruct-v1:0") == "bedrock"
+
+
+def test_find_env_var_bedrock(clean_env):
+    """The Bedrock provider maps to AWS_BEARER_TOKEN_BEDROCK in ENV_VARS."""
+    assert auth.find_env_var("bedrock") is None
+    clean_env.setenv("AWS_BEARER_TOKEN_BEDROCK", "aws-token")
+    assert auth.find_env_var("bedrock") == ("AWS_BEARER_TOKEN_BEDROCK", "aws-token")
+
+
+def test_resolve_prefill_bedrock_model_uses_bearer_token(clean_env):
+    """Selecting a Bedrock model surfaces AWS_BEARER_TOKEN_BEDROCK into the
+    API-key field (the gap Sarah called out: previously the field stayed empty
+    for Bedrock users)."""
+    clean_env.setenv("AWS_BEARER_TOKEN_BEDROCK", "aws-token")
+    out = resolve_prefill("bedrock/anthropic.claude-3-sonnet-20240229-v1:0")
+    assert out["api_key"] == ("aws-token", "AWS_BEARER_TOKEN_BEDROCK")
+
+
+def test_resolve_prefill_bedrock_model_no_token_stays_empty(clean_env):
+    """Bedrock model selected, bearer token absent → field stays empty rather
+    than borrowing another vendor's key."""
+    clean_env.setenv("ANTHROPIC_API_KEY", "sk-ant")  # unrelated key set
+    out = resolve_prefill("bedrock/anthropic.claude-3-sonnet-20240229-v1:0")
+    assert out["api_key"] == ("", None)

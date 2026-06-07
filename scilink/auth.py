@@ -14,7 +14,11 @@ ENV_VARS = {
     'google': ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
     'openai': ['OPENAI_API_KEY'],
     'anthropic': ['ANTHROPIC_API_KEY'],
-    
+    # AWS Bedrock uses a single bearer token; full AWS credential discovery
+    # (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY [+ AWS_SESSION_TOKEN]) is
+    # handled separately by boto3 and is out of scope for the prefill.
+    'bedrock': ['AWS_BEARER_TOKEN_BEDROCK'],
+
     # Other Services
     'futurehouse': ['FUTUREHOUSE_API_KEY'],
     'materials_project': ['MP_API_KEY', 'MATERIALS_PROJECT_API_KEY'],
@@ -36,14 +40,15 @@ def infer_provider(model_name: str) -> Optional[str]:
         model_name: Model string (e.g., "gemini/gemini-2.0-flash", "gpt-4o")
     
     Returns:
-        Provider name ('google', 'openai', 'anthropic') or None
+        Provider name ('google', 'openai', 'anthropic', 'bedrock') or None
     """
     if not model_name:
         return None
-        
+
     model_lower = model_name.lower()
-    
-    # Explicit prefix (e.g., "gemini/gemini-2.0-flash", "openai/gpt-4o")
+
+    # Explicit prefix (e.g., "gemini/gemini-2.0-flash", "openai/gpt-4o",
+    # "bedrock/anthropic.claude-3-sonnet-20240229-v1:0")
     if '/' in model_name:
         prefix = model_lower.split('/')[0]
         prefix_map = {
@@ -51,6 +56,7 @@ def infer_provider(model_name: str) -> Optional[str]:
             'google': 'google',
             'openai': 'openai',
             'anthropic': 'anthropic',
+            'bedrock': 'bedrock',
         }
         if prefix in prefix_map:
             return prefix_map[prefix]
