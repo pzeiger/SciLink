@@ -193,9 +193,12 @@ def run_complete_workflow(
             inputs (skipped for non-LLM methods, which are expert-defined).
         executor: Optional execution backend. When provided, the workflow runs
             the generated inputs and refines them to convergence via the
-            engine-neutral refinement loop. When ``None`` (the default, used
-            for DFT), the workflow stops after generation + validation and the
-            user runs the calculation externally.
+            engine-neutral refinement loop. ``LocalExecutor`` runs a local
+            subprocess; ``ClusterExecutor`` (or ``ClusterExecutor.connect(...)``)
+            submits to an HPC scheduler — the loop drives either through the same
+            ``Executor`` contract. When ``None`` (the default, used for DFT), the
+            workflow stops after generation + validation and the user runs the
+            calculation externally.
         run_command: Command template the executor runs, with ``{script}``
             filled from each phase's entry file (e.g. ``"lmp -in {script}"``).
             User/config — required when ``executor`` is provided. The engine
