@@ -8,7 +8,24 @@ import os
 from typing import Optional, Dict
 
 
-# Environment variable names per provider
+# Environment variable names per provider.
+#
+# To register a new provider for credential prefill (three independent rungs —
+# populate only the ones the vendor actually needs):
+#
+#   1. Add an entry here: provider identity (lowercase) -> env var name(s) in
+#      preference order. List multiple names when a vendor accepts more than
+#      one (see 'google', which honours both GEMINI_API_KEY and GOOGLE_API_KEY).
+#      Note that the env-var name is NOT derivable from the provider key in
+#      general — 'bedrock' uses AWS_BEARER_TOKEN_BEDROCK, 'materials_project'
+#      uses MP_API_KEY — so the explicit mapping is load-bearing, not redundant.
+#   2. If LiteLLM names this vendor's models with a "<prefix>/..." form, add
+#      the prefix -> provider mapping in `infer_provider`'s prefix_map. The
+#      prefix need not equal the provider identity ('gemini' and 'google'
+#      prefixes both resolve to provider 'google').
+#   3. If unprefixed model names should also map (e.g. 'gpt-5' -> openai,
+#      'claude-opus-*' -> anthropic), add a startswith / substring check in
+#      `infer_provider`.
 ENV_VARS = {
     # LLM Providers
     'google': ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
