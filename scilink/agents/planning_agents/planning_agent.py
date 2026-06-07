@@ -39,7 +39,8 @@ from .planning_rag import (
     perform_code_rag,
     refine_plan_with_feedback,
     refine_code_with_feedback,
-    verify_plan_relevance
+    verify_plan_relevance,
+    critique_plan
 )
 
 from ...skills.loader import load_skill
@@ -530,7 +531,7 @@ class PlanningAgent(BaseAgent):
 
         # RAG for science plan
         print(f"\n--- Generating Experimental Strategy ---")
-        res = perform_science_rag(
+        res, author_context = perform_science_rag(
             objective=objective,
             instructions=HYPOTHESIS_GENERATION_INSTRUCTIONS,
             task_name="Experimental Plan",
@@ -542,7 +543,8 @@ class PlanningAgent(BaseAgent):
             image_descriptions=image_descriptions,
             additional_context=ctx_string,
             external_context=external_context,
-            skill_context=skill_planning_context
+            skill_context=skill_planning_context,
+            return_context=True
         )
 
         if external_context:
@@ -566,10 +568,11 @@ class PlanningAgent(BaseAgent):
         self.state["plan_history"].append(res.copy())
         self.state["current_plan"] = res
         
-        # Self-correction
+        # 1) Objective-conformance check (enforcing). A non-conforming plan is
+        # automatically adjusted — the proven self-correction loop, unchanged.
         if not res.get("error"):
             is_relevant, critique = verify_plan_relevance(objective, res, self.model, self.generation_config)
-            
+
             if not is_relevant:
                 print(f"\n🔄 Self-correction triggered: {critique}")
                 res = refine_plan_with_feedback(
@@ -592,6 +595,46 @@ class PlanningAgent(BaseAgent):
                     result=res,
                     rationale=f"Auto-corrected due to: {critique}"
                 )
+
+        # 2) Advisory critic (separate call, AFTER conformance + any adjustment).
+        # Checks PHYSICAL REALISM and INTERNAL CONSISTENCY of the final plan and
+        # records caveats — it NEVER rewrites the plan. Findings surface as
+        # "Caveats & Potential Limitations" for the human (CO_PILOT / AUTOPILOT)
+        # at the feedback prompt, or as run_task `warnings` (AUTONOMOUS / meta).
+        # Auto-applying critic findings was shown to rescope plans unreliably, so
+        # acting on them is left to an explicit human/consumer decision.
+        if not res.get("error"):
+            verdict = critique_plan(
+                objective, res, self.model, self.generation_config,
+                retrieved_context=author_context.get("retrieved_context"),
+                primary_data=author_context.get("primary_data"),
+                images=all_image_paths or None,
+                image_descriptions=image_descriptions,
+                additional_context=ctx_string,
+                skill_context=skill_planning_context,
+            )
+            findings = verdict.get("findings", [])
+            if findings:
+                # Order critical-first so the caveats list and warnings lead with
+                # the most material concerns. Record on the plan (no rewrite).
+                _order = {"critical": 0, "minor": 1}
+                findings = sorted(findings, key=lambda f: _order.get(f.get("severity"), 1))
+                res["critic_findings"] = findings
+                self.state["current_plan"] = res
+                # Stamp onto the latest history snapshot too so the HTML report
+                # (which renders plan_history, not current_plan) shows the caveats.
+                if self.state.get("plan_history"):
+                    self.state["plan_history"][-1]["critic_findings"] = findings
+                n_crit = sum(1 for f in findings if f.get("severity") == "critical")
+                print(f"\n⚠️  Critic noted {len(findings)} caveat(s)"
+                      f"{f' ({n_crit} significant)' if n_crit else ''} "
+                      "— recorded under Caveats & Potential Limitations (plan unchanged).")
+                self._log_action(
+                    action="critic_review",
+                    input_ctx={"findings": findings},
+                    result=res,
+                    rationale="Advisory caveats recorded; plan not modified."
+                )
         
         # Human feedback on strategy
         human_feedback = None
@@ -600,6 +643,12 @@ class PlanningAgent(BaseAgent):
             human_feedback = get_user_feedback()
             
             if human_feedback:
+                # Snapshot the pre-refinement plan + its caveats. The re-critique
+                # below gets the full before/criticism/request/after picture and
+                # reasons about the revised plan itself — the human may address the
+                # caveats, change something unrelated, or override the critic.
+                prior_plan = res.copy()
+                prior_findings = res.get("critic_findings")
                 print(f"\n📝 Refining plan...")
                 self.state["human_feedback_history"].append({"phase": "science", "feedback": human_feedback})
                 refined = refine_plan_with_feedback(
@@ -618,6 +667,30 @@ class PlanningAgent(BaseAgent):
                     res = refined
                     res["iteration"] = current_iter
                     res["stage"] = "Human Refined (Science)"
+
+                    # Re-critique the refined plan so the caveats describe the
+                    # CURRENT plan, not the pre-refinement one. Pass prior_findings
+                    # so it acts as a resolution check (confirm fixes, drop resolved
+                    # ones, flag anything new) rather than re-deriving blindly.
+                    res.pop("critic_findings", None)  # discard any echoed-stale caveats
+                    verdict = critique_plan(
+                        objective, res, self.model, self.generation_config,
+                        retrieved_context=author_context.get("retrieved_context"),
+                        primary_data=author_context.get("primary_data"),
+                        images=all_image_paths or None,
+                        image_descriptions=image_descriptions,
+                        additional_context=ctx_string,
+                        skill_context=skill_planning_context,
+                        prior_plan=prior_plan,
+                        prior_findings=prior_findings,
+                        human_feedback=human_feedback,
+                    )
+                    fresh = verdict.get("findings", [])
+                    if fresh:
+                        _order = {"critical": 0, "minor": 1}
+                        fresh = sorted(fresh, key=lambda f: _order.get(f.get("severity"), 1))
+                        res["critic_findings"] = fresh
+
                     self.state["plan_history"].append(res.copy())
                     self.state["current_plan"] = res
                     display_plan_summary(res)

@@ -4,6 +4,8 @@ import re
 from datetime import datetime
 from typing import Dict, Any, List
 
+from .user_interface import format_caveats
+
 class HTMLReportGenerator:
     def __init__(self, agent_state: Dict[str, Any]):
         self.state = agent_state
@@ -281,6 +283,16 @@ class HTMLReportGenerator:
                 content_html = self._render_tea(plan)
             else:
                 content_html = "".join(self._render_experiment(exp, x+1) for x, exp in enumerate(plan.get('proposed_experiments', [])))
+                # Advisory critic caveats (same source as the CLI summary / warnings)
+                caveat_lines = format_caveats(plan.get('critic_findings'))
+                if caveat_lines:
+                    items = "".join(f"<li>{html.escape(c)}</li>" for c in caveat_lines)
+                    content_html += (
+                        '<div class="caveats" style="margin-top:18px;padding:14px 16px;'
+                        'background:#fef3c7;border-left:4px solid #f59e0b;border-radius:6px;">'
+                        '<strong style="color:#b45309">⚠️ Caveats &amp; Potential Limitations</strong>'
+                        f'<ul style="margin:8px 0 0;color:#92400e">{items}</ul></div>'
+                    )
 
             html_content += f"""
             <div class="card">

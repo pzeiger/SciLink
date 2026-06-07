@@ -1,5 +1,24 @@
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import re
+
+
+def format_caveats(findings: Optional[List[Dict[str, Any]]]) -> List[str]:
+    """Concise, advisory caveat lines from critic findings.
+
+    Assumes ``findings`` is already ordered critical-first (the agent sorts it).
+    Minor findings get a ``Minor:`` prefix; each line is ``[dimension] issue``.
+    Returns ``[]`` when there are no findings — the single source rendered by
+    both the console summary and ``run_task`` warnings.
+    """
+    lines: List[str] = []
+    for f in findings or []:
+        dim = f.get("dimension", "")
+        issue = (f.get("issue") or "").strip()
+        if not issue:
+            continue
+        prefix = "Minor: " if f.get("severity") == "minor" else ""
+        lines.append(f"{prefix}[{dim}] {issue}")
+    return lines
 
 
 def display_plan_summary(result: Dict[str, Any]) -> None:
@@ -78,6 +97,14 @@ def display_plan_summary(result: Dict[str, Any]) -> None:
             print("\n--- 💻 Implementation Code ---")
             print("  ℹ️  Plan includes implementation script.")
 
+    # --- Plan-level caveats (advisory; from the critic — the plan is unchanged) ---
+    caveats = format_caveats(result.get("critic_findings"))
+    if caveats:
+        print("\n" + "-"*80)
+        print("⚠️  Caveats & Potential Limitations")
+        for c in caveats:
+            print(f"  • {c}")
+
     print("\n" + "="*80)
 
 
@@ -90,9 +117,10 @@ def get_user_feedback() -> Optional[str]:
     
     print("📝 REQUESTING FEEDBACK")
     print("-" * 60)
-    print("Review the plan above.")
-    print("• To APPROVE: Press [ENTER] directly.")
-    print("• To REQUEST CHANGES: Type your feedback/instructions and press [ENTER].")
+    print("Review the plan and any caveats above.")
+    print("• To APPROVE as-is: Press [ENTER] directly.")
+    print("• To REVISE (e.g. address the caveats, or your own changes): "
+          "Type instructions and press [ENTER].")
     
     feedback = input("\n> Instruction: ").strip()
     
