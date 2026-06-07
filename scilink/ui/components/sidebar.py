@@ -26,6 +26,80 @@ _LOGO_DIR = Path(__file__).resolve().parent.parent / "assets"
 _LOGO_DARK = _LOGO_DIR / "scilink_logo_v3_dark.svg"
 _LOGO_LIGHT = _LOGO_DIR / "scilink_logo_v3_light.svg"
 
+
+def _seed_credentials_from_env(model: str) -> dict:
+    """Prefill the credential fields from environment variables (once).
+
+    Thin Streamlit wrapper over ``config.resolve_prefill`` (which owns the
+    resolution rules, incl. the proxy-vs-vendor safety guard). Seeds the
+    ``cfg_*`` session-state keys so the password widgets render with the
+    detected value, and returns ``{field: env_var_name}`` for the fields that
+    came from the environment (used to show a "✓ from X" caption).
+
+    ``setdefault`` is used so a value the user has already typed is never
+    clobbered (the widget keys don't exist yet on the first render).
+    """
+    from ..config import resolve_prefill, reconcile_autofill
+
+    resolved = resolve_prefill(model, st.session_state.get("cfg_base_url", ""))
+    sources: dict = {}
+
+    # Main API key: its resolved value depends on the selected model's provider,
+    # so re-resolve on every render and refresh the field when the model changes
+    # vendors — but never overwrite a key the user typed. reconcile_autofill
+    # decides; `_cfg_api_key_autofill` records what we last auto-filled so a
+    # hand-edited value is recognised and preserved.
+    api_val, api_src = resolved["api_key"]
+    new_val, new_auto = reconcile_autofill(
+        st.session_state.get("cfg_api_key"),
+        st.session_state.get("_cfg_api_key_autofill"),
+        api_val,
+    )
+    st.session_state["cfg_api_key"] = new_val          # set before the widget renders
+    st.session_state["_cfg_api_key_autofill"] = new_auto
+    if api_src and new_val == api_val:
+        sources["api_key"] = api_src
+
+    # base_url / FutureHouse / Materials Project keys are model-independent —
+    # seed once (setdefault never clobbers a typed value).
+    for field, state_key in (
+        ("base_url", "cfg_base_url"),
+        ("fh", "cfg_fh_api_key"),
+        ("mp", "cfg_mp_api_key"),
+    ):
+        value, src = resolved[field]
+        st.session_state.setdefault(state_key, value)
+        if src and st.session_state.get(state_key) == value:
+            sources[field] = src
+    return sources
+
+
+def _seed_embedding_credential_from_env(embedding_model: str) -> str | None:
+    """Prefill ``cfg_embedding_api_key`` from the env var matching the embedding
+    model's provider.
+
+    Same dynamic-refresh / don't-clobber semantics as the main API key: the
+    field is re-resolved every render and refreshed via ``reconcile_autofill``
+    when the user switches embedding models to another vendor (e.g.
+    ``text-embedding-3-small`` → ``gemini-embedding-001``), but a value the user
+    typed themselves is preserved.
+
+    Returns the env var name when one was detected and the field still holds
+    the auto-filled value (for the "✓ from X" caption), else ``None``.
+    """
+    from ..config import resolve_embedding_prefill, reconcile_autofill
+
+    val, src = resolve_embedding_prefill(embedding_model)
+    new_val, new_auto = reconcile_autofill(
+        st.session_state.get("cfg_embedding_api_key"),
+        st.session_state.get("_cfg_embedding_api_key_autofill"),
+        val,
+    )
+    st.session_state["cfg_embedding_api_key"] = new_val
+    st.session_state["_cfg_embedding_api_key_autofill"] = new_auto
+    return src if (src and new_val == val) else None
+
+
 def _render_hpc_connection() -> None:
     """Compact HPC connection controls for the sidebar."""
     try:
@@ -222,7 +296,15 @@ def render_sidebar() -> None:
         else:
             model = preset
         spec = provider_for(model)
+
+        # Prefill credential fields from environment variables (once, before
+        # the widgets render). Returns {field: env_var_name} for fields that
+        # were sourced from the env, so we can show where each value came from.
+        _env_src = _seed_credentials_from_env(model) if not _locked else {}
+
         api_key = st.text_input(spec.key_label, type="password", key="cfg_api_key", disabled=_locked)
+        if _env_src.get("api_key"):
+            st.caption(f"✓ loaded from `{_env_src['api_key']}`")
         # Provider-specific inputs (e.g. AWS region for Bedrock) — rendered only
         # for the matching provider; nothing extra shows for direct API providers.
         for _pf in spec.fields:
@@ -234,8 +316,18 @@ def render_sidebar() -> None:
                 st.text_input(_pf.label, value=_pf.default,
                               key=f"cfg_prov_{_pf.name}", help=_pf.help, disabled=_locked)
         base_url = st.text_input("Base URL (optional)", key="cfg_base_url", disabled=_locked)
+        if _env_src.get("base_url"):
+            st.caption(f"✓ loaded from `{_env_src['base_url']}`")
+        elif _env_src.get("api_key") == "SCILINK_API_KEY" and not base_url:
+            # Proxy key was prefilled but no base URL is set — the proxy path
+            # needs one, and vendors reject the proxy key without it.
+            st.caption("⚠️ Proxy key detected — set a Base URL (or export `SCILINK_BASE_URL`) to use it.")
         fh_api_key = st.text_input("FutureHouse API key (optional)", type="password", key="cfg_fh_api_key", disabled=_locked)
+        if _env_src.get("fh"):
+            st.caption(f"✓ loaded from `{_env_src['fh']}`")
         mp_api_key = st.text_input("Materials Project API key (optional)", type="password", key="cfg_mp_api_key", disabled=_locked)
+        if _env_src.get("mp"):
+            st.caption(f"✓ loaded from `{_env_src['mp']}`")
 
         from scilink.ui._features import simulate_enabled
         if simulate_enabled():
@@ -252,13 +344,26 @@ def render_sidebar() -> None:
             )
             if st.session_state.get("cfg_embedding_preset") == "Custom":
                 st.text_input("Embedding model name", key="cfg_embedding_custom", disabled=_locked)
+
+            # Match the embedding model to its provider env var (text-embedding-*
+            # -> OPENAI_API_KEY, gemini-embedding-* -> GEMINI/GOOGLE_API_KEY).
+            _emb_preset = st.session_state.get("cfg_embedding_preset", "")
+            _emb_model = (
+                st.session_state.get("cfg_embedding_custom", "")
+                if _emb_preset == "Custom" else _emb_preset
+            )
+            _emb_src = _seed_embedding_credential_from_env(_emb_model) if not _locked else None
+
             st.text_input(
                 "Embedding API key (optional)",
                 type="password",
                 key="cfg_embedding_api_key",
                 disabled=_locked,
             )
-            st.caption("\u2139\ufe0f Leave blank to use the main API key")
+            if _emb_src:
+                st.caption(f"\u2713 loaded from `{_emb_src}`")
+            else:
+                st.caption("\u2139\ufe0f Leave blank to use the main API key")
 
         # The meta-agent has only two autonomy levels (a delegation is a
         # one-shot run_task, so the modes' step-by-step co-pilot does not

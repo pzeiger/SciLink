@@ -8,13 +8,34 @@ import os
 from typing import Optional, Dict
 
 
-# Environment variable names per provider
+# Environment variable names per provider.
+#
+# To register a new provider for credential prefill (three independent rungs —
+# populate only the ones the vendor actually needs):
+#
+#   1. Add an entry here: provider identity (lowercase) -> env var name(s) in
+#      preference order. List multiple names when a vendor accepts more than
+#      one (see 'google', which honours both GEMINI_API_KEY and GOOGLE_API_KEY).
+#      Note that the env-var name is NOT derivable from the provider key in
+#      general — 'bedrock' uses AWS_BEARER_TOKEN_BEDROCK, 'materials_project'
+#      uses MP_API_KEY — so the explicit mapping is load-bearing, not redundant.
+#   2. If LiteLLM names this vendor's models with a "<prefix>/..." form, add
+#      the prefix -> provider mapping in `infer_provider`'s prefix_map. The
+#      prefix need not equal the provider identity ('gemini' and 'google'
+#      prefixes both resolve to provider 'google').
+#   3. If unprefixed model names should also map (e.g. 'gpt-5' -> openai,
+#      'claude-opus-*' -> anthropic), add a startswith / substring check in
+#      `infer_provider`.
 ENV_VARS = {
     # LLM Providers
     'google': ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
     'openai': ['OPENAI_API_KEY'],
     'anthropic': ['ANTHROPIC_API_KEY'],
-    
+    # AWS Bedrock uses a single bearer token; full AWS credential discovery
+    # (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY [+ AWS_SESSION_TOKEN]) is
+    # handled separately by boto3 and is out of scope for the prefill.
+    'bedrock': ['AWS_BEARER_TOKEN_BEDROCK'],
+
     # Other Services
     'futurehouse': ['FUTUREHOUSE_API_KEY'],
     'materials_project': ['MP_API_KEY', 'MATERIALS_PROJECT_API_KEY'],
@@ -22,6 +43,10 @@ ENV_VARS = {
 
 # Internal proxy key (separate from provider keys)
 INTERNAL_PROXY_KEY = 'SCILINK_API_KEY'
+
+# Internal proxy base URL — pairs with INTERNAL_PROXY_KEY so the proxy path
+# can be configured entirely from the environment (e.g. container deployments).
+INTERNAL_PROXY_BASE_URL = 'SCILINK_BASE_URL'
 
 
 def infer_provider(model_name: str) -> Optional[str]:
@@ -32,14 +57,15 @@ def infer_provider(model_name: str) -> Optional[str]:
         model_name: Model string (e.g., "gemini/gemini-2.0-flash", "gpt-4o")
     
     Returns:
-        Provider name ('google', 'openai', 'anthropic') or None
+        Provider name ('google', 'openai', 'anthropic', 'bedrock') or None
     """
     if not model_name:
         return None
-        
+
     model_lower = model_name.lower()
-    
-    # Explicit prefix (e.g., "gemini/gemini-2.0-flash", "openai/gpt-4o")
+
+    # Explicit prefix (e.g., "gemini/gemini-2.0-flash", "openai/gpt-4o",
+    # "bedrock/anthropic.claude-3-sonnet-20240229-v1:0")
     if '/' in model_name:
         prefix = model_lower.split('/')[0]
         prefix_map = {
@@ -47,6 +73,7 @@ def infer_provider(model_name: str) -> Optional[str]:
             'google': 'google',
             'openai': 'openai',
             'anthropic': 'anthropic',
+            'bedrock': 'bedrock',
         }
         if prefix in prefix_map:
             return prefix_map[prefix]
@@ -54,22 +81,66 @@ def infer_provider(model_name: str) -> Optional[str]:
     # Infer from model name patterns
     if model_lower.startswith(('gpt-', 'o1-', 'o3-')):
         return 'openai'
+    # OpenAI embedding family: text-embedding-ada-002, text-embedding-3-*, ...
+    if model_lower.startswith('text-embedding-'):
+        return 'openai'
     if model_lower.startswith('claude'):
         return 'anthropic'
     if 'gemini' in model_lower:
         return 'google'
-    
+
     return None
 
 
 def get_internal_proxy_key() -> Optional[str]:
     """
     Get API key for internal proxy deployments.
-    
+
     Returns:
         SCILINK_API_KEY value or None
     """
     return os.getenv(INTERNAL_PROXY_KEY)
+
+
+def get_internal_proxy_base_url() -> Optional[str]:
+    """
+    Get the base URL for internal proxy deployments.
+
+    Returns:
+        SCILINK_BASE_URL value or None
+    """
+    return os.getenv(INTERNAL_PROXY_BASE_URL)
+
+
+def find_env_var(service: str) -> Optional[tuple]:
+    """
+    Find the first set environment variable for a service.
+
+    Unlike ``get_api_key``, this returns the variable *name* alongside the
+    value, so callers (e.g. the UI) can show which env var supplied a key.
+
+    Args:
+        service: One of the keys in ``ENV_VARS`` (e.g. 'openai', 'futurehouse').
+
+    Returns:
+        ``(env_var_name, value)`` for the first set variable, or None.
+    """
+    for var_name in ENV_VARS.get(service, []):
+        value = os.getenv(var_name)
+        if value:
+            return var_name, value
+    return None
+
+
+def find_env_var_for_model(model_name: str) -> Optional[tuple]:
+    """
+    Find the set vendor env var matching a model's inferred provider.
+
+    Returns:
+        ``(env_var_name, value)`` or None (no provider inferred, or none set).
+    """
+    provider = infer_provider(model_name)
+    return find_env_var(provider) if provider else None
 
 
 class APIKeyManager:
