@@ -110,7 +110,7 @@ You MUST respond with a single JSON object containing a key "proposed_experiment
 - "hypothesis": (String) A clear, single-sentence, testable hypothesis.
 - "experiment_name": (String) A short, descriptive name for the experiment.
 - "experimental_steps": (List of Strings) A numbered or bulleted list of concrete steps to perform the experiment. Must be self-contained, i.e. fully understandable by a human WITHOUT referencing external code or files or other sections of the JSON file.
-- "required_equipment": (List of Strings) A list of common lab equipment.
+- "required_equipment": (List of Strings) Key resources, instruments, or techniques required (e.g. lab equipment/instruments, or computational resources/software).
 - "optimization_params": (Optional List) If the experiment requires optimization, provide one entry per parameter. Each entry is one of:
 
     **Continuous parameter** (real-valued knob):
