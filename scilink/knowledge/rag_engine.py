@@ -171,7 +171,8 @@ def run_rag(query: str,
             primary_data_str: Optional[str] = None,
             skill_context: Optional[str] = None,
             fallback_instructions: Optional[str] = None,
-            task_name: str = "RAG") -> Dict[str, Any]:
+            task_name: str = "RAG",
+            return_context: bool = False) -> Any:
     """Generic RAG generation loop.
 
     Retrieves context for ``query`` from ``kb``, builds a multimodal prompt
@@ -195,9 +196,14 @@ def run_rag(query: str,
         fallback_instructions: Optional instructions used to retry once when
             strict generation reports insufficient context.
         task_name: Label used in progress logging.
+        return_context: When True, return ``(result, retrieved_context_str)``
+            so callers can reuse the exact grounding evidence the generation
+            saw (e.g. a downstream critic). Default False preserves the
+            original ``result``-only return for all existing callers.
 
     Returns:
-        The parsed JSON dict, or ``{"error": ...}`` on failure.
+        The parsed JSON dict (or ``{"error": ...}`` on failure). When
+        ``return_context`` is True, a ``(result, retrieved_context_str)`` tuple.
     """
     # --- 1. Retrieve context ---
     print(f"\n--- Retrieving Context for {task_name} ---")
@@ -211,6 +217,11 @@ def run_rag(query: str,
             retrieved_context_str += f"## 🌍 External Scientific Literature\n{external_context}\n\n"
         if rag_str:
             retrieved_context_str += f"## 📂 Retrieved Local Documents\n{rag_str}"
+
+    def _ret(payload):
+        # Honor the opt-in context return without disturbing the original
+        # result-only contract for callers that don't request it.
+        return (payload, retrieved_context_str) if return_context else payload
 
     # --- 2. Build multimodal prompt ---
     loaded_images = []
@@ -253,7 +264,7 @@ def run_rag(query: str,
         result, error_msg = parse_json_from_response(response)
 
         if error_msg:
-            return {"error": f"JSON Parsing Error: {error_msg}"}
+            return _ret({"error": f"JSON Parsing Error: {error_msg}"})
 
         # Check for insufficient-context signal
         needs_fallback = bool(
@@ -263,7 +274,7 @@ def run_rag(query: str,
         if needs_fallback:
             print(f"    - ⚠️ Strict generation failed: {result.get('error')}")
             if not fallback_instructions:
-                return result  # no fallback available
+                return _ret(result)  # no fallback available
 
             print("    - 🔄 Entering Fallback Mode (General Knowledge)...")
             prompt_parts[0] = fallback_instructions
@@ -272,11 +283,11 @@ def run_rag(query: str,
             )
             result, error_msg_fb = parse_json_from_response(fallback_response)
             if error_msg_fb:
-                return {"error": f"Fallback JSON Parsing Error: {error_msg_fb}"}
+                return _ret({"error": f"Fallback JSON Parsing Error: {error_msg_fb}"})
             print("    - ✅ Fallback generation successful.")
 
-        return result
+        return _ret(result)
 
     except Exception as e:
         logging.error(f"Error in run_rag: {e}")
-        return {"error": str(e)}
+        return _ret({"error": str(e)})

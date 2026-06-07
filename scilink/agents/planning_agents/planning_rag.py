@@ -3,6 +3,11 @@ import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
+try:
+    from PIL import Image as _PIL_Image
+except Exception:  # Pillow optional — critic degrades to text-only evidence
+    _PIL_Image = None
+
 from scilink.parsers import parse_adaptive_excel
 from scilink.knowledge import run_rag, parse_json_from_response
 from .instruct import (
@@ -13,20 +18,26 @@ from .instruct import (
 )
 
 
-def verify_plan_relevance(objective: str, 
-                          result: Dict[str, Any], 
-                          model: Any, 
-                          generation_config: Any) -> Tuple[bool, str]: 
+def verify_plan_relevance(objective: str,
+                          result: Dict[str, Any],
+                          model: Any,
+                          generation_config: Any) -> Tuple[bool, str]:
     """
-    Self-reflection step. Returns (True, "") if relevant, or (False, "Reason") if not.
-    
+    Objective-conformance check (the enforcing self-reflection step). Returns
+    (True, "") if the plan conforms, or (False, "Reason") if not — a False
+    triggers an automatic plan adjustment in the caller.
+
     Logic:
     1. Checks if the plan was generated via Fallback (General Knowledge).
     2. If Fallback: Verifies only scientific soundness (Relaxed).
     3. If Strict: Verifies document grounding and specific constraint adherence (Strict).
+
+    This is intentionally scoped to relevance / objective-conformance only.
+    Physical realism and internal consistency are handled separately and
+    advisorily by ``critique_plan`` (run after this check + any adjustment).
     """
     experiments = result.get("proposed_experiments", [])
-    if not experiments: 
+    if not experiments:
         return False, "No experiments generated."
 
     # 1. Detect Fallback Mode
@@ -44,12 +55,12 @@ def verify_plan_relevance(objective: str,
         name = exp.get('experiment_name', 'N/A')
         hyp = exp.get('hypothesis', 'N/A')
         justification = exp.get('justification', 'No justification provided.')
-        
+
         plan_summary_lines.append(f"Experiment {i+1}: {name}")
         plan_summary_lines.append(f"  Hypothesis: {hyp}")
-        plan_summary_lines.append(f"  Justification: {justification}") 
+        plan_summary_lines.append(f"  Justification: {justification}")
         plan_summary_lines.append("---")
-        
+
     plan_summary = "\n".join(plan_summary_lines)
 
     # 3. Construct Context-Aware Prompt
@@ -57,22 +68,22 @@ def verify_plan_relevance(objective: str,
         print("    - ℹ️  Verifying Fallback Plan (Relaxed Constraints)...")
         eval_prompt = f"""
         You are a scientific research evaluator.
-        
+
         **CONTEXT:** The system failed to find specific documents for the User Objective in the Knowledge Base.
         Therefore, it generated a plan based on **General Scientific Knowledge**.
-        
+
         1. User Objective: "{objective}"
-        2. Proposed Plan (General Knowledge): 
+        2. Proposed Plan (General Knowledge):
         {plan_summary}
 
         **TASK:**
         Determine if the Proposed Plan makes scientific sense for the Objective, acknowledging that it CANNOT cite specific documents.
-        
+
         **CRITERIA FOR PASS:**
         - The plan addresses the objective using standard, correct scientific principles.
         - The logic is sound and actionable.
         - **DO NOT FAIL** the plan simply because it uses general knowledge or lacks specific context (this is expected in fallback mode).
-        
+
         **Output:**
         Respond with a single JSON object: {{ "is_relevant": boolean, "reason": "string explanation" }}
         """
@@ -80,20 +91,20 @@ def verify_plan_relevance(objective: str,
         print("    - ℹ️  Verifying Strict Plan (Document Constraints)...")
         eval_prompt = f"""
         You are a scientific research evaluator.
-        
+
         1. User Objective: "{objective}"
-        2. Proposed Plan: 
+        2. Proposed Plan:
         {plan_summary}
 
         **TASK:**
         Review the "Hypothesis" and "Justification" for each experiment.
         Determine if the Proposed Plan is directly relevant to the User Objective AND supported by the cited context.
-        
+
         **CRITERIA FOR FAIL:**
         - The plan ignores specific constraints in the objective (e.g., "Use X method" but the plan uses "Y").
         - The justification contradicts the hypothesis.
         - The plan is logically incoherent.
-        
+
         **Output:**
         Respond with a single JSON object: {{ "is_relevant": boolean, "reason": "string explanation" }}
         """
@@ -102,19 +113,202 @@ def verify_plan_relevance(objective: str,
     try:
         response = model.generate_content([eval_prompt], generation_config=generation_config)
         eval_result, _ = parse_json_from_response(response)
-        
+
         if eval_result and not eval_result.get("is_relevant"):
             reason = eval_result.get('reason', 'Unknown irrelevance.')
             print(f"    - ⚠️  Plan Verification Failed: {reason}")
             return False, reason
-            
+
         print(f"    - ✅ Plan Verification Passed.")
         return True, ""
-        
+
     except Exception as e:
         logging.error(f"Verification step failed: {e}")
         # Fail open: If the verifier crashes, we assume the plan is okay to avoid blocking the user.
         return True, ""
+
+
+def critique_plan(objective: str,
+                  result: Dict[str, Any],
+                  model: Any,
+                  generation_config: Any,
+                  retrieved_context: Optional[str] = None,
+                  primary_data: Optional[str] = None,
+                  images: Optional[List[Any]] = None,
+                  image_descriptions: Optional[List[str]] = None,
+                  additional_context: Optional[str] = None,
+                  skill_context: Optional[str] = None,
+                  prior_plan: Optional[Dict[str, Any]] = None,
+                  prior_findings: Optional[List[Dict[str, Any]]] = None,
+                  human_feedback: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Advisory critic for PHYSICAL REALISM and INTERNAL CONSISTENCY — a separate
+    LLM call run AFTER ``verify_plan_relevance`` (and any conformance-driven
+    adjustment), on the final plan. It NEVER rewrites the plan; it returns
+    caveats for a human / consumer to weigh.
+
+    Objective-relevance and document grounding are NOT re-litigated here — that
+    is ``verify_plan_relevance``'s enforcing job. This critic only flags physics
+    and consistency caveats.
+
+    Returns {"findings": [{"dimension","severity","experiment","issue"}, ...]}
+    with ``dimension`` in {physics, consistency}. Empty findings == clean. Fails
+    open ({"findings": []}) on error so a critic crash never blocks the user.
+
+    Optional evidence args mirror what the plan author saw, so the critic checks
+    against the same material rather than reasoning in a vacuum (the robustness
+    ingredient borrowed from the hyperspectral reviewer, which reads its plots):
+    ``retrieved_context``, ``primary_data``, ``images``/``image_descriptions``,
+    ``additional_context``, ``skill_context``. All optional.
+
+    Revision context (all optional, for re-critiquing a just-revised plan): pass
+    ``prior_plan`` (the version before the edit), ``prior_findings`` (the caveats
+    it carried), and ``human_feedback`` (what the human asked for). The critic is
+    handed the full picture and reasons about the CURRENT plan itself — the human
+    may have addressed the caveats, changed something unrelated, or deliberately
+    overridden the critic, so nothing is assumed: prior caveats that no longer
+    apply are dropped, ones that still apply are kept, and new issues introduced
+    by the revision are flagged.
+    """
+    experiments = result.get("proposed_experiments", [])
+    if not experiments:
+        return {"findings": []}
+
+    plan_summary = "\n".join(
+        f"Experiment {i+1}: {exp.get('experiment_name', 'N/A')}\n"
+        f"  Hypothesis: {exp.get('hypothesis', 'N/A')}\n"
+        f"  Justification: {exp.get('justification', 'No justification provided.')}\n---"
+        for i, exp in enumerate(experiments)
+    )
+
+    # --- Evidence: mirror what the plan author saw so checks are grounded. ---
+    evidence_parts = []
+    if primary_data:
+        evidence_parts.append(f"## 📊 Primary Experimental Data:\n{primary_data}")
+    if additional_context:
+        evidence_parts.append(f"## Additional Context:\n{additional_context}")
+    if retrieved_context:
+        evidence_parts.append(f"## Retrieved Context (KB + literature):\n{retrieved_context}")
+    if skill_context:
+        evidence_parts.append(skill_context)
+
+    loaded_images = []
+    if images and _PIL_Image:
+        for img in images:
+            if isinstance(img, str):
+                try:
+                    loaded_images.append(_PIL_Image.open(img))
+                except Exception as e:
+                    print(f"    - ⚠️ Critic could not load image {img}: {e}")
+            else:
+                loaded_images.append(img)  # assume already a PIL image
+    if loaded_images:
+        note = "## Provided Images: (See attached)"
+        if image_descriptions:
+            note += f"\n## Image Descriptions:\n{json.dumps(image_descriptions, indent=2)}"
+        evidence_parts.append(note)
+
+    if evidence_parts:
+        evidence_section = (
+            "\n────────────────────────────────────\n"
+            "EVIDENCE THE PLAN AUTHOR USED — anchor your physics checks to the\n"
+            "data values here:\n"
+            + "\n\n".join(evidence_parts) + "\n"
+        )
+    else:
+        evidence_section = ""
+
+    # Revision context: when the CURRENT plan is a revision, hand the critic the
+    # before/criticism/request/after picture and let it reason about the current
+    # plan — don't presume the human acted on the caveats (they may have changed
+    # something unrelated or overridden the critic entirely).
+    revision_parts = []
+    if prior_plan and prior_plan.get("proposed_experiments"):
+        prior_summary = "\n".join(
+            f"Experiment {i+1}: {e.get('experiment_name', 'N/A')}\n"
+            f"  Hypothesis: {e.get('hypothesis', 'N/A')}\n"
+            f"  Justification: {e.get('justification', 'No justification provided.')}\n---"
+            for i, e in enumerate(prior_plan.get("proposed_experiments", []))
+        )
+        revision_parts.append("PRIOR PLAN (before this revision):\n" + prior_summary)
+    if prior_findings:
+        pl = "\n".join(
+            f"  - [{f.get('dimension')}/{f.get('severity')}] {f.get('issue')}"
+            for f in prior_findings if f.get("issue")
+        )
+        if pl:
+            revision_parts.append("CAVEATS PREVIOUSLY RAISED on the prior plan:\n" + pl)
+    if human_feedback:
+        revision_parts.append(f'HUMAN REVISION REQUEST:\n"{human_feedback}"')
+
+    if revision_parts:
+        prior_section = (
+            "\n────────────────────────────────────\n"
+            "REVISION CONTEXT — the CURRENT plan above is a revision of an earlier one.\n"
+            "Using the prior plan, its caveats, and the human's request below, judge the\n"
+            "CURRENT plan:\n"
+            "  • a prior caveat the revision RESOLVED -> drop it.\n"
+            "  • a prior caveat that still applies and was left unaddressed -> report it.\n"
+            "  • a prior caveat the human EXPLICITLY ACCEPTED as a tradeoff -> RETAIN it\n"
+            "    but mark it accepted: phrase the issue as an accepted limitation and set\n"
+            "    its severity to 'minor' (documented for the record, not a blocker).\n"
+            "  • any NEW physics/consistency issue the revision introduced -> report it.\n\n"
+            + "\n\n".join(revision_parts) + "\n"
+        )
+    else:
+        prior_section = ""
+
+    eval_prompt = f"""
+You are reviewing an experimental plan for PHYSICAL REALISM and INTERNAL CONSISTENCY.
+A separate check has already confirmed the plan is relevant to the objective, so do
+NOT re-litigate objective-relevance or document grounding here.
+
+OBJECTIVE: "{objective}"
+
+PROPOSED PLAN:
+{plan_summary}
+{evidence_section}{prior_section}
+Assume the plan may be flawed and try to break it on two axes:
+  • physics — parameters or conditions that are physically impossible or implausible;
+              a technique that cannot measure the stated quantity or resolve the
+              claimed scale; violated conservation laws or instrument limits.
+  • consistency — a justification that contradicts its own hypothesis; steps that do
+              not actually test the stated hypothesis; equipment that does not match
+              the steps; two experiments that contradict each other.
+Report only a flaw you can name concretely. Do NOT invent problems to appear
+thorough; if an axis is clean, report nothing for it.
+
+SEVERITY:
+  • critical — would make the plan infeasible or scientifically wrong.
+  • minor    — worth noting, but the plan still stands.
+
+OUTPUT — a single JSON object:
+{{"findings": [
+   {{"dimension": "physics|consistency",
+     "severity": "critical|minor",
+     "experiment": "<experiment name or 'plan-wide'>",
+     "issue": "<one concrete sentence>"}}
+]}}
+If the plan is clean, return {{"findings": []}}.
+"""
+
+    try:
+        prompt_parts = [eval_prompt]
+        prompt_parts.extend(loaded_images)
+        response = model.generate_content(prompt_parts, generation_config=generation_config)
+        verdict, _ = parse_json_from_response(response)
+        findings = (verdict or {}).get("findings", []) or []
+        crit = [f for f in findings if f.get("severity") == "critical"]
+        if crit:
+            print(f"    - ⚠️  Critic noted {len(crit)} significant caveat(s).")
+        else:
+            print(f"    - ✅ Critic: {len(findings)} minor caveat(s).")
+        return {"findings": findings}
+
+    except Exception as e:
+        logging.error(f"Critic step failed: {e}")
+        # Fail open: if the critic crashes, assume the plan is okay to avoid blocking the user.
+        return {"findings": []}
 
 
 def perform_science_rag(objective: str,
@@ -128,13 +322,19 @@ def perform_science_rag(objective: str,
                         image_descriptions: Optional[List[str]] = None,
                         additional_context: Optional[str] = None,
                         external_context: Optional[str] = None,
-                        skill_context: Optional[str] = None) -> Dict[str, Any]:
+                        skill_context: Optional[str] = None,
+                        return_context: bool = False) -> Any:
     """
     Executes the Scientific/TEA RAG loop over the Docs KnowledgeBase.
 
     Thin planning-side wrapper over the shared ``scilink.knowledge.run_rag``
     engine: it resolves planning's primary-data Excel summary and selects the
     matching fallback instruction set, then delegates retrieval + generation.
+
+    When ``return_context`` is True, returns ``(result, author_context)`` where
+    ``author_context`` is ``{"retrieved_context", "primary_data"}`` — the
+    grounding evidence the generation saw, so a downstream critic can verify
+    against the same material. Default False preserves the result-only return.
     """
 
     # --- Resolve primary data (Excel) into a summary string ---
@@ -161,7 +361,7 @@ def perform_science_rag(objective: str,
     elif instructions == TEA_INSTRUCTIONS:
         fallback_instructions = TEA_INSTRUCTIONS_FALLBACK
 
-    return run_rag(
+    rag_out = run_rag(
         query=objective,
         instructions=instructions,
         kb=kb_docs,
@@ -175,7 +375,14 @@ def perform_science_rag(objective: str,
         skill_context=skill_context,
         fallback_instructions=fallback_instructions,
         task_name=task_name,
+        return_context=return_context,
     )
+
+    if return_context:
+        result, retrieved_context = rag_out
+        return result, {"retrieved_context": retrieved_context,
+                        "primary_data": primary_data_str}
+    return rag_out
 
 
 def normalize_code(code: str) -> str:
@@ -361,8 +568,13 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
     """
     Refines the experimental plan based on user input or experimental results.
     Now supports injecting fresh RAG context relevant to the feedback/results.
+
+    Feedback here is authoritative (human review, experimental results, or a
+    discovered constraint) and is incorporated directly. The advisory critic does
+    NOT route through this function — its caveats are surfaced for a human /
+    consumer to weigh, not auto-applied.
     """
-    
+
     # Construct the context block if available
     context_block = ""
     if new_context:

@@ -12,6 +12,7 @@ from ...auth import get_internal_proxy_key
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .planning_agent import PlanningAgent
+from .user_interface import format_caveats
 from .scalarizer_agent import ScalarizerAgent
 from .bo_agent import BOAgent
 from .orchestrator_tools import OrchestratorTools
@@ -1377,6 +1378,13 @@ class PlanningOrchestratorAgent:
         warnings: List[str] = []
         if status == "success" and not files_produced:
             warnings.append("Task completed but produced no campaign artifacts.")
+
+        # Surface the advisory critic's caveats so a headless / meta consumer
+        # sees them even though no human reviewed them in-session. The plan is
+        # not modified — these are limitations for the caller to weigh.
+        _plan = (self.planner.state or {}).get("current_plan") or {}
+        for _c in format_caveats(_plan.get("critic_findings")):
+            warnings.append(f"Plan caveat — {_c}")
 
         result = {
             "status": status,
