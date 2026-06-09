@@ -71,12 +71,17 @@ def _render_configure() -> None:
 
     structure_source = st.radio(
         "Source",
-        ["Upload file", "Use session structure"],
+        ["Upload file", "Use session structure", "Describe the system"],
         horizontal=True,
         key="ems_structure_source",
+        help=(
+            "Upload or pick an existing structure file, or describe a system "
+            "and the agent will build the atomic model before simulating."
+        ),
     )
 
     structure_file_path: Optional[str] = None
+    system_description: str = ""
 
     if structure_source == "Upload file":
         uploaded = st.file_uploader(
@@ -93,7 +98,7 @@ def _render_configure() -> None:
             dest.write_bytes(uploaded.getvalue())
             structure_file_path = str(dest)
             st.caption(f"Saved to `{dest}`")
-    else:
+    elif structure_source == "Use session structure":
         # Let the user pick from structures generated earlier in this session
         structures = [
             s for s in (st.session_state.get("hpc_sim_structures") or [])
@@ -114,71 +119,92 @@ def _render_configure() -> None:
             )
             structure_file_path = options[chosen_slug]
             st.caption(f"`{structure_file_path}`")
+    else:  # Describe the system
+        # The agent builds the atomic model from this text (via the shared
+        # structure-generation agent) before running the EMS pipeline.
+        system_description = st.text_area(
+            "System description",
+            height=90,
+            key="ems_system_description",
+            placeholder=(
+                "Describe the material to build — the agent generates the "
+                "atomic structure, then simulates it.\n"
+                "e.g. bulk rutile TiO2, conventional cell\n"
+                "e.g. monolayer MoS2\n"
+                "e.g. SrTiO3 (001) slab, 4 layers"
+            ),
+            help=(
+                "Built with the same structure-generation agent the VASP / "
+                "LAMMPS workflows use. Beam-direction reorientation is not yet "
+                "automated — describe the orientation here or upload a "
+                "pre-oriented file if a specific zone axis is required."
+            ),
+        )
+
+    # Optional structure-prep description: supercell / tiling / field of view.
+    # Routed to EMSAgent's structure-preparation stage (not the imaging planner).
+    # Applies to all sources — it shapes how the model is tiled for the sim,
+    # distinct from "System description" above, which builds the model.
+    structure_description = st.text_area(
+        "Supercell / field of view (optional)",
+        height=70,
+        key="ems_structure_description",
+        placeholder=(
+            "How to prepare the model for the sim — tiling / lateral extent.\n"
+            "e.g. 3x3x1 supercell · ~20 Å wide field of view\n"
+            "(Beam-direction reorientation is not yet applied — supply a "
+            "pre-oriented structure for a specific zone axis.)"
+        ),
+        help=(
+            "Shapes the simulation cell (tiling / lateral extent) for whichever "
+            "structure you chose above. Leave blank to let the agent auto-tile."
+        ),
+    )
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # Research goal
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     st.markdown("---")
     st.markdown("**Research goal**")
+    st.caption(
+        "Describe the imaging objective *and* any instrument parameters you "
+        "want — beam energy, probe semiangle, detector, sampling. Values you "
+        "state here are used exactly; anything you omit, the agent chooses."
+    )
     research_goal = st.text_area(
         "Describe the simulation",
-        height=100,
+        height=120,
         key="ems_research_goal",
         placeholder=(
-            "e.g. HAADF STEM image of Si along [001] at 200 keV\n"
-            "e.g. 4D-STEM datacube of ZnO for ptychographic reconstruction\n"
-            "e.g. CBED diffraction pattern of MgO along [110]"
+            "e.g. HAADF STEM image of Si along [001] at 200 keV, 20 mrad convergence\n"
+            "e.g. 4D-STEM datacube of ZnO for ptychographic reconstruction, 80 keV\n"
+            "e.g. CBED diffraction pattern of MgO, inner/outer detector 50/150 mrad"
         ),
     )
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # EM parameters
+    # Output format (an I/O preference, not a physics parameter)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     st.markdown("---")
-    st.markdown("**Simulation parameters** (the agent sets these from the goal; override here if needed)")
-
-    pc1, pc2, pc3 = st.columns(3)
-    with pc1:
-        beam_energy_kev = st.number_input(
-            "Beam energy (keV)",
-            min_value=20.0,
-            max_value=1000.0,
-            value=200.0,
-            step=10.0,
-            key="ems_beam_energy_kev",
-            help="Accelerating voltage. Typical: 60–80 keV (beam-sensitive), 200 keV (general), 300 keV (hard materials).",
-        )
-    with pc2:
-        semiangle_mrad = st.number_input(
-            "Probe semiangle (mrad)",
-            min_value=1.0,
-            max_value=60.0,
-            value=20.0,
-            step=1.0,
-            key="ems_semiangle_mrad",
-            help="Convergence semi-angle of the objective aperture. Typical: 10–15 mrad (uncorrected), 20–30 mrad (aberration-corrected).",
-        )
-    with pc3:
-        output_format = st.selectbox(
-            "Output format",
-            ["npz", "zarr"],
-            key="ems_output_format",
-            help="npz: NumPy archive, compact. zarr: chunked, lazy, preferred for 4D-STEM / TACAW.",
-        )
+    output_format = st.selectbox(
+        "Output format",
+        ["npz", "zarr"],
+        key="ems_output_format",
+        help="npz: NumPy archive, compact. zarr: chunked, lazy, preferred for 4D-STEM / TACAW.",
+    )
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # Generate button
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     st.markdown("---")
-    can_proceed = bool(
-        structure_file_path
-        and research_goal.strip()
-        and _has_key
-    )
+    has_structure = bool(structure_file_path or system_description.strip())
+    can_proceed = bool(has_structure and research_goal.strip() and _has_key)
     if not can_proceed:
         missing: list[str] = []
-        if not structure_file_path:
-            missing.append("structure file")
+        if not has_structure:
+            missing.append(
+                "a structure (upload, session pick, or system description)"
+            )
         if not research_goal.strip():
             missing.append("research goal")
         if not _has_key:
@@ -194,15 +220,18 @@ def _render_configure() -> None:
         key="ems_generate_btn",
     ):
         save_ems()
+        spinner_msg = (
+            "Building the structure and generating the abTEM script…"
+            if system_description.strip()
+            else "Asking SimulationOrchestratorAgent to generate abTEM script…"
+        )
         try:
-            with st.spinner(
-                "Asking SimulationOrchestratorAgent to generate abTEM script…"
-            ):
+            with st.spinner(spinner_msg):
                 result = _run_generation(
                     structure_file=structure_file_path,
+                    system_description=system_description.strip(),
                     research_goal=research_goal.strip(),
-                    beam_energy_kev=float(beam_energy_kev),
-                    semiangle_mrad=float(semiangle_mrad),
+                    structure_description=structure_description.strip(),
                     output_format=output_format,
                 )
         except Exception as exc:
@@ -266,32 +295,71 @@ def _get_or_create_agent():
 
 def _run_generation(
     *,
-    structure_file: str,
+    structure_file: Optional[str],
+    system_description: str,
     research_goal: str,
-    beam_energy_kev: float,
-    semiangle_mrad: float,
+    structure_description: str,
     output_format: str,
 ) -> Optional[dict]:
-    """Call agent.run_task() with an EMS-focused prompt; return the EMS record."""
+    """Call agent.run_task() with an EMS-focused prompt; return the EMS record.
+
+    Exactly one of ``structure_file`` (an existing path) or
+    ``system_description`` (text to build from) drives the structure source.
+    When a description is given, the orchestrator first builds the atomic
+    model with ``generate_structure`` and threads the resulting path into
+    ``generate_ems_simulation`` — the same decoupled hand-off the VASP
+    workflow uses, so EMSAgent never depends on the structure agent directly.
+    """
     agent = _get_or_create_agent()
 
-    task = textwrap.dedent(f"""\
-        Generate an abTEM electron microscopy simulation script for the
-        following objective.
+    struct_desc_arg = (
+        f", structure_description={structure_description!r}"
+        if structure_description else ""
+    )
+    struct_desc_line = (
+        f"Cell preparation (supercell / field of view): {structure_description}\n"
+        if structure_description else ""
+    )
 
-        Structure file: {structure_file}
-        Research goal: {research_goal}
-        Beam energy: {beam_energy_kev} keV
-        Probe semiangle: {semiangle_mrad} mrad
-        Output format: {output_format}
+    if structure_file:
+        # Structure already exists on disk — go straight to the EMS tool.
+        task = textwrap.dedent(f"""\
+            Generate an abTEM electron microscopy simulation script for the
+            following objective.
 
-        Steps:
-        1. Call generate_ems_simulation with the structure_file path above,
-           the research_goal, beam_energy_kev={beam_energy_kev},
-           semiangle_mrad={semiangle_mrad}, output_format={output_format!r}.
-        2. Return when run_abtem.py is written. Do NOT attempt to execute
-           the script — the user will run it locally or on a GPU node.
-    """)
+            Structure file: {structure_file}
+            Research goal: {research_goal}
+            {struct_desc_line}Output format: {output_format}
+
+            Steps:
+            1. Call generate_ems_simulation with structure_file set to the path
+               above, research_goal set to the research goal text VERBATIM (it
+               carries the instrument parameters — do not extract or alter them),
+               output_format={output_format!r}{struct_desc_arg}.
+            2. Return when run_abtem.py is written. Do NOT attempt to execute
+               the script — the user will run it locally or on a GPU node.
+        """)
+    else:
+        # Build the structure first, then simulate it.
+        task = textwrap.dedent(f"""\
+            Build an atomic structure and then generate an abTEM electron
+            microscopy simulation script for it.
+
+            System to build: {system_description}
+            Research goal: {research_goal}
+            {struct_desc_line}Output format: {output_format}
+
+            Steps:
+            1. Build the atomic model: call generate_structure with
+               description set to the "System to build" text above. Note the
+               structure_path it returns.
+            2. Call generate_ems_simulation with structure_file set to that
+               returned structure_path, research_goal set to the research goal
+               text VERBATIM (it carries the instrument parameters — do not
+               extract or alter them), output_format={output_format!r}{struct_desc_arg}.
+            3. Return when run_abtem.py is written. Do NOT attempt to execute
+               the script — the user will run it locally or on a GPU node.
+        """)
 
     n_before = len(agent.generated_structures)
     agent.run_task(task)

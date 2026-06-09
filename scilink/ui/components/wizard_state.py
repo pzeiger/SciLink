@@ -62,8 +62,6 @@ _VASP_KEYS: tuple[str, ...] = (
 )
 
 _EMS_KEYS: tuple[str, ...] = (
-    "ems_beam_energy_kev",
-    "ems_semiangle_mrad",
     "ems_output_format",
     "ems_structure_source",
 )
