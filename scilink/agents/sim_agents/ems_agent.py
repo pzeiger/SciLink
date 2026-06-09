@@ -208,6 +208,60 @@ class EMSAgent(SimulationAgent):
             self.logger.warning(f"Structure prep failed ({exc}); using original file")
             return structure_file
 
+    def _parse_structure_directives(
+        self,
+        structure_description: str,
+        system_info: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Extract structure-preparation directives from free text.
+
+        Recognizes lateral tiling / supercell / field-of-view requests and
+        converts them to a ``[nx, ny, nz]`` tile factor using the cell
+        dimensions in ``system_info``. Beam-direction (zone-axis)
+        reorientation is intentionally out of scope here — _prep_structure
+        does not yet auto-rotate. Returns a dict that may contain ``tile``;
+        a missing key means "let the agent auto-decide".
+        """
+        text = (structure_description or "").strip()
+        if not text:
+            return {}
+
+        a = system_info.get("lateral_extent_a") or 0.0
+        b = system_info.get("lateral_extent_b") or 0.0
+        prompt = (
+            "Extract structure-preparation directives from this description. "
+            "Report only what is explicitly requested; do not invent values.\n\n"
+            f'DESCRIPTION: "{text}"\n\n'
+            "CURRENT CELL (Å, before any tiling):\n"
+            f"- a (x) = {a:.2f}\n"
+            f"- b (y) = {b:.2f}\n\n"
+            "Rules:\n"
+            "- If a supercell / tiling is requested (e.g. '3x3x1', "
+            "'tile 4 by 4', '2x2 supercell'), return it as [nx, ny, nz].\n"
+            "- If a lateral field of view / extent is requested (e.g. "
+            "'20 Å wide', '~5 nm field of view'), compute the smallest "
+            "[nx, ny, 1] whose tiled extent reaches it (1 nm = 10 Å).\n"
+            "- If neither is requested, set tile to null.\n\n"
+            'Return JSON: {"tile": [nx, ny, nz] or null}'
+        )
+        try:
+            out = self._generate_json(prompt)
+        except Exception as exc:
+            self.logger.warning(
+                f"Structure directive parsing failed ({exc}); auto-tiling"
+            )
+            return {}
+
+        tile = out.get("tile")
+        if isinstance(tile, list) and len(tile) == 3:
+            try:
+                tile = [max(1, int(round(float(t)))) for t in tile]
+            except (TypeError, ValueError):
+                return {}
+            self.logger.info(f"Structure description → tile {tile}")
+            return {"tile": tile}
+        return {}
+
     # ================================================================
     # PLANNING
     # ================================================================
@@ -265,6 +319,12 @@ class EMSAgent(SimulationAgent):
             f"b={system_info.get('lateral_extent_b', 0):.2f}, "
             f"c={system_info.get('thickness', 0):.2f}\n"
             f"- Orthogonal: {system_info.get('is_orthogonal', False)}\n\n"
+            "If the GOAL explicitly states a value for any parameter below "
+            "(beam energy, probe semiangle, sampling, slice thickness, detector "
+            "type or angles, number of frozen-phonon configurations, technique, "
+            "or output format), you MUST use that exact value — the user's stated "
+            "values are authoritative. Choose every parameter the GOAL does not "
+            "state to be physically consistent with the ones it does.\n\n"
             f"{fixed_block}"
             f"{planning}\n\n"
             "Return JSON with these exact keys:\n"
@@ -527,6 +587,7 @@ class EMSAgent(SimulationAgent):
         self,
         structure_file: str,
         research_goal: str,
+        structure_description: Optional[str] = None,
         beam_energy_kev: Optional[float] = None,
         semiangle_mrad: Optional[float] = None,
         zone_axis: Optional[List[int]] = None,
@@ -541,7 +602,15 @@ class EMSAgent(SimulationAgent):
         Parameters
         ----------
         structure_file:     Path to the input structure (CIF, VASP, XYZ, …).
-        research_goal:      Natural-language description of the simulation goal.
+        research_goal:      Natural-language description of the imaging objective.
+                            Instrument parameters stated here (beam energy,
+                            semiangle, detector, …) are honored by the planner.
+        structure_description:
+                            Natural-language description of how to prepare the
+                            atomic model (supercell / tiling, lateral extent).
+                            Parsed into a tile factor when ``tile`` is not given
+                            explicitly. Beam-direction reorientation is not yet
+                            applied. Default None.
         beam_energy_kev:    Accelerating voltage in keV. When None, the planning
                             LLM picks it from the goal; when set, the value is
                             authoritative (overrides the LLM). Default None.
@@ -563,7 +632,14 @@ class EMSAgent(SimulationAgent):
         system_info = self.analyze_system(structure_file)
         self._last_system_info = system_info
 
-        # 2. Prepare structure (tile, orthogonalize).
+        # 2. Prepare structure (tile, orthogonalize). An explicit tile wins;
+        #    otherwise derive tiling from the natural-language structure
+        #    description when one was supplied.
+        if tile is None and structure_description:
+            directives = self._parse_structure_directives(
+                structure_description, system_info
+            )
+            tile = directives.get("tile")
         prepped_path = self._prep_structure(
             structure_file, zone_axis=zone_axis, tile=tile
         )

@@ -1316,11 +1316,8 @@ class SimulationOrchestratorTools:
         def generate_ems_simulation(
             structure_file: str,
             research_goal: str,
-            beam_energy_kev: float = None,
-            semiangle_mrad: float = None,
+            structure_description: str = None,
             output_format: str = "npz",
-            zone_axis: list = None,
-            tile: list = None,
         ) -> str:
             """Run EMSAgent.generate_simulation() and store the result."""
             if not Path(structure_file).exists():
@@ -1351,11 +1348,8 @@ class SimulationOrchestratorTools:
                 result = agent.generate_simulation(
                     structure_file=structure_file,
                     research_goal=research_goal,
-                    beam_energy_kev=beam_energy_kev,
-                    semiangle_mrad=semiangle_mrad,
+                    structure_description=structure_description,
                     output_format=output_format,
-                    zone_axis=zone_axis,
-                    tile=tile,
                 )
             except Exception as exc:
                 return json.dumps({
@@ -1370,6 +1364,7 @@ class SimulationOrchestratorTools:
                 "type": "ems",
                 "slug": slug,
                 "description": research_goal,
+                "structure_description": structure_description,
                 "structure_dir": str(workdir),
                 "structure_file": structure_file,
                 "poscar_path": result.get("prepped_structure_path"),
@@ -1415,6 +1410,10 @@ class SimulationOrchestratorTools:
                 "detector geometry, frozen phonons), deterministic geometry "
                 "validation (antialiasing, cell orthogonality, slice thickness), "
                 "and LLM-driven script generation. "
+                "Instrument parameters (beam energy, probe semiangle, detector, "
+                "sampling) are expressed in the research_goal text — do NOT extract "
+                "them into separate arguments; pass the user's wording through "
+                "verbatim so the agent reads the values directly. "
                 "Returns script_path (run_abtem.py) and prepped_structure_path. "
                 "Supports HAADF/ABF/BF STEM, 4D-STEM/CBED (PixelatedDetector), "
                 "and PRISM acceleration. Engine: abTEM."
@@ -1432,31 +1431,25 @@ class SimulationOrchestratorTools:
                 "research_goal": {
                     "type": "string",
                     "description": (
-                        "Natural-language description of the simulation goal "
-                        "(e.g. 'HAADF STEM image of Si along [001] at 200 keV', "
-                        "'4D-STEM datacube of ZnO for ptychography'). "
-                        "Drives parameter selection and detector choice."
+                        "Natural-language description of the imaging objective, "
+                        "including any instrument parameters the user specified "
+                        "(e.g. 'HAADF STEM image of Si at 200 keV, 20 mrad "
+                        "convergence', '4D-STEM datacube of ZnO for ptychography'). "
+                        "Drives technique, beam energy, semiangle, detector and "
+                        "sampling selection — values stated here are authoritative. "
+                        "Pass the user's phrasing through unchanged."
                     ),
                 },
-                "beam_energy_kev": {
-                    "type": "number",
+                "structure_description": {
+                    "type": "string",
                     "description": (
-                        "Accelerating voltage in keV. ALWAYS pass this when the "
-                        "user specifies an energy — it is authoritative and "
-                        "overrides the agent's own choice. Omit only when the "
-                        "user gave no energy, in which case the agent picks one "
-                        "from the goal. Typical values: 60–80 keV (beam-sensitive), "
-                        "100–120 keV (general), 200–300 keV (hard materials)."
-                    ),
-                },
-                "semiangle_mrad": {
-                    "type": "number",
-                    "description": (
-                        "Probe convergence semi-angle in mrad. ALWAYS pass this "
-                        "when the user specifies a convergence angle — it is "
-                        "authoritative and overrides the agent's own choice. Omit "
-                        "only when the user gave none. Typical: 10–15 mrad "
-                        "(uncorrected), 20–30 mrad (aberration-corrected)."
+                        "Optional natural-language description of how to prepare "
+                        "the atomic model — supercell / tiling and lateral field "
+                        "of view (e.g. '3x3x1 supercell', '~20 Å wide field of "
+                        "view'). Parsed into a tiling factor. Beam-direction "
+                        "reorientation is NOT yet applied; supply a pre-oriented "
+                        "structure if a specific zone axis is required. Omit when "
+                        "the default auto-tiling is fine."
                     ),
                 },
                 "output_format": {
@@ -1467,25 +1460,6 @@ class SimulationOrchestratorTools:
                         "small diffraction datasets. "
                         "'zarr': chunked, lazy, preferred for 4D-STEM datacubes "
                         "and downstream TACAW analysis."
-                    ),
-                },
-                "zone_axis": {
-                    "type": "array",
-                    "items": {"type": "integer"},
-                    "description": (
-                        "Miller indices of the beam direction, e.g. [0,0,1]. "
-                        "Auto-rotation is not yet implemented — supply a "
-                        "pre-oriented structure or omit this parameter. "
-                        "The agent will warn if a non-[001] axis is requested."
-                    ),
-                },
-                "tile": {
-                    "type": "array",
-                    "items": {"type": "integer"},
-                    "description": (
-                        "[nx, ny, nz] tiling override. When omitted, the agent "
-                        "auto-tiles laterally to ensure a minimum 10 Å extent "
-                        "in x and y."
                     ),
                 },
             },

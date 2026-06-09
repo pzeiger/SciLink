@@ -268,6 +268,139 @@ def test_ems_agent_assembly(tmp_path):
     assert abs(info["thickness"] - 5.43) < 1e-3
 
 
+# ─── 4. New flow: structure-description routing + text-driven params ──
+#
+# These guard the 2026-06 refactor: instrument parameters now ride in the
+# research-goal text (no UI boxes), and a separate structure description is
+# parsed into a tiling directive that feeds _prep_structure.
+
+
+def test_planning_prompt_marks_goal_values_authoritative(tmp_path):
+    """The planner must instruct the LLM to honor parameters stated in the
+    goal — this is what makes the description (not a box) the source of truth."""
+    agent = _make_agent(tmp_path)
+    captured = {}
+
+    def _capture(prompt):
+        captured["prompt"] = prompt
+        return {"beam_energy_ev": 80000, "semiangle_mrad": 18.0}
+
+    agent._generate_json = _capture
+    agent.plan_simulation("HAADF STEM of Si at 80 keV, 18 mrad", SYSTEM_INFO)
+
+    prompt = captured["prompt"].lower()
+    assert "authoritative" in prompt
+    assert "exact value" in prompt
+
+
+def test_parse_directives_empty_description_skips_llm(tmp_path):
+    """No description → no LLM call, empty directive dict."""
+    agent = _make_agent(tmp_path)
+
+    def _boom(prompt):  # must never be called
+        raise AssertionError("LLM called for an empty structure description")
+
+    agent._generate_json = _boom
+    assert agent._parse_structure_directives("", SYSTEM_INFO) == {}
+    assert agent._parse_structure_directives("   ", SYSTEM_INFO) == {}
+
+
+def test_parse_directives_extracts_tile(tmp_path):
+    agent = _make_agent(tmp_path)
+    agent._generate_json = lambda prompt: {"tile": [3, 3, 1]}
+    assert agent._parse_structure_directives("3x3x1 supercell", SYSTEM_INFO) == {
+        "tile": [3, 3, 1]
+    }
+
+
+def test_parse_directives_coerces_floats_and_floors_to_one(tmp_path):
+    """LLM may return floats; tile factors must come back as ints >= 1."""
+    agent = _make_agent(tmp_path)
+    agent._generate_json = lambda prompt: {"tile": [2.0, 2.9, 0]}
+    out = agent._parse_structure_directives("make it wider", SYSTEM_INFO)
+    assert out == {"tile": [2, 3, 1]}
+
+
+def test_parse_directives_null_tile_yields_empty(tmp_path):
+    agent = _make_agent(tmp_path)
+    agent._generate_json = lambda prompt: {"tile": None}
+    assert agent._parse_structure_directives("a thin slab", SYSTEM_INFO) == {}
+
+
+def test_parse_directives_llm_failure_falls_back_to_autotile(tmp_path):
+    agent = _make_agent(tmp_path)
+
+    def _raise(prompt):
+        raise RuntimeError("LLM down")
+
+    agent._generate_json = _raise
+    assert agent._parse_structure_directives("3x3x1", SYSTEM_INFO) == {}
+
+
+def test_full_pipeline_routes_description_and_goal(tmp_path):
+    """End-to-end smoke of generate_simulation with the new split inputs.
+
+    Structure prep runs for real (ASE); the three LLM seams are mocked. The
+    structure description drives a 3x3x1 tiling (72 atoms, distinct from the
+    ~2x2 the auto-tiler would pick), and the goal-stated instrument values
+    flow through to the plan with no UI override in sight.
+    """
+    pytest.importorskip("ase")
+    import ase.io
+
+    agent = _make_agent(tmp_path, skill="abtem")
+    poscar = tmp_path / "Si.vasp"
+    poscar.write_text(SI_POSCAR)
+
+    def fake_json(prompt: str):
+        if "structure-preparation directives" in prompt:
+            return {"tile": [3, 3, 1]}
+        if "Recommend electron microscopy simulation parameters" in prompt:
+            return {
+                "technique": "multislice",
+                "beam_energy_ev": 80000,
+                "semiangle_mrad": 18.0,
+                "sampling_angstrom": 0.05,
+                "slice_thickness_angstrom": 2.0,
+                "detector_type": "annular",
+                "detector_inner_mrad": 50,
+                "detector_outer_mrad": 150,
+                "frozen_phonon_configs": 8,
+                "use_prism": False,
+                "output_format": "npz",
+                "methodology_description": "smoke",
+            }
+        return {}
+
+    agent._generate_json = fake_json
+    agent._generate_text = lambda prompt: "import abtem  # generated script\n"
+    agent._validate = lambda *a, **k: {"valid": True, "errors": [], "warnings": []}
+
+    result = agent.generate_simulation(
+        structure_file=str(poscar),
+        research_goal="HAADF STEM image of Si at 80 keV, 18 mrad convergence",
+        structure_description="3x3x1 supercell",
+    )
+
+    # Script + prepped structure were written.
+    assert Path(result["script_path"]).exists()
+    prepped = result["prepped_structure_path"]
+    assert Path(prepped).exists()
+
+    # The structure DESCRIPTION drove the tiling: 8 atoms × 3 × 3 × 1 = 72.
+    assert len(ase.io.read(prepped)) == 72
+
+    # The GOAL-stated instrument values flowed through (no box override).
+    params = result["simulation_parameters"]
+    assert params["beam_energy_ev"] == 80000
+    assert params["semiangle_mrad"] == 18.0
+
+    # Pipeline produced its standard artifacts.
+    assert result["output_path"].endswith(".npz")
+    assert "geometry_validation" in result
+    assert result["skill_used"] == "abtem"
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as td:
         tp = Path(td)
@@ -276,6 +409,14 @@ if __name__ == "__main__":
         test_llm_choice_kept_when_caller_omits(tp)
         test_fixed_instrument_settings_injected_into_prompt(tp)
         test_plan_is_complete_even_when_llm_returns_nothing(tp)
+        print("  OK")
+        print("=== new flow: directives + text-driven params ===")
+        test_planning_prompt_marks_goal_values_authoritative(tp)
+        test_parse_directives_empty_description_skips_llm(tp)
+        test_parse_directives_extracts_tile(tp)
+        test_parse_directives_coerces_floats_and_floors_to_one(tp)
+        test_parse_directives_null_tile_yields_empty(tp)
+        test_parse_directives_llm_failure_falls_back_to_autotile(tp)
         print("  OK")
         print("=== geometry validator ===")
         test_geometry_validator_passes_for_good_plan(tp)
